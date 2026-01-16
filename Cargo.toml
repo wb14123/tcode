@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-tokio-stream = "0.1"
 anyhow = "1.0.100"
 serde = { version = "1.0.228", features = ["derive"] }
+tokio = "1.49.0"
+tokio-stream = { version = "0.1", features = ["sync"] }
