@@ -2,7 +2,7 @@ use std::fmt::Display;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use crate::llm::{LLMRole, Tool, LLM};
+use crate::llm::{LLMEvent, LLMRole, StopReason, Tool, LLM};
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
@@ -84,17 +84,27 @@ pub struct ConversationManager {
 impl ConversationManager {
     /// Create a new conversation. The new conversation will be kept in the manager's
     /// memory until it ends.
-    pub fn new_conversation(&self, llm: Box<dyn LLM>, system_prompt: &str, model: &str, tools: Vec<Arc<Tool<>>>) -> Result<Arc<Conversation>> {
+    pub fn new_conversation(&self, llm: Box<dyn LLM>, system_prompt: &str, model: &str, tools: Vec<Arc<Tool>>) -> Result<Arc<Conversation>> {
+        let (input_tx, input_rx) = mpsc::channel(10);
+        let (notify_tx, _) = broadcast::channel(100);
+        let llm_msgs = if system_prompt.is_empty() {
+            vec![]
+        } else {
+            vec![(LLMRole::System, system_prompt.to_string())]
+        };
         Ok(Arc::new(Conversation {
             llm,
             model: model.to_string(),
             tools,
-            llm_msgs: vec![],
-            input_channel_tx: mpsc::channel(10).0,
-            input_channel_rx: mpsc::channel(10).1,
+            llm_msgs,
+            input_channel_tx: input_tx,
+            input_channel_rx: input_rx,
             msgs: RwLock::new(vec![]),
-            new_msg_notify_tx: broadcast::channel(10).0,
-        })) // placeholder
+            new_msg_notify_tx: notify_tx,
+            msg_id_counter: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+        }))
     }
 
     /// Get a conversation by its id. It will try to load it from the manager's memory.
@@ -132,16 +142,149 @@ pub struct Conversation {
     msgs: RwLock<Vec<Arc<Message>>>,
 
     new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
+
+    /// Message ID counter for generating unique message IDs.
+    msg_id_counter: MessageID,
+
+    /// Accumulated token usage.
+    total_input_tokens: i32,
+    total_output_tokens: i32,
 }
 
 /// Multi round LLM conversation. Thread and async safe.
 impl Conversation {
+    fn next_msg_id(&mut self) -> MessageID {
+        let id = self.msg_id_counter;
+        self.msg_id_counter += 1;
+        id
+    }
 
+    fn broadcast_msg(&self, msg: Message) {
+        let msg = Arc::new(msg);
+        self.msgs.write().unwrap().push(Arc::clone(&msg));
+        // Ignore send errors - happens when no subscribers
+        let _ = self.new_msg_notify_tx.send(msg);
+    }
+
+    /// Start the worker loop for the conversation. Should only be called once.
     async fn start(&mut self) {
         while let Some(user_input) = self.input_channel_rx.recv().await {
+            // Create and broadcast user message
+            let user_msg_id = self.next_msg_id();
+            self.broadcast_msg(Message::UserMessage {
+                msg_id: user_msg_id,
+                created_at: Instant::now(),
+                content: Arc::new(user_input.clone()),
+            });
+
             self.llm_msgs.push((LLMRole::User, user_input));
-            self.llm.chat(self.model.as_str(), &self.tools, &self.llm_msgs);
-            // TODO: consume the responses and send to msgs
+            self.call_llm().await;
+        }
+    }
+
+    /// Call the LLM and handle the response.
+    /// It handles the tool call and continues the loop when there is no tool call request anymore.
+    async fn call_llm(&mut self) {
+        loop {
+            let assistant_msg_id = self.next_msg_id();
+            let mut response_stream = self.llm.chat(self.model.as_str(), &self.tools, &self.llm_msgs);
+            let mut accumulated_text = String::new();
+            let mut pending_tool_calls = Vec::new();
+            let mut should_continue = false;
+
+            // Broadcast assistant message start
+            self.broadcast_msg(Message::AssistantMessageStart {
+                msg_id: assistant_msg_id,
+                created_at: Instant::now(),
+            });
+
+            while let Some(event) = response_stream.next().await {
+                match event {
+                    LLMEvent::MessageStart { input_tokens } => {
+                        self.total_input_tokens += input_tokens;
+                    }
+                    LLMEvent::TextDelta(text) => {
+                        accumulated_text.push_str(&text);
+                        self.broadcast_msg(Message::MessageChunk {
+                            msg_id: assistant_msg_id,
+                            content: Arc::new(text),
+                        });
+                    }
+                    LLMEvent::ToolCall(tool_call) => {
+                        pending_tool_calls.push(tool_call);
+                    }
+                    LLMEvent::MessageEnd { stop_reason, input_tokens, output_tokens } => {
+                        self.total_input_tokens += input_tokens;
+                        self.total_output_tokens += output_tokens;
+
+                        let (end_status, error) = if stop_reason == StopReason::MaxTokens {
+                            (MessageEndStatus::FAILED, Some("Response truncated: maximum token limit reached".to_string()))
+                        } else {
+                            (MessageEndStatus::SUCCEEDED, None)
+                        };
+
+                        self.broadcast_msg(Message::AssistantMessageEnd {
+                            msg_id: assistant_msg_id,
+                            end_status,
+                            error,
+                            input_tokens,
+                            output_tokens,
+                        });
+
+                        // Add assistant response to llm_msgs for context
+                        if !accumulated_text.is_empty() {
+                            self.llm_msgs.push((LLMRole::Assistant, accumulated_text.clone()));
+                        }
+
+                        // Handle tool calls if any
+                        if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
+                            self.execute_tool_calls(&pending_tool_calls).await;
+                            should_continue = true;
+                        }
+                    }
+                    LLMEvent::Error(error) => {
+                        self.broadcast_msg(Message::AssistantMessageEnd {
+                            msg_id: assistant_msg_id,
+                            end_status: MessageEndStatus::FAILED,
+                            error: Some(error),
+                            input_tokens: 0,
+                            output_tokens: 0,
+                        });
+                        return;
+                    }
+                }
+            }
+
+            if !should_continue {
+                break;
+            }
+        }
+    }
+
+    async fn execute_tool_calls(&mut self, tool_calls: &[crate::llm::ToolCall]) {
+        for tool_call in tool_calls {
+            let tool_msg_id = self.next_msg_id();
+
+            // Broadcast tool start
+            self.broadcast_msg(Message::ToolMessageStart {
+                msg_id: tool_msg_id,
+                created_at: Instant::now(),
+                tool_name: tool_call.name.clone(),
+                tool_args: Box::new(tool_call.arguments.clone()),
+            });
+
+            // TODO: Actually execute the tool and get result
+            // For now, we'll add a placeholder tool result to llm_msgs
+            let tool_result = format!("Tool {} executed with args: {}", tool_call.name, tool_call.arguments);
+            self.llm_msgs.push((LLMRole::Tool, tool_result));
+
+            // Broadcast tool end
+            self.broadcast_msg(Message::ToolMessageEnd {
+                msg_id: tool_msg_id,
+                end_status: MessageEndStatus::SUCCEEDED,
+                input_tokens: 0,
+                output_tokens: 0,
+            });
         }
     }
 
