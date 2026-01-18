@@ -2,7 +2,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
 
-pub struct Tool {}
+use crate::tool::ToolSchema;
 
 #[derive(Clone, Debug)]
 pub enum LLMRole {
@@ -63,10 +63,19 @@ pub enum LLMEvent {
 }
 
 pub trait LLM: Send + Sync {
+    /// Send a chat request to the LLM.
+    ///
+    /// # Arguments
+    /// - `model`: Model identifier (e.g., "claude-3-opus", "gpt-4")
+    /// - `tools`: Tools available for the model to call
+    /// - `msgs`: Conversation history
+    ///
+    /// # Returns
+    /// A stream of [`LLMEvent`]s representing the model's response.
     fn chat(
         &self,
         model: &str,
-        tools: &[Arc<Tool>],
+        tools: &[Arc<ToolSchema>],
         msgs: &[(LLMRole, String)],
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>>;
 }

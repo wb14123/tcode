@@ -2,7 +2,8 @@ use std::fmt::Display;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use crate::llm::{LLMEvent, LLMRole, StopReason, Tool, LLM};
+use crate::llm::{LLM, LLMEvent, LLMRole, StopReason};
+use crate::tool::ToolSchema;
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
@@ -74,17 +75,22 @@ pub enum Message {
     AssistantRequestEnd {
         total_input_tokens: i32,
         total_output_tokens: i32,
-    }
+    },
 }
 
-pub struct ConversationManager {
-}
+pub struct ConversationManager {}
 
 /// Manages conversations so that any new client can attach to an existing conversation.
 impl ConversationManager {
     /// Create a new conversation. The new conversation will be kept in the manager's
     /// memory until it ends.
-    pub fn new_conversation(&self, llm: Box<dyn LLM>, system_prompt: &str, model: &str, tools: Vec<Arc<Tool>>) -> Result<Arc<Conversation>> {
+    pub fn new_conversation(
+        &self,
+        llm: Box<dyn LLM>,
+        system_prompt: &str,
+        model: &str,
+        tools: Vec<Arc<ToolSchema>>,
+    ) -> Result<Arc<Conversation>> {
         let (input_tx, input_rx) = mpsc::channel(10);
         let (notify_tx, _) = broadcast::channel(100);
         let llm_msgs = if system_prompt.is_empty() {
@@ -126,7 +132,8 @@ pub struct Conversation {
 
     model: String,
 
-    tools: Vec<Arc<Tool>>,
+    /// Tools available for the conversation.
+    tools: Vec<Arc<ToolSchema>>,
 
     /// LLM messages so far. Used to keep tracking the current messages and send the next message
     /// to LLM.
@@ -187,7 +194,9 @@ impl Conversation {
     async fn call_llm(&mut self) {
         loop {
             let assistant_msg_id = self.next_msg_id();
-            let mut response_stream = self.llm.chat(self.model.as_str(), &self.tools, &self.llm_msgs);
+            let mut response_stream =
+                self.llm
+                    .chat(self.model.as_str(), &self.tools, &self.llm_msgs);
             let mut accumulated_text = String::new();
             let mut pending_tool_calls = Vec::new();
             let mut should_continue = false;
@@ -213,12 +222,19 @@ impl Conversation {
                     LLMEvent::ToolCall(tool_call) => {
                         pending_tool_calls.push(tool_call);
                     }
-                    LLMEvent::MessageEnd { stop_reason, input_tokens, output_tokens } => {
+                    LLMEvent::MessageEnd {
+                        stop_reason,
+                        input_tokens,
+                        output_tokens,
+                    } => {
                         self.total_input_tokens += input_tokens;
                         self.total_output_tokens += output_tokens;
 
                         let (end_status, error) = if stop_reason == StopReason::MaxTokens {
-                            (MessageEndStatus::FAILED, Some("Response truncated: maximum token limit reached".to_string()))
+                            (
+                                MessageEndStatus::FAILED,
+                                Some("Response truncated: maximum token limit reached".to_string()),
+                            )
                         } else {
                             (MessageEndStatus::SUCCEEDED, None)
                         };
@@ -233,7 +249,8 @@ impl Conversation {
 
                         // Add assistant response to llm_msgs for context
                         if !accumulated_text.is_empty() {
-                            self.llm_msgs.push((LLMRole::Assistant, accumulated_text.clone()));
+                            self.llm_msgs
+                                .push((LLMRole::Assistant, accumulated_text.clone()));
                         }
 
                         // Handle tool calls if any
@@ -275,7 +292,10 @@ impl Conversation {
 
             // TODO: Actually execute the tool and get result
             // For now, we'll add a placeholder tool result to llm_msgs
-            let tool_result = format!("Tool {} executed with args: {}", tool_call.name, tool_call.arguments);
+            let tool_result = format!(
+                "Tool {} executed with args: {}",
+                tool_call.name, tool_call.arguments
+            );
             self.llm_msgs.push((LLMRole::Tool, tool_result));
 
             // Broadcast tool end
