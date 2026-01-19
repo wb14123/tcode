@@ -1,3 +1,12 @@
+//! LLM trait and provider implementations.
+//!
+//! This module contains the core LLM trait definition and implementations
+//! for various providers (OpenAI, Claude, Gemini, etc.).
+
+mod openai;
+
+pub use openai::OpenAI;
+
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;

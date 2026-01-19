@@ -1,5 +1,5 @@
 mod conversation;
-mod llm;
+pub mod llm;
 pub mod tool;
 
 #[cfg(test)]
