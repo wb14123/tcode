@@ -140,7 +140,7 @@ impl LLM for OpenAI {
     fn chat(
         &self,
         model: &str,
-        tools: &[Arc<Tool>],
+        tools: &HashMap<String, Arc<Tool>>,
         msgs: &[(LLMRole, String)],
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>> {
         let client = self.client.clone();
@@ -168,7 +168,7 @@ impl LLM for OpenAI {
         } else {
             Some(
                 tools
-                    .iter()
+                    .values()
                     .map(|t| ToolDefinition {
                         tool_type: "function",
                         function: FunctionDefinition {

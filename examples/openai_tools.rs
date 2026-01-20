@@ -3,6 +3,7 @@
 //! Usage:
 //!   OPENROUTER_API_KEY=your-key cargo run --example openai_tools
 
+use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
@@ -86,7 +87,9 @@ async fn main() {
         |params: CalculateParams| tokio_stream::once(calculate(params)),
     );
 
-    let tools = vec![Arc::new(weather_tool), Arc::new(calc_tool)];
+    let mut tools = HashMap::new();
+    tools.insert("get_weather".to_string(), Arc::new(weather_tool));
+    tools.insert("calculate".to_string(), Arc::new(calc_tool));
 
     let client = OpenAI::new(&api_key, &base_url);
 
@@ -130,7 +133,7 @@ async fn main() {
                         println!("Args: {}", tool_call.arguments);
 
                         // Find and execute the tool
-                        let result = if let Some(tool) = tools.iter().find(|t| t.name == tool_call.name) {
+                        let result = if let Some(tool) = tools.get(&tool_call.name) {
                             let mut result_stream = tool.execute(tool_call.arguments.clone());
                             let mut result = String::new();
                             while let Some(chunk) = result_stream.next().await {

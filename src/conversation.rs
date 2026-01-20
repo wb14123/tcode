@@ -1,5 +1,7 @@
+use std::collections::HashMap;
 use std::fmt::Display;
 use std::sync::{Arc, RwLock};
+use std::sync::atomic::AtomicI32;
 use std::time::Instant;
 
 use crate::llm::{LLM, LLMEvent, LLMRole, StopReason};
@@ -30,7 +32,7 @@ pub enum Message {
         created_at: Instant,
     },
 
-    MessageChunk {
+    AssistantMessageChunk {
         msg_id: MessageID,
         content: Arc<String>,
     },
@@ -48,6 +50,12 @@ pub enum Message {
         created_at: Instant,
         tool_name: String,
         tool_args: Box<dyn Display + Send + Sync>,
+    },
+
+    ToolOutputChunk {
+        msg_id: MessageID,
+        tool_name: String,
+        content: Arc<String>,
     },
 
     ToolMessageEnd {
@@ -89,7 +97,7 @@ impl ConversationManager {
         llm: Box<dyn LLM>,
         system_prompt: &str,
         model: &str,
-        tools: Vec<Arc<Tool>>,
+        tools: HashMap<String, Arc<Tool>>,
     ) -> Result<Arc<Conversation>> {
         let (input_tx, input_rx) = mpsc::channel(10);
         let (notify_tx, _) = broadcast::channel(100);
@@ -107,7 +115,7 @@ impl ConversationManager {
             input_channel_rx: input_rx,
             msgs: RwLock::new(vec![]),
             new_msg_notify_tx: notify_tx,
-            msg_id_counter: 0,
+            msg_id_counter: AtomicI32::new(0),
             total_input_tokens: 0,
             total_output_tokens: 0,
         }))
@@ -132,8 +140,8 @@ pub struct Conversation {
 
     model: String,
 
-    /// Tools available for the conversation.
-    tools: Vec<Arc<Tool>>,
+    /// Tools available for the conversation, keyed by tool name for O(1) lookup.
+    tools: HashMap<String, Arc<Tool>>,
 
     /// LLM messages so far. Used to keep tracking the current messages and send the next message
     /// to LLM.
@@ -151,7 +159,7 @@ pub struct Conversation {
     new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
 
     /// Message ID counter for generating unique message IDs.
-    msg_id_counter: MessageID,
+    msg_id_counter: AtomicI32,
 
     /// Accumulated token usage.
     total_input_tokens: i32,
@@ -160,10 +168,8 @@ pub struct Conversation {
 
 /// Multi round LLM conversation. Thread and async safe.
 impl Conversation {
-    fn next_msg_id(&mut self) -> MessageID {
-        let id = self.msg_id_counter;
-        self.msg_id_counter += 1;
-        id
+    fn next_msg_id(&self) -> MessageID {
+        self.msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
     fn broadcast_msg(&self, msg: Message) {
@@ -193,7 +199,6 @@ impl Conversation {
     /// It handles the tool call and continues the loop when there is no tool call request anymore.
     async fn call_llm(&mut self) {
         loop {
-            let assistant_msg_id = self.next_msg_id();
             let mut response_stream =
                 self.llm
                     .chat(self.model.as_str(), &self.tools, &self.llm_msgs);
@@ -203,7 +208,7 @@ impl Conversation {
 
             // Broadcast assistant message start
             self.broadcast_msg(Message::AssistantMessageStart {
-                msg_id: assistant_msg_id,
+                msg_id: self.next_msg_id(),
                 created_at: Instant::now(),
             });
 
@@ -214,8 +219,9 @@ impl Conversation {
                     }
                     LLMEvent::TextDelta(text) => {
                         accumulated_text.push_str(&text);
-                        self.broadcast_msg(Message::MessageChunk {
-                            msg_id: assistant_msg_id,
+                        let chunk_msg_id = self.next_msg_id();
+                        self.broadcast_msg(Message::AssistantMessageChunk {
+                            msg_id: chunk_msg_id,
                             content: Arc::new(text),
                         });
                     }
@@ -240,7 +246,7 @@ impl Conversation {
                         };
 
                         self.broadcast_msg(Message::AssistantMessageEnd {
-                            msg_id: assistant_msg_id,
+                            msg_id: self.next_msg_id(),
                             end_status,
                             error,
                             input_tokens,
@@ -261,7 +267,7 @@ impl Conversation {
                     }
                     LLMEvent::Error(error) => {
                         self.broadcast_msg(Message::AssistantMessageEnd {
-                            msg_id: assistant_msg_id,
+                            msg_id: self.next_msg_id(),
                             end_status: MessageEndStatus::FAILED,
                             error: Some(error),
                             input_tokens: 0,
@@ -290,18 +296,38 @@ impl Conversation {
                 tool_args: Box::new(tool_call.arguments.clone()),
             });
 
-            // TODO: Actually execute the tool and get result
-            // For now, we'll add a placeholder tool result to llm_msgs
-            let tool_result = format!(
-                "Tool {} executed with args: {}",
-                tool_call.name, tool_call.arguments
-            );
+            // Look up and execute the tool
+            let (end_status, tool_result) = if let Some(tool) = self.tools.get(&tool_call.name) {
+                // Execute the tool and stream output chunks
+                let mut output_stream = tool.execute(tool_call.arguments.clone());
+                let mut result_parts = Vec::new();
+                while let Some(chunk) = output_stream.next().await {
+                    // Broadcast each chunk immediately with its own msg_id
+                    self.broadcast_msg(Message::ToolOutputChunk {
+                        msg_id: self.next_msg_id(),
+                        tool_name: tool_call.name.clone(),
+                        content: Arc::new(chunk.clone()),
+                    });
+                    result_parts.push(chunk);
+                }
+                (MessageEndStatus::SUCCEEDED, result_parts.join(""))
+            } else {
+                let error_msg = format!("Error: Tool '{}' not found", tool_call.name);
+                // Broadcast the error as a chunk too
+                self.broadcast_msg(Message::ToolOutputChunk {
+                    msg_id: self.next_msg_id(),
+                    tool_name: tool_call.name.clone(),
+                    content: Arc::new(error_msg.clone()),
+                });
+                (MessageEndStatus::FAILED, error_msg)
+            };
+
             self.llm_msgs.push((LLMRole::Tool, tool_result));
 
             // Broadcast tool end
             self.broadcast_msg(Message::ToolMessageEnd {
-                msg_id: tool_msg_id,
-                end_status: MessageEndStatus::SUCCEEDED,
+                msg_id: self.next_msg_id(),
+                end_status,
                 input_tokens: 0,
                 output_tokens: 0,
             });
