@@ -80,7 +80,7 @@ pub trait LLM: Send + Sync {
     ///
     /// # Arguments
     /// - `tools`: List of tools to register
-    fn register_tools(&self, tools: Vec<Arc<Tool>>);
+    fn register_tools(&mut self, tools: Vec<Arc<Tool>>);
 
     /// Send a chat request to the LLM.
     ///

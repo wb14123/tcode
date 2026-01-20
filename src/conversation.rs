@@ -94,7 +94,7 @@ impl ConversationManager {
     /// memory until it ends.
     pub fn new_conversation(
         &self,
-        llm: Box<dyn LLM>,
+        mut llm: Box<dyn LLM>,
         system_prompt: &str,
         model: &str,
         tools: Vec<Arc<Tool>>,

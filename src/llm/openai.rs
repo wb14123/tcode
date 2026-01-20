@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::{Arc, RwLock};
+use std::sync::Arc;
 
 use async_stream::stream;
 use reqwest::Client;
@@ -20,7 +20,7 @@ pub struct OpenAI {
     api_key: String,
     base_url: String,
     /// Cached tool definitions for API requests.
-    cached_tool_defs: RwLock<Option<Vec<ToolDefinition>>>,
+    cached_tool_defs: Option<Vec<ToolDefinition>>,
 }
 
 impl OpenAI {
@@ -34,7 +34,7 @@ impl OpenAI {
             client: Client::new(),
             api_key: api_key.into(),
             base_url: base_url.into(),
-            cached_tool_defs: RwLock::new(None),
+            cached_tool_defs: None,
         }
     }
 
@@ -140,8 +140,8 @@ struct Usage {
 // ============================================================================
 
 impl LLM for OpenAI {
-    fn register_tools(&self, tools: Vec<Arc<Tool>>) {
-        let tool_defs: Option<Vec<ToolDefinition>> = if tools.is_empty() {
+    fn register_tools(&mut self, tools: Vec<Arc<Tool>>) {
+        self.cached_tool_defs = if tools.is_empty() {
             None
         } else {
             Some(
@@ -159,7 +159,6 @@ impl LLM for OpenAI {
                     .collect(),
             )
         };
-        *self.cached_tool_defs.write().unwrap() = tool_defs;
     }
 
     fn chat(
@@ -187,7 +186,7 @@ impl LLM for OpenAI {
             .collect();
 
         // Use cached tool definitions
-        let tool_defs = self.cached_tool_defs.read().unwrap().clone();
+        let tool_defs = self.cached_tool_defs.clone();
 
         Box::pin(stream! {
             let request_body = ChatRequest {

@@ -95,7 +95,7 @@ async fn main() {
     tools.insert("get_weather".to_string(), weather_tool);
     tools.insert("calculate".to_string(), calc_tool);
 
-    let client = OpenAI::new(&api_key, &base_url);
+    let mut client = OpenAI::new(&api_key, &base_url);
 
     // Register tools with the LLM for caching
     client.register_tools(tools_list);
