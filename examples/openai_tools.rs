@@ -86,10 +86,7 @@ async fn main() {
         |params: CalculateParams| tokio_stream::once(calculate(params)),
     );
 
-    let tools = vec![
-        Arc::new(weather_tool.to_schema()),
-        Arc::new(calc_tool.to_schema()),
-    ];
+    let tools = vec![Arc::new(weather_tool), Arc::new(calc_tool)];
 
     let client = OpenAI::new(&api_key, &base_url);
 

@@ -11,7 +11,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
 
-use crate::tool::ToolSchema;
+use crate::tool::Tool;
 
 #[derive(Clone, Debug)]
 pub enum LLMRole {
@@ -84,7 +84,7 @@ pub trait LLM: Send + Sync {
     fn chat(
         &self,
         model: &str,
-        tools: &[Arc<ToolSchema>],
+        tools: &[Arc<Tool>],
         msgs: &[(LLMRole, String)],
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>>;
 }

@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
 use super::{LLMEvent, LLMRole, StopReason, ToolCall, LLM};
-use crate::tool::ToolSchema;
+use crate::tool::Tool;
 
 /// OpenAI-compatible LLM client.
 ///
@@ -140,7 +140,7 @@ impl LLM for OpenAI {
     fn chat(
         &self,
         model: &str,
-        tools: &[Arc<ToolSchema>],
+        tools: &[Arc<Tool>],
         msgs: &[(LLMRole, String)],
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>> {
         let client = self.client.clone();
@@ -174,7 +174,7 @@ impl LLM for OpenAI {
                         function: FunctionDefinition {
                             name: t.name.clone(),
                             description: t.description.clone(),
-                            parameters: serde_json::to_value(&t.parameters)
+                            parameters: serde_json::to_value(&t.param_schema)
                                 .unwrap_or(serde_json::json!({})),
                         },
                     })

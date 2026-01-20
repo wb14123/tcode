@@ -25,19 +25,16 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_schema_properties() {
+    fn test_tool_param_schema() {
         let tool = Tool::new("test_tool", "A test tool", |_params: TestParams| {
             tokio_stream::empty::<String>()
         });
 
-        // Convert to schema for LLM API
-        let schema = tool.to_schema();
-
-        assert_eq!(schema.name, "test_tool");
-        assert_eq!(schema.description, "A test tool");
+        assert_eq!(tool.name, "test_tool");
+        assert_eq!(tool.description, "A test tool");
 
         // Verify schema has expected properties
-        let schema_json = serde_json::to_value(&schema.parameters).unwrap();
+        let schema_json = serde_json::to_value(&tool.param_schema).unwrap();
         println!(
             "Schema: {}",
             serde_json::to_string_pretty(&schema_json).unwrap()
@@ -59,34 +56,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_execute_typed() {
-        let tool = Tool::new("greeter", "Greet someone", |params: TestParams| {
-            let count = params.count.unwrap_or(1);
-            tokio_stream::iter((0..count).map(move |i| {
-                format!("{}. Hello, {}!", i + 1, params.message)
-            }))
-        });
-
-        // Execute with typed params
-        let params = TestParams {
-            message: "World".to_string(),
-            count: Some(3),
-        };
-
-        let mut stream = tool.execute(params);
-        let mut results = Vec::new();
-        while let Some(item) = stream.next().await {
-            results.push(item);
-        }
-
-        assert_eq!(results.len(), 3);
-        assert_eq!(results[0], "1. Hello, World!");
-        assert_eq!(results[1], "2. Hello, World!");
-        assert_eq!(results[2], "3. Hello, World!");
-    }
-
-    #[tokio::test]
-    async fn test_tool_schema_execute_json() {
+    async fn test_tool_execute_json() {
         let tool = Tool::new("greeter", "Greet someone", |params: TestParams| {
             let msg = params.message.clone();
             let count = params.count.unwrap_or(1);
@@ -95,11 +65,9 @@ mod tests {
             }))
         });
 
-        let schema = tool.to_schema();
-
         // Execute with JSON string
         let json_args = r#"{"message": "Rust", "count": 2}"#.to_string();
-        let mut stream = schema.execute(json_args);
+        let mut stream = tool.execute(json_args);
 
         let mut results = Vec::new();
         while let Some(item) = stream.next().await {
@@ -112,7 +80,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_schema_execute_with_default() {
+    async fn test_tool_execute_with_default() {
         let tool = Tool::new("greeter", "Greet someone", |params: TestParams| {
             let msg = params.message.clone();
             let count = params.count.unwrap_or(1);
@@ -121,11 +89,9 @@ mod tests {
             }))
         });
 
-        let schema = tool.to_schema();
-
         // Execute without optional field (uses default)
         let json_args = r#"{"message": "Default"}"#.to_string();
-        let mut stream = schema.execute(json_args);
+        let mut stream = tool.execute(json_args);
 
         let mut results = Vec::new();
         while let Some(item) = stream.next().await {
@@ -137,32 +103,28 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_tool_schema_execute_invalid_json() {
+    async fn test_tool_execute_invalid_json() {
         let tool = Tool::new("greeter", "Greet someone", |params: TestParams| {
             tokio_stream::once(format!("Hello, {}!", params.message))
         });
 
-        let schema = tool.to_schema();
-
         // Execute with invalid JSON
         let json_args = r#"not valid json"#.to_string();
-        let mut stream = schema.execute(json_args);
+        let mut stream = tool.execute(json_args);
 
         let result = stream.next().await.unwrap();
         assert!(result.starts_with("Error: Failed to parse tool arguments:"));
     }
 
     #[tokio::test]
-    async fn test_tool_schema_execute_missing_required_field() {
+    async fn test_tool_execute_missing_required_field() {
         let tool = Tool::new("greeter", "Greet someone", |params: TestParams| {
             tokio_stream::once(format!("Hello, {}!", params.message))
         });
 
-        let schema = tool.to_schema();
-
         // Execute with missing required field
         let json_args = r#"{"count": 5}"#.to_string();
-        let mut stream = schema.execute(json_args);
+        let mut stream = tool.execute(json_args);
 
         let result = stream.next().await.unwrap();
         assert!(result.starts_with("Error: Failed to parse tool arguments:"));

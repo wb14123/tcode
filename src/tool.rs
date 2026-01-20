@@ -5,7 +5,7 @@
 //! ```rust
 //! use schemars::JsonSchema;
 //! use serde::Deserialize;
-//! use llm_rs::tool::{Tool, ToolSchema};
+//! use llm_rs::tool::Tool;
 //!
 //! #[derive(Deserialize, JsonSchema)]
 //! struct ReadFileParams {
@@ -13,7 +13,7 @@
 //!     path: String,
 //! }
 //!
-//! // Create a tool with full type information
+//! // Create a tool
 //! let tool = Tool::new(
 //!     "read_file",
 //!     "Read a file's contents",
@@ -22,21 +22,17 @@
 //!     },
 //! );
 //!
-//! // Convert to schema for LLM API integration
-//! let schema: ToolSchema = tool.to_schema();
-//!
 //! // Execute with JSON string
-//! let stream = schema.execute(r#"{"path": "/tmp/test.txt"}"#.to_string());
+//! let stream = tool.execute(r#"{"path": "/tmp/test.txt"}"#.to_string());
 //! ```
 
-use std::marker::PhantomData;
 use std::pin::Pin;
 
 use schemars::Schema;
 use serde::de::DeserializeOwned;
 use tokio_stream::{Stream, StreamExt};
 
-/// Type alias for the boxed stream returned by tool schema execution.
+/// Type alias for the boxed stream returned by tool execution.
 pub type ToolOutputStream = Pin<Box<dyn Stream<Item = String> + Send>>;
 
 /// Marker trait for valid tool parameter types.
@@ -48,9 +44,10 @@ pub type ToolOutputStream = Pin<Box<dyn Stream<Item = String> + Send>>;
 pub trait ToolParams: DeserializeOwned + schemars::JsonSchema + Send + Sync + 'static {}
 impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send + Sync + 'static {}
 
-/// A tool that stores the handler function with full type information.
+/// A tool that can be called by an LLM.
 ///
-/// Use `to_schema()` to convert to a `ToolSchema` for LLM API integration.
+/// Tools have a name, description, parameter schema, and a handler function
+/// that takes JSON string input and returns a stream of string outputs.
 ///
 /// # Example
 ///
@@ -75,26 +72,24 @@ impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send
 ///     },
 /// );
 ///
-/// // Convert to schema for LLM API
-/// let schema = tool.to_schema();
+/// // Execute with JSON string
+/// let stream = tool.execute(r#"{"query": "foo"}"#.to_string());
 /// ```
-pub struct Tool<P, F, S, T> {
+pub struct Tool {
     /// Unique name for the tool.
     pub name: String,
     /// Human-readable description of what the tool does.
     pub description: String,
-    handler: F,
-    _marker: PhantomData<fn(P) -> (S, T)>,
+    /// JSON Schema for the tool's parameters.
+    pub param_schema: Schema,
+    handler: Box<dyn Fn(String) -> ToolOutputStream + Send + Sync>,
 }
 
-impl<P, F, S, T> Tool<P, F, S, T>
-where
-    P: ToolParams,
-    F: Fn(P) -> S + Send + Sync + 'static,
-    S: Stream<Item = T> + Send + 'static,
-    T: ToString + Send + 'static,
-{
+impl Tool {
     /// Create a new tool.
+    ///
+    /// The handler function receives typed parameters and returns a stream.
+    /// JSON deserialization is handled automatically.
     ///
     /// # Type Parameters
     /// - `P`: Parameter type (must implement `Deserialize` + `JsonSchema`)
@@ -106,33 +101,21 @@ where
     /// - `name`: Unique tool name (used by LLM to call the tool)
     /// - `description`: Human-readable description
     /// - `handler`: Function that takes params, returns any stream of `ToString` items
-    pub fn new(name: impl Into<String>, description: impl Into<String>, handler: F) -> Self {
-        Self {
+    pub fn new<P, F, S, T>(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        handler: F,
+    ) -> Self
+    where
+        P: ToolParams,
+        F: Fn(P) -> S + Send + Sync + 'static,
+        S: Stream<Item = T> + Send + 'static,
+        T: ToString + Send + 'static,
+    {
+        Tool {
             name: name.into(),
             description: description.into(),
-            handler,
-            _marker: PhantomData,
-        }
-    }
-
-    /// Execute the tool directly with typed parameters.
-    ///
-    /// Returns the stream produced by the handler.
-    pub fn execute(&self, params: P) -> S {
-        (self.handler)(params)
-    }
-
-    /// Convert to a `ToolSchema` for LLM API integration.
-    ///
-    /// The schema stores:
-    /// - JSON schema for parameters
-    /// - Handler that accepts JSON string input and outputs string stream
-    pub fn to_schema(self) -> ToolSchema {
-        let handler = self.handler;
-        ToolSchema {
-            name: self.name,
-            description: self.description,
-            parameters: schemars::schema_for!(P),
+            param_schema: schemars::schema_for!(P),
             handler: Box::new(move |json_str: String| {
                 match serde_json::from_str::<P>(&json_str) {
                     Ok(params) => Box::pin(handler(params).map(|item| item.to_string())),
@@ -144,24 +127,7 @@ where
             }),
         }
     }
-}
 
-/// LLM API friendly tool schema with JSON schema parameters and string-based handler.
-///
-/// Created by calling `Tool::to_schema()`. This struct is suitable for:
-/// - Serializing tool definitions for LLM APIs
-/// - Executing tools with JSON string arguments
-pub struct ToolSchema {
-    /// Unique name for the tool.
-    pub name: String,
-    /// Human-readable description of what the tool does.
-    pub description: String,
-    /// JSON Schema for the tool's parameters.
-    pub parameters: Schema,
-    handler: Box<dyn Fn(String) -> ToolOutputStream + Send + Sync>,
-}
-
-impl ToolSchema {
     /// Execute the tool with a JSON string argument.
     ///
     /// Returns a stream of string outputs that can be consumed incrementally.

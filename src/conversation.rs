@@ -3,7 +3,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
 use crate::llm::{LLM, LLMEvent, LLMRole, StopReason};
-use crate::tool::ToolSchema;
+use crate::tool::Tool;
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc};
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
@@ -89,7 +89,7 @@ impl ConversationManager {
         llm: Box<dyn LLM>,
         system_prompt: &str,
         model: &str,
-        tools: Vec<Arc<ToolSchema>>,
+        tools: Vec<Arc<Tool>>,
     ) -> Result<Arc<Conversation>> {
         let (input_tx, input_rx) = mpsc::channel(10);
         let (notify_tx, _) = broadcast::channel(100);
@@ -133,7 +133,7 @@ pub struct Conversation {
     model: String,
 
     /// Tools available for the conversation.
-    tools: Vec<Arc<ToolSchema>>,
+    tools: Vec<Arc<Tool>>,
 
     /// LLM messages so far. Used to keep tracking the current messages and send the next message
     /// to LLM.
