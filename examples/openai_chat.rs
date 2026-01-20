@@ -6,7 +6,6 @@
 //! Or for OpenAI:
 //!   OPENAI_API_KEY=your-key OPENAI_BASE_URL=https://api.openai.com/v1 cargo run --example openai_chat
 
-use std::collections::HashMap;
 use std::env;
 use std::io::{self, Write};
 
@@ -49,8 +48,7 @@ async fn main() {
     print!("Assistant: ");
     io::stdout().flush().unwrap();
 
-    let tools = HashMap::new();
-    let mut stream = client.chat(&model, &tools, &messages);
+    let mut stream = client.chat(&model, &messages);
 
     let mut total_input = 0;
     let mut total_output = 0;

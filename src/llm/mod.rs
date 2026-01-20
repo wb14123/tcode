@@ -7,7 +7,6 @@ mod openai;
 
 pub use openai::OpenAI;
 
-use std::collections::HashMap;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
@@ -73,11 +72,20 @@ pub enum LLMEvent {
 }
 
 pub trait LLM: Send + Sync {
+    /// Register tools available for the model to call.
+    ///
+    /// This method allows implementations to cache tool schemas instead of
+    /// regenerating them on every chat call. The tools are stored internally
+    /// and used in subsequent `chat` calls.
+    ///
+    /// # Arguments
+    /// - `tools`: List of tools to register
+    fn register_tools(&self, tools: Vec<Arc<Tool>>);
+
     /// Send a chat request to the LLM.
     ///
     /// # Arguments
     /// - `model`: Model identifier (e.g., "claude-3-opus", "gpt-4")
-    /// - `tools`: Tools available for the model to call, keyed by tool name
     /// - `msgs`: Conversation history
     ///
     /// # Returns
@@ -85,7 +93,6 @@ pub trait LLM: Send + Sync {
     fn chat(
         &self,
         model: &str,
-        tools: &HashMap<String, Arc<Tool>>,
         msgs: &[(LLMRole, String)],
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>>;
 }

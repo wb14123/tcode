@@ -75,23 +75,30 @@ async fn main() {
     println!();
 
     // Create tools
-    let weather_tool = Tool::new(
+    let weather_tool = Arc::new(Tool::new(
         "get_weather",
         "Get the current weather for a city",
         |params: GetWeatherParams| tokio_stream::once(get_weather(params)),
-    );
+    ));
 
-    let calc_tool = Tool::new(
+    let calc_tool = Arc::new(Tool::new(
         "calculate",
         "Evaluate a mathematical expression",
         |params: CalculateParams| tokio_stream::once(calculate(params)),
-    );
+    ));
 
+    // Tools list for registration
+    let tools_list = vec![Arc::clone(&weather_tool), Arc::clone(&calc_tool)];
+
+    // HashMap for tool lookup during execution
     let mut tools = HashMap::new();
-    tools.insert("get_weather".to_string(), Arc::new(weather_tool));
-    tools.insert("calculate".to_string(), Arc::new(calc_tool));
+    tools.insert("get_weather".to_string(), weather_tool);
+    tools.insert("calculate".to_string(), calc_tool);
 
     let client = OpenAI::new(&api_key, &base_url);
+
+    // Register tools with the LLM for caching
+    client.register_tools(tools_list);
 
     let messages = vec![
         (
@@ -108,7 +115,7 @@ async fn main() {
     print!("Assistant: ");
     io::stdout().flush().unwrap();
 
-    let mut stream = client.chat(&model, &tools, &messages);
+    let mut stream = client.chat(&model, &messages);
     let mut pending_tool_calls = Vec::new();
 
     while let Some(event) = stream.next().await {

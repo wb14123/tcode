@@ -97,8 +97,17 @@ impl ConversationManager {
         llm: Box<dyn LLM>,
         system_prompt: &str,
         model: &str,
-        tools: HashMap<String, Arc<Tool>>,
+        tools: Vec<Arc<Tool>>,
     ) -> Result<Arc<Conversation>> {
+        // Register tools with the LLM for caching
+        llm.register_tools(tools.clone());
+
+        // Convert tools list to HashMap for O(1) lookup during execution
+        let tools_map: HashMap<String, Arc<Tool>> = tools
+            .into_iter()
+            .map(|t| (t.name.clone(), t))
+            .collect();
+
         let (input_tx, input_rx) = mpsc::channel(10);
         let (notify_tx, _) = broadcast::channel(100);
         let llm_msgs = if system_prompt.is_empty() {
@@ -109,7 +118,7 @@ impl ConversationManager {
         Ok(Arc::new(Conversation {
             llm,
             model: model.to_string(),
-            tools,
+            tools: tools_map,
             llm_msgs,
             input_channel_tx: input_tx,
             input_channel_rx: input_rx,
@@ -201,7 +210,7 @@ impl Conversation {
         loop {
             let mut response_stream =
                 self.llm
-                    .chat(self.model.as_str(), &self.tools, &self.llm_msgs);
+                    .chat(self.model.as_str(), &self.llm_msgs);
             let mut accumulated_text = String::new();
             let mut pending_tool_calls = Vec::new();
             let mut should_continue = false;

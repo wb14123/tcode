@@ -2,7 +2,7 @@
 
 use std::collections::HashMap;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use async_stream::stream;
 use reqwest::Client;
@@ -19,6 +19,8 @@ pub struct OpenAI {
     client: Client,
     api_key: String,
     base_url: String,
+    /// Cached tool definitions for API requests.
+    cached_tool_defs: RwLock<Option<Vec<ToolDefinition>>>,
 }
 
 impl OpenAI {
@@ -32,6 +34,7 @@ impl OpenAI {
             client: Client::new(),
             api_key: api_key.into(),
             base_url: base_url.into(),
+            cached_tool_defs: RwLock::new(None),
         }
     }
 
@@ -67,14 +70,14 @@ struct ChatMessage {
     content: String,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct ToolDefinition {
     #[serde(rename = "type")]
     tool_type: &'static str,
     function: FunctionDefinition,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 struct FunctionDefinition {
     name: String,
     description: String,
@@ -137,10 +140,31 @@ struct Usage {
 // ============================================================================
 
 impl LLM for OpenAI {
+    fn register_tools(&self, tools: Vec<Arc<Tool>>) {
+        let tool_defs: Option<Vec<ToolDefinition>> = if tools.is_empty() {
+            None
+        } else {
+            Some(
+                tools
+                    .iter()
+                    .map(|t| ToolDefinition {
+                        tool_type: "function",
+                        function: FunctionDefinition {
+                            name: t.name.clone(),
+                            description: t.description.clone(),
+                            parameters: serde_json::to_value(&t.param_schema)
+                                .unwrap_or(serde_json::json!({})),
+                        },
+                    })
+                    .collect(),
+            )
+        };
+        *self.cached_tool_defs.write().unwrap() = tool_defs;
+    }
+
     fn chat(
         &self,
         model: &str,
-        tools: &HashMap<String, Arc<Tool>>,
         msgs: &[(LLMRole, String)],
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>> {
         let client = self.client.clone();
@@ -162,25 +186,8 @@ impl LLM for OpenAI {
             })
             .collect();
 
-        // Convert tools
-        let tool_defs: Option<Vec<ToolDefinition>> = if tools.is_empty() {
-            None
-        } else {
-            Some(
-                tools
-                    .values()
-                    .map(|t| ToolDefinition {
-                        tool_type: "function",
-                        function: FunctionDefinition {
-                            name: t.name.clone(),
-                            description: t.description.clone(),
-                            parameters: serde_json::to_value(&t.param_schema)
-                                .unwrap_or(serde_json::json!({})),
-                        },
-                    })
-                    .collect(),
-            )
-        };
+        // Use cached tool definitions
+        let tool_defs = self.cached_tool_defs.read().unwrap().clone();
 
         Box::pin(stream! {
             let request_body = ChatRequest {
