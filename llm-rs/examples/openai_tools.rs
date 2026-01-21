@@ -1,4 +1,4 @@
-//! Example: Tool calling with OpenAI/OpenRouter API
+//! Example: Tool calling with OpenAI/OpenRouter API using the #[tool] macro
 //!
 //! Usage:
 //!   OPENROUTER_API_KEY=your-key cargo run --example openai_tools
@@ -9,46 +9,51 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use llm_rs::llm::{LLMEvent, LLMRole, OpenAI, StopReason, LLM};
-use llm_rs::tool::Tool;
-use schemars::JsonSchema;
-use serde::Deserialize;
+use llm_rs::tool;
 use tokio_stream::StreamExt;
 
-// Tool parameter types
-#[derive(Deserialize, JsonSchema)]
-struct GetWeatherParams {
+// Tool definitions using the #[tool] macro
+// The macro generates:
+// - A params struct (e.g., GetWeatherParams)
+// - A tool constructor function (e.g., get_weather_tool())
+
+/// Get the current weather for a city
+#[tool]
+fn get_weather(
     /// The city name to get weather for
     city: String,
+) -> impl tokio_stream::Stream<Item = String> {
+    let result = format!(
+        "Weather in {}: 22°C, partly cloudy, humidity 65%",
+        city
+    );
+    tokio_stream::once(result)
 }
 
-#[derive(Deserialize, JsonSchema)]
-struct CalculateParams {
+/// Evaluate a mathematical expression
+#[tool]
+fn calculate(
     /// Mathematical expression to evaluate (e.g., "2 + 3 * 4")
     expression: String,
-}
-
-// Mock tool implementations
-fn get_weather(params: GetWeatherParams) -> String {
-    format!(
-        "Weather in {}: 22°C, partly cloudy, humidity 65%",
-        params.city
-    )
-}
-
-fn calculate(params: CalculateParams) -> String {
+) -> impl tokio_stream::Stream<Item = String> {
     // Simple eval for demo (just handles basic cases)
-    let expr = params.expression.trim();
-    if let Some((a, b)) = expr.split_once('+') {
+    let expr = expression.trim();
+    let result = if let Some((a, b)) = expr.split_once('+') {
         if let (Ok(a), Ok(b)) = (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
-            return format!("{} = {}", expr, a + b);
+            format!("{} = {}", expr, a + b)
+        } else {
+            format!("Cannot evaluate: {}", expr)
         }
-    }
-    if let Some((a, b)) = expr.split_once('*') {
+    } else if let Some((a, b)) = expr.split_once('*') {
         if let (Ok(a), Ok(b)) = (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
-            return format!("{} = {}", expr, a * b);
+            format!("{} = {}", expr, a * b)
+        } else {
+            format!("Cannot evaluate: {}", expr)
         }
-    }
-    format!("Cannot evaluate: {}", expr)
+    } else {
+        format!("Cannot evaluate: {}", expr)
+    };
+    tokio_stream::once(result)
 }
 
 #[tokio::main]
@@ -74,18 +79,9 @@ async fn main() {
     println!("Base URL: {}", base_url);
     println!();
 
-    // Create tools
-    let weather_tool = Arc::new(Tool::new(
-        "get_weather",
-        "Get the current weather for a city",
-        |params: GetWeatherParams| tokio_stream::once(get_weather(params)),
-    ));
-
-    let calc_tool = Arc::new(Tool::new(
-        "calculate",
-        "Evaluate a mathematical expression",
-        |params: CalculateParams| tokio_stream::once(calculate(params)),
-    ));
+    // Create tools using the generated constructor functions
+    let weather_tool = Arc::new(get_weather_tool());
+    let calc_tool = Arc::new(calculate_tool());
 
     // Tools list for registration
     let tools_list = vec![Arc::clone(&weather_tool), Arc::clone(&calc_tool)];
