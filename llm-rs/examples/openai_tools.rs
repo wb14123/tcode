@@ -1,7 +1,7 @@
-//! Example: Tool calling with OpenAI/OpenRouter API using the #[tool] macro
+//! Example: Tool calling with OpenAI API using the #[tool] macro
 //!
 //! Usage:
-//!   OPENROUTER_API_KEY=your-key cargo run --example openai_tools
+//!   OPENAI_API_KEY=your-key cargo run --example openai_tools
 
 use std::collections::HashMap;
 use std::env;
@@ -58,26 +58,8 @@ fn calculate(
 
 #[tokio::main]
 async fn main() {
-    let (api_key, base_url, model) = if let Ok(key) = env::var("OPENROUTER_API_KEY") {
-        (
-            key,
-            "https://openrouter.ai/api/v1".to_string(),
-            env::var("MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
-        )
-    } else if let Ok(key) = env::var("OPENAI_API_KEY") {
-        (
-            key,
-            env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-            env::var("MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string()),
-        )
-    } else {
-        eprintln!("Error: Set OPENROUTER_API_KEY or OPENAI_API_KEY environment variable");
-        std::process::exit(1);
-    };
-
-    println!("Using model: {}", model);
-    println!("Base URL: {}", base_url);
-    println!();
+    let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
+    let model = "gpt-4o-mini";
 
     // Create tools using the generated constructor functions
     let weather_tool = Arc::new(get_weather_tool());
@@ -91,7 +73,7 @@ async fn main() {
     tools.insert("get_weather".to_string(), weather_tool);
     tools.insert("calculate".to_string(), calc_tool);
 
-    let mut client = OpenAI::new(&api_key, &base_url);
+    let mut client = OpenAI::new(&api_key, "https://api.openai.com/v1");
 
     // Register tools with the LLM for caching
     client.register_tools(tools_list);

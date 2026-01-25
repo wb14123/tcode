@@ -1,10 +1,7 @@
-//! Example: Simple chat with OpenAI/OpenRouter API
+//! Example: Simple chat with OpenAI API
 //!
 //! Usage:
-//!   OPENROUTER_API_KEY=your-key cargo run --example openai_chat
-//!
-//! Or for OpenAI:
-//!   OPENAI_API_KEY=your-key OPENAI_BASE_URL=https://api.openai.com/v1 cargo run --example openai_chat
+//!   OPENAI_API_KEY=your-key cargo run --example openai_chat
 
 use std::env;
 use std::io::{self, Write};
@@ -14,29 +11,10 @@ use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() {
-    // Try OpenRouter first, then fall back to OpenAI
-    let (api_key, base_url, model) = if let Ok(key) = env::var("OPENROUTER_API_KEY") {
-        (
-            key,
-            "https://openrouter.ai/api/v1".to_string(),
-            env::var("MODEL").unwrap_or_else(|_| "openai/gpt-4o-mini".to_string()),
-        )
-    } else if let Ok(key) = env::var("OPENAI_API_KEY") {
-        (
-            key,
-            env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".to_string()),
-            env::var("MODEL").unwrap_or_else(|_| "gpt-4o-mini".to_string()),
-        )
-    } else {
-        eprintln!("Error: Set OPENROUTER_API_KEY or OPENAI_API_KEY environment variable");
-        std::process::exit(1);
-    };
+    let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
+    let model = "gpt-4o-mini";
 
-    println!("Using model: {}", model);
-    println!("Base URL: {}", base_url);
-    println!();
-
-    let client = OpenAI::new(&api_key, &base_url);
+    let client = OpenAI::new(&api_key, "https://api.openai.com/v1");
 
     // Simple conversation
     let messages = vec![
