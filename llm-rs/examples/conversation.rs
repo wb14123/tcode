@@ -1,10 +1,10 @@
-//! Example: Multi-round conversation using ConversationManager
+//! Example: Interactive multi-round conversation using ConversationManager
 //!
 //! This example demonstrates how to:
 //! - Create a ConversationManager
 //! - Start a conversation with tools
 //! - Subscribe to conversation messages
-//! - Send multiple chat messages in a conversation
+//! - Send interactive user messages in a conversation
 //!
 //! Usage:
 //!   OPENAI_API_KEY=your-key cargo run --example conversation
@@ -71,7 +71,7 @@ async fn main() -> anyhow::Result<()> {
     let mut msg_stream = client.subscribe();
 
     // Spawn a task to print messages as they arrive
-    let print_task = tokio::spawn(async move {
+    tokio::spawn(async move {
         while let Some(result) = msg_stream.next().await {
             match result {
                 Ok(msg) => print_message(&msg),
@@ -80,28 +80,47 @@ async fn main() -> anyhow::Result<()> {
         }
     });
 
-    // Multi-round conversation
-    let questions = [
-        "What's the weather in Tokyo?",
-        "And what about New York?",
-        "What time is it in UTC?",
-    ];
+    // Print welcome message and hints
+    println!("╔════════════════════════════════════════════════════════════╗");
+    println!("║       Interactive Conversation with AI Assistant           ║");
+    println!("╠════════════════════════════════════════════════════════════╣");
+    println!("║ Available tools:                                           ║");
+    println!("║   • get_weather <city>  - Get weather for a city           ║");
+    println!("║   • get_current_time <timezone> - Get time in a timezone   ║");
+    println!("║                                                            ║");
+    println!("║ Example questions:                                         ║");
+    println!("║   • \"What's the weather in Tokyo?\"                         ║");
+    println!("║   • \"What time is it in UTC?\"                              ║");
+    println!("║                                                            ║");
+    println!("║ Type 'quit' or 'exit' to end the conversation.             ║");
+    println!("╚════════════════════════════════════════════════════════════╝");
+    println!();
 
-    for question in questions {
-        println!("\n>>> User: {}", question);
-        client.send_chat(question).await?;
+    // Interactive conversation loop
+    loop {
+        print!("You: ");
+        io::stdout().flush()?;
 
-        // Wait a bit for the response to complete before sending next message
-        tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
+        let mut input = String::new();
+        io::stdin().read_line(&mut input)?;
+        let input = input.trim();
+
+        // Check for exit commands
+        if input.is_empty() {
+            continue;
+        }
+        if input.eq_ignore_ascii_case("quit") || input.eq_ignore_ascii_case("exit") {
+            println!("\n--- Conversation ended. Goodbye! ---");
+            break;
+        }
+
+        // Send the message
+        client.send_chat(input).await?;
+
+        // Wait for the response to complete
+        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        println!();
     }
-
-    // Give some time for the final response
-    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-
-    // Cancel the print task
-    print_task.abort();
-
-    println!("\n\n--- Conversation ended ---");
 
     Ok(())
 }
