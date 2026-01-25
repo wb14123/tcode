@@ -8,6 +8,7 @@ use crate::llm::{LLMEvent, LLMRole, StopReason, LLM};
 use crate::tool::Tool;
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc};
+use tokio::task::JoinHandle;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
@@ -88,7 +89,7 @@ pub enum Message {
 }
 
 pub struct ConversationManager {
-    conversations: RwLock<HashMap<String, Arc<Conversation>>>,
+    conversations: RwLock<HashMap<String, (Arc<ConversationClient>, JoinHandle<()>)>>,
 }
 
 /// Manages conversations so that any new client can attach to an existing conversation.
@@ -101,7 +102,7 @@ impl ConversationManager {
         system_prompt: &str,
         model: &str,
         tools: Vec<Arc<Tool>>,
-    ) -> Result<Arc<Conversation>> {
+    ) -> Result<Arc<ConversationClient>> {
         // Register tools with the LLM for caching
         llm.register_tools(tools.clone());
 
@@ -119,36 +120,45 @@ impl ConversationManager {
             vec![(LLMRole::System, system_prompt.to_string())]
         };
         let conversation_id = Uuid::new_v4().to_string();
-        let conversation = Arc::new(Conversation {
+        let mut conversation = Conversation {
             id: conversation_id.clone(),
             llm,
             model: model.to_string(),
             tools: tools_map,
             llm_msgs,
-            input_channel_tx: input_tx,
             input_channel_rx: input_rx,
-            msgs: RwLock::new(vec![]),
-            new_msg_notify_tx: notify_tx,
             msg_id_counter: AtomicI32::new(0),
             total_input_tokens: 0,
             total_output_tokens: 0,
+            conversation_client: {
+                Arc::new(ConversationClient {
+                    msgs: RwLock::new(Vec::new()),
+                    input_channel_tx: input_tx,
+                    new_msg_notify_tx: notify_tx,
+                })
+            }
+        };
+        let client = &(&conversation).conversation_client.clone();
+        let task = tokio::spawn(async move {
+            conversation.start().await;
         });
         self.conversations
             .write()
             .map_err(|e| anyhow::anyhow!("failed to acquire conversations write lock: {e}"))?
-            .insert(conversation_id, conversation.clone());
-        Ok(conversation)
+            .insert(conversation_id, (client.clone(), task));
+        Ok(client.clone())
     }
 
     /// Get a conversation by its id. It will try to load it from the manager's memory.
     /// If not found, load it from storage and put into the manager's memory.
-    pub fn get_conversation(&self, conversation_id: &str) -> Result<Option<Arc<Conversation>>> {
+    pub fn get_conversation(&self, conversation_id: &str) -> Result<Option<Arc<ConversationClient>>> {
         Ok(self
             .conversations
             .read()
             .map_err(|e| anyhow::anyhow!("failed to acquire conversations read lock: {e}"))?
             .get(conversation_id)
-            .cloned())
+            .map(|x| x.0.clone())
+        )
     }
 
     /// Remove the conversation from the manager's memory. The conversation should be
@@ -173,16 +183,10 @@ pub struct Conversation {
     /// to LLM.
     llm_msgs: Vec<(LLMRole, String)>,
 
-    /// Chat input queue sender. Used for client to send a chat message.
-    input_channel_tx: mpsc::Sender<String>,
+    conversation_client: Arc<ConversationClient>,
 
     /// Chat input receiver. Used for Conversation to poll the messages.
     input_channel_rx: mpsc::Receiver<String>,
-
-    /// Chat messages history.
-    msgs: RwLock<Vec<Arc<Message>>>,
-
-    new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
 
     /// Message ID counter for generating unique message IDs.
     msg_id_counter: AtomicI32,
@@ -199,16 +203,13 @@ impl Conversation {
     }
 
     fn broadcast_msg(&self, msg: Message) {
-        let msg = Arc::new(msg);
-        self.msgs.write().unwrap().push(Arc::clone(&msg));
-        // Ignore send errors - happens when no subscribers
-        let _ = self.new_msg_notify_tx.send(msg);
+        // TODO: also broadcast error
+        let _ = self.conversation_client.notify_msg(msg);
     }
 
     /// Start the worker loop for the conversation. Should only be called once.
     async fn start(&mut self) {
         while let Some(user_input) = self.input_channel_rx.recv().await {
-            // Create and broadcast user message
             let user_msg_id = self.next_msg_id();
             self.broadcast_msg(Message::UserMessage {
                 msg_id: user_msg_id,
@@ -350,7 +351,6 @@ impl Conversation {
 
             self.llm_msgs.push((LLMRole::Tool, tool_result));
 
-            // Broadcast tool end
             self.broadcast_msg(Message::ToolMessageEnd {
                 msg_id: self.next_msg_id(),
                 end_status,
@@ -360,6 +360,22 @@ impl Conversation {
         }
     }
 
+    /// Stop the current LLM response and all the messages in the queue.
+    pub async fn break_conversation(&self) -> Result<()> {
+        Ok(()) // placeholder
+    }
+
+}
+
+
+/// Use for the client to send chat messages and subscribe to the conversation's messages.
+pub struct ConversationClient {
+    msgs: RwLock<Vec<Arc<Message>>>,
+    input_channel_tx: mpsc::Sender<String>,
+    new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
+}
+
+impl ConversationClient {
     /// Send a chat to the conversation. Returns after the message is queued. The message
     /// will be sent to the LLM in the background when the current LLM response finished.
     pub async fn send_chat(&self, content: &str) -> Result<()> {
@@ -367,9 +383,15 @@ impl Conversation {
         Ok(())
     }
 
-    /// Stop the current LLM response and all the messages in the queue.
-    pub async fn break_conversation(&self) -> Result<()> {
-        Ok(()) // placeholder
+    /// Used for conversation to notification a new message if available
+    pub(crate) async fn notify_msg(&self, msg: Message) -> Result<()> {
+        let msg = Arc::new(msg);
+        self.msgs.write()
+            .map_err(|e| anyhow::anyhow!("failed to acquire msgs write lock: {e}"))?
+            .push(Arc::clone(&msg));
+        self.new_msg_notify_tx.send(msg)
+            .map_err(|e| anyhow::anyhow!("failed to send msg to the notification broadcast: {e}"))?;
+        Ok(())
     }
 
     /// Subscribe to the conversation's messages.
@@ -377,6 +399,7 @@ impl Conversation {
     /// If the consumer lagged too far behind, it will receive BroadcastStreamRecvError
     /// then the stream continues with normal messages.
     pub fn subscribe(&self) -> impl Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> {
+        // TODO: handle error and return error in stream
         let msgs = self.msgs.read().unwrap();
         let tx = self.new_msg_notify_tx.subscribe();
         let stream = BroadcastStream::new(tx);
