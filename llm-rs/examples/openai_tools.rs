@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use llm_rs::llm::{LLMEvent, LLMRole, OpenAI, StopReason, LLM};
 use llm_rs::tool;
+use llm_rs::tool::Tool;
 use tokio_stream::StreamExt;
 
 // Tool definitions using the #[tool] macro
@@ -30,30 +31,11 @@ fn get_weather(
     tokio_stream::once(result)
 }
 
-/// Evaluate a mathematical expression
+/// Get the current time
 #[tool]
-fn calculate(
-    /// Mathematical expression to evaluate (e.g., "2 + 3 * 4")
-    expression: String,
-) -> impl tokio_stream::Stream<Item = String> {
-    // Simple eval for demo (just handles basic cases)
-    let expr = expression.trim();
-    let result = if let Some((a, b)) = expr.split_once('+') {
-        if let (Ok(a), Ok(b)) = (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
-            format!("{} = {}", expr, a + b)
-        } else {
-            format!("Cannot evaluate: {}", expr)
-        }
-    } else if let Some((a, b)) = expr.split_once('*') {
-        if let (Ok(a), Ok(b)) = (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
-            format!("{} = {}", expr, a * b)
-        } else {
-            format!("Cannot evaluate: {}", expr)
-        }
-    } else {
-        format!("Cannot evaluate: {}", expr)
-    };
-    tokio_stream::once(result)
+fn get_current_time() -> impl tokio_stream::Stream<Item = String> {
+    let now = chrono::Local::now();
+    tokio_stream::once(now.format("%Y-%m-%d %H:%M:%S").to_string())
 }
 
 #[tokio::main]
@@ -63,15 +45,15 @@ async fn main() {
 
     // Create tools using the generated constructor functions
     let weather_tool = Arc::new(get_weather_tool());
-    let calc_tool = Arc::new(calculate_tool());
+    let time_tool = Arc::new(get_current_time_tool());
 
     // Tools list for registration
-    let tools_list = vec![Arc::clone(&weather_tool), Arc::clone(&calc_tool)];
+    let tools_list = vec![Arc::clone(&weather_tool), Arc::clone(&time_tool)];
 
     // HashMap for tool lookup during execution
-    let mut tools = HashMap::new();
+    let mut tools: HashMap<String, Arc<Tool>> = HashMap::new();
     tools.insert("get_weather".to_string(), weather_tool);
-    tools.insert("calculate".to_string(), calc_tool);
+    tools.insert("get_current_time".to_string(), time_tool);
 
     let mut client = OpenAI::new(&api_key, "https://api.openai.com/v1");
 

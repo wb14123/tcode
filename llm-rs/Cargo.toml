@@ -14,3 +14,6 @@ tokio = { version = "1.49.0", features = ["macros", "rt", "rt-multi-thread"] }
 tokio-stream = { version = "0.1", features = ["sync"] }
 llm-rs-macros = { path = "../llm-rs-macros" }
 uuid = { version = "1.19.0", features = ["v4"] }
+
+[dev-dependencies]
+chrono = "0.4"

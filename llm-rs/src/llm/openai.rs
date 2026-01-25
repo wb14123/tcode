@@ -139,6 +139,25 @@ struct Usage {
 // Implementation
 // ============================================================================
 
+/// Normalize a schemars Schema into OpenAI-compatible JSON.
+/// OpenAI requires `type: "object"` and `properties` even for empty params.
+fn normalize_schema_for_openai(schema: &schemars::Schema) -> serde_json::Value {
+    let mut value = serde_json::to_value(schema).unwrap_or(serde_json::json!({}));
+
+    if let Some(obj) = value.as_object_mut() {
+        // Ensure type is "object"
+        if !obj.contains_key("type") {
+            obj.insert("type".to_string(), serde_json::json!("object"));
+        }
+        // Ensure properties exists
+        if !obj.contains_key("properties") {
+            obj.insert("properties".to_string(), serde_json::json!({}));
+        }
+    }
+
+    value
+}
+
 impl LLM for OpenAI {
     fn register_tools(&mut self, tools: Vec<Arc<Tool>>) {
         self.cached_tool_defs = if tools.is_empty() {
@@ -152,8 +171,7 @@ impl LLM for OpenAI {
                         function: FunctionDefinition {
                             name: t.name.clone(),
                             description: t.description.clone(),
-                            parameters: serde_json::to_value(&t.param_schema)
-                                .unwrap_or(serde_json::json!({})),
+                            parameters: normalize_schema_for_openai(&t.param_schema),
                         },
                     })
                     .collect(),
