@@ -9,7 +9,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
-use super::{LLMEvent, LLMRole, StopReason, ToolCall, LLM};
+use super::{LLMEvent, LLMMessage, StopReason, ToolCall, LLM};
 use crate::tool::Tool;
 
 /// OpenAI-compatible LLM client.
@@ -67,7 +67,27 @@ struct StreamOptions {
 #[derive(Serialize)]
 struct ChatMessage {
     role: &'static str,
-    content: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_call_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    tool_calls: Option<Vec<ChatMessageToolCall>>,
+}
+
+/// Tool call in assistant message format for OpenAI API.
+#[derive(Serialize)]
+struct ChatMessageToolCall {
+    id: String,
+    #[serde(rename = "type")]
+    call_type: &'static str,
+    function: ChatMessageToolCallFunction,
+}
+
+#[derive(Serialize)]
+struct ChatMessageToolCallFunction {
+    name: String,
+    arguments: String,
 }
 
 #[derive(Clone, Serialize)]
@@ -182,7 +202,7 @@ impl LLM for OpenAI {
     fn chat(
         &self,
         model: &str,
-        msgs: &[(LLMRole, String)],
+        msgs: &[LLMMessage],
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>> {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
@@ -192,14 +212,45 @@ impl LLM for OpenAI {
         // Convert messages
         let messages: Vec<ChatMessage> = msgs
             .iter()
-            .map(|(role, content)| ChatMessage {
-                role: match role {
-                    LLMRole::System => "system",
-                    LLMRole::User => "user",
-                    LLMRole::Assistant => "assistant",
-                    LLMRole::Tool => "tool",
+            .map(|msg| match msg {
+                LLMMessage::System(content) => ChatMessage {
+                    role: "system",
+                    content: Some(content.clone()),
+                    tool_call_id: None,
+                    tool_calls: None,
                 },
-                content: content.clone(),
+                LLMMessage::User(content) => ChatMessage {
+                    role: "user",
+                    content: Some(content.clone()),
+                    tool_call_id: None,
+                    tool_calls: None,
+                },
+                LLMMessage::Assistant { content, tool_calls } => {
+                    let tc = if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(tool_calls.iter().map(|tc| ChatMessageToolCall {
+                            id: tc.id.clone(),
+                            call_type: "function",
+                            function: ChatMessageToolCallFunction {
+                                name: tc.name.clone(),
+                                arguments: tc.arguments.clone(),
+                            },
+                        }).collect())
+                    };
+                    ChatMessage {
+                        role: "assistant",
+                        content: if content.is_empty() { None } else { Some(content.clone()) },
+                        tool_call_id: None,
+                        tool_calls: tc,
+                    }
+                },
+                LLMMessage::ToolResult { tool_call_id, content } => ChatMessage {
+                    role: "tool",
+                    content: Some(content.clone()),
+                    tool_call_id: Some(tool_call_id.clone()),
+                    tool_calls: None,
+                },
             })
             .collect();
 

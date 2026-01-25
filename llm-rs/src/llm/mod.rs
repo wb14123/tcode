@@ -13,6 +13,24 @@ use tokio_stream::Stream;
 
 use crate::tool::Tool;
 
+/// Message content for LLM conversations.
+#[derive(Clone, Debug)]
+pub enum LLMMessage {
+    System(String),
+    User(String),
+    /// Assistant message with optional tool calls.
+    /// When the assistant makes tool calls, the tool_calls vector will be populated.
+    Assistant {
+        content: String,
+        tool_calls: Vec<ToolCall>,
+    },
+    /// Tool result message. Includes the tool_call_id from the original ToolCall.
+    ToolResult {
+        tool_call_id: String,
+        content: String,
+    },
+}
+
 #[derive(Clone, Debug)]
 pub enum LLMRole {
     System,
@@ -86,13 +104,13 @@ pub trait LLM: Send + Sync {
     ///
     /// # Arguments
     /// - `model`: Model identifier (e.g., "claude-3-opus", "gpt-4")
-    /// - `msgs`: Conversation history
+    /// - `msgs`: Conversation history using LLMMessage enum
     ///
     /// # Returns
     /// A stream of [`LLMEvent`]s representing the model's response.
     fn chat(
         &self,
         model: &str,
-        msgs: &[(LLMRole, String)],
+        msgs: &[LLMMessage],
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>>;
 }

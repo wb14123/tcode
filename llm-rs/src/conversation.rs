@@ -4,7 +4,7 @@ use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use crate::llm::{LLMEvent, LLMRole, StopReason, LLM};
+use crate::llm::{LLMEvent, LLMMessage, StopReason, LLM};
 use crate::tool::Tool;
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc};
@@ -92,8 +92,19 @@ pub struct ConversationManager {
     conversations: RwLock<HashMap<String, (Arc<ConversationClient>, JoinHandle<()>)>>,
 }
 
+impl Default for ConversationManager {
+    fn default() -> Self {
+        Self {
+            conversations: RwLock::new(HashMap::new()),
+        }
+    }
+}
+
 /// Manages conversations so that any new client can attach to an existing conversation.
 impl ConversationManager {
+    pub fn new() -> Self {
+        Self::default()
+    }
     /// Create a new conversation. The new conversation will be kept in the manager's
     /// memory until it ends.
     pub fn new_conversation(
@@ -117,7 +128,7 @@ impl ConversationManager {
         let llm_msgs = if system_prompt.is_empty() {
             vec![]
         } else {
-            vec![(LLMRole::System, system_prompt.to_string())]
+            vec![LLMMessage::System(system_prompt.to_string())]
         };
         let conversation_id = Uuid::new_v4().to_string();
         let mut conversation = Conversation {
@@ -181,7 +192,7 @@ pub struct Conversation {
 
     /// LLM messages so far. Used to keep tracking the current messages and send the next message
     /// to LLM.
-    llm_msgs: Vec<(LLMRole, String)>,
+    llm_msgs: Vec<LLMMessage>,
 
     conversation_client: Arc<ConversationClient>,
 
@@ -217,7 +228,7 @@ impl Conversation {
                 content: Arc::new(user_input.clone()),
             });
 
-            self.llm_msgs.push((LLMRole::User, user_input));
+            self.llm_msgs.push(LLMMessage::User(user_input));
             self.call_llm().await;
         }
     }
@@ -280,16 +291,22 @@ impl Conversation {
                             output_tokens,
                         });
 
-                        // Add assistant response to llm_msgs for context
-                        if !accumulated_text.is_empty() {
-                            self.llm_msgs
-                                .push((LLMRole::Assistant, accumulated_text.clone()));
-                        }
-
                         // Handle tool calls if any
                         if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
-                            self.execute_tool_calls(&pending_tool_calls).await;
+                            // Add assistant message with tool calls to llm_msgs
+                            let tool_calls = std::mem::take(&mut pending_tool_calls);
+                            self.llm_msgs.push(LLMMessage::Assistant {
+                                content: accumulated_text.clone(),
+                                tool_calls: tool_calls.clone(),
+                            });
+                            self.execute_tool_calls(tool_calls).await;
                             should_continue = true;
+                        } else if !accumulated_text.is_empty() {
+                            // Add assistant response to llm_msgs for context (no tool calls)
+                            self.llm_msgs.push(LLMMessage::Assistant {
+                                content: accumulated_text.clone(),
+                                tool_calls: vec![],
+                            });
                         }
                     }
                     LLMEvent::Error(error) => {
@@ -311,7 +328,7 @@ impl Conversation {
         }
     }
 
-    async fn execute_tool_calls(&mut self, tool_calls: &[crate::llm::ToolCall]) {
+    async fn execute_tool_calls(&mut self, tool_calls: Vec<crate::llm::ToolCall>) {
         for tool_call in tool_calls {
             let tool_msg_id = self.next_msg_id();
 
@@ -349,7 +366,11 @@ impl Conversation {
                 (MessageEndStatus::FAILED, error_msg)
             };
 
-            self.llm_msgs.push((LLMRole::Tool, tool_result));
+            // Push tool result with tool_call_id for proper API format
+            self.llm_msgs.push(LLMMessage::ToolResult {
+                tool_call_id: tool_call.id,
+                content: tool_result,
+            });
 
             self.broadcast_msg(Message::ToolMessageEnd {
                 msg_id: self.next_msg_id(),
@@ -383,8 +404,8 @@ impl ConversationClient {
         Ok(())
     }
 
-    /// Used for conversation to notification a new message if available
-    pub(crate) async fn notify_msg(&self, msg: Message) -> Result<()> {
+    /// Used for conversation to notify a new message if available
+    pub(crate) fn notify_msg(&self, msg: Message) -> Result<()> {
         let msg = Arc::new(msg);
         self.msgs.write()
             .map_err(|e| anyhow::anyhow!("failed to acquire msgs write lock: {e}"))?
@@ -398,7 +419,7 @@ impl ConversationClient {
     /// This will also send all the historical messages.
     /// If the consumer lagged too far behind, it will receive BroadcastStreamRecvError
     /// then the stream continues with normal messages.
-    pub fn subscribe(&self) -> impl Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> {
+    pub fn subscribe(&self) -> impl Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + use<> {
         // TODO: handle error and return error in stream
         let msgs = self.msgs.read().unwrap();
         let tx = self.new_msg_notify_tx.subscribe();

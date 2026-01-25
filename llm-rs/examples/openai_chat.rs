@@ -6,7 +6,7 @@
 use std::env;
 use std::io::{self, Write};
 
-use llm_rs::llm::{LLMEvent, LLMRole, OpenAI, LLM};
+use llm_rs::llm::{LLMEvent, LLMMessage, OpenAI, LLM};
 use tokio_stream::StreamExt;
 
 #[tokio::main]
@@ -18,8 +18,8 @@ async fn main() {
 
     // Simple conversation
     let messages = vec![
-        (LLMRole::System, "You are a helpful assistant. Be concise.".to_string()),
-        (LLMRole::User, "What is Rust programming language in 2 sentences?".to_string()),
+        LLMMessage::System("You are a helpful assistant. Be concise.".to_string()),
+        LLMMessage::User("What is Rust programming language in 2 sentences?".to_string()),
     ];
 
     println!("User: What is Rust programming language in 2 sentences?");

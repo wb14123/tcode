@@ -8,7 +8,7 @@ use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use llm_rs::llm::{LLMEvent, LLMRole, OpenAI, StopReason, LLM};
+use llm_rs::llm::{LLMEvent, LLMMessage, OpenAI, StopReason, LLM};
 use llm_rs::tool;
 use llm_rs::tool::Tool;
 use tokio_stream::StreamExt;
@@ -61,14 +61,8 @@ async fn main() {
     client.register_tools(tools_list);
 
     let messages = vec![
-        (
-            LLMRole::System,
-            "You are a helpful assistant. Use tools when needed.".to_string(),
-        ),
-        (
-            LLMRole::User,
-            "What's the weather in Tokyo?".to_string(),
-        ),
+        LLMMessage::System("You are a helpful assistant. Use tools when needed.".to_string()),
+        LLMMessage::User("What's the weather in Tokyo?".to_string()),
     ];
 
     println!("User: What's the weather in Tokyo?");
