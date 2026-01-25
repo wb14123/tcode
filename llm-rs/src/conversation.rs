@@ -1,15 +1,16 @@
 use std::collections::HashMap;
 use std::fmt::Display;
-use std::sync::{Arc, RwLock};
 use std::sync::atomic::AtomicI32;
+use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
-use crate::llm::{LLM, LLMEvent, LLMRole, StopReason};
+use crate::llm::{LLMEvent, LLMRole, StopReason, LLM};
 use crate::tool::Tool;
 use anyhow::Result;
 use tokio::sync::{broadcast, mpsc};
-use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
+use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::{Stream, StreamExt};
+use uuid::Uuid;
 
 type MessageID = i32;
 
@@ -86,7 +87,9 @@ pub enum Message {
     },
 }
 
-pub struct ConversationManager {}
+pub struct ConversationManager {
+    conversations: RwLock<HashMap<String, Arc<Conversation>>>,
+}
 
 /// Manages conversations so that any new client can attach to an existing conversation.
 impl ConversationManager {
@@ -115,7 +118,9 @@ impl ConversationManager {
         } else {
             vec![(LLMRole::System, system_prompt.to_string())]
         };
-        Ok(Arc::new(Conversation {
+        let conversation_id = Uuid::new_v4().to_string();
+        let conversation = Arc::new(Conversation {
+            id: conversation_id.clone(),
             llm,
             model: model.to_string(),
             tools: tools_map,
@@ -127,13 +132,23 @@ impl ConversationManager {
             msg_id_counter: AtomicI32::new(0),
             total_input_tokens: 0,
             total_output_tokens: 0,
-        }))
+        });
+        self.conversations
+            .write()
+            .map_err(|e| anyhow::anyhow!("failed to acquire conversations write lock: {e}"))?
+            .insert(conversation_id, conversation.clone());
+        Ok(conversation)
     }
 
     /// Get a conversation by its id. It will try to load it from the manager's memory.
     /// If not found, load it from storage and put into the manager's memory.
-    pub fn get_conversation(&self, conversation_id: &str) -> Option<Arc<Conversation>> {
-        None // placeholder
+    pub fn get_conversation(&self, conversation_id: &str) -> Result<Option<Arc<Conversation>>> {
+        Ok(self
+            .conversations
+            .read()
+            .map_err(|e| anyhow::anyhow!("failed to acquire conversations read lock: {e}"))?
+            .get(conversation_id)
+            .cloned())
     }
 
     /// Remove the conversation from the manager's memory. The conversation should be
@@ -144,6 +159,8 @@ impl ConversationManager {
 }
 
 pub struct Conversation {
+    pub id: String,
+
     /// LLM API.
     llm: Box<dyn LLM>,
 
