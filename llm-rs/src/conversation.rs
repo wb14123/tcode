@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::fmt::Display;
 use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
@@ -51,7 +50,7 @@ pub enum Message {
         msg_id: MessageID,
         created_at: Instant,
         tool_name: String,
-        tool_args: Box<dyn Display + Send + Sync>,
+        tool_args: String,
     },
 
     ToolOutputChunk {
@@ -337,7 +336,7 @@ impl Conversation {
                 msg_id: tool_msg_id,
                 created_at: Instant::now(),
                 tool_name: tool_call.name.clone(),
-                tool_args: Box::new(tool_call.arguments.clone()),
+                tool_args: tool_call.arguments.clone(),
             });
 
             // Look up and execute the tool
