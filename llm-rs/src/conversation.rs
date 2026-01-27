@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, RwLock};
-use std::time::Instant;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::llm::{LLMEvent, LLMMessage, StopReason, LLM};
 use crate::tool::Tool;
 use anyhow::Result;
+use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
@@ -14,23 +15,33 @@ use uuid::Uuid;
 
 type MessageID = i32;
 
-pub enum MessageEndStatus {
-    SUCCEEDED,
-    FAILED,
-    CANCELLED,
-    TIMEOUT,
+/// Get current timestamp in milliseconds since Unix epoch
+fn now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum MessageEndStatus {
+    Succeeded,
+    Failed,
+    Cancelled,
+    Timeout,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     UserMessage {
         msg_id: MessageID,
-        created_at: Instant,
+        created_at: u64,
         content: Arc<String>,
     },
 
     AssistantMessageStart {
         msg_id: MessageID,
-        created_at: Instant,
+        created_at: u64,
     },
 
     AssistantMessageChunk {
@@ -48,7 +59,7 @@ pub enum Message {
 
     ToolMessageStart {
         msg_id: MessageID,
-        created_at: Instant,
+        created_at: u64,
         tool_name: String,
         tool_args: String,
     },
@@ -223,7 +234,7 @@ impl Conversation {
             let user_msg_id = self.next_msg_id();
             self.broadcast_msg(Message::UserMessage {
                 msg_id: user_msg_id,
-                created_at: Instant::now(),
+                created_at: now_millis(),
                 content: Arc::new(user_input.clone()),
             });
 
@@ -246,7 +257,7 @@ impl Conversation {
             // Broadcast assistant message start
             self.broadcast_msg(Message::AssistantMessageStart {
                 msg_id: self.next_msg_id(),
-                created_at: Instant::now(),
+                created_at: now_millis(),
             });
 
             while let Some(event) = response_stream.next().await {
@@ -275,11 +286,11 @@ impl Conversation {
 
                         let (end_status, error) = if stop_reason == StopReason::MaxTokens {
                             (
-                                MessageEndStatus::FAILED,
+                                MessageEndStatus::Failed,
                                 Some("Response truncated: maximum token limit reached".to_string()),
                             )
                         } else {
-                            (MessageEndStatus::SUCCEEDED, None)
+                            (MessageEndStatus::Succeeded, None)
                         };
 
                         self.broadcast_msg(Message::AssistantMessageEnd {
@@ -311,7 +322,7 @@ impl Conversation {
                     LLMEvent::Error(error) => {
                         self.broadcast_msg(Message::AssistantMessageEnd {
                             msg_id: self.next_msg_id(),
-                            end_status: MessageEndStatus::FAILED,
+                            end_status: MessageEndStatus::Failed,
                             error: Some(error),
                             input_tokens: 0,
                             output_tokens: 0,
@@ -334,7 +345,7 @@ impl Conversation {
             // Broadcast tool start
             self.broadcast_msg(Message::ToolMessageStart {
                 msg_id: tool_msg_id,
-                created_at: Instant::now(),
+                created_at: now_millis(),
                 tool_name: tool_call.name.clone(),
                 tool_args: tool_call.arguments.clone(),
             });
@@ -353,7 +364,7 @@ impl Conversation {
                     });
                     result_parts.push(chunk);
                 }
-                (MessageEndStatus::SUCCEEDED, result_parts.join(""))
+                (MessageEndStatus::Succeeded, result_parts.join(""))
             } else {
                 let error_msg = format!("Error: Tool '{}' not found", tool_call.name);
                 // Broadcast the error as a chunk too
@@ -362,7 +373,7 @@ impl Conversation {
                     tool_name: tool_call.name.clone(),
                     content: Arc::new(error_msg.clone()),
                 });
-                (MessageEndStatus::FAILED, error_msg)
+                (MessageEndStatus::Failed, error_msg)
             };
 
             // Push tool result with tool_call_id for proper API format
