@@ -181,12 +181,12 @@ function M.setup_edit(msg_file)
 
   -- Add helpful keybindings
   vim.keymap.set('n', '<C-s>', ':w<CR>', { buffer = true, silent = true, desc = 'Send message' })
+  -- Enter in insert mode to send (use 'o' to add new lines)
+  vim.keymap.set('i', '<CR>', '<Esc>:w<CR>', { buffer = true, silent = true, desc = 'Send message' })
 
   -- Display instructions
   vim.api.nvim_buf_set_lines(0, 0, -1, false, {
-    '-- Type your message below',
-    '-- Press :w or Ctrl+S to send',
-    '-- Lines starting with -- are ignored',
+    '-- Type message, Enter to send, o for new line',
     '',
   })
   vim.cmd('normal! G')
