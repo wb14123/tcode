@@ -2,6 +2,7 @@ mod display;
 mod edit;
 mod protocol;
 mod server;
+mod session;
 
 use std::path::PathBuf;
 use std::process::Command;
@@ -12,6 +13,7 @@ use clap::{Parser, Subcommand};
 use display::DisplayClient;
 use edit::EditClient;
 use server::Server;
+use session::Session;
 
 #[derive(Parser)]
 #[command(name = "tcode")]
@@ -32,9 +34,9 @@ struct Cli {
     #[arg(long, default_value = "https://api.openai.com/v1")]
     base_url: String,
 
-    /// Socket path
+    /// Session ID (defaults to tmux session name or "default")
     #[arg(long)]
-    socket: Option<PathBuf>,
+    session: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -47,19 +49,17 @@ enum Commands {
     Display,
 }
 
-fn get_socket_path(socket: Option<PathBuf>) -> PathBuf {
-    socket.unwrap_or_else(|| {
+fn get_session_id(session: Option<String>) -> String {
+    session.unwrap_or_else(|| {
         // Try to get tmux session name for per-session isolation
-        let session_id = Command::new("tmux")
+        Command::new("tmux")
             .args(["display-message", "-p", "#S"])
             .output()
             .ok()
             .and_then(|o| String::from_utf8(o.stdout).ok())
             .map(|s| s.trim().to_string())
             .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "default".to_string());
-
-        PathBuf::from(format!("/tmp/tcode-{}.sock", session_id))
+            .unwrap_or_else(|| "default".to_string())
     })
 }
 
@@ -94,33 +94,38 @@ fn is_in_tmux() -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let socket_path = get_socket_path(cli.socket.clone());
+    let session_id = get_session_id(cli.session.clone());
     let lua_path = get_lua_path();
 
     match cli.command {
         None => {
             // Unified startup: server + tmux panes
-            run_unified(cli, socket_path, lua_path).await
+            run_unified(cli, session_id, lua_path).await
         }
         Some(Commands::Serve) => {
             let api_key = cli.api_key.ok_or_else(|| {
                 anyhow::anyhow!("API key required. Set OPENAI_API_KEY env or use --api-key")
             })?;
-            let server = Server::new(socket_path, api_key, cli.model, cli.base_url);
-            server.run().await
+            let session = Session::new(session_id)?;
+            let server = Server::new(session.socket_path(), api_key, cli.model, cli.base_url);
+            let result = server.run().await;
+            session.cleanup();
+            result
         }
         Some(Commands::Edit) => {
-            let client = EditClient::new(socket_path, lua_path);
+            let session = Session::new(session_id)?;
+            let client = EditClient::new(session, lua_path);
             client.run().await
         }
         Some(Commands::Display) => {
-            let client = DisplayClient::new(socket_path, lua_path);
+            let session = Session::new(session_id)?;
+            let client = DisplayClient::new(session, lua_path);
             client.run().await
         }
     }
 }
 
-async fn run_unified(cli: Cli, socket_path: PathBuf, lua_path: PathBuf) -> Result<()> {
+async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<()> {
     // Check if running inside tmux
     if !is_in_tmux() {
         anyhow::bail!("tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux.");
@@ -130,14 +135,18 @@ async fn run_unified(cli: Cli, socket_path: PathBuf, lua_path: PathBuf) -> Resul
         anyhow::anyhow!("API key required. Set OPENAI_API_KEY env or use --api-key")
     })?;
 
+    // Create session directory
+    let session = Session::new(session_id.clone())?;
+    let socket_path = session.socket_path();
+
     // Get the path to the current executable
     let exe_path = std::env::current_exe()?;
     let exe_str = exe_path.to_string_lossy();
-    let socket_arg = format!("--socket={}", socket_path.display());
+    let session_arg = format!("--session={}", session_id);
 
     // Start server as a background task
     let server = Server::new(
-        socket_path.clone(),
+        socket_path,
         api_key,
         cli.model.clone(),
         cli.base_url.clone(),
@@ -154,8 +163,7 @@ async fn run_unified(cli: Cli, socket_path: PathBuf, lua_path: PathBuf) -> Resul
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
     // Create edit pane (bottom 30%) and capture the pane ID
-    // --socket must come before the subcommand
-    let edit_cmd = format!("{} {} edit", exe_str, socket_arg);
+    let edit_cmd = format!("{} {} edit", exe_str, session_arg);
 
     let output = Command::new("tmux")
         .args(["split-window", "-v", "-p", "30", "-P", "-F", "#{pane_id}", &edit_cmd])
@@ -165,12 +173,14 @@ async fn run_unified(cli: Cli, socket_path: PathBuf, lua_path: PathBuf) -> Resul
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         Err(e) => {
             server_handle.abort();
+            session.cleanup();
             return Err(e.into());
         }
     };
 
-    // Run display client in current pane
-    let client = DisplayClient::new(socket_path, lua_path);
+    // Run display client in current pane (create a new session that shares the directory)
+    let display_session = Session::new(session_id)?;
+    let client = DisplayClient::new(display_session, lua_path);
     let result = client.run().await;
 
     // Kill the edit pane to ensure it exits
@@ -180,6 +190,9 @@ async fn run_unified(cli: Cli, socket_path: PathBuf, lua_path: PathBuf) -> Resul
 
     // Abort server task (it should already be shutting down)
     server_handle.abort();
+
+    // Clean up session files
+    session.cleanup();
 
     result
 }

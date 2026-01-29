@@ -12,32 +12,34 @@ use tokio::process::{Child, Command};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::protocol::{ClientMessage, ServerMessage};
+use crate::session::Session;
 
 pub struct DisplayClient {
-    socket_path: PathBuf,
+    session: Session,
     lua_path: PathBuf,
 }
 
 impl DisplayClient {
-    pub fn new(socket_path: PathBuf, lua_path: PathBuf) -> Self {
-        Self {
-            socket_path,
-            lua_path,
-        }
+    pub fn new(session: Session, lua_path: PathBuf) -> Self {
+        Self { session, lua_path }
     }
 
     pub async fn run(&self) -> Result<()> {
-        let display_file = PathBuf::from("/tmp/tcode-display.txt");
-        let status_file = PathBuf::from("/tmp/tcode-status.txt");
+        let display_file = self.session.display_file();
+        let status_file = self.session.status_file();
 
         tokio::fs::write(&display_file, "").await?;
         tokio::fs::write(&status_file, "Connecting...").await?;
 
-        let stream = UnixStream::connect(&self.socket_path).await
-            .map_err(|e| anyhow::anyhow!(
-                "Failed to connect to socket {:?}: {}. Is the server running?",
-                self.socket_path, e
-            ))?;
+        let stream = UnixStream::connect(self.session.socket_path())
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to connect to socket {:?}: {}. Is the server running?",
+                    self.session.socket_path(),
+                    e
+                )
+            })?;
 
         let framed = Framed::new(stream, LengthDelimitedCodec::new());
         let (mut sink, mut stream) = framed.split();
@@ -60,7 +62,6 @@ impl DisplayClient {
             }
         }
 
-        let _ = tokio::fs::remove_file(&status_file).await;
         Ok(())
     }
 }

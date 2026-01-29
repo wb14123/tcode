@@ -1,9 +1,11 @@
 use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::mpsc;
 
 use anyhow::Result;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
+use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
@@ -11,35 +13,57 @@ use tokio::process::{Child, Command};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::protocol::ClientMessage;
+use crate::session::Session;
 
 pub struct EditClient {
-    socket_path: PathBuf,
+    session: Session,
     lua_path: PathBuf,
 }
 
 impl EditClient {
-    pub fn new(socket_path: PathBuf, lua_path: PathBuf) -> Self {
-        Self {
-            socket_path,
-            lua_path,
-        }
+    pub fn new(session: Session, lua_path: PathBuf) -> Self {
+        Self { session, lua_path }
     }
 
     pub async fn run(&self) -> Result<()> {
-        let msg_file = PathBuf::from("/tmp/tcode-edit-msg.txt");
+        let msg_file = self.session.msg_file();
         let _ = fs::remove_file(&msg_file).await;
 
-        let stream = UnixStream::connect(&self.socket_path).await
-            .map_err(|e| anyhow::anyhow!(
-                "Failed to connect to socket {:?}: {}. Is the server running?",
-                self.socket_path, e
-            ))?;
+        let stream = UnixStream::connect(self.session.socket_path())
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to connect to socket {:?}: {}. Is the server running?",
+                    self.session.socket_path(),
+                    e
+                )
+            })?;
 
         let framed = Framed::new(stream, LengthDelimitedCodec::new());
         let (mut sink, mut server_stream) = framed.split();
 
         let mut nvim = spawn_nvim(&self.lua_path, &msg_file)?;
-        let mut poll_interval = tokio::time::interval(tokio::time::Duration::from_millis(200));
+
+        // Set up file watcher using inotify
+        let (tx, rx) = mpsc::channel();
+        let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
+            if let Ok(event) = res {
+                let _ = tx.send(event);
+            }
+        })?;
+
+        // Watch the session directory for file creation/modification
+        watcher.watch(self.session.session_dir(), RecursiveMode::NonRecursive)?;
+
+        // Convert sync channel to async stream
+        let (async_tx, mut file_events) = tokio::sync::mpsc::unbounded_channel::<Event>();
+        std::thread::spawn(move || {
+            while let Ok(event) = rx.recv() {
+                if async_tx.send(event).is_err() {
+                    break;
+                }
+            }
+        });
 
         loop {
             tokio::select! {
@@ -58,18 +82,27 @@ impl EditClient {
                         Some(Ok(_)) => {}
                     }
                 }
-                _ = poll_interval.tick() => {
-                    if let Some(content) = read_message_file(&msg_file).await {
-                        let json = serde_json::to_vec(&ClientMessage::SendMessage { content })?;
-                        sink.send(Bytes::from(json)).await?;
+                Some(event) = file_events.recv() => {
+                    if is_msg_file_event(&event, &msg_file) {
+                        if let Some(content) = read_message_file(&msg_file).await {
+                            let json = serde_json::to_vec(&ClientMessage::SendMessage { content })?;
+                            sink.send(Bytes::from(json)).await?;
+                        }
                     }
                 }
             }
         }
 
-        let _ = fs::remove_file(&msg_file).await;
         Ok(())
     }
+}
+
+fn is_msg_file_event(event: &Event, msg_file: &PathBuf) -> bool {
+    // Check if this is a create or modify event for our message file
+    matches!(
+        event.kind,
+        EventKind::Create(_) | EventKind::Modify(_)
+    ) && event.paths.iter().any(|p| p == msg_file)
 }
 
 fn spawn_nvim(lua_path: &PathBuf, msg_file: &PathBuf) -> Result<Child> {
