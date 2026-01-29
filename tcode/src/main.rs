@@ -153,25 +153,33 @@ async fn run_unified(cli: Cli, socket_path: PathBuf, lua_path: PathBuf) -> Resul
     // Wait for server to start and create socket
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    // Create edit pane (bottom 30%)
+    // Create edit pane (bottom 30%) and capture the pane ID
     // --socket must come before the subcommand
     let edit_cmd = format!("{} {} edit", exe_str, socket_arg);
 
-    let result = Command::new("tmux")
-        .args(["split-window", "-v", "-p", "30", &edit_cmd])
+    let output = Command::new("tmux")
+        .args(["split-window", "-v", "-p", "30", "-P", "-F", "#{pane_id}", &edit_cmd])
         .output();
 
-    if let Err(e) = result {
-        server_handle.abort();
-        return Err(e.into());
-    }
+    let edit_pane_id = match output {
+        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+        Err(e) => {
+            server_handle.abort();
+            return Err(e.into());
+        }
+    };
 
     // Run display client in current pane
     let client = DisplayClient::new(socket_path, lua_path);
     let result = client.run().await;
 
-    // Wait for server to finish (it should exit when display sends shutdown)
-    let _ = server_handle.await;
+    // Kill the edit pane to ensure it exits
+    let _ = Command::new("tmux")
+        .args(["kill-pane", "-t", &edit_pane_id])
+        .output();
+
+    // Abort server task (it should already be shutting down)
+    server_handle.abort();
 
     result
 }
