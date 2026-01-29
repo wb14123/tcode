@@ -4,6 +4,7 @@ mod protocol;
 mod server;
 
 use std::path::PathBuf;
+use std::process::Command;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -38,7 +39,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Start the server (default behavior)
+    /// Start the server only (for standalone mode)
     Serve,
     /// Open edit window to compose messages
     Edit,
@@ -49,7 +50,7 @@ enum Commands {
 fn get_socket_path(socket: Option<PathBuf>) -> PathBuf {
     socket.unwrap_or_else(|| {
         // Try to get tmux session name for per-session isolation
-        let session_id = std::process::Command::new("tmux")
+        let session_id = Command::new("tmux")
             .args(["display-message", "-p", "#S"])
             .output()
             .ok()
@@ -86,14 +87,22 @@ fn get_lua_path() -> PathBuf {
     PathBuf::from("lua")
 }
 
+fn is_in_tmux() -> bool {
+    std::env::var("TMUX").is_ok()
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let socket_path = get_socket_path(cli.socket);
+    let socket_path = get_socket_path(cli.socket.clone());
     let lua_path = get_lua_path();
 
     match cli.command {
-        None | Some(Commands::Serve) => {
+        None => {
+            // Unified startup: server + tmux panes
+            run_unified(cli, socket_path, lua_path).await
+        }
+        Some(Commands::Serve) => {
             let api_key = cli.api_key.ok_or_else(|| {
                 anyhow::anyhow!("API key required. Set OPENAI_API_KEY env or use --api-key")
             })?;
@@ -109,4 +118,60 @@ async fn main() -> Result<()> {
             client.run().await
         }
     }
+}
+
+async fn run_unified(cli: Cli, socket_path: PathBuf, lua_path: PathBuf) -> Result<()> {
+    // Check if running inside tmux
+    if !is_in_tmux() {
+        anyhow::bail!("tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux.");
+    }
+
+    let api_key = cli.api_key.ok_or_else(|| {
+        anyhow::anyhow!("API key required. Set OPENAI_API_KEY env or use --api-key")
+    })?;
+
+    // Get the path to the current executable
+    let exe_path = std::env::current_exe()?;
+    let exe_str = exe_path.to_string_lossy();
+    let socket_arg = format!("--socket={}", socket_path.display());
+
+    // Start server as a background task
+    let server = Server::new(
+        socket_path.clone(),
+        api_key,
+        cli.model.clone(),
+        cli.base_url.clone(),
+    );
+
+    // Spawn server in background
+    let server_handle = tokio::spawn(async move {
+        if let Err(e) = server.run().await {
+            eprintln!("[Server] Error: {}", e);
+        }
+    });
+
+    // Wait for server to start and create socket
+    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+
+    // Create edit pane (bottom 30%)
+    // --socket must come before the subcommand
+    let edit_cmd = format!("{} {} edit", exe_str, socket_arg);
+
+    let result = Command::new("tmux")
+        .args(["split-window", "-v", "-p", "30", &edit_cmd])
+        .output();
+
+    if let Err(e) = result {
+        server_handle.abort();
+        return Err(e.into());
+    }
+
+    // Run display client in current pane
+    let client = DisplayClient::new(socket_path, lua_path);
+    let result = client.run().await;
+
+    // Wait for server to finish (it should exit when display sends shutdown)
+    let _ = server_handle.await;
+
+    result
 }

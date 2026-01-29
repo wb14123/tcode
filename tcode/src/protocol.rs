@@ -8,6 +8,8 @@ pub enum ClientMessage {
     SendMessage { content: String },
     /// Subscribe to conversation events (display client sends this)
     Subscribe,
+    /// Request server shutdown (broadcasts to all clients)
+    Shutdown,
 }
 
 /// Server -> Client messages
@@ -20,4 +22,6 @@ pub enum ServerMessage {
     Event(Message),
     /// Error
     Error { message: String },
+    /// Status update for display in statusline
+    Status { message: String },
 }

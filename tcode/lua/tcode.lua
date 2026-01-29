@@ -2,9 +2,14 @@ local M = {}
 
 -- Setup display window for viewing conversation
 -- @param display_file: Path to file where display content is written
-function M.setup_display(display_file)
+-- @param status_file: Path to file where status messages are written
+function M.setup_display(display_file, status_file)
   M.display_file = display_file or '/tmp/tcode-display.txt'
+  M.status_file = status_file or '/tmp/tcode-status.txt'
   M.last_size = 0
+
+  -- Initialize status variable
+  vim.g.tcode_status = 'Connecting...'
 
   -- Create a new empty buffer with a name
   vim.cmd('enew')
@@ -24,6 +29,9 @@ function M.setup_display(display_file)
   vim.wo.number = false
   vim.wo.relativenumber = false
   vim.wo.signcolumn = 'no'
+
+  -- Set statusline to show status
+  vim.wo.statusline = '%#TCodeStatusLine# TCode: %{g:tcode_status} %='
 
   local buf = vim.api.nvim_get_current_buf()
 
@@ -80,11 +88,31 @@ function M.setup_display(display_file)
     end
   end
 
+  -- Function to check for status updates
+  local function check_status()
+    local file = io.open(M.status_file, 'r')
+    if file then
+      local status = file:read('*all')
+      file:close()
+      if status and status ~= '' then
+        vim.schedule(function()
+          vim.g.tcode_status = status
+          -- Force statusline redraw
+          vim.cmd('redrawstatus')
+        end)
+      end
+    end
+  end
+
   -- Create timer to poll for updates
   M.display_timer = vim.uv.new_timer()
   M.display_timer:start(100, 100, vim.schedule_wrap(check_updates))
 
-  -- Clean up timer when buffer is deleted
+  -- Create timer to poll for status updates
+  M.status_timer = vim.uv.new_timer()
+  M.status_timer:start(200, 200, vim.schedule_wrap(check_status))
+
+  -- Clean up timers when buffer is deleted
   vim.api.nvim_create_autocmd('BufDelete', {
     buffer = buf,
     callback = function()
@@ -92,6 +120,11 @@ function M.setup_display(display_file)
         M.display_timer:stop()
         M.display_timer:close()
         M.display_timer = nil
+      end
+      if M.status_timer then
+        M.status_timer:stop()
+        M.status_timer:close()
+        M.status_timer = nil
       end
     end,
   })
@@ -105,6 +138,7 @@ function M.setup_display(display_file)
     highlight TCodeUser guifg=#61afef ctermfg=75
     highlight TCodeAssistant guifg=#98c379 ctermfg=114
     highlight TCodeTool guifg=#e5c07b ctermfg=180
+    highlight TCodeStatusLine guibg=#282c34 guifg=#98c379 ctermfg=114 ctermbg=236
   ]])
 
   -- Add keybinding to quit
@@ -131,6 +165,9 @@ function M.setup_edit(msg_file)
   -- Set window options
   vim.wo.wrap = true
   vim.wo.linebreak = true
+
+  -- Set statusline
+  vim.wo.statusline = '%#TCodeEditStatus# TCode Edit - Enter to send, o for new line %='
 
   -- Create autocmd to send content on save
   vim.api.nvim_create_autocmd('BufWriteCmd', {
@@ -183,6 +220,11 @@ function M.setup_edit(msg_file)
   vim.keymap.set('n', '<C-s>', ':w<CR>', { buffer = true, silent = true, desc = 'Send message' })
   -- Enter in insert mode to send (use 'o' to add new lines)
   vim.keymap.set('i', '<CR>', '<Esc>:w<CR>i', { buffer = true, silent = true, desc = 'Send message' })
+
+  -- Set up highlight for statusline
+  vim.cmd([[
+    highlight TCodeEditStatus guibg=#282c34 guifg=#61afef ctermfg=75 ctermbg=236
+  ]])
 
   -- Display instructions
   vim.api.nvim_buf_set_lines(0, 0, -1, false, {

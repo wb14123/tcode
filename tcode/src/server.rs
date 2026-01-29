@@ -3,11 +3,11 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt as FuturesStreamExt};
+use futures::{SinkExt, StreamExt};
 use llm_rs::conversation::ConversationManager;
 use llm_rs::llm::OpenAI;
 use tokio::net::{UnixListener, UnixStream};
-use tokio_stream::StreamExt as TokioStreamExt;
+use tokio::sync::broadcast;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::protocol::{ClientMessage, ServerMessage};
@@ -36,9 +36,6 @@ impl Server {
         }
 
         let listener = UnixListener::bind(&self.socket_path)?;
-        println!("Server listening on {:?}", self.socket_path);
-        println!("Using model: {}", self.model);
-        println!("Base URL: {}", self.base_url);
 
         // Create LLM and conversation manager
         let llm = Box::new(OpenAI::new(&self.api_key, &self.base_url));
@@ -47,71 +44,108 @@ impl Server {
             llm,
             "You are a helpful assistant.",
             &self.model,
-            vec![], // No tools for PoC
+            vec![],
         )?;
 
-        println!("Conversation created. Waiting for connections...\n");
+        // Shutdown signal
+        let (shutdown_tx, _) = broadcast::channel::<()>(1);
+        let shutdown_tx = Arc::new(shutdown_tx);
+        let socket_path = self.socket_path.clone();
 
+        // Accept loop
+        let mut shutdown_rx = shutdown_tx.subscribe();
         loop {
-            let (stream, _) = listener.accept().await?;
-            println!("[Server] Client connected");
-
-            let conv_client = Arc::clone(&conversation_client);
-            tokio::spawn(async move {
-                if let Err(e) = handle_client(stream, conv_client).await {
-                    eprintln!("[Server] Client error: {}", e);
+            tokio::select! {
+                biased;
+                _ = shutdown_rx.recv() => break,
+                result = listener.accept() => {
+                    let (stream, _) = result?;
+                    let conv_client = Arc::clone(&conversation_client);
+                    let shutdown_tx = Arc::clone(&shutdown_tx);
+                    tokio::spawn(handle_client(stream, conv_client, shutdown_tx));
                 }
-                println!("[Server] Client disconnected");
-            });
+            }
         }
+
+        let _ = std::fs::remove_file(&socket_path);
+        Ok(())
     }
 }
 
 async fn handle_client(
     stream: UnixStream,
     conv_client: Arc<llm_rs::conversation::ConversationClient>,
+    shutdown_tx: Arc<broadcast::Sender<()>>,
+) {
+    let shutdown_rx = shutdown_tx.subscribe();
+    let _ = handle_client_inner(stream, conv_client, shutdown_tx, shutdown_rx).await;
+}
+
+async fn handle_client_inner(
+    stream: UnixStream,
+    conv_client: Arc<llm_rs::conversation::ConversationClient>,
+    shutdown_tx: Arc<broadcast::Sender<()>>,
+    mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<()> {
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
     let (mut sink, mut stream) = framed.split();
 
-    while let Some(result) = FuturesStreamExt::next(&mut stream).await {
-        let bytes = result?;
-        let msg: ClientMessage = serde_json::from_slice(&bytes)?;
+    send_msg(&mut sink, &ServerMessage::Status { message: "Connected".into() }).await?;
 
-        match msg {
-            ClientMessage::Subscribe => {
-                println!("[Server] Client subscribed to events");
-                // Subscribe to llm-rs events and forward to client
-                let mut events = conv_client.subscribe();
-                println!("[Server] Subscription created, waiting for events...");
+    loop {
+        tokio::select! {
+            biased;
+            _ = shutdown_rx.recv() => break,
+            result = stream.next() => {
+                let Some(Ok(bytes)) = result else { break };
+                let Ok(msg) = serde_json::from_slice::<ClientMessage>(&bytes) else { continue };
 
-                while let Some(event_result) = TokioStreamExt::next(&mut events).await {
-                    match event_result {
-                        Ok(event) => {
-                            println!("[Server] Forwarding event: {:?}", std::mem::discriminant(&*event));
-                            let resp = ServerMessage::Event((*event).clone());
-                            let json = serde_json::to_vec(&resp)?;
-                            sink.send(Bytes::from(json)).await?;
-                        }
-                        Err(e) => {
-                            eprintln!("[Server] Event stream error: {:?}", e);
+                match msg {
+                    ClientMessage::Subscribe => {
+                        send_msg(&mut sink, &ServerMessage::Status { message: "Ready".into() }).await?;
+
+                        let mut events = conv_client.subscribe();
+
+                        loop {
+                            tokio::select! {
+                                biased;
+                                _ = shutdown_rx.recv() => return Ok(()),
+                                event_result = events.next() => {
+                                    let Some(Ok(event)) = event_result else { break };
+
+                                    if matches!(&*event, llm_rs::conversation::Message::AssistantMessageStart { .. }) {
+                                        send_msg(&mut sink, &ServerMessage::Status { message: "Streaming...".into() }).await?;
+                                    }
+                                    if matches!(&*event, llm_rs::conversation::Message::AssistantMessageEnd { .. }) {
+                                        send_msg(&mut sink, &ServerMessage::Status { message: "Ready".into() }).await?;
+                                    }
+
+                                    send_msg(&mut sink, &ServerMessage::Event((*event).clone())).await?;
+                                }
+                            }
                         }
                     }
+                    ClientMessage::SendMessage { content } => {
+                        let _ = conv_client.send_chat(&content).await;
+                        send_msg(&mut sink, &ServerMessage::Ack).await?;
+                    }
+                    ClientMessage::Shutdown => {
+                        let _ = shutdown_tx.send(());
+                        return Ok(());
+                    }
                 }
-                println!("[Server] Event stream ended");
-            }
-            ClientMessage::SendMessage { content } => {
-                println!("[Server] Received message: {}", &content[..content.len().min(50)]);
-                println!("[Server] Sending to LLM...");
-                match conv_client.send_chat(&content).await {
-                    Ok(_) => println!("[Server] Message queued successfully"),
-                    Err(e) => eprintln!("[Server] Failed to send message: {}", e),
-                }
-                let json = serde_json::to_vec(&ServerMessage::Ack)?;
-                sink.send(Bytes::from(json)).await?;
             }
         }
     }
 
+    Ok(())
+}
+
+async fn send_msg<S>(sink: &mut S, msg: &ServerMessage) -> Result<()>
+where
+    S: futures::Sink<Bytes, Error = std::io::Error> + Unpin,
+{
+    let json = serde_json::to_vec(msg)?;
+    sink.send(Bytes::from(json)).await?;
     Ok(())
 }

@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::Stdio;
 
 use anyhow::Result;
 use bytes::Bytes;
@@ -8,6 +8,7 @@ use llm_rs::conversation::Message;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::UnixStream;
+use tokio::process::{Child, Command};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::protocol::{ClientMessage, ServerMessage};
@@ -26,12 +27,12 @@ impl DisplayClient {
     }
 
     pub async fn run(&self) -> Result<()> {
-        // File for communication with neovim
         let display_file = PathBuf::from("/tmp/tcode-display.txt");
-        // Clear the file
-        tokio::fs::write(&display_file, "").await?;
+        let status_file = PathBuf::from("/tmp/tcode-status.txt");
 
-        // Connect to server
+        tokio::fs::write(&display_file, "").await?;
+        tokio::fs::write(&status_file, "Connecting...").await?;
+
         let stream = UnixStream::connect(&self.socket_path).await
             .map_err(|e| anyhow::anyhow!(
                 "Failed to connect to socket {:?}: {}. Is the server running?",
@@ -41,76 +42,95 @@ impl DisplayClient {
         let framed = Framed::new(stream, LengthDelimitedCodec::new());
         let (mut sink, mut stream) = framed.split();
 
-        // Send subscribe request
+        // Subscribe to events
         let json = serde_json::to_vec(&ClientMessage::Subscribe)?;
         sink.send(Bytes::from(json)).await?;
 
-        // Spawn neovim with display plugin
-        let lua_cmd = format!(
-            "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}')",
-            self.lua_path.display(),
-            display_file.display()
-        );
+        // Spawn neovim
+        let mut nvim = spawn_nvim(&self.lua_path, &display_file, &status_file)?;
 
-        let mut nvim = Command::new("nvim")
-            .args(["-c", &lua_cmd])
-            .spawn()?;
-
-        // Stream events and append to file
-        while let Some(result) = stream.next().await {
-            // Check if neovim exited
-            if let Ok(Some(_)) = nvim.try_wait() {
-                break;
+        tokio::select! {
+            biased;
+            _ = nvim.wait() => {
+                let json = serde_json::to_vec(&ClientMessage::Shutdown)?;
+                let _ = sink.send(Bytes::from(json)).await;
             }
-
-            let bytes = result?;
-            let msg: ServerMessage = serde_json::from_slice(&bytes)?;
-
-            if let ServerMessage::Event(event) = msg {
-                let formatted = format_event(&event);
-                if !formatted.is_empty() {
-                    // Append to display file
-                    let mut file = OpenOptions::new()
-                        .create(true)
-                        .append(true)
-                        .open(&display_file)
-                        .await?;
-                    file.write_all(formatted.as_bytes()).await?;
-                    file.flush().await?;
-                }
+            _ = process_server_messages(&mut stream, &display_file, &status_file) => {
+                let _ = nvim.kill().await;
             }
         }
 
-        // Wait for neovim to exit
-        let _ = nvim.wait();
+        let _ = tokio::fs::remove_file(&status_file).await;
         Ok(())
     }
 }
 
-/// Format a conversation event for display
+fn spawn_nvim(lua_path: &PathBuf, display_file: &PathBuf, status_file: &PathBuf) -> Result<Child> {
+    let lua_cmd = format!(
+        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}')",
+        lua_path.display(),
+        display_file.display(),
+        status_file.display()
+    );
+
+    let child = Command::new("nvim")
+        .args(["-c", &lua_cmd])
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .spawn()?;
+
+    Ok(child)
+}
+
+async fn process_server_messages<S>(stream: &mut S, display_file: &PathBuf, status_file: &PathBuf)
+where
+    S: StreamExt<Item = Result<bytes::BytesMut, std::io::Error>> + Unpin,
+{
+    while let Some(Ok(bytes)) = stream.next().await {
+        let Ok(msg) = serde_json::from_slice::<ServerMessage>(&bytes) else {
+            continue;
+        };
+
+        match msg {
+            ServerMessage::Event(event) => {
+                let _ = append_event(display_file, &event).await;
+            }
+            ServerMessage::Status { message } => {
+                let _ = tokio::fs::write(status_file, &message).await;
+            }
+            ServerMessage::Ack | ServerMessage::Error { .. } => {}
+        }
+    }
+}
+
+async fn append_event(display_file: &PathBuf, event: &Message) -> Result<()> {
+    let formatted = format_event(event);
+    if formatted.is_empty() {
+        return Ok(());
+    }
+
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(display_file)
+        .await?;
+    file.write_all(formatted.as_bytes()).await?;
+    file.flush().await?;
+    Ok(())
+}
+
 fn format_event(event: &Message) -> String {
     match event {
-        Message::UserMessage { content, .. } => {
-            format!("\n>>> USER:\n{}\n", content)
-        }
-        Message::AssistantMessageStart { .. } => {
-            "\n>>> ASSISTANT:\n".to_string()
-        }
-        Message::AssistantMessageChunk { content, .. } => {
-            content.to_string()
-        }
-        Message::AssistantMessageEnd { .. } => {
-            "\n".to_string()
-        }
+        Message::UserMessage { content, .. } => format!("\n>>> USER:\n{}\n", content),
+        Message::AssistantMessageStart { .. } => "\n>>> ASSISTANT:\n".to_string(),
+        Message::AssistantMessageChunk { content, .. } => content.to_string(),
+        Message::AssistantMessageEnd { .. } => "\n".to_string(),
         Message::ToolMessageStart { tool_name, tool_args, .. } => {
             format!("\n>>> TOOL: {} ({})\n", tool_name, tool_args)
         }
-        Message::ToolOutputChunk { content, .. } => {
-            content.to_string()
-        }
-        Message::ToolMessageEnd { .. } => {
-            "\n".to_string()
-        }
+        Message::ToolOutputChunk { content, .. } => content.to_string(),
+        Message::ToolMessageEnd { .. } => "\n".to_string(),
         _ => String::new(),
     }
 }
