@@ -39,12 +39,12 @@ impl Session {
         self.session_dir.join("edit-msg.txt")
     }
 
-    /// Path for the display content file (written by display client, read by nvim)
+    /// Path for the display content file (written by server, read by nvim)
     pub fn display_file(&self) -> PathBuf {
         self.session_dir.join("display.txt")
     }
 
-    /// Path for the status file (written by display client, read by nvim)
+    /// Path for the status file (written by server, read by nvim)
     pub fn status_file(&self) -> PathBuf {
         self.session_dir.join("status.txt")
     }

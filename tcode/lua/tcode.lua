@@ -108,6 +108,10 @@ function M.setup_display(display_file, status_file)
       file:close()
       if status and status ~= '' then
         vim.schedule(function()
+          if status == 'Shutdown' then
+            vim.cmd('qa!')
+            return
+          end
           vim.g.tcode_status = status
           -- Force statusline redraw
           vim.cmd('redrawstatus')

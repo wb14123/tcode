@@ -128,7 +128,14 @@ async fn main() -> Result<()> {
                 anyhow::anyhow!("API key required. Set OPENAI_API_KEY env or use --api-key")
             })?;
             let session = Session::new(session_id)?;
-            let server = Server::new(session.socket_path(), api_key, cli.model, cli.base_url);
+            let server = Server::new(
+                session.socket_path(),
+                session.display_file(),
+                session.status_file(),
+                api_key,
+                cli.model,
+                cli.base_url,
+            );
             let result = server.run().await;
             session.cleanup();
             result
@@ -168,6 +175,8 @@ async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<
     // Start server as a background task
     let server = Server::new(
         socket_path,
+        session.display_file(),
+        session.status_file(),
         api_key,
         cli.model.clone(),
         cli.base_url.clone(),
