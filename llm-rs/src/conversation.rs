@@ -184,7 +184,7 @@ impl ConversationManager {
 
     /// Remove the conversation from the manager's memory. The conversation should be
     /// cleared if there is no reference to the Arc anymore.
-    pub fn end_conversation(&self, conversation_id: &str) -> Result<()> {
+    pub fn end_conversation(&self, _conversation_id: &str) -> Result<()> {
         Ok(()) // placeholder
     }
 }
