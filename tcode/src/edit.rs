@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::mpsc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
@@ -53,7 +53,8 @@ impl EditClient {
         })?;
 
         // Watch the session directory for file creation/modification
-        watcher.watch(self.session.session_dir(), RecursiveMode::NonRecursive)?;
+        watcher.watch(self.session.session_dir(), RecursiveMode::NonRecursive)
+            .with_context(|| format!("Failed to watch session directory {:?}", self.session.session_dir()))?;
 
         // Convert sync channel to async stream
         let (async_tx, mut file_events) = tokio::sync::mpsc::unbounded_channel::<Event>();
@@ -117,7 +118,8 @@ fn spawn_nvim(lua_path: &PathBuf, msg_file: &PathBuf) -> Result<Child> {
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .spawn()?;
+        .spawn()
+        .context("Failed to spawn 'nvim' for edit - is neovim installed and in PATH?")?;
 
     Ok(child)
 }

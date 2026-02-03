@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::process::Stdio;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use llm_rs::conversation::Message;
@@ -28,8 +28,10 @@ impl DisplayClient {
         let display_file = self.session.display_file();
         let status_file = self.session.status_file();
 
-        tokio::fs::write(&display_file, "").await?;
-        tokio::fs::write(&status_file, "Connecting...").await?;
+        tokio::fs::write(&display_file, "").await
+            .with_context(|| format!("Failed to initialize display file {:?}", display_file))?;
+        tokio::fs::write(&status_file, "Connecting...").await
+            .with_context(|| format!("Failed to initialize status file {:?}", status_file))?;
 
         let stream = UnixStream::connect(self.session.socket_path())
             .await
@@ -79,7 +81,8 @@ fn spawn_nvim(lua_path: &PathBuf, display_file: &PathBuf, status_file: &PathBuf)
         .stdin(Stdio::inherit())
         .stdout(Stdio::inherit())
         .stderr(Stdio::inherit())
-        .spawn()?;
+        .spawn()
+        .context("Failed to spawn 'nvim' for display - is neovim installed and in PATH?")?;
 
     Ok(child)
 }

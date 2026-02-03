@@ -2,7 +2,7 @@ use std::fs::{self, Permissions};
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 
 /// Manages session-specific directories and files under /tmp/tcode/sessions/<session_id>/
 /// Files are created with restricted permissions (0600) in a directory with 0700 permissions.
@@ -18,11 +18,13 @@ impl Session {
         let session_dir = base_dir.join(&session_id);
 
         // Create base directory if needed
-        fs::create_dir_all(&base_dir)?;
+        fs::create_dir_all(&base_dir)
+            .with_context(|| format!("Failed to create session base directory {:?}", base_dir))?;
         fs::set_permissions(&base_dir, Permissions::from_mode(0o700))?;
 
         // Create session directory with restricted permissions
-        fs::create_dir_all(&session_dir)?;
+        fs::create_dir_all(&session_dir)
+            .with_context(|| format!("Failed to create session directory {:?}", session_dir))?;
         fs::set_permissions(&session_dir, Permissions::from_mode(0o700))?;
 
         Ok(Self { session_dir })

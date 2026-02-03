@@ -7,7 +7,7 @@ mod session;
 use std::path::PathBuf;
 use std::process::Command;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 
 use display::DisplayClient;
@@ -140,7 +140,7 @@ async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<
     let socket_path = session.socket_path();
 
     // Get the path to the current executable
-    let exe_path = std::env::current_exe()?;
+    let exe_path = std::env::current_exe().context("Failed to determine current executable path")?;
     let exe_str = exe_path.to_string_lossy();
     let session_arg = format!("--session={}", session_id);
 
@@ -167,14 +167,15 @@ async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<
 
     let output = Command::new("tmux")
         .args(["split-window", "-v", "-p", "30", "-P", "-F", "#{pane_id}", &edit_cmd])
-        .output();
+        .output()
+        .context("Failed to run 'tmux' - is tmux installed and in PATH?");
 
     let edit_pane_id = match output {
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         Err(e) => {
             server_handle.abort();
             session.cleanup();
-            return Err(e.into());
+            return Err(e);
         }
     };
 

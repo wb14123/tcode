@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use llm_rs::conversation::ConversationManager;
@@ -32,10 +32,12 @@ impl Server {
     pub async fn run(&self) -> Result<()> {
         // Clean up existing socket file
         if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path)?;
+            std::fs::remove_file(&self.socket_path)
+                .with_context(|| format!("Failed to remove existing socket {:?}", self.socket_path))?;
         }
 
-        let listener = UnixListener::bind(&self.socket_path)?;
+        let listener = UnixListener::bind(&self.socket_path)
+            .with_context(|| format!("Failed to bind Unix socket at {:?}", self.socket_path))?;
 
         // Create LLM and conversation manager
         let llm = Box::new(OpenAI::new(&self.api_key, &self.base_url));
