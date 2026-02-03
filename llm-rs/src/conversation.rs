@@ -59,6 +59,7 @@ pub enum Message {
 
     ToolMessageStart {
         msg_id: MessageID,
+        tool_call_id: String,
         created_at: u64,
         tool_name: String,
         tool_args: String,
@@ -66,12 +67,14 @@ pub enum Message {
 
     ToolOutputChunk {
         msg_id: MessageID,
+        tool_call_id: String,
         tool_name: String,
         content: Arc<String>,
     },
 
     ToolMessageEnd {
         msg_id: MessageID,
+        tool_call_id: String,
         end_status: MessageEndStatus,
         input_tokens: i32,
         output_tokens: i32,
@@ -345,6 +348,7 @@ impl Conversation {
             // Broadcast tool start
             self.broadcast_msg(Message::ToolMessageStart {
                 msg_id: tool_msg_id,
+                tool_call_id: tool_call.id.clone(),
                 created_at: now_millis(),
                 tool_name: tool_call.name.clone(),
                 tool_args: tool_call.arguments.clone(),
@@ -359,6 +363,7 @@ impl Conversation {
                     // Broadcast each chunk immediately with its own msg_id
                     self.broadcast_msg(Message::ToolOutputChunk {
                         msg_id: self.next_msg_id(),
+                        tool_call_id: tool_call.id.clone(),
                         tool_name: tool_call.name.clone(),
                         content: Arc::new(chunk.clone()),
                     });
@@ -370,23 +375,25 @@ impl Conversation {
                 // Broadcast the error as a chunk too
                 self.broadcast_msg(Message::ToolOutputChunk {
                     msg_id: self.next_msg_id(),
+                    tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
                     content: Arc::new(error_msg.clone()),
                 });
                 (MessageEndStatus::Failed, error_msg)
             };
 
+            self.broadcast_msg(Message::ToolMessageEnd {
+                msg_id: self.next_msg_id(),
+                tool_call_id: tool_call.id.clone(),
+                end_status,
+                input_tokens: 0,
+                output_tokens: 0,
+            });
+
             // Push tool result with tool_call_id for proper API format
             self.llm_msgs.push(LLMMessage::ToolResult {
                 tool_call_id: tool_call.id,
                 content: tool_result,
-            });
-
-            self.broadcast_msg(Message::ToolMessageEnd {
-                msg_id: self.next_msg_id(),
-                end_status,
-                input_tokens: 0,
-                output_tokens: 0,
             });
         }
     }
