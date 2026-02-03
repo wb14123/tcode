@@ -70,48 +70,29 @@ function M.setup_display(display_file, status_file)
   local function check_updates()
     local file = io.open(M.display_file, 'r')
     if file then
-      local content = file:read('*all')
+      file:seek('set', M.last_size)
+      local new_content = file:read('*all')
       file:close()
 
-      local current_size = #content
-      if current_size > M.last_size then
-        -- Get new content
-        local new_content = content:sub(M.last_size + 1)
-        M.last_size = current_size
-
-        -- Split into lines and append to buffer
-        local lines = vim.split(new_content, '\n', { plain = true })
+      if new_content and #new_content > 0 then
+        M.last_size = M.last_size + #new_content
 
         vim.schedule(function()
           if vim.api.nvim_buf_is_valid(buf) then
-            -- Temporarily make buffer modifiable
             vim.bo[buf].modifiable = true
 
-            -- Get current last line
             local line_count = vim.api.nvim_buf_line_count(buf)
             local last_line = vim.api.nvim_buf_get_lines(buf, line_count - 1, line_count, false)[1] or ''
+            local lines = vim.split(new_content, '\n', { plain = true })
+            vim.api.nvim_buf_set_text(buf, line_count - 1, #last_line, line_count - 1, #last_line, lines)
 
-            -- If there are lines to add
-            if #lines > 0 then
-              -- Append first chunk to last line (for streaming)
-              if lines[1] ~= '' then
-                vim.api.nvim_buf_set_lines(buf, line_count - 1, line_count, false, { last_line .. lines[1] })
-              end
-
-              -- Add remaining lines
-              if #lines > 1 then
-                vim.api.nvim_buf_set_lines(buf, line_count, line_count, false, vim.list_slice(lines, 2))
-              end
-
-              -- Scroll to bottom
-              local win = vim.fn.bufwinid(buf)
-              if win ~= -1 then
-                local new_count = vim.api.nvim_buf_line_count(buf)
-                vim.api.nvim_win_set_cursor(win, { new_count, 0 })
-              end
+            -- Scroll to bottom
+            local win = vim.fn.bufwinid(buf)
+            if win ~= -1 then
+              local new_count = vim.api.nvim_buf_line_count(buf)
+              vim.api.nvim_win_set_cursor(win, { new_count, 0 })
             end
 
-            -- Make buffer read-only again
             vim.bo[buf].modifiable = false
           end
         end)
