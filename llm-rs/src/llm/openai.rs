@@ -295,6 +295,7 @@ impl LLM for OpenAI {
             let mut input_tokens = 0i32;
             let mut output_tokens = 0i32;
             let mut emitted_start = false;
+            let mut stop_reason: Option<StopReason> = None;
 
             let mut byte_stream = response.bytes_stream();
             let mut buffer = String::new();
@@ -326,17 +327,8 @@ impl LLM for OpenAI {
                     let data = &line[6..];
 
                     if data == "[DONE]" {
-                        // Emit any completed tool calls
-                        for (_, (id, name, args)) in tool_calls.drain() {
-                            yield LLMEvent::ToolCall(ToolCall {
-                                id,
-                                name,
-                                arguments: args,
-                            });
-                        }
-
                         yield LLMEvent::MessageEnd {
-                            stop_reason: StopReason::EndTurn,
+                            stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
                             input_tokens,
                             output_tokens,
                         };
@@ -392,9 +384,10 @@ impl LLM for OpenAI {
                             }
                         }
 
-                        // Handle finish reason
+                        // Handle finish reason — don't emit MessageEnd yet;
+                        // the usage chunk arrives after this, before [DONE].
                         if let Some(reason) = choice.finish_reason {
-                            let stop_reason = match reason.as_str() {
+                            stop_reason = Some(match reason.as_str() {
                                 "tool_calls" => {
                                     // Emit completed tool calls
                                     for (_, (id, name, args)) in tool_calls.drain() {
@@ -408,20 +401,13 @@ impl LLM for OpenAI {
                                 }
                                 "length" => StopReason::MaxTokens,
                                 _ => StopReason::EndTurn,
-                            };
-
-                            yield LLMEvent::MessageEnd {
-                                stop_reason,
-                                input_tokens,
-                                output_tokens,
-                            };
-                            return;
+                            });
                         }
                     }
                 }
             }
 
-            // Stream ended without [DONE] or finish_reason
+            // Stream ended without [DONE]
             if !tool_calls.is_empty() {
                 for (_, (id, name, args)) in tool_calls.drain() {
                     yield LLMEvent::ToolCall(ToolCall {
@@ -433,7 +419,7 @@ impl LLM for OpenAI {
             }
 
             yield LLMEvent::MessageEnd {
-                stop_reason: StopReason::EndTurn,
+                stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
                 input_tokens,
                 output_tokens,
             };
