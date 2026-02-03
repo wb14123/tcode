@@ -1,5 +1,36 @@
 local M = {}
 
+-- Watch a file for changes using inotify (fs_event).
+-- The file must already exist. Errors on failure.
+-- @param filepath: Path to the file to watch
+-- @param on_change: Callback invoked when the file changes
+-- @return table with a stop() method to clean up
+local function watch_file(filepath, on_change)
+  local handle = vim.uv.new_fs_event()
+  local ret, err_name, err_msg = handle:start(filepath, {}, vim.schedule_wrap(function(err, filename, events)
+    if err then
+      error('fs_event error on ' .. filepath .. ': ' .. err)
+      return
+    end
+    on_change()
+  end))
+
+  if not ret then
+    handle:close()
+    error('failed to watch ' .. filepath .. ': ' .. (err_name or 'unknown'))
+  end
+
+  -- Check for any existing content
+  on_change()
+
+  return {
+    stop = function()
+      handle:stop()
+      handle:close()
+    end,
+  }
+end
+
 -- Setup display window for viewing conversation
 -- @param display_file: Path to file where display content is written
 -- @param status_file: Path to file where status messages are written
@@ -104,27 +135,21 @@ function M.setup_display(display_file, status_file)
     end
   end
 
-  -- Create timer to poll for updates
-  M.display_timer = vim.uv.new_timer()
-  M.display_timer:start(100, 100, vim.schedule_wrap(check_updates))
+  -- Watch files for changes using inotify
+  M.display_watcher = watch_file(M.display_file, check_updates)
+  M.status_watcher = watch_file(M.status_file, check_status)
 
-  -- Create timer to poll for status updates
-  M.status_timer = vim.uv.new_timer()
-  M.status_timer:start(200, 200, vim.schedule_wrap(check_status))
-
-  -- Clean up timers when buffer is deleted
+  -- Clean up watchers when buffer is deleted
   vim.api.nvim_create_autocmd('BufDelete', {
     buffer = buf,
     callback = function()
-      if M.display_timer then
-        M.display_timer:stop()
-        M.display_timer:close()
-        M.display_timer = nil
+      if M.display_watcher then
+        M.display_watcher.stop()
+        M.display_watcher = nil
       end
-      if M.status_timer then
-        M.status_timer:stop()
-        M.status_timer:close()
-        M.status_timer = nil
+      if M.status_watcher then
+        M.status_watcher.stop()
+        M.status_watcher = nil
       end
     end,
   })
