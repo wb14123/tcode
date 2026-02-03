@@ -77,7 +77,7 @@ impl EditClient {
                 msg = server_stream.next() => {
                     match msg {
                         None | Some(Err(_)) => {
-                            let _ = nvim.kill().await;
+                            crate::terminate_child(&mut nvim).await?;
                             break;
                         }
                         Some(Ok(_)) => {}

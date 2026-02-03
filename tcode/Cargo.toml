@@ -14,3 +14,4 @@ anyhow = "1"
 futures = "0.3"
 bytes = "1"
 notify = "8.2.0"
+nix = { version = "0.29", features = ["term", "signal"] }

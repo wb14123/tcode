@@ -50,6 +50,9 @@ impl DisplayClient {
         let json = serde_json::to_vec(&ClientMessage::Subscribe)?;
         sink.send(Bytes::from(json)).await?;
 
+        // Save terminal settings before neovim takes over
+        let saved_termios = nix::sys::termios::tcgetattr(std::io::stdin()).ok();
+
         // Spawn neovim
         let mut nvim = spawn_nvim(&self.lua_path, &display_file, &status_file)?;
 
@@ -60,8 +63,14 @@ impl DisplayClient {
                 let _ = sink.send(Bytes::from(json)).await;
             }
             _ = process_server_messages(&mut stream, &display_file, &status_file) => {
-                let _ = nvim.kill().await;
+                crate::terminate_child(&mut nvim).await?;
             }
+        }
+
+        // Restore terminal settings as a safety net
+        if let Some(ref t) = saved_termios {
+            nix::sys::termios::tcsetattr(std::io::stdin(), nix::sys::termios::SetArg::TCSANOW, t)
+                .context("Failed to restore terminal settings")?;
         }
 
         Ok(())

@@ -6,9 +6,30 @@ mod session;
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
+use tokio::process::Child;
+
+/// Gracefully stop a neovim child: SIGTERM with timeout, then SIGKILL.
+pub(crate) async fn terminate_child(child: &mut Child) -> Result<()> {
+    let graceful = child.id().is_some_and(|pid| {
+        nix::sys::signal::kill(
+            nix::unistd::Pid::from_raw(pid as i32),
+            nix::sys::signal::Signal::SIGTERM,
+        )
+        .is_ok()
+    });
+    if !graceful
+        || tokio::time::timeout(Duration::from_secs(2), child.wait())
+            .await
+            .is_err()
+    {
+        child.kill().await.context("Failed to kill neovim")?;
+    }
+    Ok(())
+}
 
 use display::DisplayClient;
 use edit::EditClient;
