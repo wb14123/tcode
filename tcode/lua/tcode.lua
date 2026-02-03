@@ -31,13 +31,185 @@ local function watch_file(filepath, on_change)
   }
 end
 
+-- Format a millisecond epoch timestamp as HH:MM:SS
+local function format_time(ts_millis)
+  if not ts_millis then return nil end
+  return os.date('%H:%M:%S', math.floor(ts_millis / 1000))
+end
+
+-- Append complete lines to the buffer
+local function append_lines(buf, lines)
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  vim.api.nvim_buf_set_lines(buf, line_count, line_count, false, lines)
+end
+
+-- Append text continuing from current buffer position (for streaming chunks)
+local function append_text(buf, text)
+  local line_count = vim.api.nvim_buf_line_count(buf)
+  local last_line = vim.api.nvim_buf_get_lines(buf, line_count - 1, line_count, false)[1] or ''
+  local lines = vim.split(text, '\n', { plain = true })
+  vim.api.nvim_buf_set_text(buf, line_count - 1, #last_line, line_count - 1, #last_line, lines)
+end
+
+-- Render a single JSONL event into the buffer with extmarks
+-- Serde externally-tagged enums: {"VariantName": {fields...}}
+local function render_event(buf, ns, event)
+  local variant, data = next(event)
+  if not variant then return end
+
+  if variant == 'UserMessage' then
+    append_lines(buf, { '' })
+    local label_line = vim.api.nvim_buf_line_count(buf) - 1
+    local virt = { { '>>> USER', 'TCodeUser' } }
+    local ts = format_time(data.created_at)
+    if ts then
+      table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
+    end
+    vim.api.nvim_buf_set_extmark(buf, ns, label_line, 0, {
+      virt_text = virt,
+      virt_text_pos = 'overlay',
+    })
+    local content_lines = vim.split(data.content, '\n', { plain = true })
+    append_lines(buf, content_lines)
+
+  elseif variant == 'AssistantMessageStart' then
+    append_lines(buf, { '' })
+    local label_line = vim.api.nvim_buf_line_count(buf) - 1
+    local virt = { { '>>> ASSISTANT', 'TCodeAssistant' } }
+    local ts = format_time(data.created_at)
+    if ts then
+      table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
+    end
+    vim.api.nvim_buf_set_extmark(buf, ns, label_line, 0, {
+      virt_text = virt,
+      virt_text_pos = 'overlay',
+    })
+    -- Add empty line for content to append to (so chunks don't land on the label line)
+    append_lines(buf, { '' })
+
+  elseif variant == 'AssistantMessageChunk' then
+    append_text(buf, data.content)
+
+  elseif variant == 'AssistantMessageEnd' then
+    append_lines(buf, { '' })
+    local info_line = vim.api.nvim_buf_line_count(buf) - 1
+    local parts = {}
+    if data.input_tokens and data.output_tokens then
+      table.insert(parts, {
+        string.format('[%d in / %d out tokens]', data.input_tokens, data.output_tokens),
+        'TCodeTokens',
+      })
+    end
+    if data.end_status and data.end_status ~= 'Succeeded' then
+      table.insert(parts, { ' [' .. data.end_status .. ']', 'TCodeError' })
+    end
+    if type(data.error) == 'string' then
+      table.insert(parts, { ' Error: ' .. data.error, 'TCodeError' })
+    end
+    if #parts > 0 then
+      vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
+        virt_text = parts,
+        virt_text_pos = 'overlay',
+      })
+    end
+
+  elseif variant == 'ToolMessageStart' then
+    append_lines(buf, { '' })
+    local label_line = vim.api.nvim_buf_line_count(buf) - 1
+    local virt = { { '>>> TOOL: ' .. (data.tool_name or ''), 'TCodeTool' } }
+    local ts = format_time(data.created_at)
+    if ts then
+      table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
+    end
+    vim.api.nvim_buf_set_extmark(buf, ns, label_line, 0, {
+      virt_text = virt,
+      virt_text_pos = 'overlay',
+    })
+    if data.tool_args and data.tool_args ~= '' and data.tool_args ~= '{}' then
+      append_lines(buf, { '' })
+      local args_line = vim.api.nvim_buf_line_count(buf) - 1
+      vim.api.nvim_buf_set_extmark(buf, ns, args_line, 0, {
+        virt_text = { { data.tool_args, 'TCodeTokens' } },
+        virt_text_pos = 'overlay',
+      })
+    end
+    -- Add empty line for tool output to append to
+    append_lines(buf, { '' })
+
+  elseif variant == 'ToolOutputChunk' then
+    append_text(buf, data.content)
+
+  elseif variant == 'ToolMessageEnd' then
+    append_lines(buf, { '' })
+    local info_line = vim.api.nvim_buf_line_count(buf) - 1
+    local parts = {}
+    if data.input_tokens and data.output_tokens and (data.input_tokens > 0 or data.output_tokens > 0) then
+      table.insert(parts, {
+        string.format('[%d in / %d out tokens]', data.input_tokens, data.output_tokens),
+        'TCodeTokens',
+      })
+    end
+    if data.end_status and data.end_status ~= 'Succeeded' then
+      table.insert(parts, { ' [TOOL ' .. data.end_status .. ']', 'TCodeError' })
+    end
+    if #parts > 0 then
+      vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
+        virt_text = parts,
+        virt_text_pos = 'overlay',
+      })
+    end
+
+  elseif variant == 'SubAgentStart' then
+    append_lines(buf, { '' })
+    local label_line = vim.api.nvim_buf_line_count(buf) - 1
+    vim.api.nvim_buf_set_extmark(buf, ns, label_line, 0, {
+      virt_text = { { '>>> SUB-AGENT: ' .. (data.description or ''), 'TCodeTool' } },
+      virt_text_pos = 'overlay',
+    })
+
+  elseif variant == 'SubAgentEnd' then
+    append_lines(buf, { '' })
+    local info_line = vim.api.nvim_buf_line_count(buf) - 1
+    local parts = {}
+    if data.input_tokens and data.output_tokens then
+      table.insert(parts, {
+        string.format('[sub-agent: %d in / %d out tokens]', data.input_tokens, data.output_tokens),
+        'TCodeTokens',
+      })
+    end
+    if data.end_status and data.end_status ~= 'Succeeded' then
+      table.insert(parts, { ' [' .. data.end_status .. ']', 'TCodeError' })
+    end
+    if #parts > 0 then
+      vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
+        virt_text = parts,
+        virt_text_pos = 'overlay',
+      })
+    end
+
+  elseif variant == 'AssistantRequestEnd' then
+    append_lines(buf, { '', '' })
+    local info_line = vim.api.nvim_buf_line_count(buf) - 1
+    if data.total_input_tokens and data.total_output_tokens then
+      vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
+        virt_text = { {
+          string.format('[Total: %d in / %d out tokens]', data.total_input_tokens, data.total_output_tokens),
+          'TCodeTokens',
+        } },
+        virt_text_pos = 'overlay',
+      })
+    end
+  end
+end
+
 -- Setup display window for viewing conversation
--- @param display_file: Path to file where display content is written
+-- @param display_file: Path to file where display content is written (JSONL)
 -- @param status_file: Path to file where status messages are written
 function M.setup_display(display_file, status_file)
-  M.display_file = display_file or '/tmp/tcode-display.txt'
+  M.display_file = display_file or '/tmp/tcode-display.jsonl'
   M.status_file = status_file or '/tmp/tcode-status.txt'
   M.last_size = 0
+  M.line_buffer = ''
 
   -- Initialize status variable
   vim.g.tcode_status = 'Connecting...'
@@ -64,40 +236,62 @@ function M.setup_display(display_file, status_file)
   -- Set statusline to show status
   vim.wo.statusline = '%#TCodeStatusLine# TCode: %{g:tcode_status} %='
 
-  local buf = vim.api.nvim_get_current_buf()
+  -- Set up highlight groups
+  vim.api.nvim_set_hl(0, 'TCodeUser', { fg = '#61afef', bold = true, ctermfg = 75 })
+  vim.api.nvim_set_hl(0, 'TCodeAssistant', { fg = '#98c379', bold = true, ctermfg = 114 })
+  vim.api.nvim_set_hl(0, 'TCodeTool', { fg = '#e5c07b', bold = true, ctermfg = 180 })
+  vim.api.nvim_set_hl(0, 'TCodeTokens', { fg = '#5c6370', italic = true, ctermfg = 242 })
+  vim.api.nvim_set_hl(0, 'TCodeError', { fg = '#e06c75', bold = true, ctermfg = 168 })
+  vim.api.nvim_set_hl(0, 'TCodeStatusLine', { bg = '#282c34', fg = '#98c379', ctermfg = 114, ctermbg = 236 })
 
-  -- Function to check for new content
+  local buf = vim.api.nvim_get_current_buf()
+  local ns = vim.api.nvim_create_namespace('tcode')
+
+  -- Function to check for new JSONL content
   local function check_updates()
     local file = io.open(M.display_file, 'r')
-    if file then
-      file:seek('set', M.last_size)
-      local new_content = file:read('*all')
-      file:close()
+    if not file then return end
+    file:seek('set', M.last_size)
+    local new_content = file:read('*all')
+    file:close()
 
-      if new_content and #new_content > 0 then
-        M.last_size = M.last_size + #new_content
+    if not new_content or #new_content == 0 then return end
+    M.last_size = M.last_size + #new_content
 
-        vim.schedule(function()
-          if vim.api.nvim_buf_is_valid(buf) then
-            vim.bo[buf].modifiable = true
+    -- Prepend any leftover partial line from last read
+    local data = M.line_buffer .. new_content
 
-            local line_count = vim.api.nvim_buf_line_count(buf)
-            local last_line = vim.api.nvim_buf_get_lines(buf, line_count - 1, line_count, false)[1] or ''
-            local lines = vim.split(new_content, '\n', { plain = true })
-            vim.api.nvim_buf_set_text(buf, line_count - 1, #last_line, line_count - 1, #last_line, lines)
-
-            -- Scroll to bottom
-            local win = vim.fn.bufwinid(buf)
-            if win ~= -1 then
-              local new_count = vim.api.nvim_buf_line_count(buf)
-              vim.api.nvim_win_set_cursor(win, { new_count, 0 })
-            end
-
-            vim.bo[buf].modifiable = false
-          end
-        end)
-      end
+    -- Split into lines; last element may be incomplete if data doesn't end with \n
+    local lines = vim.split(data, '\n', { plain = true })
+    if data:sub(-1) ~= '\n' then
+      M.line_buffer = lines[#lines]
+      table.remove(lines, #lines)
+    else
+      M.line_buffer = ''
     end
+
+    vim.schedule(function()
+      if not vim.api.nvim_buf_is_valid(buf) then return end
+      vim.bo[buf].modifiable = true
+
+      for _, line in ipairs(lines) do
+        if line ~= '' then
+          local ok, event = pcall(vim.json.decode, line)
+          if ok and event then
+            render_event(buf, ns, event)
+          end
+        end
+      end
+
+      -- Scroll to bottom
+      local win = vim.fn.bufwinid(buf)
+      if win ~= -1 then
+        local new_count = vim.api.nvim_buf_line_count(buf)
+        vim.api.nvim_win_set_cursor(win, { new_count, 0 })
+      end
+
+      vim.bo[buf].modifiable = false
+    end)
   end
 
   -- Function to check for status updates
@@ -138,18 +332,6 @@ function M.setup_display(display_file, status_file)
       end
     end,
   })
-
-  -- Set up basic syntax highlighting for messages
-  vim.cmd([[
-    syntax match TCodeUser /^>>> USER:/
-    syntax match TCodeAssistant /^>>> ASSISTANT:/
-    syntax match TCodeTool /^>>> TOOL:.*/
-
-    highlight TCodeUser guifg=#61afef ctermfg=75
-    highlight TCodeAssistant guifg=#98c379 ctermfg=114
-    highlight TCodeTool guifg=#e5c07b ctermfg=180
-    highlight TCodeStatusLine guibg=#282c34 guifg=#98c379 ctermfg=114 ctermbg=236
-  ]])
 
   -- Add keybinding to quit
   vim.keymap.set('n', 'q', ':qa!<CR>', { buffer = true, silent = true, desc = 'Quit' })

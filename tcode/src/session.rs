@@ -41,7 +41,7 @@ impl Session {
 
     /// Path for the display content file (written by server, read by nvim)
     pub fn display_file(&self) -> PathBuf {
-        self.session_dir.join("display.txt")
+        self.session_dir.join("display.jsonl")
     }
 
     /// Path for the status file (written by server, read by nvim)

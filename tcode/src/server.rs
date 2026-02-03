@@ -182,32 +182,15 @@ where
 }
 
 async fn append_event(display_file: &PathBuf, event: &Message) -> Result<()> {
-    let formatted = format_event(event);
-    if formatted.is_empty() {
-        return Ok(());
-    }
+    let mut line = serde_json::to_string(event)?;
+    line.push('\n');
 
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
         .open(display_file)
         .await?;
-    file.write_all(formatted.as_bytes()).await?;
+    file.write_all(line.as_bytes()).await?;
     file.flush().await?;
     Ok(())
-}
-
-fn format_event(event: &Message) -> String {
-    match event {
-        Message::UserMessage { content, .. } => format!("\n>>> USER:\n{}\n", content),
-        Message::AssistantMessageStart { .. } => "\n>>> ASSISTANT:\n".to_string(),
-        Message::AssistantMessageChunk { content, .. } => content.to_string(),
-        Message::AssistantMessageEnd { .. } => "\n".to_string(),
-        Message::ToolMessageStart { tool_name, tool_args, .. } => {
-            format!("\n>>> TOOL: {} ({})\n", tool_name, tool_args)
-        }
-        Message::ToolOutputChunk { content, .. } => content.to_string(),
-        Message::ToolMessageEnd { .. } => "\n".to_string(),
-        _ => String::new(),
-    }
 }
