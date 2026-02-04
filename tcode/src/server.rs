@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
@@ -14,10 +15,23 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::protocol::{ClientMessage, ServerMessage};
 
+/// Per-tool-call tracking state used by the event writer.
+struct ToolCallState {
+    file_path: PathBuf,
+    status_file_path: PathBuf,
+    tool_name: String,
+    accumulated_preview: String,
+    tmux_window_id: Option<String>,
+}
+
+const PREVIEW_MAX_CHARS: usize = 200;
+
 pub struct Server {
     socket_path: PathBuf,
     display_file: PathBuf,
     status_file: PathBuf,
+    session_id: String,
+    session_dir: PathBuf,
     api_key: String,
     model: String,
     base_url: String,
@@ -28,6 +42,8 @@ impl Server {
         socket_path: PathBuf,
         display_file: PathBuf,
         status_file: PathBuf,
+        session_id: String,
+        session_dir: PathBuf,
         api_key: String,
         model: String,
         base_url: String,
@@ -36,6 +52,8 @@ impl Server {
             socket_path,
             display_file,
             status_file,
+            session_id,
+            session_dir,
             api_key,
             model,
             base_url,
@@ -65,15 +83,33 @@ impl Server {
             llm,
             "You are a helpful assistant.",
             &self.model,
-            vec![],
+            vec![Arc::new(tools::web_fetch_tool())],
         )?;
+
+        // Resolve exe path for spawning tool-call subcommand
+        let exe_path = std::env::current_exe()
+            .context("Failed to determine current executable path")?;
 
         // Spawn background task to write conversation events to display files
         let mut events = conversation_client.subscribe();
         let display_file = self.display_file.clone();
         let status_file = self.status_file.clone();
+        let session_id = self.session_id.clone();
+        let session_dir = self.session_dir.clone();
         let mut event_writer = tokio::spawn(async move {
-            while let Some(Ok(event)) = events.next().await {
+            let mut tool_calls: HashMap<String, ToolCallState> = HashMap::new();
+
+            tracing::info!("event_writer started");
+
+            while let Some(item) = events.next().await {
+                let event = match item {
+                    Ok(event) => event,
+                    Err(tokio_stream::wrappers::errors::BroadcastStreamRecvError::Lagged(n)) => {
+                        tracing::warn!(skipped = n, "broadcast lagged");
+                        continue;
+                    }
+                };
+                // Status file updates for assistant messages
                 if matches!(&*event, Message::AssistantMessageStart { .. }) {
                     tokio::fs::write(&status_file, "Streaming...").await
                         .context("Failed to write status file")?;
@@ -82,9 +118,139 @@ impl Server {
                     tokio::fs::write(&status_file, "Ready").await
                         .context("Failed to write status file")?;
                 }
-                append_event(&display_file, &event).await
-                    .context("Failed to append display event")?;
+
+                match &*event {
+                    Message::ToolMessageStart { tool_call_id, tool_name, tool_args, .. } => {
+                        tracing::info!(
+                            tool_call_id,
+                            tool_name,
+                            tool_args,
+                            "ToolMessageStart received"
+                        );
+
+                        // Create per-tool-call files
+                        let tc_file = session_dir.join(format!("tool-call-{}.jsonl", tool_call_id));
+                        let tc_status = session_dir.join(format!("tool-call-{}-status.txt", tool_call_id));
+                        tokio::fs::write(&tc_file, "").await
+                            .context("Failed to create tool call file")?;
+                        tokio::fs::write(&tc_status, "Running").await
+                            .context("Failed to create tool call status file")?;
+
+                        // Write event to both main display and per-tool-call file
+                        append_event(&display_file, &event).await
+                            .context("Failed to append display event")?;
+                        append_event(&tc_file, &event).await
+                            .context("Failed to append tool call event")?;
+
+                        // Spawn tmux tab for tool call detail view
+                        tracing::debug!(tool_call_id, "spawning tmux window");
+                        let window_id = spawn_tool_call_tmux(
+                            &exe_path,
+                            &session_id,
+                            tool_call_id,
+                            tool_name,
+                        ).await;
+                        tracing::debug!(tool_call_id, ?window_id, "tmux window spawned");
+
+                        tool_calls.insert(tool_call_id.clone(), ToolCallState {
+                            file_path: tc_file,
+                            status_file_path: tc_status,
+                            tool_name: tool_name.clone(),
+                            accumulated_preview: String::new(),
+                            tmux_window_id: window_id,
+                        });
+                    }
+
+                    Message::ToolOutputChunk { tool_call_id, content, .. } => {
+                        let tracked = tool_calls.contains_key(tool_call_id.as_str());
+                        tracing::debug!(
+                            tool_call_id,
+                            tracked,
+                            content_len = content.len(),
+                            "ToolOutputChunk received"
+                        );
+                        if let Some(state) = tool_calls.get_mut(tool_call_id) {
+                            // Write to per-tool-call file only (NOT main display)
+                            append_event(&state.file_path, &event).await
+                                .context("Failed to append tool call chunk")?;
+
+                            // Accumulate first N chars for preview
+                            if state.accumulated_preview.len() < PREVIEW_MAX_CHARS {
+                                let remaining = PREVIEW_MAX_CHARS - state.accumulated_preview.len();
+                                let chunk: String = content.chars().take(remaining).collect();
+                                state.accumulated_preview.push_str(&chunk);
+                            }
+                        } else {
+                            tracing::warn!(
+                                tool_call_id,
+                                "ToolOutputChunk for untracked tool call — dropped"
+                            );
+                        }
+                    }
+
+                    Message::ToolMessageEnd { tool_call_id, end_status, .. } => {
+                        tracing::info!(
+                            tool_call_id,
+                            ?end_status,
+                            "ToolMessageEnd received"
+                        );
+                        if let Some(state) = tool_calls.remove(tool_call_id) {
+                            // Write truncated preview to main display as a single ToolOutputChunk
+                            if !state.accumulated_preview.is_empty() {
+                                let mut preview = state.accumulated_preview;
+                                if preview.len() >= PREVIEW_MAX_CHARS {
+                                    preview.push_str("...");
+                                }
+                                let preview_event = Message::ToolOutputChunk {
+                                    msg_id: 0,
+                                    tool_call_id: tool_call_id.clone(),
+                                    tool_name: state.tool_name,
+                                    content: Arc::new(preview),
+                                };
+                                append_event(&display_file, &preview_event).await
+                                    .context("Failed to append tool call preview")?;
+                            }
+
+                            // Write ToolMessageEnd to both files
+                            append_event(&display_file, &event).await
+                                .context("Failed to append display event")?;
+                            append_event(&state.file_path, &event).await
+                                .context("Failed to append tool call end")?;
+
+                            // Signal the tool call display to close
+                            tokio::fs::write(&state.status_file_path, "Done").await
+                                .context("Failed to write tool call status")?;
+                            tracing::debug!(tool_call_id, "wrote Done to status file");
+
+                            // Schedule tmux window close after delay
+                            if let Some(window_id) = state.tmux_window_id {
+                                tokio::spawn(async move {
+                                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
+                                    let _ = tokio::process::Command::new("tmux")
+                                        .args(["kill-window", "-t", &window_id])
+                                        .output()
+                                        .await;
+                                });
+                            }
+                        } else {
+                            tracing::warn!(
+                                tool_call_id,
+                                "ToolMessageEnd for untracked tool call — fallback to main display"
+                            );
+                            // Fallback: write to main display if we missed the start
+                            append_event(&display_file, &event).await
+                                .context("Failed to append display event")?;
+                        }
+                    }
+
+                    _ => {
+                        // All other events: write to main display only
+                        append_event(&display_file, &event).await
+                            .context("Failed to append display event")?;
+                    }
+                }
             }
+            tracing::info!("event_writer finished");
             Ok::<(), anyhow::Error>(())
         });
 
@@ -119,6 +285,40 @@ impl Server {
         std::fs::remove_file(&socket_path)
             .with_context(|| format!("Failed to remove socket {:?}", socket_path))?;
         Ok(())
+    }
+}
+
+/// Spawn a new tmux window running `tcode tool-call <id>`.
+/// Returns the tmux window ID if successful.
+async fn spawn_tool_call_tmux(
+    exe_path: &PathBuf,
+    session_id: &str,
+    tool_call_id: &str,
+    tool_name: &str,
+) -> Option<String> {
+    let cmd = format!(
+        "{} --session={} tool-call {}",
+        exe_path.to_string_lossy(),
+        session_id,
+        tool_call_id
+    );
+    let window_name = format!("tool:{}", tool_name);
+
+    let output = tokio::process::Command::new("tmux")
+        .args([
+            "new-window",
+            "-n", &window_name,
+            "-P", "-F", "#{window_id}",
+            &cmd,
+        ])
+        .output()
+        .await
+        .ok()?;
+
+    if output.status.success() {
+        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    } else {
+        None
     }
 }
 
@@ -181,16 +381,16 @@ where
     Ok(())
 }
 
-async fn append_event(display_file: &PathBuf, event: &Message) -> Result<()> {
+async fn append_event(file: &PathBuf, event: &Message) -> Result<()> {
     let mut line = serde_json::to_string(event)?;
     line.push('\n');
 
-    let mut file = OpenOptions::new()
+    let mut f = OpenOptions::new()
         .create(true)
         .append(true)
-        .open(display_file)
+        .open(file)
         .await?;
-    file.write_all(line.as_bytes()).await?;
-    file.flush().await?;
+    f.write_all(line.as_bytes()).await?;
+    f.flush().await?;
     Ok(())
 }

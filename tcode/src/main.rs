@@ -3,7 +3,9 @@ mod edit;
 mod protocol;
 mod server;
 mod session;
+mod tool_call_display;
 
+use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
@@ -11,6 +13,7 @@ use std::time::Duration;
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use tokio::process::Child;
+use tracing_subscriber::EnvFilter;
 
 /// Gracefully stop a neovim child: SIGTERM with timeout, then SIGKILL.
 pub(crate) async fn terminate_child(child: &mut Child) -> Result<()> {
@@ -35,6 +38,7 @@ use display::DisplayClient;
 use edit::EditClient;
 use server::Server;
 use session::Session;
+use tool_call_display::ToolCallDisplayClient;
 
 #[derive(Parser)]
 #[command(name = "tcode")]
@@ -68,6 +72,11 @@ enum Commands {
     Edit,
     /// Open display window to view conversation
     Display,
+    /// Show details of a specific tool call
+    ToolCall {
+        /// The tool call ID to display
+        tool_call_id: String,
+    },
 }
 
 fn get_session_id(session: Option<String>) -> String {
@@ -118,6 +127,24 @@ async fn main() -> Result<()> {
     let session_id = get_session_id(cli.session.clone());
     let lua_path = get_lua_path();
 
+    // Initialize tracing to a log file in the session directory.
+    let log_dir = PathBuf::from("/tmp/tcode/sessions").join(&session_id);
+    fs::create_dir_all(&log_dir).ok();
+    let log_file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(log_dir.join("debug.log"))
+        .ok();
+    if let Some(log_file) = log_file {
+        tracing_subscriber::fmt()
+            .with_writer(std::sync::Mutex::new(log_file))
+            .with_env_filter(
+                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")),
+            )
+            .with_ansi(false)
+            .init();
+    }
+
     match cli.command {
         None => {
             // Unified startup: server + tmux panes
@@ -127,11 +154,13 @@ async fn main() -> Result<()> {
             let api_key = cli.api_key.ok_or_else(|| {
                 anyhow::anyhow!("API key required. Set OPENAI_API_KEY env or use --api-key")
             })?;
-            let session = Session::new(session_id)?;
+            let session = Session::new(session_id.clone())?;
             let server = Server::new(
                 session.socket_path(),
                 session.display_file(),
                 session.status_file(),
+                session_id,
+                session.session_dir().clone(),
                 api_key,
                 cli.model,
                 cli.base_url,
@@ -148,6 +177,11 @@ async fn main() -> Result<()> {
         Some(Commands::Display) => {
             let session = Session::new(session_id)?;
             let client = DisplayClient::new(session, lua_path);
+            client.run().await
+        }
+        Some(Commands::ToolCall { tool_call_id }) => {
+            let session = Session::new(session_id)?;
+            let client = ToolCallDisplayClient::new(session, lua_path, tool_call_id);
             client.run().await
         }
     }
@@ -177,6 +211,8 @@ async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<
         socket_path,
         session.display_file(),
         session.status_file(),
+        session_id.clone(),
+        session.session_dir().clone(),
         api_key,
         cli.model.clone(),
         cli.base_url.clone(),

@@ -54,12 +54,32 @@ impl Session {
         self.session_dir.join("server.sock")
     }
 
+    /// Path for a per-tool-call JSONL file (written by server, read by tool-call display)
+    pub fn tool_call_file(&self, tool_call_id: &str) -> PathBuf {
+        self.session_dir.join(format!("tool-call-{}.jsonl", tool_call_id))
+    }
+
+    /// Path for a per-tool-call status file (written by server, read by tool-call display)
+    pub fn tool_call_status_file(&self, tool_call_id: &str) -> PathBuf {
+        self.session_dir.join(format!("tool-call-{}-status.txt", tool_call_id))
+    }
+
     /// Clean up session files and directory
     pub fn cleanup(&self) {
         let _ = fs::remove_file(self.msg_file());
         let _ = fs::remove_file(self.display_file());
         let _ = fs::remove_file(self.status_file());
         let _ = fs::remove_file(self.socket_path());
+        // Remove per-tool-call files
+        if let Ok(entries) = fs::read_dir(&self.session_dir) {
+            for entry in entries.flatten() {
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if name.starts_with("tool-call-") {
+                    let _ = fs::remove_file(entry.path());
+                }
+            }
+        }
         let _ = fs::remove_dir(&self.session_dir);
     }
 }

@@ -337,6 +337,153 @@ function M.setup_display(display_file, status_file)
   vim.keymap.set('n', 'q', ':qa!<CR>', { buffer = true, silent = true, desc = 'Quit' })
 end
 
+-- Setup tool call display window for viewing a single tool call's details
+-- @param tool_call_file: Path to the per-tool-call JSONL file
+-- @param status_file: Path to the per-tool-call status file
+function M.setup_tool_call_display(tool_call_file, status_file)
+  M.tc_file = tool_call_file
+  M.tc_status_file = status_file
+  M.tc_last_size = 0
+  M.tc_line_buffer = ''
+
+  -- Initialize status variable
+  vim.g.tcode_tc_status = 'Waiting...'
+
+  -- Create a new empty buffer with a name
+  vim.cmd('enew')
+  vim.api.nvim_buf_set_name(0, '[TCode Tool Call]')
+
+  -- Configure buffer options
+  vim.bo.buftype = 'nofile'
+  vim.bo.bufhidden = 'hide'
+  vim.bo.swapfile = false
+  vim.bo.modifiable = false
+  vim.bo.readonly = true
+  vim.bo.filetype = 'tcode'
+
+  -- Set window options
+  vim.wo.wrap = true
+  vim.wo.linebreak = true
+  vim.wo.number = false
+  vim.wo.relativenumber = false
+  vim.wo.signcolumn = 'no'
+
+  -- Set statusline to show tool call status
+  vim.wo.statusline = '%#TCodeStatusLine# Tool Call: %{g:tcode_tc_status} %='
+
+  -- Set up highlight groups (shared with main display)
+  vim.api.nvim_set_hl(0, 'TCodeUser', { fg = '#61afef', bold = true, ctermfg = 75 })
+  vim.api.nvim_set_hl(0, 'TCodeAssistant', { fg = '#98c379', bold = true, ctermfg = 114 })
+  vim.api.nvim_set_hl(0, 'TCodeTool', { fg = '#e5c07b', bold = true, ctermfg = 180 })
+  vim.api.nvim_set_hl(0, 'TCodeTokens', { fg = '#5c6370', italic = true, ctermfg = 242 })
+  vim.api.nvim_set_hl(0, 'TCodeError', { fg = '#e06c75', bold = true, ctermfg = 168 })
+  vim.api.nvim_set_hl(0, 'TCodeStatusLine', { bg = '#282c34', fg = '#e5c07b', ctermfg = 180, ctermbg = 236 })
+
+  local buf = vim.api.nvim_get_current_buf()
+  local ns = vim.api.nvim_create_namespace('tcode_tc')
+
+  -- Function to check for new JSONL content
+  local function check_updates()
+    local file = io.open(M.tc_file, 'r')
+    if not file then return end
+    file:seek('set', M.tc_last_size)
+    local new_content = file:read('*all')
+    file:close()
+
+    if not new_content or #new_content == 0 then return end
+    M.tc_last_size = M.tc_last_size + #new_content
+
+    -- Prepend any leftover partial line from last read
+    local data = M.tc_line_buffer .. new_content
+
+    -- Split into lines; last element may be incomplete if data doesn't end with \n
+    local lines = vim.split(data, '\n', { plain = true })
+    if data:sub(-1) ~= '\n' then
+      M.tc_line_buffer = lines[#lines]
+      table.remove(lines, #lines)
+    else
+      M.tc_line_buffer = ''
+    end
+
+    vim.schedule(function()
+      if not vim.api.nvim_buf_is_valid(buf) then return end
+      vim.bo[buf].modifiable = true
+
+      for _, line in ipairs(lines) do
+        if line ~= '' then
+          local ok, event = pcall(vim.json.decode, line)
+          if ok and event then
+            -- Update status from tool events
+            local variant, data_inner = next(event)
+            if variant == 'ToolMessageStart' then
+              vim.g.tcode_tc_status = 'Running: ' .. (data_inner.tool_name or '')
+              vim.cmd('redrawstatus')
+            elseif variant == 'ToolMessageEnd' then
+              local status = data_inner.end_status or 'Unknown'
+              vim.g.tcode_tc_status = 'Done: ' .. status
+              vim.cmd('redrawstatus')
+            end
+            render_event(buf, ns, event)
+          end
+        end
+      end
+
+      -- Scroll to bottom
+      local win = vim.fn.bufwinid(buf)
+      if win ~= -1 then
+        local new_count = vim.api.nvim_buf_line_count(buf)
+        vim.api.nvim_win_set_cursor(win, { new_count, 0 })
+      end
+
+      vim.bo[buf].modifiable = false
+    end)
+  end
+
+  -- Function to check for status updates
+  local function check_status()
+    local file = io.open(M.tc_status_file, 'r')
+    if file then
+      local status = file:read('*all')
+      file:close()
+      if status and status ~= '' then
+        vim.schedule(function()
+          if status == 'Done' then
+            -- Auto-close after a short delay (server will kill the tmux window,
+            -- but exit gracefully if still alive)
+            vim.defer_fn(function()
+              vim.cmd('qa!')
+            end, 3000)
+            return
+          end
+          vim.cmd('redrawstatus')
+        end)
+      end
+    end
+  end
+
+  -- Watch files for changes using inotify
+  M.tc_watcher = watch_file(M.tc_file, check_updates)
+  M.tc_status_watcher = watch_file(M.tc_status_file, check_status)
+
+  -- Clean up watchers when buffer is deleted
+  vim.api.nvim_create_autocmd('BufDelete', {
+    buffer = buf,
+    callback = function()
+      if M.tc_watcher then
+        M.tc_watcher.stop()
+        M.tc_watcher = nil
+      end
+      if M.tc_status_watcher then
+        M.tc_status_watcher.stop()
+        M.tc_status_watcher = nil
+      end
+    end,
+  })
+
+  -- Add keybinding to quit
+  vim.keymap.set('n', 'q', ':qa!<CR>', { buffer = true, silent = true, desc = 'Quit' })
+end
+
 -- Setup edit window for composing messages
 -- @param msg_file: Path to file where messages should be written
 function M.setup_edit(msg_file)

@@ -345,6 +345,13 @@ impl Conversation {
         for tool_call in tool_calls {
             let tool_msg_id = self.next_msg_id();
 
+            tracing::info!(
+                tool_call_id = %tool_call.id,
+                tool_name = %tool_call.name,
+                args = %tool_call.arguments,
+                "executing tool call"
+            );
+
             // Broadcast tool start
             self.broadcast_msg(Message::ToolMessageStart {
                 msg_id: tool_msg_id,
@@ -356,10 +363,16 @@ impl Conversation {
 
             // Look up and execute the tool
             let (end_status, tool_result) = if let Some(tool) = self.tools.get(&tool_call.name) {
+                tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");
                 // Execute the tool and stream output chunks
                 let mut output_stream = tool.execute(tool_call.arguments.clone());
                 let mut result_parts = Vec::new();
                 while let Some(chunk) = output_stream.next().await {
+                    tracing::debug!(
+                        tool_call_id = %tool_call.id,
+                        chunk_len = chunk.len(),
+                        "tool output chunk"
+                    );
                     // Broadcast each chunk immediately with its own msg_id
                     self.broadcast_msg(Message::ToolOutputChunk {
                         msg_id: self.next_msg_id(),
@@ -369,9 +382,19 @@ impl Conversation {
                     });
                     result_parts.push(chunk);
                 }
+                tracing::info!(
+                    tool_call_id = %tool_call.id,
+                    result_len = result_parts.iter().map(|s| s.len()).sum::<usize>(),
+                    "tool stream finished"
+                );
                 (MessageEndStatus::Succeeded, result_parts.join(""))
             } else {
                 let error_msg = format!("Error: Tool '{}' not found", tool_call.name);
+                tracing::error!(
+                    tool_call_id = %tool_call.id,
+                    tool_name = %tool_call.name,
+                    "tool not found"
+                );
                 // Broadcast the error as a chunk too
                 self.broadcast_msg(Message::ToolOutputChunk {
                     msg_id: self.next_msg_id(),
