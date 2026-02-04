@@ -48,14 +48,17 @@ use syn::{parse_macro_input, spanned::Spanned, Attribute, FnArg, ItemFn, Pat, Pa
 /// }
 /// ```
 ///
-/// # Async Functions
+/// # Async Streams
 ///
-/// Async functions are supported. The macro wraps them appropriately:
+/// For async operations, return an async stream using `async_stream::stream!`:
 ///
 /// ```ignore
 /// #[tool]
-/// async fn fetch_data(url: String) -> impl Stream<Item = String> {
-///     // async implementation
+/// fn fetch_data(url: String) -> impl Stream<Item = String> {
+///     async_stream::stream! {
+///         let result = do_async_work().await;
+///         yield result;
+///     }
 /// }
 /// ```
 #[proc_macro_attribute]
@@ -134,8 +137,16 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate field names for destructuring
     let field_names: Vec<_> = params.iter().map(|(name, _, _)| name.clone()).collect();
 
-    // Check if function is async
-    let is_async = input_fn.sig.asyncness.is_some();
+    // Reject async functions - tools should return lazy async streams instead
+    if input_fn.sig.asyncness.is_some() {
+        return syn::Error::new(
+            input_fn.sig.asyncness.span(),
+            "#[tool] does not support async functions. \
+             Return an async stream (e.g., `async_stream::stream! { ... }`) instead.",
+        )
+        .to_compile_error()
+        .into();
+    }
 
     // Get function visibility
     let vis = &input_fn.vis;
@@ -143,23 +154,9 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate the tool constructor function
     let tool_fn_name = format_ident!("{}_tool", fn_name);
 
-    // Generate the handler call based on whether the function is async
-    let handler_body = if is_async {
-        quote! {
-            |params: #params_struct_name| {
-                ::async_stream::stream! {
-                    let mut stream = #fn_name(#(params.#field_names.clone()),*).await;
-                    while let Some(item) = ::tokio_stream::StreamExt::next(&mut stream).await {
-                        yield item;
-                    }
-                }
-            }
-        }
-    } else {
-        quote! {
-            |params: #params_struct_name| {
-                #fn_name(#(params.#field_names),*)
-            }
+    let handler_body = quote! {
+        |params: #params_struct_name| {
+            #fn_name(#(params.#field_names),*)
         }
     };
 
@@ -172,7 +169,6 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Recreate the function signature with stripped parameter attributes
     let fn_generics = &input_fn.sig.generics;
-    let fn_asyncness = &input_fn.sig.asyncness;
     let fn_unsafety = &input_fn.sig.unsafety;
     let fn_abi = &input_fn.sig.abi;
     let fn_output = &input_fn.sig.output;
@@ -209,7 +205,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         // Original function (with cleaned params)
         #(#other_fn_attrs)*
-        #vis #fn_asyncness #fn_unsafety #fn_abi fn #fn_name #fn_generics (#(#clean_inputs),*) #fn_output #block
+        #vis #fn_unsafety #fn_abi fn #fn_name #fn_generics (#(#clean_inputs),*) #fn_output #block
 
         // Tool constructor function
         #vis fn #tool_fn_name() -> #crate_path::tool::Tool {
