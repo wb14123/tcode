@@ -77,6 +77,8 @@ enum Commands {
         /// The tool call ID to display
         tool_call_id: String,
     },
+    /// Launch Chrome browser with persistent profile for login setup
+    Browser,
 }
 
 fn get_session_id(session: Option<String>) -> String {
@@ -184,7 +186,43 @@ async fn main() -> Result<()> {
             let client = ToolCallDisplayClient::new(session, lua_path, tool_call_id);
             client.run().await
         }
+        Some(Commands::Browser) => run_browser().await,
     }
+}
+
+async fn run_browser() -> Result<()> {
+    use headless_chrome::{Browser, LaunchOptions};
+
+    let data_dir = tools::web_fetch::chrome_data_dir();
+    fs::create_dir_all(&data_dir)?;
+
+    println!("Launching Chrome with persistent profile at: {}", data_dir.display());
+    println!("Log in to your accounts, then close the browser window to save the session.");
+    println!();
+
+    let launch_options = LaunchOptions {
+        headless: false,
+        user_data_dir: Some(data_dir),
+        ..LaunchOptions::default()
+    };
+
+    let browser = Browser::new(launch_options)?;
+
+    // Get the process and wait for it to exit
+    let process = browser.get_process_id();
+    if let Some(pid) = process {
+        // Poll until the process exits
+        loop {
+            let exists = std::path::Path::new(&format!("/proc/{}", pid)).exists();
+            if !exists {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    println!("Browser closed. Your session data has been saved.");
+    Ok(())
 }
 
 async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<()> {

@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+headless_chrome = "1.0"
 llm-rs = { path = "../llm-rs" }
 tools = { path = "../tools" }
 tokio = { version = "1", features = ["full"] }

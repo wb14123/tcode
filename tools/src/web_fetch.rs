@@ -1,8 +1,18 @@
+use std::path::PathBuf;
+
 use anyhow::{anyhow, Result};
 use headless_chrome::{Browser, LaunchOptions};
 use llm_rs_macros::tool;
 
 const READABILITY_JS: &str = include_str!("vendor/readability-0.6.0.js");
+
+/// Get the Chrome user data directory for persistent sessions.
+pub fn chrome_data_dir() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tcode")
+        .join("chrome")
+}
 
 /// Fetch a web page using headless Chrome and extract clean HTML using Readability.js.
 fn fetch_and_extract(url: &str) -> Result<String> {
@@ -12,7 +22,15 @@ fn fetch_and_extract(url: &str) -> Result<String> {
     // variable is only relevant for subprocess spawning, not for other threads.
     unsafe { std::env::remove_var("LD_PRELOAD") };
 
-    let browser = Browser::new(LaunchOptions::default())?;
+    let data_dir = chrome_data_dir();
+    std::fs::create_dir_all(&data_dir)?;
+
+    let launch_options = LaunchOptions {
+        user_data_dir: Some(data_dir),
+        headless: false,
+        ..LaunchOptions::default()
+    };
+    let browser = Browser::new(launch_options)?;
     let tab = browser.new_tab()?;
 
     tab.navigate_to(url)?;

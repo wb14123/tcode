@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 async-stream = "0.3"
+dirs = "6"
 headless_chrome = "1.0"
 llm-rs = { path = "../llm-rs" }
 llm-rs-macros = { path = "../llm-rs-macros" }
