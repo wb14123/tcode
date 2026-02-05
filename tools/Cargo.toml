@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = "1"
 async-stream = "0.3"
 headless_chrome = "1.0"
 llm-rs = { path = "../llm-rs" }

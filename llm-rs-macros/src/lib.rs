@@ -4,8 +4,71 @@
 
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
+use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, spanned::Spanned, Attribute, FnArg, ItemFn, Pat, PatType};
+use syn::{
+    parse::{Parse, ParseStream},
+    parse_macro_input, spanned::Spanned, Attribute, FnArg, ItemFn, Lit, Pat, PatType, Token,
+};
+
+/// Parsed attributes for the #[tool] macro.
+struct ToolAttrs {
+    /// Optional timeout in milliseconds.
+    timeout_ms: Option<u64>,
+}
+
+impl Parse for ToolAttrs {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let mut timeout_ms = None;
+
+        while !input.is_empty() {
+            let ident: syn::Ident = input.parse()?;
+            input.parse::<Token![=]>()?;
+
+            match ident.to_string().as_str() {
+                "timeout_ms" => {
+                    let lit: Lit = input.parse()?;
+                    match lit {
+                        Lit::Int(lit_int) => {
+                            timeout_ms = Some(lit_int.base10_parse()?);
+                        }
+                        _ => {
+                            return Err(syn::Error::new(
+                                lit.span(),
+                                "timeout_ms must be an integer (milliseconds)",
+                            ));
+                        }
+                    }
+                }
+                other => {
+                    return Err(syn::Error::new(
+                        ident.span(),
+                        format!("unknown attribute: {}", other),
+                    ));
+                }
+            }
+
+            // Consume optional comma
+            if input.peek(Token![,]) {
+                input.parse::<Token![,]>()?;
+            }
+        }
+
+        Ok(ToolAttrs { timeout_ms })
+    }
+}
+
+/// Determine the crate path to use for `llm_rs`.
+fn get_crate_path() -> proc_macro2::TokenStream {
+    match crate_name("llm-rs") {
+        Ok(FoundCrate::Itself) => quote! { crate },
+        Ok(FoundCrate::Name(name)) => {
+            let ident = format_ident!("{}", name);
+            quote! { ::#ident }
+        }
+        Err(_) => quote! { ::llm_rs },
+    }
+}
 
 /// Attribute macro that transforms a function into an LLM tool.
 ///
@@ -37,14 +100,15 @@ use syn::{parse_macro_input, spanned::Spanned, Attribute, FnArg, ItemFn, Pat, Pa
 /// 2. The original function (with doc comments stripped from params)
 /// 3. A `{fn_name}_tool()` function that creates the Tool
 ///
-/// # Using within llm-rs crate
+/// # Timeout
 ///
-/// When using the macro within the llm-rs crate itself, use the `crate` attribute:
+/// Specify a timeout in milliseconds for the tool execution:
 ///
 /// ```ignore
-/// #[tool(crate = crate)]
-/// fn internal_tool(query: String) -> impl Stream<Item = String> {
-///     // ...
+/// #[tool(timeout_ms = 30000)]
+/// fn slow_tool(query: String) -> impl Stream<Item = Result<String, String>> {
+///     // This tool has a 30-second timeout
+///     tokio_stream::once(Ok("result".to_string()))
 /// }
 /// ```
 ///
@@ -65,21 +129,18 @@ use syn::{parse_macro_input, spanned::Spanned, Attribute, FnArg, ItemFn, Pat, Pa
 pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let input_fn = parse_macro_input!(item as ItemFn);
 
-    // Parse the attribute for crate path override
-    let crate_path = if attr.is_empty() {
-        quote! { ::llm_rs }
+    // Parse the attribute for timeout
+    let attrs = if attr.is_empty() {
+        ToolAttrs { timeout_ms: None }
     } else {
-        let attr_str = attr.to_string();
-        if attr_str.contains("crate") && attr_str.contains("crate::") {
-            // crate = crate means use the local crate path
-            quote! { crate }
-        } else if attr_str.contains("crate") {
-            // Try to parse as crate = some_path
-            quote! { crate }
-        } else {
-            quote! { ::llm_rs }
+        match syn::parse::<ToolAttrs>(attr) {
+            Ok(attrs) => attrs,
+            Err(e) => return e.to_compile_error().into(),
         }
     };
+
+    // Auto-detect crate path
+    let crate_path = get_crate_path();
 
     // Extract function name
     let fn_name = &input_fn.sig.ident;
@@ -196,6 +257,22 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     let block = &input_fn.block;
 
+    // Generate the tool creation code with optional timeout
+    let timeout_expr = if let Some(timeout_ms) = attrs.timeout_ms {
+        quote! { Some(::std::time::Duration::from_millis(#timeout_ms)) }
+    } else {
+        quote! { None }
+    };
+
+    let tool_creation = quote! {
+        #crate_path::tool::Tool::new(
+            #fn_name_str,
+            #description,
+            #timeout_expr,
+            #handler_body,
+        )
+    };
+
     let output = quote! {
         // Generated params struct
         #[derive(::serde::Deserialize, ::schemars::JsonSchema)]
@@ -209,11 +286,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         // Tool constructor function
         #vis fn #tool_fn_name() -> #crate_path::tool::Tool {
-            #crate_path::tool::Tool::new(
-                #fn_name_str,
-                #description,
-                #handler_body,
-            )
+            #tool_creation
         }
     };
 

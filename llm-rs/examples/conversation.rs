@@ -23,12 +23,12 @@ use tokio_stream::StreamExt;
 fn get_weather(
     /// The city name to get weather for
     city: String,
-) -> impl tokio_stream::Stream<Item = String> {
+) -> impl tokio_stream::Stream<Item = Result<String, String>> {
     let result = format!(
         "Weather in {}: 22°C, partly cloudy, humidity 65%",
         city
     );
-    tokio_stream::once(result)
+    tokio_stream::once(Ok(result))
 }
 
 /// Get the current time in a timezone
@@ -36,13 +36,13 @@ fn get_weather(
 fn get_current_time(
     /// The timezone (e.g., "UTC", "Asia/Tokyo")
     timezone: String,
-) -> impl tokio_stream::Stream<Item = String> {
+) -> impl tokio_stream::Stream<Item = Result<String, String>> {
     let now = chrono::Local::now();
-    tokio_stream::once(format!(
+    tokio_stream::once(Ok(format!(
         "Current time in {}: {}",
         timezone,
         now.format("%Y-%m-%d %H:%M:%S")
-    ))
+    )))
 }
 
 #[tokio::main]
