@@ -83,7 +83,7 @@ impl Server {
             llm,
             "You are a helpful assistant.",
             &self.model,
-            vec![Arc::new(tools::web_fetch_tool())],
+            vec![Arc::new(tools::web_fetch_tool()), Arc::new(tools::web_search_tool())],
         )?;
 
         // Resolve exe path for spawning tool-call subcommand

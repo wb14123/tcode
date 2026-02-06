@@ -193,7 +193,7 @@ async fn main() -> Result<()> {
 async fn run_browser() -> Result<()> {
     use headless_chrome::{Browser, LaunchOptions};
 
-    let data_dir = tools::web_fetch::chrome_data_dir();
+    let data_dir = tools::browser::chrome_data_dir();
     fs::create_dir_all(&data_dir)?;
 
     println!("Launching Chrome with persistent profile at: {}", data_dir.display());
