@@ -320,6 +320,16 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
 
     vim.schedule(function()
       if not vim.api.nvim_buf_is_valid(buf) then return end
+
+      -- Check if user is at the bottom before modifying content
+      local was_at_bottom = true
+      local win = vim.fn.bufwinid(buf)
+      if win ~= -1 then
+        local cursor_line = vim.api.nvim_win_get_cursor(win)[1]
+        local line_count = vim.api.nvim_buf_line_count(buf)
+        was_at_bottom = (cursor_line >= line_count)
+      end
+
       vim.bo[buf].modifiable = true
 
       for _, line in ipairs(lines) do
@@ -331,11 +341,12 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
         end
       end
 
-      -- Scroll to bottom
-      local win = vim.fn.bufwinid(buf)
+      -- Auto-scroll to bottom only if user was already at the bottom
       if win ~= -1 then
         local new_count = vim.api.nvim_buf_line_count(buf)
-        vim.api.nvim_win_set_cursor(win, { new_count, 0 })
+        if was_at_bottom then
+          vim.api.nvim_win_set_cursor(win, { new_count, 0 })
+        end
       end
 
       vim.bo[buf].modifiable = false
@@ -483,6 +494,16 @@ function M.setup_tool_call_display(tool_call_file, status_file)
 
     vim.schedule(function()
       if not vim.api.nvim_buf_is_valid(buf) then return end
+
+      -- Check if user is at the bottom before modifying content
+      local was_at_bottom = true
+      local win = vim.fn.bufwinid(buf)
+      if win ~= -1 then
+        local cursor_line = vim.api.nvim_win_get_cursor(win)[1]
+        local line_count = vim.api.nvim_buf_line_count(buf)
+        was_at_bottom = (cursor_line >= line_count)
+      end
+
       vim.bo[buf].modifiable = true
 
       for _, line in ipairs(lines) do
@@ -504,11 +525,12 @@ function M.setup_tool_call_display(tool_call_file, status_file)
         end
       end
 
-      -- Scroll to bottom
-      local win = vim.fn.bufwinid(buf)
+      -- Auto-scroll to bottom only if user was already at the bottom
       if win ~= -1 then
         local new_count = vim.api.nvim_buf_line_count(buf)
-        vim.api.nvim_win_set_cursor(win, { new_count, 0 })
+        if was_at_bottom then
+          vim.api.nvim_win_set_cursor(win, { new_count, 0 })
+        end
       end
 
       vim.bo[buf].modifiable = false
