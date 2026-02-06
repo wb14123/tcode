@@ -224,7 +224,7 @@ function M.setup_display(display_file, status_file)
   vim.bo.swapfile = false
   vim.bo.modifiable = false
   vim.bo.readonly = true
-  vim.bo.filetype = 'tcode'
+  vim.bo.filetype = 'markdown'
 
   -- Set window options
   vim.wo.wrap = true
@@ -359,7 +359,7 @@ function M.setup_tool_call_display(tool_call_file, status_file)
   vim.bo.swapfile = false
   vim.bo.modifiable = false
   vim.bo.readonly = true
-  vim.bo.filetype = 'tcode'
+  vim.bo.filetype = 'markdown'
 
   -- Set window options
   vim.wo.wrap = true
