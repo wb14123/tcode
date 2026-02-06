@@ -5,6 +5,8 @@ use headless_chrome::{Browser, LaunchOptions};
 use llm_rs_macros::tool;
 
 const READABILITY_JS: &str = include_str!("vendor/readability-0.6.0.js");
+const WAIT_FOR_IDLE_JS: &str = include_str!("js/wait-for-idle.js");
+const EXTRACT_CONTENT_JS: &str = include_str!("js/extract-content.js");
 
 /// Get the Chrome user data directory for persistent sessions.
 pub fn chrome_data_dir() -> PathBuf {
@@ -34,21 +36,15 @@ fn fetch_and_extract(url: &str) -> Result<String> {
     let tab = browser.new_tab()?;
 
     tab.navigate_to(url)?;
-    tab.wait_for_element("body")?;
+    tab.wait_until_navigated()?;
+
+    // Wait for document.readyState to be 'complete' and network to be idle.
+    // We intercept fetch/XHR to track pending requests and wait until no new
+    // requests have been made for 500ms.
+    tab.evaluate(WAIT_FOR_IDLE_JS, true)?;
+
     tab.evaluate(READABILITY_JS, false)?;
-
-    let js_code = r#"
-        (function() {
-            var documentClone = document.cloneNode(true);
-            var article = new Readability(documentClone).parse();
-            if (article && article.content) {
-                return article.content;
-            }
-            return null;
-        })()
-    "#;
-
-    let result = tab.evaluate(js_code, false)?;
+    let result = tab.evaluate(EXTRACT_CONTENT_JS, false)?;
 
     match result.value {
         Some(serde_json::Value::String(content)) => Ok(content),
@@ -60,7 +56,7 @@ fn fetch_and_extract(url: &str) -> Result<String> {
 }
 
 /// Fetch a web page and return cleaned HTML content extracted by Readability
-#[tool(timeout_ms = 30000)]
+#[tool(timeout_ms = 300000)]
 pub fn web_fetch(
     /// The URL to fetch and extract content from
     url: String,
