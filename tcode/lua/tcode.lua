@@ -51,6 +51,11 @@ local function append_text(buf, text)
   vim.api.nvim_buf_set_text(buf, line_count - 1, #last_line, line_count - 1, #last_line, lines)
 end
 
+-- Namespace and lookup table for tool-call range extmarks.
+-- Maps extmark ID -> tool_call_id so we can find which tool call a cursor line belongs to.
+local tc_ns = vim.api.nvim_create_namespace('tcode_tc_id')
+local tc_extmark_ids = {}  -- extmark_id -> tool_call_id
+
 -- Render a single JSONL event into the buffer with extmarks
 -- Serde externally-tagged enums: {"VariantName": {fields...}}
 local function render_event(buf, ns, event)
@@ -135,13 +140,52 @@ local function render_event(buf, ns, event)
     end
     -- Add empty line for tool output to append to
     append_lines(buf, { '' })
+    -- Place a range extmark covering label through current last line;
+    -- ToolOutputChunk and ToolMessageEnd will extend end_row further.
+    if data.tool_call_id then
+      local last_line = vim.api.nvim_buf_line_count(buf) - 1
+      local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, label_line, 0, {
+        end_row = last_line,
+        end_col = 0,
+      })
+      tc_extmark_ids[mark_id] = data.tool_call_id
+    end
 
   elseif variant == 'ToolOutputChunk' then
     append_text(buf, data.content)
+    -- Extend the range extmark to cover newly appended output lines
+    if data.tool_call_id then
+      local last_line = vim.api.nvim_buf_line_count(buf) - 1
+      local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, {})
+      for _, mark in ipairs(marks) do
+        if tc_extmark_ids[mark[1]] == data.tool_call_id then
+          vim.api.nvim_buf_set_extmark(buf, tc_ns, mark[2], mark[3], {
+            id = mark[1],
+            end_row = last_line,
+            end_col = 0,
+          })
+          break
+        end
+      end
+    end
 
   elseif variant == 'ToolMessageEnd' then
     append_lines(buf, { '' })
     local info_line = vim.api.nvim_buf_line_count(buf) - 1
+    -- Extend the range extmark placed at ToolMessageStart to cover the whole tool block
+    if data.tool_call_id then
+      local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, {})
+      for _, mark in ipairs(marks) do
+        if tc_extmark_ids[mark[1]] == data.tool_call_id then
+          vim.api.nvim_buf_set_extmark(buf, tc_ns, mark[2], mark[3], {
+            id = mark[1],
+            end_row = info_line,
+            end_col = 0,
+          })
+          break
+        end
+      end
+    end
     local parts = {}
     if data.input_tokens and data.output_tokens and (data.input_tokens > 0 or data.output_tokens > 0) then
       table.insert(parts, {
@@ -205,9 +249,13 @@ end
 -- Setup display window for viewing conversation
 -- @param display_file: Path to file where display content is written (JSONL)
 -- @param status_file: Path to file where status messages are written
-function M.setup_display(display_file, status_file)
+-- @param session_id: Session ID for spawning tool call windows
+-- @param exe_path: Path to tcode executable
+function M.setup_display(display_file, status_file, session_id, exe_path)
   M.display_file = display_file or '/tmp/tcode-display.jsonl'
   M.status_file = status_file or '/tmp/tcode-status.txt'
+  M.session_id = session_id
+  M.exe_path = exe_path
   M.last_size = 0
   M.line_buffer = ''
 
@@ -335,6 +383,34 @@ function M.setup_display(display_file, status_file)
 
   -- Add keybinding to quit
   vim.keymap.set('n', 'q', ':qa!<CR>', { buffer = true, silent = true, desc = 'Quit' })
+
+  -- Add keybinding to open tool call detail in a new tmux tab
+  vim.keymap.set('n', 'o', function()
+    if not M.exe_path or not M.session_id then
+      vim.notify('Session info not available', vim.log.levels.ERROR)
+      return
+    end
+    local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
+    -- Find extmarks whose range covers the cursor line
+    local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, { details = true })
+    local tool_call_id = nil
+    for _, mark in ipairs(marks) do
+      local start_row = mark[2]
+      local details = mark[4]
+      local end_row = details.end_row or start_row
+      if cursor_line >= start_row and cursor_line <= end_row and tc_extmark_ids[mark[1]] then
+        tool_call_id = tc_extmark_ids[mark[1]]
+        break
+      end
+    end
+    if not tool_call_id then
+      vim.notify('No tool call on this line', vim.log.levels.WARN)
+      return
+    end
+    local cmd = string.format('%s --session=%s tool-call %s', M.exe_path, M.session_id, tool_call_id)
+    local window_name = 'tool-detail'
+    vim.fn.system(string.format('tmux new-window -n "%s" "%s"', window_name, cmd))
+  end, { buffer = true, silent = true, desc = 'Open tool call detail' })
 end
 
 -- Setup tool call display window for viewing a single tool call's details
@@ -447,14 +523,6 @@ function M.setup_tool_call_display(tool_call_file, status_file)
       file:close()
       if status and status ~= '' then
         vim.schedule(function()
-          if status == 'Done' then
-            -- Auto-close after a short delay (server will kill the tmux window,
-            -- but exit gracefully if still alive)
-            vim.defer_fn(function()
-              vim.cmd('qa!')
-            end, 3000)
-            return
-          end
           vim.cmd('redrawstatus')
         end)
       end

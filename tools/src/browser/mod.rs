@@ -30,7 +30,7 @@ pub fn navigate_and_wait(url: &str) -> Result<(Browser, Arc<Tab>)> {
 
     let launch_options = LaunchOptions {
         user_data_dir: Some(data_dir),
-        headless: false,
+        headless: true,
         ..LaunchOptions::default()
     };
     let browser = Browser::new(launch_options)?;

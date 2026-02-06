@@ -161,7 +161,6 @@ async fn main() -> Result<()> {
                 session.socket_path(),
                 session.display_file(),
                 session.status_file(),
-                session_id,
                 session.session_dir().clone(),
                 api_key,
                 cli.model,
@@ -177,8 +176,8 @@ async fn main() -> Result<()> {
             client.run().await
         }
         Some(Commands::Display) => {
-            let session = Session::new(session_id)?;
-            let client = DisplayClient::new(session, lua_path);
+            let session = Session::new(session_id.clone())?;
+            let client = DisplayClient::new(session, lua_path, session_id);
             client.run().await
         }
         Some(Commands::ToolCall { tool_call_id }) => {
@@ -249,7 +248,6 @@ async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<
         socket_path,
         session.display_file(),
         session.status_file(),
-        session_id.clone(),
         session.session_dir().clone(),
         api_key,
         cli.model.clone(),
@@ -284,8 +282,8 @@ async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<
     };
 
     // Run display client in current pane (create a new session that shares the directory)
-    let display_session = Session::new(session_id)?;
-    let client = DisplayClient::new(display_session, lua_path);
+    let display_session = Session::new(session_id.clone())?;
+    let client = DisplayClient::new(display_session, lua_path, session_id);
     let result = client.run().await;
 
     // Kill the edit pane to ensure it exits

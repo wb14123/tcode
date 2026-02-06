@@ -21,7 +21,6 @@ struct ToolCallState {
     status_file_path: PathBuf,
     tool_name: String,
     accumulated_preview: String,
-    tmux_window_id: Option<String>,
 }
 
 const PREVIEW_MAX_CHARS: usize = 200;
@@ -30,7 +29,6 @@ pub struct Server {
     socket_path: PathBuf,
     display_file: PathBuf,
     status_file: PathBuf,
-    session_id: String,
     session_dir: PathBuf,
     api_key: String,
     model: String,
@@ -42,7 +40,6 @@ impl Server {
         socket_path: PathBuf,
         display_file: PathBuf,
         status_file: PathBuf,
-        session_id: String,
         session_dir: PathBuf,
         api_key: String,
         model: String,
@@ -52,7 +49,6 @@ impl Server {
             socket_path,
             display_file,
             status_file,
-            session_id,
             session_dir,
             api_key,
             model,
@@ -86,15 +82,10 @@ impl Server {
             vec![Arc::new(tools::web_fetch_tool()), Arc::new(tools::web_search_tool())],
         )?;
 
-        // Resolve exe path for spawning tool-call subcommand
-        let exe_path = std::env::current_exe()
-            .context("Failed to determine current executable path")?;
-
         // Spawn background task to write conversation events to display files
         let mut events = conversation_client.subscribe();
         let display_file = self.display_file.clone();
         let status_file = self.status_file.clone();
-        let session_id = self.session_id.clone();
         let session_dir = self.session_dir.clone();
         let mut event_writer = tokio::spawn(async move {
             let mut tool_calls: HashMap<String, ToolCallState> = HashMap::new();
@@ -142,22 +133,11 @@ impl Server {
                         append_event(&tc_file, &event).await
                             .context("Failed to append tool call event")?;
 
-                        // Spawn tmux tab for tool call detail view
-                        tracing::debug!(tool_call_id, "spawning tmux window");
-                        let window_id = spawn_tool_call_tmux(
-                            &exe_path,
-                            &session_id,
-                            tool_call_id,
-                            tool_name,
-                        ).await;
-                        tracing::debug!(tool_call_id, ?window_id, "tmux window spawned");
-
                         tool_calls.insert(tool_call_id.clone(), ToolCallState {
                             file_path: tc_file,
                             status_file_path: tc_status,
                             tool_name: tool_name.clone(),
                             accumulated_preview: String::new(),
-                            tmux_window_id: window_id,
                         });
                     }
 
@@ -217,21 +197,10 @@ impl Server {
                             append_event(&state.file_path, &event).await
                                 .context("Failed to append tool call end")?;
 
-                            // Signal the tool call display to close
+                            // Mark the tool call as done
                             tokio::fs::write(&state.status_file_path, "Done").await
                                 .context("Failed to write tool call status")?;
                             tracing::debug!(tool_call_id, "wrote Done to status file");
-
-                            // Schedule tmux window close after delay
-                            if let Some(window_id) = state.tmux_window_id {
-                                tokio::spawn(async move {
-                                    tokio::time::sleep(std::time::Duration::from_secs(4)).await;
-                                    let _ = tokio::process::Command::new("tmux")
-                                        .args(["kill-window", "-t", &window_id])
-                                        .output()
-                                        .await;
-                                });
-                            }
                         } else {
                             tracing::warn!(
                                 tool_call_id,
@@ -285,40 +254,6 @@ impl Server {
         std::fs::remove_file(&socket_path)
             .with_context(|| format!("Failed to remove socket {:?}", socket_path))?;
         Ok(())
-    }
-}
-
-/// Spawn a new tmux window running `tcode tool-call <id>`.
-/// Returns the tmux window ID if successful.
-async fn spawn_tool_call_tmux(
-    exe_path: &PathBuf,
-    session_id: &str,
-    tool_call_id: &str,
-    tool_name: &str,
-) -> Option<String> {
-    let cmd = format!(
-        "{} --session={} tool-call {}",
-        exe_path.to_string_lossy(),
-        session_id,
-        tool_call_id
-    );
-    let window_name = format!("tool:{}", tool_name);
-
-    let output = tokio::process::Command::new("tmux")
-        .args([
-            "new-window",
-            "-n", &window_name,
-            "-P", "-F", "#{window_id}",
-            &cmd,
-        ])
-        .output()
-        .await
-        .ok()?;
-
-    if output.status.success() {
-        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-    } else {
-        None
     }
 }
 
