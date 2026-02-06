@@ -35,3 +35,6 @@ pub fn web_fetch(
             .flatten()
     }
 }
+
+#[cfg(test)]
+mod tests;
