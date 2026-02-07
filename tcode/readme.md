@@ -1,139 +1,94 @@
-# TCode
+# tcode
 
-TCode is a coding agent like Claude Code or Codex, running in the terminal. It leverages existing tools like neovim and tmux for better TUI experience instead of creating its own GUI. So that it's more powerful and user has less learning curve if they are already familiar with the existing tools.
+A terminal-based coding agent that leverages neovim and tmux for its UI. Instead of building a custom TUI, tcode uses tools the user already knows - giving familiar keybindings and extensibility for free.
 
-## Design
+## How It Works
 
-TCode is a server-client design so that you can open many windows with tools like tmux to view different content.
-
-Here are some of the commands:
-
-### tcode
-
-`tcode` will start a server locally (use socket file for proper permission management). It's also the main window which shows the interaction between user and the code agent and the output of the code agent, along with all the other information like status bars. All the content are shown in an embeded neovim buffer for easier viewing.
-
-You can start multiple tcode, but only one per tmux session. The following command will attach to the one that is running in the current tmux session.
-
-### tcode edit
-
-`tcode edit` will create a neovim buffer to send prompt to the tcode. It also handles selections like options provided by tcode agent, accept / reject command and so on.
-
-A `tcode edit` window is started by tcode main window by default, in the same tab, use vertical split.
-
-### tcode details
-
-Show the details in tcode sub agents and too usage. By default the main windows just show something is going on, like exporing the code, calling a tool and so on. This `tcode details` show all those sub tasks.
-
-There is an optional param for `tcode details`, which is only showing one of the sub task. In the main window, there should be a user friendly id for each of the task so that the `tcode details` can use.
-
-By default tcode main window also spawn tmux tabs for each of the task so that the user can navigate to it directly.
-
-### tcode diff
-
-A window monitors the proposed diffs by tcode agent. Only showing if tcode is not set to auto accept edits. It uses the vimdiff tool (configurable) for easier viewing.
-
-By default tcode main window also shows a tmux popup windows (floating window) for the diff if set to not auto accept edits.
-
-## Neovim Streaming
-
-Show output in neovim, example:
+TCode uses a server-client architecture. The server manages the LLM conversation and writes events to files. Clients are separate neovim processes that read those files and render the UI.
 
 ```
-nvim -c "enew | set ft=sh | call jobstart(['./slow_read.sh', 'slow_read.sh'], {'on_stdout': {j,d,e -> append(line('$')-1, d)}})"
+┌─────────────────────────────────────────────────┐
+│  tmux session                                   │
+│                                                 │
+│  ┌──────────────────┐  ┌────────────────────┐   │
+│  │  Display (nvim)  │  │  Edit (nvim)       │   │
+│  │  Reads JSONL     │  │  Writes messages   │   │
+│  │  Renders chat    │  │  via Unix socket   │   │
+│  └────────┬─────────┘  └────────┬───────────┘   │
+│           │ display.jsonl       │ server.sock    │
+│           └────────┬────────────┘                │
+│                    ▼                             │
+│           Server Process                         │
+│           ├─ ConversationManager                │
+│           ├─ JSONL event writer                  │
+│           └─ Unix socket listener               │
+│                                                 │
+│  Session dir: /tmp/tcode/sessions/{id}/         │
+└─────────────────────────────────────────────────┘
 ```
 
-## Configurable Extenal Tools
+## Commands
 
-User should be able to config different external tools by providing things like these when given a command parameter:
+### `tcode`
 
-* view command output
-* open `tcode edit`
-* open `tcode details`
-* open diff
-* find tcode instance in the current session
+Starts the server and opens display + edit panes in the current tmux session. One instance per tmux session - running it again attaches to the existing one.
 
-## Message Branching with Extmarks
+### `tcode serve`
 
-TCode uses neovim's extmarks to track message boundaries and enable easy conversation branching.
+Starts just the server process (no tmux integration). Useful for running components separately.
 
-### How It Works
+### `tcode edit`
 
-Each message in the conversation buffer is tagged with an extmark containing a unique message ID. Extmarks automatically track positions even as text is inserted or deleted around them.
+Opens a neovim editor for composing and sending messages to the server. Watches `edit-msg.txt` for changes and sends content over the Unix socket.
 
-```
-┌─ msg-001 ───────────────────────────────┐
-│ User: How do I fix this bug?            │  ← extmark at start
-└─────────────────────────────────────────┘
-┌─ msg-002 [●] ───────────────────────────┐
-│ Agent: Let me check...                  │  ← extmark at start, [●] = branch exists
-│ The issue is in foo.rs line 42...       │
-└─────────────────────────────────────────┘
-┌─ msg-003 ───────────────────────────────┐
-│ User: Can you show me?                  │  ← extmark at start
-└─────────────────────────────────────────┘
-```
+### `tcode display`
 
-### Branching Flow
+Opens a neovim buffer that renders the conversation by tailing `display.jsonl`. Shows user messages, assistant responses, tool calls, and token usage with syntax highlighting.
 
-1. User navigates to a message and presses `<leader>tb` (branch)
-2. Neovim plugin finds the extmark at cursor position → gets message ID
-3. Plugin sends "branch from msg-id" command to tcode server
-4. Server acknowledges, plugin deletes all lines after that message
-5. User can now type a new message that becomes the new branch
+### `tcode tool-call <id>`
 
-### Implementation
+Opens a neovim buffer showing the detailed output of a specific tool execution. Reads from per-tool-call JSONL files.
 
-**Server-side (Rust):**
-- Assign unique IDs to each message
-- Send message boundaries to neovim via RPC
-- Handle `branch_from(msg_id)` requests
-- Maintain conversation tree structure
+### `tcode browser`
 
-**Neovim plugin (Lua):**
-```lua
-local ns = vim.api.nvim_create_namespace('tcode_messages')
+Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) that the headless browser tools need.
 
--- Mark message start
-function M.mark_message_start(msg_id, line)
-  vim.api.nvim_buf_set_extmark(buf, ns, line, 0, {
-    id = msg_id,
-    right_gravity = false,
-  })
-end
+## Session Files
 
--- Find message at cursor
-function M.get_message_at_cursor()
-  local cursor = vim.api.nvim_win_get_cursor(0)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, ns, 0, cursor, {})
-  return marks[#marks]  -- last mark before cursor
-end
+All session data lives in `/tmp/tcode/sessions/{session_id}/`:
 
--- Branch from current message
-function M.branch_here()
-  local msg = M.get_message_at_cursor()
-  tcode_rpc.send('branch_from', msg.id)
-  local next_mark = get_next_mark(msg.id)
-  if next_mark then
-    vim.api.nvim_buf_set_lines(buf, next_mark.line, -1, false, {})
-  end
-end
-```
+| File | Purpose |
+|------|---------|
+| `server.sock` | Unix socket for client-server communication |
+| `display.jsonl` | Conversation events (server writes, display reads) |
+| `edit-msg.txt` | User message file (edit writes, server reads) |
+| `status.txt` | Server status |
+| `tool-call-{id}.jsonl` | Per-tool-call output stream |
+| `tool-call-{id}-status.txt` | Per-tool-call status |
+| `debug.log` | Debug logging output |
 
-### Keybindings
+## Neovim Plugin
 
-| Key | Action |
-|-----|--------|
-| `<leader>tb` | Branch from current message |
-| `<leader>te` | Edit current message |
-| `<leader>tn` | Navigate to next branch |
-| `<leader>tp` | Navigate to previous branch |
+`lua/tcode.lua` is the neovim plugin that powers the display and edit clients. It handles:
 
-### Visual Indicators
+- JSONL event parsing and incremental rendering into neovim buffers
+- Syntax highlighting (TCodeUser, TCodeAssistant, TCodeTool, TCodeError, TCodeTokens)
+- Auto-scrolling (only when cursor is at bottom)
+- File watching via inotify
+- Token usage display
 
-- Sign column markers show message boundaries
-- `[●]` indicator on messages that have alternate branches
-- Virtual text can show message IDs (configurable)
+## Design Notes
 
-## Tech Stack
+The following are design directions, some implemented and some aspirational:
 
-* Rust
+### Message Branching
+
+TCode uses neovim's extmarks to track message boundaries, enabling conversation branching - navigate to a message and branch from there to explore alternative responses.
+
+### Configurable External Tools
+
+The architecture supports configuring different external tools for viewing output, editing, diffs, etc. - anything that can accept tcode's file paths and socket as parameters.
+
+### Diff Viewing
+
+Planned: A `tcode diff` command for reviewing proposed code changes using vimdiff (or a configurable diff tool).
