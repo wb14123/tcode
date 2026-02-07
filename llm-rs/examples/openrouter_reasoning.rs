@@ -9,7 +9,7 @@
 use std::env;
 use std::io::{self, Write};
 
-use llm_rs::llm::{ChatOptions, LLMEvent, LLMMessage, OpenAI, ReasoningEffort, LLM};
+use llm_rs::llm::{ChatOptions, LLMEvent, LLMMessage, OpenRouter, ReasoningEffort, LLM};
 use tokio_stream::StreamExt;
 
 #[tokio::main]
@@ -17,7 +17,7 @@ async fn main() {
     let api_key = env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set");
     let model = "deepseek/deepseek-r1";
 
-    let client = OpenAI::openrouter(&api_key);
+    let client = OpenRouter::new(&api_key);
 
     let messages = vec![
         LLMMessage::System("You are a helpful assistant. Be concise.".to_string()),

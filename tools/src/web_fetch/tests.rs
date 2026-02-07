@@ -1,3 +1,5 @@
+use std::sync::{Arc, LazyLock, Mutex};
+
 use headless_chrome::{Browser, LaunchOptions};
 
 /// The cleaning logic from extract-content.js, as a standalone JS function.
@@ -55,16 +57,27 @@ const CLEAN_JS: &str = r#"
 })
 "#;
 
-fn setup() -> (Browser, std::sync::Arc<headless_chrome::Tab>) {
-    let browser = Browser::new(LaunchOptions {
+/// Shared browser launch result. `Err` stores the message when Chrome is not found.
+static BROWSER_RESULT: LazyLock<Result<Mutex<Browser>, String>> = LazyLock::new(|| {
+    match Browser::new(LaunchOptions {
         headless: true,
         ..LaunchOptions::default()
-    })
-    .expect("failed to launch browser");
+    }) {
+        Ok(browser) => Ok(Mutex::new(browser)),
+        Err(e) => Err(format!("Chrome not available — install Chrome/Chromium to run these tests: {e}")),
+    }
+});
+
+fn new_tab() -> Arc<headless_chrome::Tab> {
+    let mutex = match BROWSER_RESULT.as_ref() {
+        Ok(m) => m,
+        Err(msg) => panic!("{msg}"),
+    };
+    let browser = mutex.lock().expect("browser mutex poisoned");
     let tab = browser.new_tab().expect("failed to open tab");
     tab.navigate_to("about:blank").unwrap();
     tab.wait_until_navigated().unwrap();
-    (browser, tab)
+    tab
 }
 
 /// Evaluate the cleaning function as a single self-contained IIFE.
@@ -80,46 +93,46 @@ fn clean(tab: &headless_chrome::Tab, html: &str) -> String {
 
 #[test]
 fn bare_span_unwrapped() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     assert_eq!(clean(&tab, "<span>hello</span>"), "hello");
 }
 
 #[test]
 fn span_with_class_kept() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     let input = r#"<span class="highlight">hello</span>"#;
     assert_eq!(clean(&tab, input), input);
 }
 
 #[test]
 fn nested_spans_unwrapped() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     assert_eq!(clean(&tab, "<span><span>deep</span></span>"), "deep");
 }
 
 #[test]
 fn div_wrapping_single_div_flattened() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     let input = "<div><div><p>text</p></div></div>";
     assert_eq!(clean(&tab, input), "<div><p>text</p></div>");
 }
 
 #[test]
 fn deeply_nested_divs_flattened() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     let input = "<div><div><div><p>text</p></div></div></div>";
     assert_eq!(clean(&tab, input), "<div><p>text</p></div>");
 }
 
 #[test]
 fn div_with_inline_content_unwrapped() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     assert_eq!(clean(&tab, "<div>just text</div>"), "just text");
 }
 
 #[test]
 fn div_with_inline_elements_unwrapped() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     assert_eq!(
         clean(&tab, "<div><strong>bold</strong> and <em>italic</em></div>"),
         "<strong>bold</strong> and <em>italic</em>"
@@ -128,35 +141,35 @@ fn div_with_inline_elements_unwrapped() {
 
 #[test]
 fn div_with_block_children_kept() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     let input = "<div><p>one</p><p>two</p></div>";
     assert_eq!(clean(&tab, input), input);
 }
 
 #[test]
 fn div_with_class_kept() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     let input = r#"<div class="container"><p>text</p></div>"#;
     assert_eq!(clean(&tab, input), input);
 }
 
 #[test]
 fn semantic_elements_preserved() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     let input = "<h1>Title</h1><ul><li>item</li></ul><pre><code>x</code></pre>";
     assert_eq!(clean(&tab, input), input);
 }
 
 #[test]
 fn links_preserved() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     let input = r#"<a href="https://example.com">link</a>"#;
     assert_eq!(clean(&tab, input), input);
 }
 
 #[test]
 fn mixed_real_world_cleanup() {
-    let (_b, tab) = setup();
+    let tab = new_tab();
     let input = "<div><div><div><span>Hello</span> <span>world</span></div></div><p>Paragraph</p></div>";
     let result = clean(&tab, input);
     assert!(!result.contains("<span>"), "bare spans should be removed");

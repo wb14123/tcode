@@ -55,7 +55,7 @@ async fn main() {
     tools.insert("get_weather".to_string(), weather_tool);
     tools.insert("get_current_time".to_string(), time_tool);
 
-    let mut client = OpenAI::new(&api_key, "https://api.openai.com/v1");
+    let mut client = OpenAI::new(&api_key);
 
     // Register tools with the LLM for caching
     client.register_tools(tools_list);

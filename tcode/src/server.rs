@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use llm_rs::conversation::{ConversationManager, Message};
-use llm_rs::llm::{ChatOptions, OpenAI};
+use llm_rs::llm::{ChatOptions, OpenAI, OpenRouter, LLM};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -73,7 +73,11 @@ impl Server {
             .with_context(|| format!("Failed to initialize status file {:?}", self.status_file))?;
 
         // Create LLM and conversation manager
-        let llm = Box::new(OpenAI::new(&self.api_key, &self.base_url));
+        let llm: Box<dyn LLM> = if self.base_url.contains("api.openai.com") {
+            Box::new(OpenAI::new(&self.api_key))
+        } else {
+            Box::new(OpenRouter::with_base_url(&self.api_key, &self.base_url))
+        };
         let manager = ConversationManager::new();
         let conversation_client = manager.new_conversation(
             llm,

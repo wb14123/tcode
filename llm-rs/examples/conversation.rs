@@ -14,7 +14,7 @@ use std::io::{self, Write};
 use std::sync::Arc;
 
 use llm_rs::conversation::{ConversationManager, Message};
-use llm_rs::llm::{ChatOptions, OpenAI, ReasoningEffort};
+use llm_rs::llm::{ChatOptions, OpenRouter, ReasoningEffort};
 use llm_rs::tool;
 use tokio_stream::StreamExt;
 
@@ -58,7 +58,7 @@ async fn main() -> anyhow::Result<()> {
 
     // Create conversation manager and start a conversation
     let manager = ConversationManager::new();
-    let llm = Box::new(OpenAI::openrouter(&api_key));
+    let llm = Box::new(OpenRouter::new(&api_key));
 
     let client = manager.new_conversation(
         llm,

@@ -4,8 +4,14 @@
 //! for various providers (OpenAI, Claude, Gemini, etc.).
 
 mod openai;
+mod openai_common;
+mod openrouter;
+
+#[cfg(test)]
+mod openai_tests;
 
 pub use openai::OpenAI;
+pub use openrouter::OpenRouter;
 
 use std::pin::Pin;
 use std::sync::Arc;

@@ -14,7 +14,7 @@ async fn main() {
     let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
     let model = "gpt-5-nano";
 
-    let client = OpenAI::new(&api_key, "https://api.openai.com/v1");
+    let client = OpenAI::new(&api_key);
 
     // Simple conversation
     let messages = vec![
