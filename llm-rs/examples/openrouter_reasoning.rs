@@ -1,7 +1,10 @@
-//! Example: Simple chat with OpenAI API (with reasoning/thinking support)
+//! Example: Reasoning/thinking tokens with OpenRouter
+//!
+//! OpenRouter exposes the actual thinking text from reasoning models,
+//! unlike OpenAI's Chat Completions API which only reports token counts.
 //!
 //! Usage:
-//!   OPENAI_API_KEY=your-key cargo run --example openai_chat
+//!   OPENROUTER_API_KEY=your-key cargo run --example openrouter_reasoning
 
 use std::env;
 use std::io::{self, Write};
@@ -11,15 +14,14 @@ use tokio_stream::StreamExt;
 
 #[tokio::main]
 async fn main() {
-    let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
-    let model = "gpt-5-nano";
+    let api_key = env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set");
+    let model = "deepseek/deepseek-r1";
 
-    let client = OpenAI::new(&api_key, "https://api.openai.com/v1");
+    let client = OpenAI::openrouter(&api_key);
 
-    // Simple conversation
     let messages = vec![
         LLMMessage::System("You are a helpful assistant. Be concise.".to_string()),
-        LLMMessage::User("What is Rust programming language in 2 sentences? Think deeply.".to_string()),
+        LLMMessage::User("What is Rust programming language in 2 sentences?".to_string()),
     ];
 
     let chat_options = ChatOptions {
@@ -27,27 +29,38 @@ async fn main() {
         ..Default::default()
     };
 
+    println!("Model: {}", model);
+    println!("Reasoning effort: Medium");
+    println!();
     println!("User: What is Rust programming language in 2 sentences?");
-    print!("Assistant: ");
-    io::stdout().flush().unwrap();
+    println!();
 
     let mut stream = client.chat(model, &messages, &chat_options);
 
     let mut total_input = 0;
     let mut total_output = 0;
+    let mut in_thinking = false;
 
     while let Some(event) = stream.next().await {
         match event {
             LLMEvent::MessageStart { input_tokens } => {
                 total_input += input_tokens;
             }
-            LLMEvent::TextDelta(text) => {
-                print!("{}", text);
+            LLMEvent::ThinkingDelta(text) => {
+                if !in_thinking {
+                    print!("\x1b[2m<thinking> ");
+                    in_thinking = true;
+                }
+                print!("\x1b[2m{}\x1b[0m", text);
                 io::stdout().flush().unwrap();
             }
-            LLMEvent::ThinkingDelta(text) => {
-                // Dim color for thinking text
-                print!("\x1b[2m{}\x1b[0m", text);
+            LLMEvent::TextDelta(text) => {
+                if in_thinking {
+                    println!("\x1b[2m </thinking>\x1b[0m");
+                    println!();
+                    in_thinking = false;
+                }
+                print!("{}", text);
                 io::stdout().flush().unwrap();
             }
             LLMEvent::ToolCall(tool_call) => {
@@ -60,6 +73,10 @@ async fn main() {
                 reasoning_tokens,
                 ..
             } => {
+                if in_thinking {
+                    println!("\x1b[2m </thinking>\x1b[0m");
+                    in_thinking = false;
+                }
                 total_input += input_tokens;
                 total_output += output_tokens;
                 println!();

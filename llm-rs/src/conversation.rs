@@ -3,7 +3,7 @@ use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::llm::{LLMEvent, LLMMessage, StopReason, LLM};
+use crate::llm::{ChatOptions, LLMEvent, LLMMessage, StopReason, LLM};
 use crate::tool::Tool;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -49,12 +49,18 @@ pub enum Message {
         content: Arc<String>,
     },
 
+    AssistantThinkingChunk {
+        msg_id: MessageID,
+        content: Arc<String>,
+    },
+
     AssistantMessageEnd {
         msg_id: MessageID,
         end_status: MessageEndStatus,
         error: Option<String>,
         input_tokens: i32,
         output_tokens: i32,
+        reasoning_tokens: i32,
     },
 
     ToolMessageStart {
@@ -126,6 +132,7 @@ impl ConversationManager {
         system_prompt: &str,
         model: &str,
         tools: Vec<Arc<Tool>>,
+        chat_options: ChatOptions,
     ) -> Result<Arc<ConversationClient>> {
         // Register tools with the LLM for caching
         llm.register_tools(tools.clone());
@@ -154,6 +161,7 @@ impl ConversationManager {
             msg_id_counter: AtomicI32::new(0),
             total_input_tokens: 0,
             total_output_tokens: 0,
+            chat_options,
             conversation_client: {
                 Arc::new(ConversationClient {
                     msgs: RwLock::new(Vec::new()),
@@ -218,6 +226,9 @@ pub struct Conversation {
     /// Accumulated token usage.
     total_input_tokens: i32,
     total_output_tokens: i32,
+
+    /// Chat options (includes reasoning config) for this conversation.
+    chat_options: ChatOptions,
 }
 
 /// Multi round LLM conversation. Thread and async safe.
@@ -252,7 +263,7 @@ impl Conversation {
         loop {
             let mut response_stream =
                 self.llm
-                    .chat(self.model.as_str(), &self.llm_msgs);
+                    .chat(self.model.as_str(), &self.llm_msgs, &self.chat_options);
             let mut accumulated_text = String::new();
             let mut pending_tool_calls = Vec::new();
             let mut should_continue = false;
@@ -276,6 +287,12 @@ impl Conversation {
                             content: Arc::new(text),
                         });
                     }
+                    LLMEvent::ThinkingDelta(text) => {
+                        self.broadcast_msg(Message::AssistantThinkingChunk {
+                            msg_id: self.next_msg_id(),
+                            content: Arc::new(text),
+                        });
+                    }
                     LLMEvent::ToolCall(tool_call) => {
                         pending_tool_calls.push(tool_call);
                     }
@@ -283,6 +300,8 @@ impl Conversation {
                         stop_reason,
                         input_tokens,
                         output_tokens,
+                        reasoning_tokens,
+                        reasoning,
                     } => {
                         self.total_input_tokens += input_tokens;
                         self.total_output_tokens += output_tokens;
@@ -302,6 +321,7 @@ impl Conversation {
                             error,
                             input_tokens,
                             output_tokens,
+                            reasoning_tokens,
                         });
 
                         // Handle tool calls if any
@@ -311,14 +331,16 @@ impl Conversation {
                             self.llm_msgs.push(LLMMessage::Assistant {
                                 content: accumulated_text.clone(),
                                 tool_calls: tool_calls.clone(),
+                                reasoning,
                             });
                             self.execute_tool_calls(tool_calls).await;
                             should_continue = true;
-                        } else if !accumulated_text.is_empty() {
-                            // Add assistant response to llm_msgs for context (no tool calls)
+                        } else if !accumulated_text.is_empty() || !reasoning.is_empty() {
+                            // Add assistant response to llm_msgs for context
                             self.llm_msgs.push(LLMMessage::Assistant {
                                 content: accumulated_text.clone(),
                                 tool_calls: vec![],
+                                reasoning,
                             });
                         }
                     }
@@ -329,6 +351,7 @@ impl Conversation {
                             error: Some(error),
                             input_tokens: 0,
                             output_tokens: 0,
+                            reasoning_tokens: 0,
                         });
                         return;
                     }

@@ -8,7 +8,7 @@ use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use llm_rs::llm::{LLMEvent, LLMMessage, OpenAI, StopReason, LLM};
+use llm_rs::llm::{ChatOptions, LLMEvent, LLMMessage, OpenAI, StopReason, LLM};
 use llm_rs::tool;
 use llm_rs::tool::Tool;
 use tokio_stream::StreamExt;
@@ -69,7 +69,7 @@ async fn main() {
     print!("Assistant: ");
     io::stdout().flush().unwrap();
 
-    let mut stream = client.chat(&model, &messages);
+    let mut stream = client.chat(&model, &messages, &ChatOptions::default());
     let mut pending_tool_calls = Vec::new();
 
     while let Some(event) = stream.next().await {
@@ -77,6 +77,10 @@ async fn main() {
             LLMEvent::MessageStart { .. } => {}
             LLMEvent::TextDelta(text) => {
                 print!("{}", text);
+                io::stdout().flush().unwrap();
+            }
+            LLMEvent::ThinkingDelta(text) => {
+                print!("[thinking: {}]", text);
                 io::stdout().flush().unwrap();
             }
             LLMEvent::ToolCall(tool_call) => {

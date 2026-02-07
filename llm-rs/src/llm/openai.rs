@@ -9,8 +9,48 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
-use super::{LLMEvent, LLMMessage, StopReason, ToolCall, LLM};
+use super::{ChatOptions, LLMEvent, LLMMessage, ReasoningDetail, ReasoningEffort, StopReason, ToolCall, LLM};
 use crate::tool::Tool;
+
+// ============================================================================
+// OpenAI ReasoningDetail implementation
+// ============================================================================
+
+/// OpenAI/OpenRouter reasoning detail — wraps raw JSON from the provider.
+#[derive(Debug)]
+struct OpenAIReasoningDetail {
+    raw: serde_json::Value,
+}
+
+impl OpenAIReasoningDetail {
+    fn from_json(value: serde_json::Value) -> Self {
+        Self { raw: value }
+    }
+
+    fn from_text(text: String) -> Self {
+        Self {
+            raw: serde_json::json!({"type": "reasoning.text", "text": text}),
+        }
+    }
+}
+
+impl ReasoningDetail for OpenAIReasoningDetail {
+    fn text(&self) -> Option<&str> {
+        // "text" for reasoning.text, "summary" for reasoning.summary
+        self.raw
+            .get("text")
+            .and_then(|v| v.as_str())
+            .or_else(|| self.raw.get("summary").and_then(|v| v.as_str()))
+    }
+
+    fn to_json(&self) -> serde_json::Value {
+        self.raw.clone()
+    }
+}
+
+// ============================================================================
+// OpenAI client
+// ============================================================================
 
 /// OpenAI-compatible LLM client.
 ///
@@ -57,11 +97,31 @@ struct ChatRequest<'a> {
     tools: Option<Vec<ToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+    /// OpenRouter format: nested object `reasoning: { effort, max_tokens, exclude }`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<ReasoningRequest>,
+    /// OpenAI Chat Completions format: top-level string `reasoning_effort: "medium"`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_effort: Option<&'static str>,
 }
 
 #[derive(Serialize)]
 struct StreamOptions {
     include_usage: bool,
+}
+
+fn is_false(v: &bool) -> bool {
+    !*v
+}
+
+#[derive(Serialize)]
+struct ReasoningRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    effort: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "is_false")]
+    exclude: bool,
 }
 
 #[derive(Serialize)]
@@ -73,6 +133,8 @@ struct ChatMessage {
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_calls: Option<Vec<ChatMessageToolCall>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
 /// Tool call in assistant message format for OpenAI API.
@@ -128,6 +190,12 @@ struct Delta {
     content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCallDelta>>,
+    /// Structured reasoning details (OpenRouter unified format).
+    #[serde(default)]
+    reasoning_details: Option<Vec<serde_json::Value>>,
+    /// Simple reasoning content string (some providers).
+    #[serde(default)]
+    reasoning_content: Option<String>,
 }
 
 #[derive(Deserialize, Debug)]
@@ -153,11 +221,42 @@ struct Usage {
     prompt_tokens: i32,
     #[serde(default)]
     completion_tokens: i32,
+    #[serde(default)]
+    output_tokens_details: Option<OutputTokensDetails>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct OutputTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: i32,
 }
 
 // ============================================================================
 // Implementation
 // ============================================================================
+
+/// Convert `ReasoningEffort` enum to the API string representation.
+fn effort_to_str(effort: &ReasoningEffort) -> &'static str {
+    match effort {
+        ReasoningEffort::XHigh => "xhigh",
+        ReasoningEffort::High => "high",
+        ReasoningEffort::Medium => "medium",
+        ReasoningEffort::Low => "low",
+        ReasoningEffort::Minimal => "minimal",
+    }
+}
+
+/// Build a `ReasoningRequest` from `ChatOptions`, or None if no reasoning config is set.
+fn build_reasoning_request(options: &ChatOptions) -> Option<ReasoningRequest> {
+    if options.reasoning_effort.is_none() && options.reasoning_budget.is_none() && !options.exclude_reasoning {
+        return None;
+    }
+    Some(ReasoningRequest {
+        effort: options.reasoning_effort.as_ref().map(effort_to_str),
+        max_tokens: options.reasoning_budget,
+        exclude: options.exclude_reasoning,
+    })
+}
 
 /// Normalize a schemars Schema into OpenAI-compatible JSON.
 /// OpenAI requires `type: "object"` and `properties` even for empty params.
@@ -203,11 +302,22 @@ impl LLM for OpenAI {
         &self,
         model: &str,
         msgs: &[LLMMessage],
+        options: &ChatOptions,
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>> {
         let client = self.client.clone();
         let api_key = self.api_key.clone();
         let base_url = self.base_url.clone();
         let model = model.to_string();
+        let is_openrouter = base_url.contains("openrouter.ai");
+        let reasoning_request = build_reasoning_request(options);
+        // OpenAI Chat Completions uses top-level `reasoning_effort` string;
+        // OpenRouter uses nested `reasoning: { effort, ... }` object.
+        let (reasoning, reasoning_effort) = if is_openrouter {
+            (reasoning_request, None)
+        } else {
+            let effort_str = reasoning_request.as_ref().and_then(|r| r.effort);
+            (None, effort_str)
+        };
 
         // Convert messages
         let messages: Vec<ChatMessage> = msgs
@@ -218,38 +328,63 @@ impl LLM for OpenAI {
                     content: Some(content.clone()),
                     tool_call_id: None,
                     tool_calls: None,
+                    reasoning_details: None,
                 },
                 LLMMessage::User(content) => ChatMessage {
                     role: "user",
                     content: Some(content.clone()),
                     tool_call_id: None,
                     tool_calls: None,
+                    reasoning_details: None,
                 },
-                LLMMessage::Assistant { content, tool_calls } => {
+                LLMMessage::Assistant {
+                    content,
+                    tool_calls,
+                    reasoning,
+                } => {
                     let tc = if tool_calls.is_empty() {
                         None
                     } else {
-                        Some(tool_calls.iter().map(|tc| ChatMessageToolCall {
-                            id: tc.id.clone(),
-                            call_type: "function",
-                            function: ChatMessageToolCallFunction {
-                                name: tc.name.clone(),
-                                arguments: tc.arguments.clone(),
-                            },
-                        }).collect())
+                        Some(
+                            tool_calls
+                                .iter()
+                                .map(|tc| ChatMessageToolCall {
+                                    id: tc.id.clone(),
+                                    call_type: "function",
+                                    function: ChatMessageToolCallFunction {
+                                        name: tc.name.clone(),
+                                        arguments: tc.arguments.clone(),
+                                    },
+                                })
+                                .collect(),
+                        )
+                    };
+                    let rd = if reasoning.is_empty() {
+                        None
+                    } else {
+                        Some(reasoning.iter().map(|r| r.to_json()).collect())
                     };
                     ChatMessage {
                         role: "assistant",
-                        content: if content.is_empty() { None } else { Some(content.clone()) },
+                        content: if content.is_empty() {
+                            None
+                        } else {
+                            Some(content.clone())
+                        },
                         tool_call_id: None,
                         tool_calls: tc,
+                        reasoning_details: rd,
                     }
-                },
-                LLMMessage::ToolResult { tool_call_id, content } => ChatMessage {
+                }
+                LLMMessage::ToolResult {
+                    tool_call_id,
+                    content,
+                } => ChatMessage {
                     role: "tool",
                     content: Some(content.clone()),
                     tool_call_id: Some(tool_call_id.clone()),
                     tool_calls: None,
+                    reasoning_details: None,
                 },
             })
             .collect();
@@ -264,6 +399,8 @@ impl LLM for OpenAI {
                 stream: true,
                 tools: tool_defs,
                 stream_options: Some(StreamOptions { include_usage: true }),
+                reasoning,
+                reasoning_effort,
             };
 
             let url = format!("{}/chat/completions", base_url);
@@ -294,8 +431,14 @@ impl LLM for OpenAI {
             let mut tool_calls: HashMap<usize, (String, String, String)> = HashMap::new();
             let mut input_tokens = 0i32;
             let mut output_tokens = 0i32;
+            let mut reasoning_tokens = 0i32;
             let mut emitted_start = false;
             let mut stop_reason: Option<StopReason> = None;
+
+            // Accumulate reasoning details for round-tripping
+            let mut accumulated_reasoning: Vec<Arc<dyn ReasoningDetail>> = Vec::new();
+            // Accumulate simple reasoning_content text (some providers use this instead of reasoning_details)
+            let mut accumulated_reasoning_text = String::new();
 
             let mut byte_stream = response.bytes_stream();
             let mut buffer = String::new();
@@ -327,10 +470,20 @@ impl LLM for OpenAI {
                     let data = &line[6..];
 
                     if data == "[DONE]" {
+                        // Convert any accumulated reasoning_content text to a detail
+                        if !accumulated_reasoning_text.is_empty() {
+                            let text = std::mem::take(&mut accumulated_reasoning_text);
+                            accumulated_reasoning.push(Arc::new(
+                                OpenAIReasoningDetail::from_text(text),
+                            ));
+                        }
+
                         yield LLMEvent::MessageEnd {
                             stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
                             input_tokens,
                             output_tokens,
+                            reasoning_tokens,
+                            reasoning: std::mem::take(&mut accumulated_reasoning),
                         };
                         return;
                     }
@@ -347,6 +500,10 @@ impl LLM for OpenAI {
                     if let Some(usage) = chunk.usage {
                         input_tokens = usage.prompt_tokens;
                         output_tokens = usage.completion_tokens;
+                        reasoning_tokens = usage
+                            .output_tokens_details
+                            .map(|d| d.reasoning_tokens)
+                            .unwrap_or(0);
                     }
 
                     for choice in chunk.choices {
@@ -354,6 +511,36 @@ impl LLM for OpenAI {
                         if !emitted_start {
                             yield LLMEvent::MessageStart { input_tokens: 0 };
                             emitted_start = true;
+                        }
+
+                        // Handle reasoning details (structured array format — OpenRouter)
+                        if let Some(details) = choice.delta.reasoning_details {
+                            for detail_json in details {
+                                // Extract text for streaming display
+                                let text = detail_json
+                                    .get("text")
+                                    .and_then(|v| v.as_str())
+                                    .or_else(|| {
+                                        detail_json.get("summary").and_then(|v| v.as_str())
+                                    });
+                                if let Some(text) = text {
+                                    if !text.is_empty() {
+                                        yield LLMEvent::ThinkingDelta(text.to_string());
+                                    }
+                                }
+                                // Accumulate full detail for round-tripping
+                                accumulated_reasoning.push(Arc::new(
+                                    OpenAIReasoningDetail::from_json(detail_json),
+                                ));
+                            }
+                        }
+
+                        // Handle reasoning content (simple string format — some providers)
+                        if let Some(ref reasoning_text) = choice.delta.reasoning_content {
+                            if !reasoning_text.is_empty() {
+                                yield LLMEvent::ThinkingDelta(reasoning_text.clone());
+                                accumulated_reasoning_text.push_str(reasoning_text);
+                            }
                         }
 
                         // Handle text content
@@ -418,10 +605,20 @@ impl LLM for OpenAI {
                 }
             }
 
+            // Convert any accumulated reasoning_content text to a detail
+            if !accumulated_reasoning_text.is_empty() {
+                let text = std::mem::take(&mut accumulated_reasoning_text);
+                accumulated_reasoning.push(Arc::new(
+                    OpenAIReasoningDetail::from_text(text),
+                ));
+            }
+
             yield LLMEvent::MessageEnd {
                 stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
                 input_tokens,
                 output_tokens,
+                reasoning_tokens,
+                reasoning: std::mem::take(&mut accumulated_reasoning),
             };
         })
     }

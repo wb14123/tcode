@@ -13,16 +13,62 @@ use tokio_stream::Stream;
 
 use crate::tool::Tool;
 
+// ============================================================================
+// Reasoning / Thinking types
+// ============================================================================
+
+/// Reasoning effort level for thinking models.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ReasoningEffort {
+    XHigh,
+    High,
+    Medium,
+    Low,
+    Minimal,
+}
+
+/// Options for LLM chat requests.
+#[derive(Clone, Debug, Default)]
+pub struct ChatOptions {
+    /// Reasoning effort level (mutually exclusive with `reasoning_budget`).
+    pub reasoning_effort: Option<ReasoningEffort>,
+    /// Explicit reasoning token budget (mutually exclusive with `reasoning_effort`).
+    pub reasoning_budget: Option<u32>,
+    /// If true, model uses reasoning internally but doesn't return it in the response.
+    pub exclude_reasoning: bool,
+}
+
+/// Trait for reasoning/thinking details from model responses.
+///
+/// Each LLM provider implements this with its own format. For example, the OpenAI
+/// provider wraps raw JSON from the API, while a future Claude provider would
+/// extract from Claude's `thinking` content blocks.
+///
+/// `Arc<dyn ReasoningDetail>` is used in [`LLMMessage`] and [`LLMEvent`] for Clone support.
+pub trait ReasoningDetail: Send + Sync + std::fmt::Debug {
+    /// Get display text for showing to the user.
+    fn text(&self) -> Option<&str>;
+
+    /// Get raw JSON for sending back to the LLM API (round-tripping).
+    fn to_json(&self) -> serde_json::Value;
+}
+
+// ============================================================================
+// Message types
+// ============================================================================
+
 /// Message content for LLM conversations.
 #[derive(Clone, Debug)]
 pub enum LLMMessage {
     System(String),
     User(String),
-    /// Assistant message with optional tool calls.
-    /// When the assistant makes tool calls, the tool_calls vector will be populated.
+    /// Assistant message with optional tool calls and reasoning details.
     Assistant {
         content: String,
         tool_calls: Vec<ToolCall>,
+        /// Reasoning details from the model, used for round-tripping.
+        /// Empty vec means no reasoning was produced.
+        reasoning: Vec<Arc<dyn ReasoningDetail>>,
     },
     /// Tool result message. Includes the tool_call_id from the original ToolCall.
     ToolResult {
@@ -72,6 +118,10 @@ pub enum LLMEvent {
     /// Maps to Claude's text_delta or OpenAI's delta.content.
     TextDelta(String),
 
+    /// A chunk of reasoning/thinking text for streaming display.
+    /// Maps to OpenRouter's delta.reasoning_details or delta.reasoning_content.
+    ThinkingDelta(String),
+
     /// Model requests a tool call.
     /// Maps to Claude's tool_use content block or OpenAI's delta.tool_calls.
     ToolCall(ToolCall),
@@ -82,6 +132,11 @@ pub enum LLMEvent {
         stop_reason: StopReason,
         input_tokens: i32,
         output_tokens: i32,
+        /// Reasoning tokens used (subset of output_tokens). 0 if not reported.
+        reasoning_tokens: i32,
+        /// Full reasoning details from the provider for round-tripping.
+        /// Provider accumulates these during streaming and emits them here.
+        reasoning: Vec<Arc<dyn ReasoningDetail>>,
     },
 
     /// Error occurred during generation.
@@ -105,6 +160,7 @@ pub trait LLM: Send + Sync {
     /// # Arguments
     /// - `model`: Model identifier (e.g., "claude-3-opus", "gpt-4")
     /// - `msgs`: Conversation history using LLMMessage enum
+    /// - `options`: Chat options including reasoning configuration
     ///
     /// # Returns
     /// A stream of [`LLMEvent`]s representing the model's response.
@@ -112,5 +168,6 @@ pub trait LLM: Send + Sync {
         &self,
         model: &str,
         msgs: &[LLMMessage],
+        options: &ChatOptions,
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>>;
 }

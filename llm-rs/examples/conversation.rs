@@ -7,14 +7,14 @@
 //! - Send interactive user messages in a conversation
 //!
 //! Usage:
-//!   OPENAI_API_KEY=your-key cargo run --example conversation
+//!   OPENROUTER_API_KEY=your-key cargo run --example conversation
 
 use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
 
 use llm_rs::conversation::{ConversationManager, Message};
-use llm_rs::llm::OpenAI;
+use llm_rs::llm::{ChatOptions, OpenAI, ReasoningEffort};
 use llm_rs::tool;
 use tokio_stream::StreamExt;
 
@@ -47,8 +47,8 @@ fn get_current_time(
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-    let api_key = env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set");
-    let model = "gpt-4o-mini";
+    let api_key = env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set");
+    let model = "deepseek/deepseek-r1";
 
     // Create tools
     let tools = vec![
@@ -58,13 +58,17 @@ async fn main() -> anyhow::Result<()> {
 
     // Create conversation manager and start a conversation
     let manager = ConversationManager::new();
-    let llm = Box::new(OpenAI::new(&api_key, "https://api.openai.com/v1"));
+    let llm = Box::new(OpenAI::openrouter(&api_key));
 
     let client = manager.new_conversation(
         llm,
         "You are a helpful assistant. Use tools when needed to answer questions about weather and time.",
         model,
         tools,
+        ChatOptions {
+            reasoning_effort: Some(ReasoningEffort::Medium),
+            ..Default::default()
+        },
     )?;
 
     // Subscribe to messages (this must be done before sending to receive all messages)
@@ -139,14 +143,19 @@ fn print_message(msg: &Message) {
             print!("{}", content);
             io::stdout().flush().unwrap();
         }
+        Message::AssistantThinkingChunk { content, .. } => {
+            print!("[thinking: {}]", content);
+            io::stdout().flush().unwrap();
+        }
         Message::AssistantMessageEnd {
             input_tokens,
             output_tokens,
+            reasoning_tokens,
             ..
         } => {
             println!(
-                "\n    [tokens: {} in, {} out]",
-                input_tokens, output_tokens
+                "\n    [tokens: {} in, {} out, {} reasoning]",
+                input_tokens, output_tokens, reasoning_tokens
             );
         }
         Message::ToolMessageStart {

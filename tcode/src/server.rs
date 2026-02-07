@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use llm_rs::conversation::{ConversationManager, Message};
-use llm_rs::llm::OpenAI;
+use llm_rs::llm::{ChatOptions, OpenAI};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -80,6 +80,7 @@ impl Server {
             "You are a helpful assistant.",
             &self.model,
             vec![Arc::new(tools::web_fetch_tool()), Arc::new(tools::web_search_tool())],
+            ChatOptions::default(),
         )?;
 
         // Spawn background task to write conversation events to display files
