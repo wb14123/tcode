@@ -81,18 +81,20 @@ local function render_label(buf, ns, prefix, hl_group, data)
   return label_line
 end
 
--- Render a token/status info line as virtual text
+-- Render a token/status info line as virtual text, but errors as real text
 local function render_info(buf, ns, data, token_prefix)
   append_lines(buf, { '' })
   local info_line = vim.api.nvim_buf_line_count(buf) - 1
-  local parts = {}
+
+  -- Collect virtual text parts for tokens/status metadata
+  local virt_parts = {}
   if data.input_tokens and data.output_tokens then
     local has_tokens = not token_prefix or (data.input_tokens > 0 or data.output_tokens > 0)
     if has_tokens then
       local fmt = token_prefix
         and string.format('[%s: %%d in / %%d out tokens]', token_prefix)
         or '[%d in / %d out tokens]'
-      table.insert(parts, {
+      table.insert(virt_parts, {
         string.format(fmt, data.input_tokens, data.output_tokens),
         'TCodeTokens',
       })
@@ -100,17 +102,29 @@ local function render_info(buf, ns, data, token_prefix)
   end
   if data.end_status and data.end_status ~= 'Succeeded' then
     local prefix = token_prefix and ' [' .. string.upper(token_prefix) .. ' ' or ' ['
-    table.insert(parts, { prefix .. data.end_status .. ']', 'TCodeError' })
+    table.insert(virt_parts, { prefix .. data.end_status .. ']', 'TCodeError' })
   end
-  if type(data.error) == 'string' then
-    table.insert(parts, { ' Error: ' .. data.error, 'TCodeError' })
-  end
-  if #parts > 0 then
+
+  -- Render tokens/status as virtual text
+  if #virt_parts > 0 then
     vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
-      virt_text = parts,
+      virt_text = virt_parts,
       virt_text_pos = 'overlay',
     })
   end
+
+  -- Render error as real buffer text so it can wrap, be navigated, selected, copied
+  if type(data.error) == 'string' and data.error ~= '' then
+    append_lines(buf, { '' })
+    local error_start_line = vim.api.nvim_buf_line_count(buf) - 1
+    local error_lines = vim.split('Error: ' .. data.error, '\n', { plain = true })
+    vim.api.nvim_buf_set_lines(buf, error_start_line, error_start_line + 1, false, error_lines)
+    -- Apply error highlight to all error lines
+    for i = 0, #error_lines - 1 do
+      vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeError', error_start_line + i, 0, -1)
+    end
+  end
+
   return info_line
 end
 
