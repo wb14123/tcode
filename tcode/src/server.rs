@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use llm_rs::conversation::{ConversationManager, Message};
-use llm_rs::llm::{ChatOptions, OpenAI, OpenRouter, LLM};
+use llm_rs::llm::{ChatOptions, OpenAI, OpenRouter, ReasoningEffort, LLM};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -84,7 +84,10 @@ impl Server {
             "You are a helpful assistant.",
             &self.model,
             vec![Arc::new(tools::web_fetch_tool()), Arc::new(tools::web_search_tool())],
-            ChatOptions::default(),
+            ChatOptions{
+                reasoning_effort: Some(ReasoningEffort::Medium),
+                ..Default::default()
+            },
         )?;
 
         // Spawn background task to write conversation events to display files
@@ -94,6 +97,7 @@ impl Server {
         let session_dir = self.session_dir.clone();
         let mut event_writer = tokio::spawn(async move {
             let mut tool_calls: HashMap<String, ToolCallState> = HashMap::new();
+            let mut is_thinking = false;
 
             tracing::info!("event_writer started");
 
@@ -107,10 +111,22 @@ impl Server {
                 };
                 // Status file updates for assistant messages
                 if matches!(&*event, Message::AssistantMessageStart { .. }) {
+                    is_thinking = false;
+                    tokio::fs::write(&status_file, "Streaming...").await
+                        .context("Failed to write status file")?;
+                }
+                if matches!(&*event, Message::AssistantThinkingChunk { .. }) && !is_thinking {
+                    is_thinking = true;
+                    tokio::fs::write(&status_file, "Thinking...").await
+                        .context("Failed to write status file")?;
+                }
+                if matches!(&*event, Message::AssistantMessageChunk { .. }) && is_thinking {
+                    is_thinking = false;
                     tokio::fs::write(&status_file, "Streaming...").await
                         .context("Failed to write status file")?;
                 }
                 if matches!(&*event, Message::AssistantMessageEnd { .. }) {
+                    is_thinking = false;
                     tokio::fs::write(&status_file, "Ready").await
                         .context("Failed to write status file")?;
                 }

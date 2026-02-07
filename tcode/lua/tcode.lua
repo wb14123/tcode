@@ -56,6 +56,15 @@ end
 local tc_ns = vim.api.nvim_create_namespace('tcode_tc_id')
 local tc_extmark_ids = {}  -- extmark_id -> tool_call_id
 
+-- Thinking token state: track streaming thinking and collapsed entries
+local thinking_ns = vim.api.nvim_create_namespace('tcode_thinking')
+local thinking_entries = {}  -- extmark_id -> { content, expanded }
+local thinking_state = {
+  is_thinking = false,
+  start_row = nil,
+  content = '',
+}
+
 -- Render a label line with optional timestamp as virtual text
 local function render_label(buf, ns, prefix, hl_group, data)
   append_lines(buf, { '' })
@@ -120,6 +129,90 @@ local function extend_tc_extmark(buf, tool_call_id, end_row)
   end
 end
 
+-- Collapse streaming thinking content into a single indicator line
+local function collapse_thinking(buf, ns)
+  if not thinking_state.is_thinking then return end
+
+  local start_row = thinking_state.start_row
+  local end_row = vim.api.nvim_buf_line_count(buf) - 1
+
+  -- Replace thinking lines with indicator line + spacer + empty line for subsequent content
+  if end_row >= start_row then
+    vim.api.nvim_buf_set_lines(buf, start_row, end_row + 1, false, { '', '', '' })
+  end
+
+  -- Place indicator extmark
+  local mark_id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
+    virt_text = { { '[Thinking... press o to expand]', 'TCodeTokens' } },
+    virt_text_pos = 'overlay',
+  })
+
+  -- Store for later expansion
+  thinking_entries[mark_id] = {
+    content = thinking_state.content,
+    expanded = false,
+  }
+
+  -- Reset thinking state
+  thinking_state.is_thinking = false
+  thinking_state.content = ''
+  thinking_state.start_row = nil
+end
+
+-- Find a thinking extmark at the given buffer line (0-indexed)
+local function find_thinking_at_line(buf, line)
+  local marks = vim.api.nvim_buf_get_extmarks(buf, thinking_ns, 0, -1, { details = true })
+  for _, mark in ipairs(marks) do
+    local start_row = mark[2]
+    local details = mark[4]
+    local end_row = details.end_row or start_row
+    if line >= start_row and line <= end_row then
+      return mark[1]
+    end
+  end
+  return nil
+end
+
+-- Toggle thinking content expand/collapse inline
+local function toggle_thinking(buf, mark_id)
+  local entry = thinking_entries[mark_id]
+  if not entry then return end
+
+  vim.bo[buf].modifiable = true
+
+  local mark = vim.api.nvim_buf_get_extmark_by_id(buf, thinking_ns, mark_id, {})
+  local start_row = mark[1]
+  local content_lines = vim.split(entry.content, '\n', { plain = true })
+
+  if entry.expanded then
+    -- Collapse: replace content lines with single blank indicator line
+    vim.api.nvim_buf_set_lines(buf, start_row, start_row + #content_lines, false, { '' })
+    vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
+      id = mark_id,
+      virt_text = { { '[Thinking... press o to expand]', 'TCodeTokens' } },
+      virt_text_pos = 'overlay',
+    })
+    entry.expanded = false
+  else
+    -- Expand: replace blank indicator line with content
+    vim.api.nvim_buf_set_lines(buf, start_row, start_row + 1, false, content_lines)
+    -- Apply thinking highlight to all expanded lines
+    for i = 0, #content_lines - 1 do
+      vim.api.nvim_buf_add_highlight(buf, thinking_ns, 'TCodeThinking', start_row + i, 0, -1)
+    end
+    vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
+      id = mark_id,
+      end_row = start_row + #content_lines - 1,
+      end_col = 0,
+      virt_text = { { '[Thinking... press o to collapse]', 'TCodeTokens' } },
+      virt_text_pos = 'right_align',
+    })
+    entry.expanded = true
+  end
+
+  vim.bo[buf].modifiable = false
+end
+
 -- Render a single JSONL event into the buffer with extmarks
 -- Serde externally-tagged enums: {"VariantName": {fields...}}
 local function render_event(buf, ns, event)
@@ -135,10 +228,30 @@ local function render_event(buf, ns, event)
     render_label(buf, ns, '>>> ASSISTANT', 'TCodeAssistant', data)
     append_lines(buf, { '' })
 
+  elseif variant == 'AssistantThinkingChunk' then
+    if not thinking_state.is_thinking then
+      thinking_state.is_thinking = true
+      thinking_state.start_row = vim.api.nvim_buf_line_count(buf) - 1  -- 0-indexed row where append_text writes
+      thinking_state.content = ''
+    end
+    thinking_state.content = thinking_state.content .. data.content
+    append_text(buf, data.content)
+    -- Apply thinking highlight to all lines from start_row to end of buffer
+    local end_line = vim.api.nvim_buf_line_count(buf) - 1
+    for i = thinking_state.start_row, end_line do
+      vim.api.nvim_buf_add_highlight(buf, thinking_ns, 'TCodeThinking', i, 0, -1)
+    end
+
   elseif variant == 'AssistantMessageChunk' then
+    if thinking_state.is_thinking then
+      collapse_thinking(buf, ns)
+    end
     append_text(buf, data.content)
 
   elseif variant == 'AssistantMessageEnd' then
+    if thinking_state.is_thinking then
+      collapse_thinking(buf, ns)
+    end
     render_info(buf, ns, data, nil)
 
   elseif variant == 'ToolMessageStart' then
@@ -200,6 +313,7 @@ local function setup_highlights(statusline_fg, statusline_ctermfg)
   vim.api.nvim_set_hl(0, 'TCodeUser', { fg = '#61afef', bold = true, ctermfg = 75 })
   vim.api.nvim_set_hl(0, 'TCodeAssistant', { fg = '#98c379', bold = true, ctermfg = 114 })
   vim.api.nvim_set_hl(0, 'TCodeTool', { fg = '#e5c07b', bold = true, ctermfg = 180 })
+  vim.api.nvim_set_hl(0, 'TCodeThinking', { fg = '#7c8495', italic = true, ctermfg = 245 })
   vim.api.nvim_set_hl(0, 'TCodeTokens', { fg = '#5c6370', italic = true, ctermfg = 242 })
   vim.api.nvim_set_hl(0, 'TCodeError', { fg = '#e06c75', bold = true, ctermfg = 168 })
   vim.api.nvim_set_hl(0, 'TCodeStatusLine', {
@@ -351,13 +465,22 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
 
   vim.keymap.set('n', 'q', ':qa!<CR>', { buffer = true, silent = true, desc = 'Quit' })
 
-  -- Keybinding to open tool call detail in a new tmux tab
+  -- Context-aware 'o' keybinding: toggle thinking or open tool call detail
   vim.keymap.set('n', 'o', function()
+    local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
+
+    -- Check for thinking extmark first
+    local thinking_mark = find_thinking_at_line(buf, cursor_line)
+    if thinking_mark then
+      toggle_thinking(buf, thinking_mark)
+      return
+    end
+
+    -- Fall through to tool call detail
     if not M.exe_path or not M.session_id then
       vim.notify('Session info not available', vim.log.levels.ERROR)
       return
     end
-    local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
     local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, { details = true })
     local tool_call_id = nil
     for _, mark in ipairs(marks) do
@@ -370,7 +493,6 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
       end
     end
     if not tool_call_id then
-      vim.notify('No tool call on this line', vim.log.levels.WARN)
       return
     end
     local cmd = string.format('%s --session=%s tool-call %s', M.exe_path, M.session_id, tool_call_id)

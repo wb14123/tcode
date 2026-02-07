@@ -52,7 +52,7 @@ struct Cli {
     api_key: Option<String>,
 
     /// Model to use
-    #[arg(long, default_value = "gpt-4o")]
+    #[arg(long, default_value = "gpt-5-nano")]
     model: String,
 
     /// Base URL for the API
