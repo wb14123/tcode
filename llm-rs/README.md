@@ -12,7 +12,8 @@ The `LLM` trait defines a provider-agnostic interface for chat completions with 
 - **`LLMEvent`**: MessageStart, TextDelta, ThinkingDelta, ToolCall, MessageEnd (with stop reason and token usage), Error.
 - **`LLMMessage`**: Enum of System, User, Assistant (with tool calls), and ToolResult messages.
 - **`ChatOptions`**: Reasoning effort/budget controls.
-- **OpenAI implementation** (`openai.rs`): Works with OpenAI, OpenRouter, and any OpenAI-compatible API. Handles SSE streaming, function calling, and reasoning/thinking tokens.
+- **OpenAI implementation** (`openai.rs`): Uses the Responses API (`/v1/responses`). Handles SSE streaming, function calling, and reasoning tokens.
+- **OpenRouter implementation** (`openrouter.rs`): Uses Chat Completions API for OpenRouter and compatible providers.
 
 ### `conversation` - Conversation Manager
 
@@ -32,6 +33,21 @@ Streaming tool execution with timeout support.
 - **`TimeoutStream`**: Wraps a tool's output stream to enforce a total execution timeout.
 
 Tools are typically defined using the `#[tool]` macro from `llm-rs-macros`, not constructed manually.
+
+## Reasoning / Thinking Tokens
+
+Models like OpenAI's o1/o3 and DeepSeek R1 produce reasoning tokens before their final response. This library handles them as follows:
+
+**Streaming Display**: Reasoning is streamed via `ThinkingDelta` events for real-time display. Token usage is tracked separately in `MessageEnd.reasoning_tokens`.
+
+**Multi-turn Persistence**:
+
+| Provider | Reasoning Persisted | Notes |
+|----------|---------------------|-------|
+| OpenRouter | ✅ Yes | Passed back via `reasoning_details` in Chat Completions format |
+| OpenAI | ❌ No | Responses API requires specific item ordering that's difficult to reconstruct |
+
+For OpenAI, the model works normally but loses visibility into its previous chain of thought. To enable full reasoning persistence with OpenAI, use server-managed conversations (`store=true` + `previous_response_id`).
 
 ## Conversation Flow
 
