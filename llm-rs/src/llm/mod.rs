@@ -44,20 +44,6 @@ pub struct ChatOptions {
     pub exclude_reasoning: bool,
 }
 
-/// Trait for reasoning/thinking details from model responses.
-///
-/// Each LLM provider implements this with its own format. For example, the OpenAI
-/// provider wraps raw JSON from the API, while a future Claude provider would
-/// extract from Claude's `thinking` content blocks.
-///
-/// `Arc<dyn ReasoningDetail>` is used in [`LLMMessage`] and [`LLMEvent`] for Clone support.
-pub trait ReasoningDetail: Send + Sync + std::fmt::Debug {
-    /// Get display text for showing to the user.
-    fn text(&self) -> Option<&str>;
-
-    /// Get raw JSON for sending back to the LLM API (round-tripping).
-    fn to_json(&self) -> serde_json::Value;
-}
 
 // ============================================================================
 // Message types
@@ -68,13 +54,13 @@ pub trait ReasoningDetail: Send + Sync + std::fmt::Debug {
 pub enum LLMMessage {
     System(String),
     User(String),
-    /// Assistant message with optional tool calls and reasoning details.
+    /// Assistant message with optional tool calls.
     Assistant {
         content: String,
         tool_calls: Vec<ToolCall>,
-        /// Reasoning details from the model, used for round-tripping.
-        /// Empty vec means no reasoning was produced.
-        reasoning: Vec<Arc<dyn ReasoningDetail>>,
+        /// Raw provider response for round-tripping. If present, send this to LLM
+        /// instead of reconstructing from other fields.
+        raw: Option<serde_json::Value>,
     },
     /// Tool result message. Includes the tool_call_id from the original ToolCall.
     ToolResult {
@@ -140,9 +126,8 @@ pub enum LLMEvent {
         output_tokens: i32,
         /// Reasoning tokens used (subset of output_tokens). 0 if not reported.
         reasoning_tokens: i32,
-        /// Full reasoning details from the provider for round-tripping.
-        /// Provider accumulates these during streaming and emits them here.
-        reasoning: Vec<Arc<dyn ReasoningDetail>>,
+        /// Raw provider response for round-tripping.
+        raw: Option<serde_json::Value>,
     },
 
     /// Error occurred during generation.

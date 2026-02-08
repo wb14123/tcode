@@ -2,45 +2,8 @@
 
 use std::sync::Arc;
 
-use super::{ChatOptions, ReasoningDetail, ReasoningEffort};
+use super::{ChatOptions, ReasoningEffort};
 use crate::tool::Tool;
-
-// ============================================================================
-// Shared ReasoningDetail for Chat Completions API (used by OpenRouter)
-// ============================================================================
-
-/// Reasoning detail wrapping raw JSON from the Chat Completions API.
-///
-/// Used by OpenRouter and other Chat Completions-compatible providers.
-#[derive(Debug)]
-pub(crate) struct ChatCompletionsReasoningDetail {
-    raw: serde_json::Value,
-}
-
-impl ChatCompletionsReasoningDetail {
-    pub fn from_json(value: serde_json::Value) -> Self {
-        Self { raw: value }
-    }
-
-    pub fn from_text(text: String) -> Self {
-        Self {
-            raw: serde_json::json!({"type": "reasoning.text", "text": text}),
-        }
-    }
-}
-
-impl ReasoningDetail for ChatCompletionsReasoningDetail {
-    fn text(&self) -> Option<&str> {
-        self.raw
-            .get("text")
-            .and_then(|v| v.as_str())
-            .or_else(|| self.raw.get("summary").and_then(|v| v.as_str()))
-    }
-
-    fn to_json(&self) -> serde_json::Value {
-        self.raw.clone()
-    }
-}
 
 // ============================================================================
 // Shared tool definition types (for Chat Completions API format)

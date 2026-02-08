@@ -21,12 +21,12 @@ mod tests {
     #[derive(serde::Deserialize, schemars::JsonSchema)]
     struct EmptyParams {}
 
-    fn get_openai_key() -> Option<String> {
-        std::env::var("OPENAI_API_KEY").ok()
+    fn get_openai_key() -> String {
+        std::env::var("OPENAI_API_KEY").expect("OPENAI_API_KEY must be set")
     }
 
-    fn get_openrouter_key() -> Option<String> {
-        std::env::var("OPENROUTER_API_KEY").ok()
+    fn get_openrouter_key() -> String {
+        std::env::var("OPENROUTER_API_KEY").expect("OPENROUTER_API_KEY must be set")
     }
 
     /// Collect all events from a chat stream.
@@ -73,12 +73,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_openai_basic_chat() {
-        let Some(key) = get_openai_key() else {
-            eprintln!("Skipping test_openai_basic_chat: OPENAI_API_KEY not set");
-            return;
-        };
-
-        let client = OpenAI::new(&key);
+        let client = OpenAI::new(get_openai_key());
         let messages = vec![
             LLMMessage::System("You are a helpful assistant. Be very concise.".to_string()),
             LLMMessage::User("Say hello in exactly 3 words.".to_string()),
@@ -114,12 +109,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_openai_reasoning() {
-        let Some(key) = get_openai_key() else {
-            eprintln!("Skipping test_openai_reasoning: OPENAI_API_KEY not set");
-            return;
-        };
-
-        let client = OpenAI::new(&key);
+        let client = OpenAI::new(get_openai_key());
         let messages = vec![
             LLMMessage::System("You are a helpful assistant.".to_string()),
             LLMMessage::User("What is 17 * 23? Think step by step.".to_string()),
@@ -143,29 +133,45 @@ mod tests {
         assert!(events.iter().any(|e| matches!(e, LLMEvent::TextDelta(_))),
             "Expected TextDelta events, got: {summary}");
 
-        // Check reasoning tokens > 0
+        // Check raw is present for round-tripping and contains reasoning
         if let Some(LLMEvent::MessageEnd {
-            stop_reason,
-            input_tokens,
-            output_tokens,
-            reasoning_tokens,
-            reasoning,
+            stop_reason: _,
+            input_tokens: _,
+            output_tokens: _,
+            reasoning_tokens: _,
+            raw,
         }) = events.iter().find(|e| matches!(e, LLMEvent::MessageEnd { .. }))
         {
             let thinking_count = events.iter().filter(|e| matches!(e, LLMEvent::ThinkingDelta(_))).count();
             assert!(
-                *reasoning_tokens > 0,
-                "Expected reasoning_tokens > 0, got 0. \
-                 Usage: input={input_tokens}, output={output_tokens}, reasoning={reasoning_tokens}. \
-                 Stop: {stop_reason:?}. ThinkingDelta events: {thinking_count}. \
-                 Reasoning details count: {}",
-                reasoning.len(),
+                thinking_count > 0,
+                "Expected ThinkingDelta events with reasoning enabled, got 0",
             );
             assert!(
-                !reasoning.is_empty(),
-                "Expected reasoning details for round-tripping, got empty vec. \
-                 reasoning_tokens={reasoning_tokens}, ThinkingDelta events: {thinking_count}",
+                raw.is_some(),
+                "Expected raw output for round-tripping, got None. \
+                 ThinkingDelta events: {thinking_count}",
             );
+            // Verify raw contains an array with reasoning item
+            if let Some(raw_value) = raw {
+                assert!(
+                    raw_value.is_array(),
+                    "Expected raw to be an array, got: {raw_value:?}"
+                );
+                let arr = raw_value.as_array().unwrap();
+                assert!(
+                    !arr.is_empty(),
+                    "Expected raw array to have items for round-tripping"
+                );
+                // Check that at least one item is a reasoning item
+                let has_reasoning = arr.iter().any(|item| {
+                    item.get("type").and_then(|t| t.as_str()) == Some("reasoning")
+                });
+                assert!(
+                    has_reasoning,
+                    "Expected raw to contain a reasoning item for round-tripping, got: {raw_value:?}"
+                );
+            }
         } else {
             panic!("No MessageEnd event found, got: {summary}");
         }
@@ -173,11 +179,6 @@ mod tests {
 
     #[tokio::test]
     async fn test_openai_tool_call() {
-        let Some(key) = get_openai_key() else {
-            eprintln!("Skipping test_openai_tool_call: OPENAI_API_KEY not set");
-            return;
-        };
-
         // Define a simple tool
         let tool = Tool::new::<EmptyParams, _, _, _, _>(
             "get_weather",
@@ -188,7 +189,7 @@ mod tests {
             },
         );
 
-        let mut client = OpenAI::new(&key);
+        let mut client = OpenAI::new(get_openai_key());
         client.register_tools(vec![Arc::new(tool)]);
 
         let messages = vec![LLMMessage::User(
@@ -224,18 +225,88 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn test_openai_reasoning_multi_turn() {
+        let client = OpenAI::new(get_openai_key());
+        let options = ChatOptions {
+            reasoning_effort: Some(ReasoningEffort::Low),
+            ..Default::default()
+        };
+
+        // First turn: ask a question that requires reasoning
+        let messages = vec![
+            LLMMessage::System("You are a helpful assistant.".to_string()),
+            LLMMessage::User("What is 7 + 5?".to_string()),
+        ];
+
+        let stream = client.chat("gpt-5-nano", &messages, &options);
+        let events = collect_events(stream).await;
+
+        let errors = collect_errors(&events);
+        let summary = event_summary(&events);
+        assert!(errors.is_empty(), "First turn errors: {errors:?}\nEvents: {summary}");
+
+        // Extract the response for round-tripping
+        let mut accumulated_text = String::new();
+        let mut raw: Option<serde_json::Value> = None;
+
+        for event in &events {
+            match event {
+                LLMEvent::TextDelta(text) => accumulated_text.push_str(text),
+                LLMEvent::MessageEnd { raw: r, .. } => raw = r.clone(),
+                _ => {}
+            }
+        }
+
+        // Verify first turn has reasoning in raw for round-tripping
+        assert!(raw.is_some(), "Expected raw for round-tripping, got None");
+        let raw_value = raw.as_ref().unwrap();
+        assert!(raw_value.is_array(), "Expected raw to be an array");
+        let has_reasoning = raw_value.as_array().unwrap().iter().any(|item| {
+            item.get("type").and_then(|t| t.as_str()) == Some("reasoning")
+        });
+        assert!(
+            has_reasoning,
+            "First turn raw must contain reasoning item for round-trip test. Got: {raw_value:?}"
+        );
+
+        // Second turn: continue the conversation with the raw response containing reasoning
+        // If reasoning items aren't properly paired with their output items, OpenAI returns:
+        // "Item 'rs_...' of type 'reasoning' was provided without its required following item."
+        let messages = vec![
+            LLMMessage::System("You are a helpful assistant.".to_string()),
+            LLMMessage::User("What is 7 + 5?".to_string()),
+            LLMMessage::Assistant {
+                content: accumulated_text,
+                tool_calls: vec![],
+                raw,
+            },
+            LLMMessage::User("Now multiply that by 2.".to_string()),
+        ];
+
+        let stream = client.chat("gpt-5-nano", &messages, &options);
+        let events = collect_events(stream).await;
+
+        let errors = collect_errors(&events);
+        let summary = event_summary(&events);
+        assert!(
+            errors.is_empty(),
+            "Second turn failed (reasoning round-trip issue): {errors:?}\nEvents: {summary}"
+        );
+
+        assert!(
+            events.iter().any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
+            "Expected MessageEnd in second turn, got: {summary}"
+        );
+    }
+
     // ========================================================================
     // OpenRouter (Chat Completions API) tests
     // ========================================================================
 
     #[tokio::test]
     async fn test_openrouter_basic_chat() {
-        let Some(key) = get_openrouter_key() else {
-            eprintln!("Skipping test_openrouter_basic_chat: OPENROUTER_API_KEY not set");
-            return;
-        };
-
-        let client = OpenRouter::new(&key);
+        let client = OpenRouter::new(get_openrouter_key());
         let messages = vec![
             LLMMessage::System("You are a helpful assistant. Be very concise.".to_string()),
             LLMMessage::User("Say hello in exactly 3 words.".to_string()),
@@ -259,5 +330,61 @@ mod tests {
             "Expected at least one TextDelta event, got: {summary}");
         assert!(events.iter().any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
             "Expected MessageEnd event, got: {summary}");
+    }
+
+    #[tokio::test]
+    async fn test_openrouter_multi_turn() {
+        let client = OpenRouter::new(get_openrouter_key());
+
+        // First turn
+        let messages = vec![
+            LLMMessage::System("You are a helpful assistant. Be concise.".to_string()),
+            LLMMessage::User("What is 3 + 4?".to_string()),
+        ];
+
+        let stream = client.chat("deepseek/deepseek-chat", &messages, &ChatOptions::default());
+        let events = collect_events(stream).await;
+
+        let errors = collect_errors(&events);
+        let summary = event_summary(&events);
+        assert!(errors.is_empty(), "First turn errors: {errors:?}\nEvents: {summary}");
+
+        // Extract response for round-tripping
+        let mut accumulated_text = String::new();
+        let mut raw: Option<serde_json::Value> = None;
+
+        for event in &events {
+            match event {
+                LLMEvent::TextDelta(text) => accumulated_text.push_str(text),
+                LLMEvent::MessageEnd { raw: r, .. } => raw = r.clone(),
+                _ => {}
+            }
+        }
+
+        assert!(raw.is_some(), "Expected raw for round-tripping");
+
+        // Second turn with raw response
+        let messages = vec![
+            LLMMessage::System("You are a helpful assistant. Be concise.".to_string()),
+            LLMMessage::User("What is 3 + 4?".to_string()),
+            LLMMessage::Assistant {
+                content: accumulated_text,
+                tool_calls: vec![],
+                raw,
+            },
+            LLMMessage::User("Multiply that by 2.".to_string()),
+        ];
+
+        let stream = client.chat("deepseek/deepseek-chat", &messages, &ChatOptions::default());
+        let events = collect_events(stream).await;
+
+        let errors = collect_errors(&events);
+        let summary = event_summary(&events);
+        assert!(errors.is_empty(), "Second turn errors: {errors:?}\nEvents: {summary}");
+
+        assert!(
+            events.iter().any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
+            "Expected MessageEnd in second turn, got: {summary}"
+        );
     }
 }

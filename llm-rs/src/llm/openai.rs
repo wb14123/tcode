@@ -89,34 +89,35 @@ fn convert_messages(msgs: &[LLMMessage]) -> Vec<InputItem> {
             LLMMessage::Assistant {
                 content,
                 tool_calls,
-                reasoning: _reasoning,
+                raw,
             } => {
-                // NOTE: We intentionally do NOT pass reasoning items back in stateless mode.
-                // OpenAI requires reasoning items to be followed by their output items in a
-                // specific format that's difficult to reconstruct. For proper reasoning
-                // persistence across turns, use server-managed mode with `previous_response_id`.
-                //
-                // The model will still work without reasoning context - it just won't have
-                // visibility into its previous chain of thought.
-
-                // Assistant text as a message
-                if !content.is_empty() {
-                    items.push(InputItem::EasyMessage(EasyInputMessage {
-                        role: Role::Assistant,
-                        content: EasyInputContent::Text(content.clone()),
-                        r#type: Default::default(),
-                    }));
-                }
-
-                // Tool calls as FunctionCall items
-                for tc in tool_calls {
-                    items.push(InputItem::Item(Item::FunctionCall(FunctionToolCall {
-                        call_id: tc.id.clone(),
-                        name: tc.name.clone(),
-                        arguments: tc.arguments.clone(),
-                        id: None,
-                        status: None,
-                    })));
+                if let Some(raw_value) = raw {
+                    // Use raw output items directly - preserves reasoning + message pairing
+                    if let Some(arr) = raw_value.as_array() {
+                        for item_json in arr {
+                            if let Ok(item) = serde_json::from_value::<Item>(item_json.clone()) {
+                                items.push(InputItem::Item(item));
+                            }
+                        }
+                    }
+                } else {
+                    // Fallback: reconstruct from fields (for messages not from OpenAI)
+                    if !content.is_empty() {
+                        items.push(InputItem::EasyMessage(EasyInputMessage {
+                            role: Role::Assistant,
+                            content: EasyInputContent::Text(content.clone()),
+                            r#type: Default::default(),
+                        }));
+                    }
+                    for tc in tool_calls {
+                        items.push(InputItem::Item(Item::FunctionCall(FunctionToolCall {
+                            call_id: tc.id.clone(),
+                            name: tc.name.clone(),
+                            arguments: tc.arguments.clone(),
+                            id: None,
+                            status: None,
+                        })));
+                    }
                 }
             }
             LLMMessage::ToolResult {
@@ -300,6 +301,14 @@ impl LLM for OpenAI {
                     ResponseStreamEvent::ResponseCompleted(e) => {
                         let response = e.response;
 
+                        // Serialize full output for round-tripping (preserves reasoning + message pairing)
+                        let raw_output: serde_json::Value = serde_json::Value::Array(
+                            response.output
+                                .iter()
+                                .map(|item| serde_json::to_value(item).unwrap_or_default())
+                                .collect()
+                        );
+
                         let (input_tokens, output_tokens, reasoning_tokens) =
                             if let Some(usage) = &response.usage {
                                 (
@@ -328,7 +337,7 @@ impl LLM for OpenAI {
                             input_tokens,
                             output_tokens,
                             reasoning_tokens,
-                            reasoning: vec![],
+                            raw: Some(raw_output),
                         };
                         return;
                     }
@@ -346,6 +355,14 @@ impl LLM for OpenAI {
                     ResponseStreamEvent::ResponseIncomplete(e) => {
                         let response = e.response;
 
+                        // Serialize partial output for round-tripping
+                        let raw_output: serde_json::Value = serde_json::Value::Array(
+                            response.output
+                                .iter()
+                                .map(|item| serde_json::to_value(item).unwrap_or_default())
+                                .collect()
+                        );
+
                         let (input_tokens, output_tokens, reasoning_tokens) =
                             if let Some(usage) = &response.usage {
                                 (
@@ -362,7 +379,7 @@ impl LLM for OpenAI {
                             input_tokens,
                             output_tokens,
                             reasoning_tokens,
-                            reasoning: vec![],
+                            raw: Some(raw_output),
                         };
                         return;
                     }
@@ -385,7 +402,7 @@ impl LLM for OpenAI {
                     input_tokens: 0,
                     output_tokens: 0,
                     reasoning_tokens: 0,
-                    reasoning: vec![],
+                    raw: None,
                 };
             }
         })

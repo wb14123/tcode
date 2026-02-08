@@ -288,6 +288,7 @@ impl Conversation {
                         });
                     }
                     LLMEvent::ThinkingDelta(text) => {
+                        // Reasoning is streamed for display; raw field handles round-tripping
                         self.broadcast_msg(Message::AssistantThinkingChunk {
                             msg_id: self.next_msg_id(),
                             content: Arc::new(text),
@@ -301,7 +302,7 @@ impl Conversation {
                         input_tokens,
                         output_tokens,
                         reasoning_tokens,
-                        reasoning,
+                        raw,
                     } => {
                         self.total_input_tokens += input_tokens;
                         self.total_output_tokens += output_tokens;
@@ -331,16 +332,16 @@ impl Conversation {
                             self.llm_msgs.push(LLMMessage::Assistant {
                                 content: accumulated_text.clone(),
                                 tool_calls: tool_calls.clone(),
-                                reasoning,
+                                raw: raw.clone(),
                             });
                             self.execute_tool_calls(tool_calls).await;
                             should_continue = true;
-                        } else if !accumulated_text.is_empty() || !reasoning.is_empty() {
+                        } else if !accumulated_text.is_empty() || raw.is_some() {
                             // Add assistant response to llm_msgs for context
                             self.llm_msgs.push(LLMMessage::Assistant {
                                 content: accumulated_text.clone(),
                                 tool_calls: vec![],
-                                reasoning,
+                                raw: raw.clone(),
                             });
                         }
                     }

@@ -11,10 +11,8 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
-use super::{ChatOptions, LLMEvent, LLMMessage, ReasoningDetail, StopReason, ToolCall, LLM};
-use super::openai_common::{
-    self, ChatCompletionsReasoningDetail, ReasoningRequest, ToolDefinition,
-};
+use super::{ChatOptions, LLMEvent, LLMMessage, StopReason, ToolCall, LLM};
+use super::openai_common::{self, ReasoningRequest, ToolDefinition};
 use crate::tool::Tool;
 
 // ============================================================================
@@ -83,15 +81,15 @@ struct ChatMessage {
     reasoning_details: Option<Vec<serde_json::Value>>,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ChatMessageToolCall {
     id: String,
     #[serde(rename = "type")]
-    call_type: &'static str,
+    call_type: String,
     function: ChatMessageToolCallFunction,
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct ChatMessageToolCallFunction {
     name: String,
     arguments: String,
@@ -202,40 +200,54 @@ impl LLM for OpenRouter {
                 LLMMessage::Assistant {
                     content,
                     tool_calls,
-                    reasoning,
+                    raw,
                 } => {
-                    let tc = if tool_calls.is_empty() {
-                        None
+                    if let Some(raw_value) = raw {
+                        // Use raw message directly if available
+                        let content = raw_value.get("content").and_then(|v| v.as_str()).map(String::from);
+                        let tc = raw_value.get("tool_calls").and_then(|v| {
+                            serde_json::from_value::<Vec<ChatMessageToolCall>>(v.clone()).ok()
+                        });
+                        let rd = raw_value.get("reasoning_details").and_then(|v| {
+                            v.as_array().map(|arr| arr.clone())
+                        });
+                        ChatMessage {
+                            role: "assistant",
+                            content,
+                            tool_call_id: None,
+                            tool_calls: tc,
+                            reasoning_details: rd,
+                        }
                     } else {
-                        Some(
-                            tool_calls
-                                .iter()
-                                .map(|tc| ChatMessageToolCall {
-                                    id: tc.id.clone(),
-                                    call_type: "function",
-                                    function: ChatMessageToolCallFunction {
-                                        name: tc.name.clone(),
-                                        arguments: tc.arguments.clone(),
-                                    },
-                                })
-                                .collect(),
-                        )
-                    };
-                    let rd = if reasoning.is_empty() {
-                        None
-                    } else {
-                        Some(reasoning.iter().map(|r| r.to_json()).collect())
-                    };
-                    ChatMessage {
-                        role: "assistant",
-                        content: if content.is_empty() {
+                        // Fallback: reconstruct from fields
+                        let tc = if tool_calls.is_empty() {
                             None
                         } else {
-                            Some(content.clone())
-                        },
-                        tool_call_id: None,
-                        tool_calls: tc,
-                        reasoning_details: rd,
+                            Some(
+                                tool_calls
+                                    .iter()
+                                    .map(|tc| ChatMessageToolCall {
+                                        id: tc.id.clone(),
+                                        call_type: "function".to_string(),
+                                        function: ChatMessageToolCallFunction {
+                                            name: tc.name.clone(),
+                                            arguments: tc.arguments.clone(),
+                                        },
+                                    })
+                                    .collect(),
+                            )
+                        };
+                        ChatMessage {
+                            role: "assistant",
+                            content: if content.is_empty() {
+                                None
+                            } else {
+                                Some(content.clone())
+                            },
+                            tool_call_id: None,
+                            tool_calls: tc,
+                            reasoning_details: None,
+                        }
                     }
                 }
                 LLMMessage::ToolResult {
@@ -293,7 +305,8 @@ impl LLM for OpenRouter {
             let mut reasoning_tokens = 0i32;
             let mut emitted_start = false;
             let mut stop_reason: Option<StopReason> = None;
-            let mut accumulated_reasoning: Vec<Arc<dyn ReasoningDetail>> = Vec::new();
+            let mut accumulated_text = String::new();
+            let mut accumulated_reasoning_details: Vec<serde_json::Value> = Vec::new();
             let mut accumulated_reasoning_text = String::new();
 
             let mut byte_stream = response.bytes_stream();
@@ -321,11 +334,32 @@ impl LLM for OpenRouter {
                     let data = &line[6..];
 
                     if data == "[DONE]" {
-                        if !accumulated_reasoning_text.is_empty() {
-                            let text = std::mem::take(&mut accumulated_reasoning_text);
-                            accumulated_reasoning.push(Arc::new(
-                                ChatCompletionsReasoningDetail::from_text(text),
-                            ));
+                        // Build raw message for round-tripping
+                        let mut raw_msg = serde_json::json!({ "role": "assistant" });
+                        if !accumulated_text.is_empty() {
+                            raw_msg["content"] = accumulated_text.clone().into();
+                        }
+                        if !tool_calls.is_empty() {
+                            raw_msg["tool_calls"] = serde_json::json!(
+                                tool_calls.values().map(|(id, name, args)| {
+                                    serde_json::json!({
+                                        "id": id,
+                                        "type": "function",
+                                        "function": { "name": name, "arguments": args }
+                                    })
+                                }).collect::<Vec<_>>()
+                            );
+                        }
+                        // Combine reasoning_details and reasoning_content into reasoning_details
+                        if !accumulated_reasoning_details.is_empty() || !accumulated_reasoning_text.is_empty() {
+                            let mut all_details = accumulated_reasoning_details.clone();
+                            if !accumulated_reasoning_text.is_empty() {
+                                all_details.push(serde_json::json!({
+                                    "type": "reasoning.text",
+                                    "text": accumulated_reasoning_text
+                                }));
+                            }
+                            raw_msg["reasoning_details"] = serde_json::Value::Array(all_details);
                         }
 
                         yield LLMEvent::MessageEnd {
@@ -333,7 +367,7 @@ impl LLM for OpenRouter {
                             input_tokens,
                             output_tokens,
                             reasoning_tokens,
-                            reasoning: std::mem::take(&mut accumulated_reasoning),
+                            raw: Some(raw_msg),
                         };
                         return;
                     }
@@ -374,9 +408,7 @@ impl LLM for OpenRouter {
                                         yield LLMEvent::ThinkingDelta(text.to_string());
                                     }
                                 }
-                                accumulated_reasoning.push(Arc::new(
-                                    ChatCompletionsReasoningDetail::from_json(detail_json),
-                                ));
+                                accumulated_reasoning_details.push(detail_json);
                             }
                         }
 
@@ -389,6 +421,7 @@ impl LLM for OpenRouter {
 
                         if let Some(content) = choice.delta.content {
                             if !content.is_empty() {
+                                accumulated_text.push_str(&content);
                                 yield LLMEvent::TextDelta(content);
                             }
                         }
@@ -444,11 +477,21 @@ impl LLM for OpenRouter {
                 }
             }
 
-            if !accumulated_reasoning_text.is_empty() {
-                let text = std::mem::take(&mut accumulated_reasoning_text);
-                accumulated_reasoning.push(Arc::new(
-                    ChatCompletionsReasoningDetail::from_text(text),
-                ));
+            // Build raw message for round-tripping
+            let mut raw_msg = serde_json::json!({ "role": "assistant" });
+            if !accumulated_text.is_empty() {
+                raw_msg["content"] = accumulated_text.into();
+            }
+            // Note: tool_calls already drained above, but we don't need them in raw since we emitted ToolCall events
+            if !accumulated_reasoning_details.is_empty() || !accumulated_reasoning_text.is_empty() {
+                let mut all_details = accumulated_reasoning_details;
+                if !accumulated_reasoning_text.is_empty() {
+                    all_details.push(serde_json::json!({
+                        "type": "reasoning.text",
+                        "text": accumulated_reasoning_text
+                    }));
+                }
+                raw_msg["reasoning_details"] = serde_json::Value::Array(all_details);
             }
 
             yield LLMEvent::MessageEnd {
@@ -456,7 +499,7 @@ impl LLM for OpenRouter {
                 input_tokens,
                 output_tokens,
                 reasoning_tokens,
-                reasoning: std::mem::take(&mut accumulated_reasoning),
+                raw: Some(raw_msg),
             };
         })
     }
