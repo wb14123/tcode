@@ -1,7 +1,9 @@
 //! OpenAI Responses API LLM implementation.
 //!
-//! Uses the Responses API (`/v1/responses`) for better reasoning model support,
-//! reasoning summaries, and encrypted reasoning persistence across turns.
+//! Uses the Responses API (`/v1/responses`) for reasoning model support.
+//! Reasoning is streamed via `ThinkingDelta` events for display but not
+//! persisted across turns in stateless mode. For full reasoning persistence,
+//! use server-managed mode with `previous_response_id`.
 
 use std::pin::Pin;
 use std::sync::Arc;
@@ -9,8 +11,8 @@ use std::sync::Arc;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::responses::{
     CreateResponseArgs, EasyInputContent, EasyInputMessage, FunctionCallOutput,
-    FunctionCallOutputItemParam, FunctionToolCall, IncludeEnum, InputItem, InputParam, Item,
-    OutputItem, Reasoning, ReasoningItem, ResponseStreamEvent, Role, Status,
+    FunctionCallOutputItemParam, FunctionToolCall, InputItem, InputParam, Item,
+    OutputItem, Reasoning, ResponseStreamEvent, Role, Status,
     Tool as OAITool, FunctionTool,
 };
 use async_stream::stream;
@@ -18,45 +20,8 @@ use futures::StreamExt;
 use tokio_stream::Stream;
 
 use super::openai_common::{effort_to_str, normalize_schema_for_openai};
-use super::{ChatOptions, LLMEvent, LLMMessage, ReasoningDetail, StopReason, ToolCall, LLM};
+use super::{ChatOptions, LLMEvent, LLMMessage, StopReason, ToolCall, LLM};
 use crate::tool::Tool;
-
-// ============================================================================
-// Responses API ReasoningDetail implementation
-// ============================================================================
-
-/// Reasoning detail from the Responses API — wraps a full `ReasoningItem` as JSON.
-///
-/// Preserves `encrypted_content` for round-tripping reasoning across turns
-/// in stateless mode (store=false or ZDR).
-#[derive(Debug)]
-struct ResponsesReasoningDetail {
-    raw: serde_json::Value,
-}
-
-impl ResponsesReasoningDetail {
-    fn from_reasoning_item(item: &ReasoningItem) -> Self {
-        Self {
-            raw: serde_json::to_value(item).unwrap_or_default(),
-        }
-    }
-}
-
-impl ReasoningDetail for ResponsesReasoningDetail {
-    fn text(&self) -> Option<&str> {
-        // Extract from summary[0].text
-        self.raw
-            .get("summary")
-            .and_then(|s| s.as_array())
-            .and_then(|a| a.first())
-            .and_then(|item| item.get("text"))
-            .and_then(|t| t.as_str())
-    }
-
-    fn to_json(&self) -> serde_json::Value {
-        self.raw.clone()
-    }
-}
 
 // ============================================================================
 // OpenAI client (Responses API)
@@ -64,10 +29,9 @@ impl ReasoningDetail for ResponsesReasoningDetail {
 
 /// OpenAI LLM client using the Responses API.
 ///
-/// Provides full reasoning support including:
-/// - Reasoning summaries (streamed as `ThinkingDelta` events)
-/// - Encrypted reasoning persistence across function call turns
-/// - Better model intelligence vs Chat Completions API
+/// Provides reasoning support:
+/// - Reasoning summaries streamed as `ThinkingDelta` events for display
+/// - Reasoning tokens tracked separately in usage stats
 pub struct OpenAI {
     client: async_openai::Client<OpenAIConfig>,
     cached_tools: Option<Vec<OAITool>>,
@@ -125,15 +89,15 @@ fn convert_messages(msgs: &[LLMMessage]) -> Vec<InputItem> {
             LLMMessage::Assistant {
                 content,
                 tool_calls,
-                reasoning,
+                reasoning: _reasoning,
             } => {
-                // Pass back reasoning items first (includes encrypted_content for persistence)
-                for detail in reasoning {
-                    let json = detail.to_json();
-                    if let Ok(reasoning_item) = serde_json::from_value::<ReasoningItem>(json) {
-                        items.push(InputItem::Item(Item::Reasoning(reasoning_item)));
-                    }
-                }
+                // NOTE: We intentionally do NOT pass reasoning items back in stateless mode.
+                // OpenAI requires reasoning items to be followed by their output items in a
+                // specific format that's difficult to reconstruct. For proper reasoning
+                // persistence across turns, use server-managed mode with `previous_response_id`.
+                //
+                // The model will still work without reasoning context - it just won't have
+                // visibility into its previous chain of thought.
 
                 // Assistant text as a message
                 if !content.is_empty() {
@@ -241,7 +205,6 @@ impl LLM for OpenAI {
             builder.model(&model);
             builder.input(InputParam::Items(input_items));
             builder.stream(true);
-            builder.include(vec![IncludeEnum::ReasoningEncryptedContent]);
 
             if let Some(tools) = tools {
                 builder.tools(tools);
@@ -268,7 +231,6 @@ impl LLM for OpenAI {
             };
 
             let mut emitted_start = false;
-            let mut accumulated_reasoning: Vec<Arc<dyn ReasoningDetail>> = Vec::new();
 
             while let Some(event_result) = event_stream.next().await {
                 let event = match event_result {
@@ -321,23 +283,17 @@ impl LLM for OpenAI {
                         }
                     }
 
-                    // Output item done — collect reasoning items and function calls
+                    // Output item done — handle function calls
                     ResponseStreamEvent::ResponseOutputItemDone(e) => {
-                        match e.item {
-                            OutputItem::FunctionCall(fc) => {
-                                yield LLMEvent::ToolCall(ToolCall {
-                                    id: fc.call_id,
-                                    name: fc.name,
-                                    arguments: fc.arguments,
-                                });
-                            }
-                            OutputItem::Reasoning(ref reasoning_item) => {
-                                accumulated_reasoning.push(Arc::new(
-                                    ResponsesReasoningDetail::from_reasoning_item(reasoning_item),
-                                ));
-                            }
-                            _ => {}
+                        if let OutputItem::FunctionCall(fc) = e.item {
+                            yield LLMEvent::ToolCall(ToolCall {
+                                id: fc.call_id,
+                                name: fc.name,
+                                arguments: fc.arguments,
+                            });
                         }
+                        // Note: Reasoning items are streamed via ThinkingDelta events,
+                        // we don't accumulate them since we don't round-trip in stateless mode
                     }
 
                     // Response completed — emit MessageEnd with usage
@@ -372,7 +328,7 @@ impl LLM for OpenAI {
                             input_tokens,
                             output_tokens,
                             reasoning_tokens,
-                            reasoning: std::mem::take(&mut accumulated_reasoning),
+                            reasoning: vec![],
                         };
                         return;
                     }
@@ -406,7 +362,7 @@ impl LLM for OpenAI {
                             input_tokens,
                             output_tokens,
                             reasoning_tokens,
-                            reasoning: std::mem::take(&mut accumulated_reasoning),
+                            reasoning: vec![],
                         };
                         return;
                     }
@@ -429,7 +385,7 @@ impl LLM for OpenAI {
                     input_tokens: 0,
                     output_tokens: 0,
                     reasoning_tokens: 0,
-                    reasoning: std::mem::take(&mut accumulated_reasoning),
+                    reasoning: vec![],
                 };
             }
         })
