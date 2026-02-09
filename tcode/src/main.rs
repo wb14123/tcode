@@ -1,3 +1,4 @@
+mod claude_auth;
 mod display;
 mod edit;
 mod protocol;
@@ -79,6 +80,8 @@ enum Commands {
     },
     /// Launch Chrome browser with persistent profile for login setup
     Browser,
+    /// Authenticate with Claude via OAuth and get an API key
+    ClaudeAuth,
 }
 
 fn get_session_id(session: Option<String>) -> String {
@@ -186,6 +189,7 @@ async fn main() -> Result<()> {
             client.run().await
         }
         Some(Commands::Browser) => run_browser().await,
+        Some(Commands::ClaudeAuth) => claude_auth::run().await,
     }
 }
 

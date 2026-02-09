@@ -53,6 +53,59 @@ Opens a neovim buffer showing the detailed output of a specific tool execution. 
 
 Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) that the headless browser tools need.
 
+### `tcode claude-auth`
+
+Authenticates with Claude via OAuth and outputs tokens for API access. This is for **Claude Pro/Max subscribers** who want to use their subscription credits via the API.
+
+```bash
+tcode claude-auth
+```
+
+1. Opens authorization URL in your browser (claude.ai)
+2. After authorizing, paste the code back into the terminal
+3. Outputs OAuth tokens as JSON:
+
+```json
+{
+  "access_token": "...",
+  "refresh_token": "...",
+  "expires_at": 1234567890
+}
+```
+
+## Using Claude OAuth Tokens with the API
+
+Instead of using an API key (`x-api-key`), use the OAuth access token with Bearer authentication:
+
+```bash
+curl https://api.anthropic.com/v1/messages \
+  -H "Authorization: Bearer <access_token>" \
+  -H "anthropic-beta: oauth-2025-04-20" \
+  -H "anthropic-version: 2023-06-01" \
+  -H "content-type: application/json" \
+  -d '{
+    "model": "claude-sonnet-4-20250514",
+    "max_tokens": 1024,
+    "messages": [{"role": "user", "content": "Hello"}]
+  }'
+```
+
+**Required headers:**
+- `Authorization: Bearer <access_token>` - OAuth token (not x-api-key)
+- `anthropic-beta: oauth-2025-04-20` - Required for OAuth authentication
+
+**Token refresh:** Access tokens expire (check `expires_at`). Use the `refresh_token` to get a new access token:
+
+```bash
+curl -X POST https://console.anthropic.com/v1/oauth/token \
+  -H "Content-Type: application/json" \
+  -d '{
+    "grant_type": "refresh_token",
+    "refresh_token": "<refresh_token>",
+    "client_id": "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+  }'
+```
+
 ## Session Files
 
 All session data lives in `/tmp/tcode/sessions/{session_id}/`:
