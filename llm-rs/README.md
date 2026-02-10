@@ -14,6 +14,7 @@ The `LLM` trait defines a provider-agnostic interface for chat completions with 
 - **`ChatOptions`**: Reasoning effort/budget controls.
 - **OpenAI implementation** (`openai.rs`): Uses the Responses API (`/v1/responses`). Handles SSE streaming, function calling, and reasoning tokens.
 - **OpenRouter implementation** (`openrouter.rs`): Uses Chat Completions API for OpenRouter and compatible providers.
+- **Claude implementation** (`claude.rs`): Uses Anthropic Messages API with OAuth authentication. See [Claude OAuth Authentication](#claude-oauth-authentication) below.
 
 ### `conversation` - Conversation Manager
 
@@ -66,3 +67,65 @@ User sends message via ConversationClient::send_chat()
 - `examples/openai_tools.rs` - Tool calling demonstration
 - `examples/conversation.rs` - Interactive multi-round conversation with tools
 - `examples/openrouter_reasoning.rs` - Reasoning with OpenRouter
+- `examples/claude_tools.rs` - Claude with tool calling via OAuth
+
+## Claude OAuth Authentication
+
+The Claude implementation uses OAuth tokens from Claude Pro/Max subscriptions (not API keys). These tokens have special requirements enforced by Anthropic.
+
+### Obtaining an OAuth Token
+
+Use the `tcode claude-auth` command to obtain OAuth tokens via the PKCE flow:
+
+```bash
+cargo run -p tcode -- claude-auth
+```
+
+This opens a browser for authentication and returns access/refresh tokens.
+
+### OAuth Token Requirements
+
+Claude Code OAuth tokens require specific request signatures to work. The implementation handles these automatically:
+
+1. **System Prompt Prefix**: Every request must include this exact prefix as the first system block:
+   ```
+   You are Claude Code, Anthropic's official CLI for Claude.
+   ```
+
+2. **Beta Headers**: The `anthropic-beta` header must include:
+   - `claude-code-20250219` - Identifies as Claude Code
+   - `oauth-2025-04-20` - OAuth beta feature
+   - `interleaved-thinking-2025-05-14` - Thinking support
+   - `fine-grained-tool-streaming-2025-05-14` - Tool streaming
+
+3. **Tool Name Prefix**: All tool names must be prefixed with `mcp_` (e.g., `mcp_get_weather`). The prefix is stripped when returning tool calls to the caller.
+
+4. **Additional Headers**:
+   - `x-app: cli`
+   - `anthropic-dangerous-direct-browser-access: true`
+   - `User-Agent: claude-cli/2.1.2 (external, cli)`
+
+5. **URL Parameter**: Requests must include `?beta=true` query parameter.
+
+6. **System Format**: The system prompt must use array format:
+   ```json
+   "system": [{"type": "text", "text": "..."}]
+   ```
+
+### Usage Example
+
+```rust
+use llm_rs::llm::{Claude, LLM, LLMMessage, ChatOptions};
+
+let claude = Claude::new(access_token);
+let messages = vec![
+    LLMMessage::User("Hello!".to_string()),
+];
+
+let stream = claude.chat("claude-sonnet-4-20250514", &messages, &ChatOptions::default());
+```
+
+### References
+
+- OAuth authentication flow based on [opencode-anthropic-auth](https://github.com/anomalyco/opencode-anthropic-auth)
+- See [issue #12](https://github.com/anomalyco/opencode-anthropic-auth/issues/12) and [issue #33](https://github.com/anomalyco/opencode-anthropic-auth/issues/33) for details on OAuth requirements

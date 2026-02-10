@@ -34,7 +34,9 @@ llm-rs/               Root workspace
 │  llm-rs (Core Library)                                │
 │  ├─ ConversationManager (multi-round chat loop)      │
 │  ├─ LLM trait (provider-agnostic streaming interface)│
-│  │   └─ OpenAI impl (OpenAI, OpenRouter compatible)  │
+│  │   ├─ OpenAI impl (Responses API)                  │
+│  │   ├─ OpenRouter impl (Chat Completions API)       │
+│  │   └─ Claude impl (Messages API with OAuth)        │
 │  └─ Tool system (streaming execution with timeouts)  │
 │                                                      │
 │  tools (Built-in Tools)                              │
@@ -51,7 +53,7 @@ llm-rs/               Root workspace
 - **Terminal-native**: Uses neovim and tmux rather than building a custom GUI. Users get familiar keybindings and extensibility for free.
 - **Server-client over Unix sockets**: The server manages the conversation and writes JSONL event files. Clients (display, edit, tool-call viewer) are separate neovim processes that read those files. This allows flexible multi-pane layouts via tmux.
 - **Streaming everywhere**: LLM responses and tool outputs stream incrementally through async Rust streams for low-latency feedback.
-- **Provider-agnostic LLM trait**: The `LLM` trait abstracts providers. Currently implemented for OpenAI-compatible APIs (including OpenRouter). Adding new providers means implementing one trait.
+- **Provider-agnostic LLM trait**: The `LLM` trait abstracts providers. Currently implemented for OpenAI (Responses API), OpenRouter (Chat Completions API), and Claude (Messages API with OAuth). Adding new providers means implementing one trait.
 - **Macro-based tool definitions**: The `#[tool]` proc macro generates JSON schema, deserialization, and `Tool` construction from a plain function signature.
 
 ## Building
