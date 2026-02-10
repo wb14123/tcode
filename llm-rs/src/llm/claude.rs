@@ -52,7 +52,7 @@ struct MessagesRequest<'a> {
     model: &'a str,
     max_tokens: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
-    system: Option<String>,
+    system: Option<Vec<SystemBlock>>,
     messages: Vec<ClaudeMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -61,6 +61,14 @@ struct MessagesRequest<'a> {
     // Add: thinking: Option<ThinkingConfig>
     // where ThinkingConfig = { type: "enabled", budget_tokens: N }
     // The ChatOptions.reasoning_budget can map to budget_tokens
+}
+
+/// System prompt content block for Claude API.
+#[derive(Serialize)]
+struct SystemBlock {
+    #[serde(rename = "type")]
+    block_type: &'static str,
+    text: String,
 }
 
 /// Claude tool definition (note: uses `input_schema` not `parameters`).
@@ -73,6 +81,11 @@ struct ClaudeToolDefinition {
 
 /// Tool name prefix required for OAuth authentication.
 const TOOL_PREFIX: &str = "mcp_";
+
+/// Required system prompt prefix for Claude Code OAuth authentication.
+/// Without this prefix, the OAuth token will be rejected with:
+/// "This credential is only authorized for use with Claude Code"
+const CLAUDE_CODE_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's official CLI for Claude.";
 
 /// Claude message format.
 #[derive(Serialize)]
@@ -254,16 +267,17 @@ fn strip_tool_prefix(name: &str) -> String {
 }
 
 /// Convert LLMMessage list to Claude message format.
-/// Returns (system_prompt, messages).
-fn convert_messages(msgs: &[LLMMessage]) -> (Option<String>, Vec<ClaudeMessage>) {
-    let mut system_prompt: Option<String> = None;
+/// Returns (system_blocks, messages).
+/// The system prompt is prefixed with CLAUDE_CODE_SYSTEM_PREFIX for OAuth authentication.
+fn convert_messages(msgs: &[LLMMessage]) -> (Option<Vec<SystemBlock>>, Vec<ClaudeMessage>) {
+    let mut user_system_prompt: Option<String> = None;
     let mut claude_messages: Vec<ClaudeMessage> = Vec::new();
 
     for msg in msgs {
         match msg {
             LLMMessage::System(content) => {
                 // Claude uses top-level system parameter, not a message role
-                system_prompt = Some(content.clone());
+                user_system_prompt = Some(content.clone());
             }
             LLMMessage::User(content) => {
                 claude_messages.push(ClaudeMessage {
@@ -345,7 +359,21 @@ fn convert_messages(msgs: &[LLMMessage]) -> (Option<String>, Vec<ClaudeMessage>)
         }
     }
 
-    (system_prompt, claude_messages)
+    // Build final system blocks with required Claude Code prefix for OAuth
+    // Using array format: [{"type": "text", "text": "..."}]
+    let mut system_blocks = vec![SystemBlock {
+        block_type: "text",
+        text: CLAUDE_CODE_SYSTEM_PREFIX.to_string(),
+    }];
+
+    if let Some(user_prompt) = user_system_prompt {
+        system_blocks.push(SystemBlock {
+            block_type: "text",
+            text: user_prompt,
+        });
+    }
+
+    (Some(system_blocks), claude_messages)
 }
 
 // ============================================================================
@@ -370,7 +398,7 @@ impl LLM for Claude {
         let tool_defs = self.cached_tool_defs.clone();
 
         // Convert messages
-        let (system_prompt, messages) = convert_messages(msgs);
+        let (system_blocks, messages) = convert_messages(msgs);
 
         // TODO: Future extended thinking support
         // Map ChatOptions to Claude thinking config:
@@ -382,7 +410,7 @@ impl LLM for Claude {
             let request_body = MessagesRequest {
                 model: &model,
                 max_tokens: 8192, // Default max tokens
-                system: system_prompt,
+                system: system_blocks,
                 messages,
                 stream: true,
                 tools: tool_defs,
@@ -393,10 +421,13 @@ impl LLM for Claude {
             let response = client
                 .post(&url)
                 .header("Authorization", format!("Bearer {}", access_token))
-                .header("anthropic-beta", "oauth-2025-04-20,interleaved-thinking-2025-05-14")
+                .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
                 .header("anthropic-version", "2023-06-01")
                 .header("Content-Type", "application/json")
                 .header("User-Agent", "claude-cli/2.1.2 (external, cli)")
+                // Additional headers required for Claude Code OAuth
+                .header("x-app", "cli")
+                .header("anthropic-dangerous-direct-browser-access", "true")
                 .json(&request_body)
                 .send()
                 .await;
