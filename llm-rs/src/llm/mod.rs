@@ -3,6 +3,7 @@
 //! This module contains the core LLM trait definition and implementations
 //! for various providers (OpenAI, Claude, Gemini, etc.).
 
+mod claude;
 mod openai;
 mod openai_common;
 mod openrouter;
@@ -10,6 +11,7 @@ mod openrouter;
 #[cfg(test)]
 mod openai_tests;
 
+pub use claude::Claude;
 pub use openai::OpenAI;
 pub use openrouter::OpenRouter;
 
