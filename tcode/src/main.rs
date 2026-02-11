@@ -11,10 +11,45 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Context, Result};
-use clap::{Parser, Subcommand};
+use anyhow::{anyhow, Context, Result};
+use clap::{Parser, Subcommand, ValueEnum};
 use tokio::process::Child;
 use tracing_subscriber::EnvFilter;
+
+/// LLM provider selection
+#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+enum Provider {
+    #[default]
+    Claude,
+    OpenAi,
+    OpenRouter,
+}
+
+impl Provider {
+    fn default_model(&self) -> &'static str {
+        match self {
+            Provider::Claude => "claude-opus-4-6",
+            Provider::OpenAi => "gpt-5-nano",
+            Provider::OpenRouter => "deepseek/deepseek-r1",
+        }
+    }
+
+    fn default_base_url(&self) -> &'static str {
+        match self {
+            Provider::Claude => "https://api.anthropic.com",
+            Provider::OpenAi => "https://api.openai.com/v1",
+            Provider::OpenRouter => "https://openrouter.ai/api/v1",
+        }
+    }
+
+    fn env_var_name(&self) -> &'static str {
+        match self {
+            Provider::Claude => "ANTHROPIC_ACCESS_TOKEN",
+            Provider::OpenAi => "OPENAI_API_KEY",
+            Provider::OpenRouter => "OPENROUTER_API_KEY",
+        }
+    }
+}
 
 /// Gracefully stop a neovim child: SIGTERM with timeout, then SIGKILL.
 pub(crate) async fn terminate_child(child: &mut Child) -> Result<()> {
@@ -37,9 +72,30 @@ pub(crate) async fn terminate_child(child: &mut Child) -> Result<()> {
 
 use display::DisplayClient;
 use edit::EditClient;
+use llm_rs::llm::{Claude, OpenAI, OpenRouter, LLM};
 use server::Server;
 use session::Session;
 use tool_call_display::ToolCallDisplayClient;
+
+/// Create an LLM instance from CLI options
+fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String)> {
+    let provider = cli.provider;
+    let api_key = cli.api_key.clone()
+        .or_else(|| std::env::var(provider.env_var_name()).ok())
+        .ok_or_else(|| {
+            anyhow!("API key required. Set {} env or use --api-key", provider.env_var_name())
+        })?;
+    let model = cli.model.clone().unwrap_or_else(|| provider.default_model().to_string());
+    let base_url = cli.base_url.clone().unwrap_or_else(|| provider.default_base_url().to_string());
+
+    let llm: Box<dyn LLM> = match provider {
+        Provider::Claude => Box::new(Claude::with_base_url(&api_key, &base_url)),
+        Provider::OpenAi => Box::new(OpenAI::with_base_url(&api_key, &base_url)),
+        Provider::OpenRouter => Box::new(OpenRouter::with_base_url(&api_key, &base_url)),
+    };
+
+    Ok((llm, model))
+}
 
 #[derive(Parser)]
 #[command(name = "tcode")]
@@ -48,17 +104,21 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// API key for the LLM provider
-    #[arg(long, env = "OPENAI_API_KEY")]
+    /// LLM provider to use
+    #[arg(long, value_enum, default_value_t = Provider::Claude)]
+    provider: Provider,
+
+    /// API key/token (defaults to provider-specific env var)
+    #[arg(long)]
     api_key: Option<String>,
 
-    /// Model to use
-    #[arg(long, default_value = "gpt-5-nano")]
-    model: String,
+    /// Model to use (defaults based on provider)
+    #[arg(long)]
+    model: Option<String>,
 
-    /// Base URL for the API
-    #[arg(long, default_value = "https://api.openai.com/v1")]
-    base_url: String,
+    /// Base URL for the API (defaults based on provider)
+    #[arg(long)]
+    base_url: Option<String>,
 
     /// Session ID (defaults to tmux session name or "default")
     #[arg(long)]
@@ -156,18 +216,15 @@ async fn main() -> Result<()> {
             run_unified(cli, session_id, lua_path).await
         }
         Some(Commands::Serve) => {
-            let api_key = cli.api_key.ok_or_else(|| {
-                anyhow::anyhow!("API key required. Set OPENAI_API_KEY env or use --api-key")
-            })?;
+            let (llm, model) = create_llm(&cli)?;
             let session = Session::new(session_id.clone())?;
             let server = Server::new(
                 session.socket_path(),
                 session.display_file(),
                 session.status_file(),
                 session.session_dir().clone(),
-                api_key,
-                cli.model,
-                cli.base_url,
+                llm,
+                model,
             );
             let result = server.run().await;
             session.cleanup();
@@ -234,9 +291,7 @@ async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<
         anyhow::bail!("tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux.");
     }
 
-    let api_key = cli.api_key.ok_or_else(|| {
-        anyhow::anyhow!("API key required. Set OPENAI_API_KEY env or use --api-key")
-    })?;
+    let (llm, model) = create_llm(&cli)?;
 
     // Create session directory
     let session = Session::new(session_id.clone())?;
@@ -253,9 +308,8 @@ async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<
         session.display_file(),
         session.status_file(),
         session.session_dir().clone(),
-        api_key,
-        cli.model.clone(),
-        cli.base_url.clone(),
+        llm,
+        model,
     );
 
     // Spawn server in background

@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use llm_rs::conversation::{ConversationManager, Message};
-use llm_rs::llm::{ChatOptions, OpenAI, OpenRouter, ReasoningEffort, LLM};
+use llm_rs::llm::{ChatOptions, ReasoningEffort, LLM};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -30,9 +30,8 @@ pub struct Server {
     display_file: PathBuf,
     status_file: PathBuf,
     session_dir: PathBuf,
-    api_key: String,
+    llm: Box<dyn LLM>,
     model: String,
-    base_url: String,
 }
 
 impl Server {
@@ -41,22 +40,20 @@ impl Server {
         display_file: PathBuf,
         status_file: PathBuf,
         session_dir: PathBuf,
-        api_key: String,
+        llm: Box<dyn LLM>,
         model: String,
-        base_url: String,
     ) -> Self {
         Self {
             socket_path,
             display_file,
             status_file,
             session_dir,
-            api_key,
+            llm,
             model,
-            base_url,
         }
     }
 
-    pub async fn run(&self) -> Result<()> {
+    pub async fn run(self) -> Result<()> {
         // Clean up existing socket file
         if self.socket_path.exists() {
             std::fs::remove_file(&self.socket_path)
@@ -72,15 +69,10 @@ impl Server {
         tokio::fs::write(&self.status_file, "Ready").await
             .with_context(|| format!("Failed to initialize status file {:?}", self.status_file))?;
 
-        // Create LLM and conversation manager
-        let llm: Box<dyn LLM> = if self.base_url.contains("api.openai.com") {
-            Box::new(OpenAI::new(&self.api_key))
-        } else {
-            Box::new(OpenRouter::with_base_url(&self.api_key, &self.base_url))
-        };
+        // Create conversation manager
         let manager = ConversationManager::new();
         let conversation_client = manager.new_conversation(
-            llm,
+            self.llm,
             "You are a helpful assistant.",
             &self.model,
             vec![Arc::new(tools::web_fetch_tool()), Arc::new(tools::web_search_tool())],
