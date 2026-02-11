@@ -27,6 +27,35 @@ TCode uses a server-client architecture. The server manages the LLM conversation
 └─────────────────────────────────────────────────┘
 ```
 
+## CLI Options
+
+### Provider Selection
+
+Use `--provider` to select the LLM provider:
+
+```bash
+tcode --provider claude    # Default - uses Claude API
+tcode --provider openai    # Uses OpenAI API
+tcode --provider openrouter # Uses OpenRouter API
+```
+
+Each provider has its own default model, base URL, and environment variable for the API key:
+
+| Provider | Env Variable | Default Model | Default Base URL |
+|----------|--------------|---------------|------------------|
+| `claude` | `ANTHROPIC_ACCESS_TOKEN` | `claude-opus-4-6` | `https://api.anthropic.com` |
+| `openai` | `OPENAI_API_KEY` | `gpt-5-nano` | `https://api.openai.com/v1` |
+| `openrouter` | `OPENROUTER_API_KEY` | `deepseek/deepseek-r1` | `https://openrouter.ai/api/v1` |
+
+### Other Options
+
+```bash
+--api-key <key>     # Override API key (otherwise uses provider's env var)
+--model <model>     # Override default model
+--base-url <url>    # Override default base URL
+--session <id>      # Custom session ID (defaults to tmux session name)
+```
+
 ## Commands
 
 ### `tcode`
