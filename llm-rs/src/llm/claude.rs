@@ -3,6 +3,7 @@
 //! Uses the Anthropic Messages API with OAuth authentication.
 
 use std::collections::HashMap;
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -15,28 +16,62 @@ use super::{ChatOptions, LLMEvent, LLMMessage, StopReason, ToolCall, LLM};
 use crate::tool::Tool;
 
 // ============================================================================
+// Token getter type
+// ============================================================================
+
+/// Function type for getting an access token. Called before each API request.
+/// For static tokens, returns the same token. For OAuth, may trigger refresh.
+pub type GetTokenFn =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync>;
+
+// ============================================================================
 // Claude client
 // ============================================================================
 
 /// Claude (Anthropic) Messages API client.
 pub struct Claude {
     client: Client,
-    access_token: String,
+    get_token: GetTokenFn,
     base_url: String,
     cached_tool_defs: Option<Vec<ClaudeToolDefinition>>,
 }
 
 impl Claude {
-    /// Create a new Claude client with the default Anthropic API base URL.
+    /// Create a new Claude client with a static API key/token.
     pub fn new(access_token: impl Into<String>) -> Self {
         Self::with_base_url(access_token, "https://api.anthropic.com")
     }
 
-    /// Create a new Claude client with a custom base URL.
+    /// Create a new Claude client with a static token and custom base URL.
     pub fn with_base_url(access_token: impl Into<String>, base_url: impl Into<String>) -> Self {
+        let token = access_token.into();
         Self {
             client: Client::new(),
-            access_token: access_token.into(),
+            get_token: Arc::new(move || {
+                let t = token.clone();
+                Box::pin(async move { Ok(t) })
+            }),
+            base_url: base_url.into(),
+            cached_tool_defs: None,
+        }
+    }
+
+    /// Create a new Claude client with a custom token getter function.
+    /// Use this for OAuth tokens with auto-refresh.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let manager = TokenManager::load(...);
+    /// let get_token: GetTokenFn = Arc::new(move || {
+    ///     let m = manager.clone();
+    ///     Box::pin(async move { m.get_access_token().await.map_err(|e| e.to_string()) })
+    /// });
+    /// let claude = Claude::with_get_token(get_token, "https://api.anthropic.com");
+    /// ```
+    pub fn with_get_token(get_token: GetTokenFn, base_url: impl Into<String>) -> Self {
+        Self {
+            client: Client::new(),
+            get_token,
             base_url: base_url.into(),
             cached_tool_defs: None,
         }
@@ -392,7 +427,7 @@ impl LLM for Claude {
         _options: &ChatOptions,
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>> {
         let client = self.client.clone();
-        let access_token = self.access_token.clone();
+        let get_token = self.get_token.clone();
         let base_url = self.base_url.clone();
         let model = model.to_string();
         let tool_defs = self.cached_tool_defs.clone();
@@ -407,6 +442,15 @@ impl LLM for Claude {
         // }
 
         Box::pin(stream! {
+            // Get a valid access token (may trigger refresh if expired)
+            let access_token = match get_token().await {
+                Ok(token) => token,
+                Err(e) => {
+                    yield LLMEvent::Error(format!("Failed to get access token: {}", e));
+                    return;
+                }
+            };
+
             let request_body = MessagesRequest {
                 model: &model,
                 max_tokens: 8192, // Default max tokens

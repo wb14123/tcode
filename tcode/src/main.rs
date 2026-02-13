@@ -72,26 +72,47 @@ pub(crate) async fn terminate_child(child: &mut Child) -> Result<()> {
 
 use display::DisplayClient;
 use edit::EditClient;
-use llm_rs::llm::{Claude, OpenAI, OpenRouter, LLM};
+use llm_rs::llm::{Claude, GetTokenFn, OpenAI, OpenRouter, LLM};
 use server::Server;
 use session::Session;
 use tool_call_display::ToolCallDisplayClient;
 
-/// Create an LLM instance from CLI options
-fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String)> {
-    let provider = cli.provider;
-    let api_key = cli.api_key.clone()
+/// Get API key from CLI or environment variable
+fn get_api_key(cli: &Cli, provider: Provider) -> Result<String> {
+    cli.api_key.clone()
         .or_else(|| std::env::var(provider.env_var_name()).ok())
         .ok_or_else(|| {
             anyhow!("API key required. Set {} env or use --api-key", provider.env_var_name())
-        })?;
+        })
+}
+
+/// Create an LLM instance from CLI options
+fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String)> {
+    let provider = cli.provider;
     let model = cli.model.clone().unwrap_or_else(|| provider.default_model().to_string());
     let base_url = cli.base_url.clone().unwrap_or_else(|| provider.default_base_url().to_string());
 
     let llm: Box<dyn LLM> = match provider {
-        Provider::Claude => Box::new(Claude::with_base_url(&api_key, &base_url)),
-        Provider::OpenAi => Box::new(OpenAI::with_base_url(&api_key, &base_url)),
-        Provider::OpenRouter => Box::new(OpenRouter::with_base_url(&api_key, &base_url)),
+        Provider::Claude => {
+            let manager = claude_auth::load_token_manager().ok_or_else(|| {
+                anyhow!("No Claude authentication found. Run 'tcode claude-auth' to authenticate.")
+            })?;
+            let get_token: GetTokenFn = std::sync::Arc::new(move || {
+                let m = manager.clone();
+                Box::pin(async move {
+                    m.get_access_token().await.map_err(|e| e.to_string())
+                })
+            });
+            Box::new(Claude::with_get_token(get_token, &base_url))
+        }
+        Provider::OpenAi => {
+            let api_key = get_api_key(cli, provider)?;
+            Box::new(OpenAI::with_base_url(&api_key, &base_url))
+        }
+        Provider::OpenRouter => {
+            let api_key = get_api_key(cli, provider)?;
+            Box::new(OpenRouter::with_base_url(&api_key, &base_url))
+        }
     };
 
     Ok((llm, model))

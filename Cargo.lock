@@ -2367,6 +2367,7 @@ dependencies = [
  "base64",
  "bytes",
  "clap",
+ "dirs",
  "futures",
  "headless_chrome",
  "llm-rs",

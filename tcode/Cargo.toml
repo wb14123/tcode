@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+dirs = "6"
 headless_chrome = "1.0"
 llm-rs = { path = "../llm-rs" }
 tools = { path = "../tools" }
