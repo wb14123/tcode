@@ -12,7 +12,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
-use super::{ChatOptions, LLMEvent, LLMMessage, StopReason, ToolCall, LLM};
+use super::{ChatOptions, LLMEvent, LLMMessage, ReasoningEffort, StopReason, ToolCall, LLM};
 use crate::tool::Tool;
 
 // ============================================================================
@@ -92,10 +92,8 @@ struct MessagesRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ClaudeToolDefinition>>,
-    // TODO: Future extended thinking support
-    // Add: thinking: Option<ThinkingConfig>
-    // where ThinkingConfig = { type: "enabled", budget_tokens: N }
-    // The ChatOptions.reasoning_budget can map to budget_tokens
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
 }
 
 /// System prompt content block for Claude API.
@@ -112,6 +110,14 @@ struct ClaudeToolDefinition {
     name: String,
     description: String,
     input_schema: serde_json::Value,
+}
+
+/// Extended thinking configuration for Claude.
+#[derive(Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    thinking_type: &'static str,
+    budget_tokens: u32,
 }
 
 /// Tool name prefix required for OAuth authentication.
@@ -154,9 +160,11 @@ enum ContentBlock {
         tool_use_id: String,
         content: String,
     },
-    // TODO: Future extended thinking support
-    // #[serde(rename = "thinking")]
-    // Thinking { thinking: String, signature: String },
+    #[serde(rename = "thinking")]
+    Thinking {
+        thinking: String,
+        signature: String,
+    },
 }
 
 // ============================================================================
@@ -184,6 +192,9 @@ struct UsageInfo {
     input_tokens: i32,
     #[serde(default)]
     output_tokens: i32,
+    /// Tokens used for extended thinking (reasoning tokens)
+    #[serde(default)]
+    cache_creation_input_tokens: i32,
 }
 
 /// Content block start event payload.
@@ -220,9 +231,10 @@ struct DeltaInfo {
     text: Option<String>,
     #[serde(default)]
     partial_json: Option<String>,
-    // TODO: Future extended thinking support
-    // #[serde(default)]
-    // thinking: Option<String>,
+    #[serde(default)]
+    thinking: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 /// Message delta event payload.
@@ -258,6 +270,12 @@ struct ToolBlockAccumulator {
     id: String,
     name: String,
     input_json: String,
+}
+
+/// Tracks thinking content blocks being built across deltas.
+struct ThinkingBlockAccumulator {
+    thinking_text: String,
+    signature: String,
 }
 
 // ============================================================================
@@ -424,7 +442,7 @@ impl LLM for Claude {
         &self,
         model: &str,
         msgs: &[LLMMessage],
-        _options: &ChatOptions,
+        options: &ChatOptions,
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>> {
         let client = self.client.clone();
         let get_token = self.get_token.clone();
@@ -435,11 +453,30 @@ impl LLM for Claude {
         // Convert messages
         let (system_blocks, messages) = convert_messages(msgs);
 
-        // TODO: Future extended thinking support
-        // Map ChatOptions to Claude thinking config:
-        // if let Some(budget) = options.reasoning_budget {
-        //     thinking = Some(ThinkingConfig { type: "enabled", budget_tokens: budget });
-        // }
+        // Map ChatOptions to Claude thinking config
+        // If reasoning_budget is set, use it directly
+        // Otherwise, map reasoning_effort to a default budget
+        let thinking = if let Some(budget) = options.reasoning_budget {
+            Some(ThinkingConfig {
+                thinking_type: "enabled",
+                budget_tokens: budget,
+            })
+        } else if let Some(ref effort) = options.reasoning_effort {
+            // Map reasoning effort to budget tokens for Claude
+            let budget = match effort {
+                ReasoningEffort::Minimal => 4000,
+                ReasoningEffort::Low => 8000,
+                ReasoningEffort::Medium => 16000,
+                ReasoningEffort::High => 24000,
+                ReasoningEffort::XHigh => 31999, // Max allowed
+            };
+            Some(ThinkingConfig {
+                thinking_type: "enabled",
+                budget_tokens: budget,
+            })
+        } else {
+            None
+        };
 
         Box::pin(stream! {
             // Get a valid access token (may trigger refresh if expired)
@@ -451,13 +488,20 @@ impl LLM for Claude {
                 }
             };
 
+            // Calculate max_tokens: must be greater than thinking.budget_tokens if thinking is enabled
+            let max_tokens = match &thinking {
+                Some(config) => config.budget_tokens + 16384, // budget + output buffer
+                None => 8192, // Default when thinking is disabled
+            };
+
             let request_body = MessagesRequest {
                 model: &model,
-                max_tokens: 8192, // Default max tokens
+                max_tokens,
                 system: system_blocks,
                 messages,
                 stream: true,
                 tools: tool_defs,
+                thinking,
             };
 
             // OAuth requires ?beta=true query param and additional beta headers
@@ -501,6 +545,10 @@ impl LLM for Claude {
 
             // Track tool_use blocks being built (by index)
             let mut tool_blocks: HashMap<usize, ToolBlockAccumulator> = HashMap::new();
+
+            // Track thinking blocks being built (by index)
+            let mut thinking_blocks: HashMap<usize, ThinkingBlockAccumulator> = HashMap::new();
+            let mut reasoning_tokens = 0i32;
 
             // SSE parsing state
             let mut byte_stream = response.bytes_stream();
@@ -572,8 +620,16 @@ impl LLM for Claude {
                                                 }
                                             }
                                         }
-                                        // TODO: Future extended thinking support
-                                        // "thinking" => { /* handle thinking block start */ }
+                                        "thinking" => {
+                                            // Start tracking a new thinking block
+                                            thinking_blocks.insert(
+                                                parsed.index,
+                                                ThinkingBlockAccumulator {
+                                                    thinking_text: String::new(),
+                                                    signature: String::new(),
+                                                },
+                                            );
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -597,12 +653,23 @@ impl LLM for Claude {
                                                 }
                                             }
                                         }
-                                        // TODO: Future extended thinking support
-                                        // "thinking_delta" => {
-                                        //     if let Some(thinking) = parsed.delta.thinking {
-                                        //         yield LLMEvent::ThinkingDelta(thinking);
-                                        //     }
-                                        // }
+                                        "thinking_delta" => {
+                                            // Accumulate thinking text and emit delta
+                                            if let Some(thinking) = parsed.delta.thinking {
+                                                if let Some(acc) = thinking_blocks.get_mut(&parsed.index) {
+                                                    acc.thinking_text.push_str(&thinking);
+                                                }
+                                                yield LLMEvent::ThinkingDelta(thinking);
+                                            }
+                                        }
+                                        "signature_delta" => {
+                                            // Accumulate signature for thinking block
+                                            if let Some(sig) = parsed.delta.signature.as_ref() {
+                                                if let Some(acc) = thinking_blocks.get_mut(&parsed.index) {
+                                                    acc.signature.push_str(sig);
+                                                }
+                                            }
+                                        }
                                         _ => {}
                                     }
                                 }
@@ -633,6 +700,14 @@ impl LLM for Claude {
                                                 arguments: acc.input_json,
                                             });
                                         }
+                                        // Check if this was a thinking block
+                                        if let Some(acc) = thinking_blocks.remove(&index) {
+                                            // Store for raw round-tripping (with signature for verification)
+                                            accumulated_content.push(ContentBlock::Thinking {
+                                                thinking: acc.thinking_text,
+                                                signature: acc.signature,
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -640,6 +715,10 @@ impl LLM for Claude {
                                 if let Ok(parsed) = serde_json::from_str::<MessageDeltaData>(data) {
                                     if let Some(usage) = parsed.usage {
                                         output_tokens = usage.output_tokens;
+                                        // Track reasoning tokens from cache_creation_input_tokens
+                                        if usage.cache_creation_input_tokens > 0 {
+                                            reasoning_tokens = usage.cache_creation_input_tokens;
+                                        }
                                     }
                                     if let Some(reason) = parsed.delta.stop_reason {
                                         stop_reason = Some(match reason.as_str() {
@@ -670,7 +749,7 @@ impl LLM for Claude {
                                     stop_reason: stop_reason.clone().unwrap_or(StopReason::EndTurn),
                                     input_tokens,
                                     output_tokens,
-                                    reasoning_tokens: 0, // TODO: Track from thinking blocks
+                                    reasoning_tokens,
                                     raw: Some(raw),
                                 };
                                 return;
@@ -709,7 +788,7 @@ impl LLM for Claude {
                 stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
                 input_tokens,
                 output_tokens,
-                reasoning_tokens: 0,
+                reasoning_tokens,
                 raw: Some(raw),
             };
         })
