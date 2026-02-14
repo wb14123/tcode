@@ -174,14 +174,19 @@ local function collapse_thinking(buf, ns)
 end
 
 -- Find a thinking extmark at the given buffer line (0-indexed)
+-- Only returns extmarks that are tracked in thinking_entries (not highlights)
 local function find_thinking_at_line(buf, line)
   local marks = vim.api.nvim_buf_get_extmarks(buf, thinking_ns, 0, -1, { details = true })
   for _, mark in ipairs(marks) do
-    local start_row = mark[2]
-    local details = mark[4]
-    local end_row = details.end_row or start_row
-    if line >= start_row and line <= end_row then
-      return mark[1]
+    local mark_id = mark[1]
+    -- Only consider marks that are tracked thinking entries (not highlights)
+    if thinking_entries[mark_id] then
+      local start_row = mark[2]
+      local details = mark[4]
+      local end_row = details.end_row or start_row
+      if line >= start_row and line <= end_row then
+        return mark_id
+      end
     end
   end
   return nil
@@ -218,8 +223,8 @@ local function toggle_thinking(buf, mark_id)
       id = mark_id,
       end_row = start_row + #content_lines - 1,
       end_col = 0,
-      virt_text = { { '[Thinking... press o to collapse]', 'TCodeTokens' } },
-      virt_text_pos = 'right_align',
+      virt_lines = { { { '[Thinking... press o to collapse]', 'TCodeTokens' } } },
+      virt_lines_above = true,
     })
     entry.expanded = true
   end
