@@ -453,6 +453,9 @@ impl LLM for Claude {
         // Convert messages
         let (system_blocks, messages) = convert_messages(msgs);
 
+        // Capture max_tokens option
+        let max_tokens_option = options.max_tokens;
+
         // Map ChatOptions to Claude thinking config
         // If reasoning_budget is set, use it directly
         // Otherwise, map reasoning_effort to a default budget
@@ -489,9 +492,15 @@ impl LLM for Claude {
             };
 
             // Calculate max_tokens: must be greater than thinking.budget_tokens if thinking is enabled
-            let max_tokens = match &thinking {
-                Some(config) => config.budget_tokens + 16384, // budget + output buffer
-                None => 8192, // Default when thinking is disabled
+            // Use provided max_tokens option, otherwise use defaults
+            const DEFAULT_OUTPUT_TOKENS: u32 = 8192;
+            let max_tokens = match (&thinking, max_tokens_option) {
+                // User provided explicit max_tokens
+                (_, Some(user_max)) => user_max,
+                // Thinking enabled: budget + default output buffer
+                (Some(config), None) => config.budget_tokens + DEFAULT_OUTPUT_TOKENS,
+                // No thinking, no user override: use default
+                (None, None) => DEFAULT_OUTPUT_TOKENS,
             };
 
             let request_body = MessagesRequest {

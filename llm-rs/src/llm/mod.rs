@@ -38,6 +38,8 @@ pub enum ReasoningEffort {
 /// Options for LLM chat requests.
 #[derive(Clone, Debug, Default)]
 pub struct ChatOptions {
+    /// Maximum tokens for the response output. If not set, provider defaults are used.
+    pub max_tokens: Option<u32>,
     /// Reasoning effort level (mutually exclusive with `reasoning_budget`).
     pub reasoning_effort: Option<ReasoningEffort>,
     /// Explicit reasoning token budget (mutually exclusive with `reasoning_effort`).

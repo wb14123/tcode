@@ -174,6 +174,7 @@ impl LLM for OpenAI {
         let model = model.to_string();
         let input_items = convert_messages(msgs);
         let tools = self.cached_tools.clone();
+        let max_output_tokens = options.max_tokens;
 
         // Build reasoning config
         let reasoning = {
@@ -207,6 +208,9 @@ impl LLM for OpenAI {
             builder.input(InputParam::Items(input_items));
             builder.stream(true);
 
+            if let Some(max_tokens) = max_output_tokens {
+                builder.max_output_tokens(max_tokens);
+            }
             if let Some(tools) = tools {
                 builder.tools(tools);
             }

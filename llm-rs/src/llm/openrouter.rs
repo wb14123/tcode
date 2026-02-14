@@ -56,6 +56,8 @@ struct ChatRequest<'a> {
     messages: Vec<ChatMessage>,
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
+    max_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
@@ -177,6 +179,7 @@ impl LLM for OpenRouter {
         let api_key = self.api_key.clone();
         let base_url = self.base_url.clone();
         let model = model.to_string();
+        let max_tokens = options.max_tokens;
         let reasoning_request = openai_common::build_reasoning_request(options);
 
         // Convert messages
@@ -270,6 +273,7 @@ impl LLM for OpenRouter {
                 model: &model,
                 messages,
                 stream: true,
+                max_tokens,
                 tools: tool_defs,
                 stream_options: Some(StreamOptions { include_usage: true }),
                 reasoning: reasoning_request,
