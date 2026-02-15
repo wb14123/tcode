@@ -163,20 +163,8 @@ enum Commands {
     Browser,
     /// Authenticate with Claude via OAuth and get an API key
     ClaudeAuth,
-}
-
-fn get_session_id(session: Option<String>) -> String {
-    session.unwrap_or_else(|| {
-        // Try to get tmux session name for per-session isolation
-        Command::new("tmux")
-            .args(["display-message", "-p", "#S"])
-            .output()
-            .ok()
-            .and_then(|o| String::from_utf8(o.stdout).ok())
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| "default".to_string())
-    })
+    /// List active sessions
+    Sessions,
 }
 
 fn get_lua_path() -> PathBuf {
@@ -210,11 +198,81 @@ fn is_in_tmux() -> bool {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let session_id = get_session_id(cli.session.clone());
     let lua_path = get_lua_path();
 
-    // Initialize tracing to a log file in the session directory.
-    let log_dir = PathBuf::from("/tmp/tcode/sessions").join(&session_id);
+    // Helper to require --session flag for subcommands
+    let require_session = |opt: Option<String>| -> Result<String> {
+        opt.ok_or_else(|| anyhow!("--session=<id> is required for this subcommand"))
+    };
+
+    match cli.command {
+        None => {
+            // Unified startup: server + tmux panes (generates new session ID)
+            run_unified(cli, lua_path).await
+        }
+        Some(Commands::Serve) => {
+            let session_id = require_session(cli.session.clone())?;
+            init_tracing(&session_id);
+            let (llm, model) = create_llm(&cli)?;
+            let session = Session::new(session_id)?;
+            let server = Server::new(
+                session.socket_path(),
+                session.display_file(),
+                session.status_file(),
+                session.session_dir().clone(),
+                llm,
+                model,
+            );
+            server.run().await
+        }
+        Some(Commands::Edit) => {
+            let session_id = require_session(cli.session)?;
+            init_tracing(&session_id);
+            let session = Session::new(session_id)?;
+            let client = EditClient::new(session, lua_path);
+            client.run().await
+        }
+        Some(Commands::Display) => {
+            let session_id = require_session(cli.session)?;
+            init_tracing(&session_id);
+            let session = Session::new(session_id.clone())?;
+            let client = DisplayClient::new(session, lua_path, session_id);
+            client.run().await
+        }
+        Some(Commands::ToolCall { tool_call_id }) => {
+            let session_id = require_session(cli.session)?;
+            init_tracing(&session_id);
+            let session = Session::new(session_id)?;
+            let client = ToolCallDisplayClient::new(session, lua_path, tool_call_id);
+            client.run().await
+        }
+        Some(Commands::Sessions) => {
+            use std::os::unix::net::UnixStream;
+            let sessions = session::list_sessions()?;
+            if sessions.is_empty() {
+                println!("No sessions in ~/.tcode/sessions/");
+            } else {
+                println!("Sessions:");
+                for id in sessions {
+                    let session = Session::new(id.clone())?;
+                    // Try to connect to socket to check if server is running
+                    let status = if UnixStream::connect(session.socket_path()).is_ok() {
+                        "active"
+                    } else {
+                        "inactive"
+                    };
+                    println!("  {} ({})", id, status);
+                }
+            }
+            Ok(())
+        }
+        Some(Commands::Browser) => run_browser().await,
+        Some(Commands::ClaudeAuth) => claude_auth::run().await,
+    }
+}
+
+fn init_tracing(session_id: &str) {
+    let log_dir = session::base_path().join(session_id);
     fs::create_dir_all(&log_dir).ok();
     let log_file = fs::OpenOptions::new()
         .create(true)
@@ -229,45 +287,6 @@ async fn main() -> Result<()> {
             )
             .with_ansi(false)
             .init();
-    }
-
-    match cli.command {
-        None => {
-            // Unified startup: server + tmux panes
-            run_unified(cli, session_id, lua_path).await
-        }
-        Some(Commands::Serve) => {
-            let (llm, model) = create_llm(&cli)?;
-            let session = Session::new(session_id.clone())?;
-            let server = Server::new(
-                session.socket_path(),
-                session.display_file(),
-                session.status_file(),
-                session.session_dir().clone(),
-                llm,
-                model,
-            );
-            let result = server.run().await;
-            session.cleanup();
-            result
-        }
-        Some(Commands::Edit) => {
-            let session = Session::new(session_id)?;
-            let client = EditClient::new(session, lua_path);
-            client.run().await
-        }
-        Some(Commands::Display) => {
-            let session = Session::new(session_id.clone())?;
-            let client = DisplayClient::new(session, lua_path, session_id);
-            client.run().await
-        }
-        Some(Commands::ToolCall { tool_call_id }) => {
-            let session = Session::new(session_id)?;
-            let client = ToolCallDisplayClient::new(session, lua_path, tool_call_id);
-            client.run().await
-        }
-        Some(Commands::Browser) => run_browser().await,
-        Some(Commands::ClaudeAuth) => claude_auth::run().await,
     }
 }
 
@@ -306,11 +325,17 @@ async fn run_browser() -> Result<()> {
     Ok(())
 }
 
-async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<()> {
+async fn run_unified(cli: Cli, lua_path: PathBuf) -> Result<()> {
     // Check if running inside tmux
     if !is_in_tmux() {
         anyhow::bail!("tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux.");
     }
+
+    // Generate new session ID
+    let session_id = session::generate_session_id();
+    println!("Session: {}", session_id);
+
+    init_tracing(&session_id);
 
     let (llm, model) = create_llm(&cli)?;
 
@@ -355,7 +380,6 @@ async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<
         Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
         Err(e) => {
             server_handle.abort();
-            session.cleanup();
             return Err(e);
         }
     };
@@ -372,9 +396,6 @@ async fn run_unified(cli: Cli, session_id: String, lua_path: PathBuf) -> Result<
 
     // Abort server task (it should already be shutting down)
     server_handle.abort();
-
-    // Clean up session files
-    session.cleanup();
 
     result
 }

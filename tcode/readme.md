@@ -23,7 +23,7 @@ TCode uses a server-client architecture. The server manages the LLM conversation
 │           ├─ JSONL event writer                  │
 │           └─ Unix socket listener               │
 │                                                 │
-│  Session dir: /tmp/tcode/sessions/{id}/         │
+│  Session dir: ~/.tcode/sessions/{id}/           │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -53,28 +53,32 @@ Each provider has its own default model, base URL, and environment variable for 
 --api-key <key>     # Override API key (otherwise uses provider's env var)
 --model <model>     # Override default model
 --base-url <url>    # Override default base URL
---session <id>      # Custom session ID (defaults to tmux session name)
+--session <id>      # Session ID (required for subcommands, auto-generated for main command)
 ```
 
 ## Commands
 
 ### `tcode`
 
-Starts the server and opens display + edit panes in the current tmux session. One instance per tmux session - running it again attaches to the existing one.
+Starts the server and opens display + edit panes in the current tmux session. Generates a unique 8-character session ID (e.g., `abc12def`) and prints it on startup. Session files persist in `~/.tcode/sessions/{id}/`.
 
-### `tcode serve`
+### `tcode sessions`
 
-Starts just the server process (no tmux integration). Useful for running components separately.
+Lists all sessions with their status (active/inactive). Active sessions have a running server.
 
-### `tcode edit`
+### `tcode serve --session <id>`
+
+Starts just the server process (no tmux integration). Requires `--session` flag.
+
+### `tcode edit --session <id>`
 
 Opens a neovim editor for composing and sending messages to the server. Watches `edit-msg.txt` for changes and sends content over the Unix socket.
 
-### `tcode display`
+### `tcode display --session <id>`
 
 Opens a neovim buffer that renders the conversation by tailing `display.jsonl`. Shows user messages, assistant responses, tool calls, and token usage with syntax highlighting.
 
-### `tcode tool-call <id>`
+### `tcode tool-call <tool-call-id> --session <id>`
 
 Opens a neovim buffer showing the detailed output of a specific tool execution. Reads from per-tool-call JSONL files.
 
@@ -137,7 +141,7 @@ curl -X POST https://console.anthropic.com/v1/oauth/token \
 
 ## Session Files
 
-All session data lives in `/tmp/tcode/sessions/{session_id}/`:
+All session data lives in `~/.tcode/sessions/{session_id}/`. Sessions persist after exit.
 
 | File | Purpose |
 |------|---------|

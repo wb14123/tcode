@@ -1,10 +1,50 @@
 use std::fs::{self, Permissions};
+use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
+use rand::Rng;
 
-/// Manages session-specific directories and files under /tmp/tcode/sessions/<session_id>/
+/// Returns the base path for all sessions: ~/.tcode/sessions/
+pub fn base_path() -> PathBuf {
+    dirs::home_dir()
+        .expect("Could not find home directory")
+        .join(".tcode")
+        .join("sessions")
+}
+
+/// Generate a unique 8-character session ID (lowercase alphanumeric)
+pub fn generate_session_id() -> String {
+    const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";
+    let mut rng = rand::rng();
+    (0..8)
+        .map(|_| {
+            let idx = rng.random_range(0..CHARSET.len());
+            CHARSET[idx] as char
+        })
+        .collect()
+}
+
+/// List all session directories under ~/.tcode/sessions/
+pub fn list_sessions() -> io::Result<Vec<String>> {
+    let base = base_path();
+    if !base.exists() {
+        return Ok(vec![]);
+    }
+    let mut sessions = vec![];
+    for entry in fs::read_dir(base)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            if let Some(name) = entry.file_name().to_str() {
+                sessions.push(name.to_string());
+            }
+        }
+    }
+    Ok(sessions)
+}
+
+/// Manages session-specific directories and files under ~/.tcode/sessions/<session_id>/
 /// Files are created with restricted permissions (0600) in a directory with 0700 permissions.
 pub struct Session {
     session_dir: PathBuf,
@@ -14,7 +54,7 @@ impl Session {
     /// Create a new session with the given ID.
     /// Creates the session directory with restricted permissions.
     pub fn new(session_id: String) -> Result<Self> {
-        let base_dir = PathBuf::from("/tmp/tcode/sessions");
+        let base_dir = base_path();
         let session_dir = base_dir.join(&session_id);
 
         // Create base directory if needed
@@ -62,25 +102,6 @@ impl Session {
     /// Path for a per-tool-call status file (written by server, read by tool-call display)
     pub fn tool_call_status_file(&self, tool_call_id: &str) -> PathBuf {
         self.session_dir.join(format!("tool-call-{}-status.txt", tool_call_id))
-    }
-
-    /// Clean up session files and directory
-    pub fn cleanup(&self) {
-        let _ = fs::remove_file(self.msg_file());
-        let _ = fs::remove_file(self.display_file());
-        let _ = fs::remove_file(self.status_file());
-        let _ = fs::remove_file(self.socket_path());
-        // Remove per-tool-call files
-        if let Ok(entries) = fs::read_dir(&self.session_dir) {
-            for entry in entries.flatten() {
-                let name = entry.file_name();
-                let name = name.to_string_lossy();
-                if name.starts_with("tool-call-") {
-                    let _ = fs::remove_file(entry.path());
-                }
-            }
-        }
-        let _ = fs::remove_dir(&self.session_dir);
     }
 }
 
