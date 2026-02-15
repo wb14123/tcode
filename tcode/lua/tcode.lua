@@ -351,7 +351,6 @@ local function create_display_buffer(name, statusline)
   vim.bo.bufhidden = 'hide'
   vim.bo.swapfile = false
   vim.bo.modifiable = false
-  vim.bo.readonly = true
   vim.bo.filetype = 'markdown'
 
   vim.wo.wrap = true
