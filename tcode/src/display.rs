@@ -1,10 +1,10 @@
 use std::path::PathBuf;
-use std::process::Stdio;
 
 use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
 
 use crate::session::Session;
+use crate::tty_stdio;
 
 pub struct DisplayClient {
     session: Session,
@@ -50,11 +50,13 @@ fn spawn_nvim(lua_path: &PathBuf, display_file: &PathBuf, status_file: &PathBuf,
         exe_path.display(),
     );
 
+    let (stdin, stdout, stderr) = tty_stdio::get_tty_stdio();
+
     let child = Command::new("nvim")
         .args(["-c", &lua_cmd])
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .context("Failed to spawn 'nvim' for display - is neovim installed and in PATH?")?;
 

@@ -1,5 +1,4 @@
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
@@ -14,6 +13,7 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use crate::protocol::ClientMessage;
 use crate::session::Session;
+use crate::tty_stdio;
 
 pub struct EditClient {
     session: Session,
@@ -113,11 +113,13 @@ fn spawn_nvim(lua_path: &PathBuf, msg_file: &PathBuf) -> Result<Child> {
         msg_file.display()
     );
 
+    let (stdin, stdout, stderr) = tty_stdio::get_tty_stdio();
+
     let child = Command::new("nvim")
         .args(["-c", &lua_cmd])
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
         .spawn()
         .context("Failed to spawn 'nvim' for edit - is neovim installed and in PATH?")?;
 

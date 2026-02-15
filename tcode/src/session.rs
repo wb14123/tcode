@@ -103,5 +103,15 @@ impl Session {
     pub fn tool_call_status_file(&self, tool_call_id: &str) -> PathBuf {
         self.session_dir.join(format!("tool-call-{}-status.txt", tool_call_id))
     }
+
+    /// Path for stdout log (captures injected stdout from tools like proxychains)
+    pub fn stdout_log(&self) -> PathBuf {
+        self.session_dir.join("stdout.log")
+    }
+
+    /// Path for stderr log (captures injected stderr from tools like proxychains)
+    pub fn stderr_log(&self) -> PathBuf {
+        self.session_dir.join("stderr.log")
+    }
 }
 

@@ -5,6 +5,7 @@ mod protocol;
 mod server;
 mod session;
 mod tool_call_display;
+mod tty_stdio;
 
 use std::fs;
 use std::path::PathBuf;
@@ -325,22 +326,28 @@ async fn run_browser() -> Result<()> {
     Ok(())
 }
 
-async fn run_unified(cli: Cli, lua_path: PathBuf) -> Result<()> {
+async fn run_unified(cli: Cli, _lua_path: PathBuf) -> Result<()> {
     // Check if running inside tmux
     if !is_in_tmux() {
         anyhow::bail!("tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux.");
     }
 
-    // Generate new session ID
+    // Generate new session ID and create session directory first
     let session_id = session::generate_session_id();
-    println!("Session: {}", session_id);
+    let session = Session::new(session_id.clone())?;
+
+    // Redirect stdout/stderr to log files to prevent injected output (e.g. from proxychains4)
+    // from corrupting the TUI display. Save original stdout to print session ID.
+    let original_stdout = tty_stdio::redirect_output_to_files(
+        &session.stdout_log(),
+        &session.stderr_log(),
+    );
+    tty_stdio::write_to_terminal(original_stdout, &format!("Session: {}\n", session_id));
 
     init_tracing(&session_id);
 
     let (llm, model) = create_llm(&cli)?;
 
-    // Create session directory
-    let session = Session::new(session_id.clone())?;
     let socket_path = session.socket_path();
 
     // Get the path to the current executable
@@ -384,10 +391,22 @@ async fn run_unified(cli: Cli, lua_path: PathBuf) -> Result<()> {
         }
     };
 
-    // Run display client in current pane (create a new session that shares the directory)
-    let display_session = Session::new(session_id.clone())?;
-    let client = DisplayClient::new(display_session, lua_path, session_id);
-    let result = client.run().await;
+    // Run display client as a separate process with the original terminal fds.
+    // This bypasses the redirected stdout/stderr.
+    let display_cmd = format!("{} {} display", exe_str, session_arg);
+    let (stdin, stdout, stderr) = tty_stdio::get_original_stdio()
+        .context("Failed to get original stdio fds")?;
+
+    let mut display_child = std::process::Command::new("sh")
+        .args(["-c", &display_cmd])
+        .stdin(stdin)
+        .stdout(stdout)
+        .stderr(stderr)
+        .spawn()
+        .context("Failed to spawn display process")?;
+
+    // Wait for display to exit
+    let result = display_child.wait();
 
     // Kill the edit pane to ensure it exits
     let _ = Command::new("tmux")
@@ -397,5 +416,5 @@ async fn run_unified(cli: Cli, lua_path: PathBuf) -> Result<()> {
     // Abort server task (it should already be shutting down)
     server_handle.abort();
 
-    result
+    result.map(|_| ()).context("Display process failed")
 }
