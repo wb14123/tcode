@@ -73,7 +73,7 @@ pub(crate) async fn terminate_child(child: &mut Child) -> Result<()> {
 
 use display::DisplayClient;
 use edit::EditClient;
-use llm_rs::llm::{Claude, GetTokenFn, OpenAI, OpenRouter, LLM};
+use llm_rs::llm::{ChatOptions, Claude, GetTokenFn, OpenAI, OpenRouter, ReasoningEffort, ToolSummarizationConfig, LLM};
 use server::Server;
 use session::Session;
 use tool_call_display::ToolCallDisplayClient;
@@ -85,6 +85,26 @@ fn get_api_key(cli: &Cli, provider: Provider) -> Result<String> {
         .ok_or_else(|| {
             anyhow!("API key required. Set {} env or use --api-key", provider.env_var_name())
         })
+}
+
+/// Build ChatOptions from CLI args
+fn build_chat_options(cli: &Cli) -> ChatOptions {
+    let tool_summarization = if cli.no_tool_summary {
+        None
+    } else {
+        Some(ToolSummarizationConfig {
+            tool_summary_recent_count: cli.tool_summary_recent_count,
+            tool_summary_min_length: cli.tool_summary_min_length,
+            tool_summary_model: cli.tool_summary_model.clone(),
+            tool_summary_enabled: true,
+        })
+    };
+
+    ChatOptions {
+        reasoning_effort: Some(ReasoningEffort::Medium),
+        tool_summarization,
+        ..Default::default()
+    }
 }
 
 /// Create an LLM instance from CLI options
@@ -145,6 +165,23 @@ struct Cli {
     /// Session ID (defaults to tmux session name or "default")
     #[arg(long)]
     session: Option<String>,
+
+    // Tool summarization options
+    /// Number of recent tool results to keep in full (default: 3)
+    #[arg(long, default_value = "3")]
+    tool_summary_recent_count: usize,
+
+    /// Minimum content length to trigger tool output summarization (default: 2000)
+    #[arg(long, default_value = "2000")]
+    tool_summary_min_length: usize,
+
+    /// Model to use for tool summarization (default: provider's smallest)
+    #[arg(long)]
+    tool_summary_model: Option<String>,
+
+    /// Disable tool output summarization
+    #[arg(long)]
+    no_tool_summary: bool,
 }
 
 #[derive(Subcommand)]
@@ -215,6 +252,7 @@ async fn main() -> Result<()> {
             let session_id = require_session(cli.session.clone())?;
             init_tracing(&session_id);
             let (llm, model) = create_llm(&cli)?;
+            let chat_options = build_chat_options(&cli);
             let session = Session::new(session_id)?;
             let server = Server::new(
                 session.socket_path(),
@@ -223,6 +261,7 @@ async fn main() -> Result<()> {
                 session.session_dir().clone(),
                 llm,
                 model,
+                chat_options,
             );
             server.run().await
         }
@@ -347,6 +386,7 @@ async fn run_unified(cli: Cli, _lua_path: PathBuf) -> Result<()> {
     init_tracing(&session_id);
 
     let (llm, model) = create_llm(&cli)?;
+    let chat_options = build_chat_options(&cli);
 
     let socket_path = session.socket_path();
 
@@ -363,6 +403,7 @@ async fn run_unified(cli: Cli, _lua_path: PathBuf) -> Result<()> {
         session.session_dir().clone(),
         llm,
         model,
+        chat_options,
     );
 
     // Spawn server in background

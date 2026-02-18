@@ -6,7 +6,7 @@ use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use llm_rs::conversation::{ConversationManager, Message};
-use llm_rs::llm::{ChatOptions, ReasoningEffort, LLM};
+use llm_rs::llm::{ChatOptions, LLM};
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -32,6 +32,7 @@ pub struct Server {
     session_dir: PathBuf,
     llm: Box<dyn LLM>,
     model: String,
+    chat_options: ChatOptions,
 }
 
 impl Server {
@@ -42,6 +43,7 @@ impl Server {
         session_dir: PathBuf,
         llm: Box<dyn LLM>,
         model: String,
+        chat_options: ChatOptions,
     ) -> Self {
         Self {
             socket_path,
@@ -50,6 +52,7 @@ impl Server {
             session_dir,
             llm,
             model,
+            chat_options,
         }
     }
 
@@ -76,10 +79,7 @@ impl Server {
             "You are a helpful assistant.",
             &self.model,
             vec![Arc::new(tools::web_fetch_tool()), Arc::new(tools::web_search_tool())],
-            ChatOptions{
-                reasoning_effort: Some(ReasoningEffort::Medium),
-                ..Default::default()
-            },
+            self.chat_options.clone(),
         )?;
 
         // Spawn background task to write conversation events to display files
@@ -223,6 +223,25 @@ impl Server {
                             append_event(&display_file, &event).await
                                 .context("Failed to append display event")?;
                         }
+                    }
+
+                    Message::ToolSummary { tool_call_id, summary, .. } => {
+                        tracing::info!(
+                            tool_call_id,
+                            summary_len = summary.len(),
+                            "ToolSummary received"
+                        );
+
+                        // Write summary to the per-tool-call file
+                        let tc_file = session_dir.join(format!("tool-call-{}.jsonl", tool_call_id));
+                        if tc_file.exists() {
+                            append_event(&tc_file, &event).await
+                                .context("Failed to append tool summary")?;
+                        }
+
+                        // Also write to main display so UI can update
+                        append_event(&display_file, &event).await
+                            .context("Failed to append tool summary to display")?;
                     }
 
                     _ => {

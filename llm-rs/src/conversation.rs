@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -105,6 +105,13 @@ pub enum Message {
         total_input_tokens: i32,
         total_output_tokens: i32,
     },
+
+    /// Emitted when a tool output is summarized (lazy, when it moves beyond recent_count)
+    ToolSummary {
+        msg_id: MessageID,
+        tool_call_id: String,
+        summary: Arc<String>,
+    },
 }
 
 pub struct ConversationManager {
@@ -168,7 +175,8 @@ impl ConversationManager {
                     input_channel_tx: input_tx,
                     new_msg_notify_tx: notify_tx,
                 })
-            }
+            },
+            unsummarized_tool_indices: VecDeque::new(),
         };
         let client = &(&conversation).conversation_client.clone();
         let task = tokio::spawn(async move {
@@ -229,6 +237,11 @@ pub struct Conversation {
 
     /// Chat options (includes reasoning config) for this conversation.
     chat_options: ChatOptions,
+
+    /// Queue of indices into llm_msgs for tool results not yet summarized.
+    /// When a new tool result is added, its index is pushed to this queue.
+    /// When the queue exceeds recent_count, the oldest is popped and summarized.
+    unsummarized_tool_indices: VecDeque<usize>,
 }
 
 /// Multi round LLM conversation. Thread and async safe.
@@ -261,6 +274,9 @@ impl Conversation {
     /// It handles the tool call and continues the loop when there is no tool call request anymore.
     async fn call_llm(&mut self) {
         loop {
+            // Summarize old tool outputs before sending to LLM
+            self.prepare_tool_summaries().await;
+
             let mut response_stream =
                 self.llm
                     .chat(self.model.as_str(), &self.llm_msgs, &self.chat_options);
@@ -438,10 +454,15 @@ impl Conversation {
             });
 
             // Push tool result with tool_call_id for proper API format
+            let idx = self.llm_msgs.len();
             self.llm_msgs.push(LLMMessage::ToolResult {
                 tool_call_id: tool_call.id,
                 content: tool_result,
+                cached_summary: None,
             });
+
+            // Track this tool result index for lazy summarization
+            self.unsummarized_tool_indices.push_back(idx);
         }
     }
 
@@ -450,6 +471,80 @@ impl Conversation {
         Ok(()) // placeholder
     }
 
+    /// Lazily summarize old tool outputs before sending to LLM.
+    /// Uses a queue of message indices. When the queue exceeds recent_count,
+    /// pops the oldest and summarizes it if needed.
+    async fn prepare_tool_summaries(&mut self) {
+        // Get config from chat_options, return early if not enabled
+        let config = match &self.chat_options.tool_summarization {
+            Some(config) if config.tool_summary_enabled => config.clone(),
+            _ => return,
+        };
+
+        // Pop oldest tool indices from queue while it exceeds recent_count
+        while self.unsummarized_tool_indices.len() > config.tool_summary_recent_count {
+            let idx = match self.unsummarized_tool_indices.pop_front() {
+                Some(idx) => idx,
+                None => break,
+            };
+
+            // Extract info and check if summarization is needed
+            let (tool_call_id, content) = {
+                if let LLMMessage::ToolResult {
+                    tool_call_id,
+                    content,
+                    cached_summary,
+                } = &self.llm_msgs[idx]
+                {
+                    if cached_summary.is_some() {
+                        continue; // Already summarized
+                    }
+                    if content.len() <= config.tool_summary_min_length {
+                        continue; // Too short to summarize
+                    }
+                    (tool_call_id.clone(), content.clone())
+                } else {
+                    continue;
+                }
+            };
+
+            // Call the LLM to summarize
+            let model = config.tool_summary_model.as_deref();
+            match self.llm.summarize_tool_output(model, &content).await {
+                Ok(summary) => {
+                    tracing::info!(
+                        tool_call_id = %tool_call_id,
+                        original_len = content.len(),
+                        summary_len = summary.len(),
+                        "tool output summarized"
+                    );
+
+                    // Update the cached_summary directly via index
+                    if let LLMMessage::ToolResult {
+                        cached_summary, ..
+                    } = &mut self.llm_msgs[idx]
+                    {
+                        *cached_summary = Some(summary.clone());
+                    }
+
+                    // Broadcast the ToolSummary event
+                    self.broadcast_msg(Message::ToolSummary {
+                        msg_id: self.next_msg_id(),
+                        tool_call_id,
+                        summary: Arc::new(summary),
+                    });
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        tool_call_id = %tool_call_id,
+                        error = %e,
+                        "failed to summarize tool output, using original"
+                    );
+                    // Continue without summary - original content will be used
+                }
+            }
+        }
+    }
 }
 
 

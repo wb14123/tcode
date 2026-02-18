@@ -188,5 +188,8 @@ fn print_message(msg: &Message) {
                 total_input_tokens, total_output_tokens
             );
         }
+        Message::ToolSummary { tool_call_id, summary, .. } => {
+            println!("    [Tool {} summary: {}]", tool_call_id, summary);
+        }
     }
 }

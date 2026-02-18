@@ -15,6 +15,7 @@ pub use claude::{Claude, GetTokenFn};
 pub use openai::OpenAI;
 pub use openrouter::OpenRouter;
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
@@ -35,6 +36,31 @@ pub enum ReasoningEffort {
     Minimal,
 }
 
+/// Configuration for tool output summarization.
+#[derive(Clone, Debug)]
+pub struct ToolSummarizationConfig {
+    /// Number of most recent tool results to keep in full (default: 3)
+    pub tool_summary_recent_count: usize,
+    /// Minimum content length to trigger summarization (default: 2000)
+    pub tool_summary_min_length: usize,
+    /// Model to use for summarization (default: provider's smallest)
+    /// Examples: "claude-haiku-4", "gpt-4o-mini", "openai/gpt-4o-mini"
+    pub tool_summary_model: Option<String>,
+    /// Whether tool summarization is enabled
+    pub tool_summary_enabled: bool,
+}
+
+impl Default for ToolSummarizationConfig {
+    fn default() -> Self {
+        Self {
+            tool_summary_recent_count: 3,
+            tool_summary_min_length: 2000,
+            tool_summary_model: None,
+            tool_summary_enabled: true,
+        }
+    }
+}
+
 /// Options for LLM chat requests.
 #[derive(Clone, Debug, Default)]
 pub struct ChatOptions {
@@ -46,6 +72,8 @@ pub struct ChatOptions {
     pub reasoning_budget: Option<u32>,
     /// If true, model uses reasoning internally but doesn't return it in the response.
     pub exclude_reasoning: bool,
+    /// Configuration for tool output summarization
+    pub tool_summarization: Option<ToolSummarizationConfig>,
 }
 
 
@@ -70,6 +98,8 @@ pub enum LLMMessage {
     ToolResult {
         tool_call_id: String,
         content: String,
+        /// Cached summary of the content (populated lazily during preprocessing)
+        cached_summary: Option<String>,
     },
 }
 
@@ -165,4 +195,21 @@ pub trait LLM: Send + Sync {
         msgs: &[LLMMessage],
         options: &ChatOptions,
     ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>>;
+
+    /// Summarize tool output using the provider's summarization model.
+    ///
+    /// # Arguments
+    /// - `model`: Model to use (if None, use provider's default smallest model)
+    /// - `tool_output`: The tool output to summarize
+    ///
+    /// # Returns
+    /// The summary string, or an error message if summarization fails.
+    fn summarize_tool_output(
+        &self,
+        model: Option<&str>,
+        tool_output: &str,
+    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>>;
+
+    /// Get the default smallest model name for tool summarization.
+    fn default_tool_summary_model(&self) -> &'static str;
 }
