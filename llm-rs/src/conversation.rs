@@ -32,6 +32,13 @@ pub enum MessageEndStatus {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum SystemMessageLevel {
+    Info,
+    Warning,
+    Error,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     UserMessage {
         msg_id: MessageID,
@@ -111,6 +118,14 @@ pub enum Message {
         msg_id: MessageID,
         tool_call_id: String,
         summary: Arc<String>,
+    },
+
+    /// System-level message (info, warning, error)
+    SystemMessage {
+        msg_id: MessageID,
+        created_at: u64,
+        level: SystemMessageLevel,
+        message: String,
     },
 }
 
@@ -540,6 +555,13 @@ impl Conversation {
                         error = %e,
                         "failed to summarize tool output, using original"
                     );
+                    // Broadcast error to UI
+                    self.broadcast_msg(Message::SystemMessage {
+                        msg_id: self.next_msg_id(),
+                        created_at: now_millis(),
+                        level: SystemMessageLevel::Warning,
+                        message: format!("Tool summarization failed: {}", e),
+                    });
                     // Continue without summary - original content will be used
                 }
             }

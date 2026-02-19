@@ -331,6 +331,30 @@ local function render_event(buf, ns, event)
     })
     append_lines(buf, { '' })
 
+  elseif variant == 'SystemMessage' then
+    -- Display system message with appropriate styling based on level
+    local level = data.level or 'Info'
+    local prefix = '[' .. level:upper() .. '] '
+    local hl_group = 'TCodeSystemInfo'
+    local notify_level = vim.log.levels.INFO
+    if level == 'Warning' then
+      hl_group = 'TCodeSystemWarning'
+      notify_level = vim.log.levels.WARN
+    elseif level == 'Error' then
+      hl_group = 'TCodeSystemError'
+      notify_level = vim.log.levels.ERROR
+    end
+    -- Show as nvim notification (ephemeral)
+    vim.notify(data.message or '', notify_level, { title = 'TCode' })
+    -- Also show in main display (persistent)
+    append_lines(buf, { '' })
+    local msg_lines = vim.split(prefix .. (data.message or ''), '\n', { plain = true })
+    append_lines(buf, msg_lines)
+    local start_row = vim.api.nvim_buf_line_count(buf) - #msg_lines
+    for i = 0, #msg_lines - 1 do
+      vim.api.nvim_buf_add_highlight(buf, ns, hl_group, start_row + i, 0, -1)
+    end
+
   elseif variant == 'SubAgentStart' then
     render_label(buf, ns, '>>> SUB-AGENT: ' .. (data.description or ''), 'TCodeTool', data)
 
@@ -360,6 +384,9 @@ local function setup_highlights(statusline_fg, statusline_ctermfg)
   vim.api.nvim_set_hl(0, 'TCodeThinking', { fg = '#7c8495', italic = true, ctermfg = 245 })
   vim.api.nvim_set_hl(0, 'TCodeTokens', { fg = '#5c6370', italic = true, ctermfg = 242 })
   vim.api.nvim_set_hl(0, 'TCodeError', { fg = '#e06c75', bold = true, ctermfg = 168 })
+  vim.api.nvim_set_hl(0, 'TCodeSystemInfo', { fg = '#61afef', italic = true, ctermfg = 75 })
+  vim.api.nvim_set_hl(0, 'TCodeSystemWarning', { fg = '#e5c07b', bold = true, ctermfg = 180 })
+  vim.api.nvim_set_hl(0, 'TCodeSystemError', { fg = '#e06c75', bold = true, ctermfg = 168 })
   vim.api.nvim_set_hl(0, 'TCodeStatusLine', {
     bg = '#282c34', fg = statusline_fg,
     ctermfg = statusline_ctermfg, ctermbg = 236,
