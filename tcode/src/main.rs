@@ -385,6 +385,16 @@ async fn run_unified(cli: Cli, _lua_path: PathBuf) -> Result<()> {
 
     init_tracing(&session_id);
 
+    // Run the main logic, catching any errors to display them to the terminal
+    // (since stderr is now redirected to a log file)
+    let result = run_unified_inner(cli, session, session_id).await;
+    if let Err(ref e) = result {
+        tty_stdio::write_error_to_terminal(&format!("Error: {:?}", e));
+    }
+    result
+}
+
+async fn run_unified_inner(cli: Cli, session: Session, session_id: String) -> Result<()> {
     let (llm, model) = create_llm(&cli)?;
     let chat_options = build_chat_options(&cli);
 
