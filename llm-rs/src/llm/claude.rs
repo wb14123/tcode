@@ -437,7 +437,7 @@ fn convert_messages(msgs: &[LLMMessage]) -> (Option<Vec<SystemBlock>>, Vec<Claud
 // ============================================================================
 
 /// Default model for tool summarization
-const DEFAULT_SUMMARY_MODEL: &str = "claude-3-5-haiku-20241022";
+const DEFAULT_SUMMARY_MODEL: &str = "claude-sonnet-4-6";
 
 /// Summarization prompt template
 const SUMMARIZATION_PROMPT: &str = r#"Summarize the following tool output concisely.
