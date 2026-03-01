@@ -65,6 +65,31 @@ local thinking_state = {
   content = '',
 }
 
+-- Treesitter markdown regions: only user/assistant message text is rendered as markdown.
+-- We track line ranges and use set_included_regions() to restrict treesitter parsing.
+local md_regions = {}   -- list of {start_row, end_row} (0-indexed)
+local ts_parser = nil   -- treesitter LanguageTree, set in setup_display
+local assistant_md = { started = false, start_row = nil, region_idx = nil }
+
+local function update_ts_regions(buf)
+  if not ts_parser then return end
+  if not vim.api.nvim_buf_is_valid(buf) then return end
+  local regions = {}
+  local total_lines = vim.api.nvim_buf_line_count(buf)
+  for _, r in ipairs(md_regions) do
+    local sr = math.max(0, r[1])
+    local er = math.min(r[2], total_lines - 1)
+    if er >= sr then
+      local last_line = vim.api.nvim_buf_get_lines(buf, er, er + 1, false)[1] or ''
+      table.insert(regions, { { sr, 0, er, #last_line } })
+    end
+  end
+  pcall(function()
+    ts_parser:set_included_regions(regions)
+    ts_parser:parse(true)
+  end)
+end
+
 -- Render a label line with optional timestamp as virtual text
 local function render_label(buf, ns, prefix, hl_group, data)
   append_lines(buf, { '' })
@@ -238,10 +263,28 @@ local function render_event(buf, ns, event)
   local variant, data = next(event)
   if not variant then return end
 
+  -- Auto-close an unclosed markdown region when a non-assistant event arrives
+  if assistant_md.started
+      and variant ~= 'AssistantMessageChunk'
+      and variant ~= 'AssistantMessageEnd'
+      and variant ~= 'AssistantThinkingChunk' then
+    if assistant_md.region_idx then
+      md_regions[assistant_md.region_idx][2] = vim.api.nvim_buf_line_count(buf) - 1
+      update_ts_regions(buf)
+    end
+    assistant_md.started = false
+    assistant_md.start_row = nil
+    assistant_md.region_idx = nil
+  end
+
   if variant == 'UserMessage' then
     render_label(buf, ns, '>>> USER', 'TCodeUser', data)
+    local start_row = vim.api.nvim_buf_line_count(buf)
     local content_lines = vim.split(data.content, '\n', { plain = true })
     append_lines(buf, content_lines)
+    local end_row = vim.api.nvim_buf_line_count(buf) - 1
+    table.insert(md_regions, { start_row, end_row })
+    update_ts_regions(buf)
 
   elseif variant == 'AssistantMessageStart' then
     render_label(buf, ns, '>>> ASSISTANT', 'TCodeAssistant', data)
@@ -265,11 +308,26 @@ local function render_event(buf, ns, event)
     if thinking_state.is_thinking then
       collapse_thinking(buf, ns)
     end
+    if not assistant_md.started then
+      assistant_md.start_row = vim.api.nvim_buf_line_count(buf) - 1
+      assistant_md.started = true
+      table.insert(md_regions, { assistant_md.start_row, assistant_md.start_row })
+      assistant_md.region_idx = #md_regions
+    end
     append_text(buf, data.content)
+    md_regions[assistant_md.region_idx][2] = vim.api.nvim_buf_line_count(buf) - 1
+    update_ts_regions(buf)
 
   elseif variant == 'AssistantMessageEnd' then
     if thinking_state.is_thinking then
       collapse_thinking(buf, ns)
+    end
+    if assistant_md.started then
+      md_regions[assistant_md.region_idx][2] = vim.api.nvim_buf_line_count(buf) - 1
+      update_ts_regions(buf)
+      assistant_md.started = false
+      assistant_md.start_row = nil
+      assistant_md.region_idx = nil
     end
     render_info(buf, ns, data, nil)
 
@@ -403,7 +461,6 @@ local function create_display_buffer(name, statusline)
   vim.bo.bufhidden = 'hide'
   vim.bo.swapfile = false
   vim.bo.modifiable = false
-  vim.bo.filetype = 'markdown'
 
   vim.wo.wrap = true
   vim.wo.linebreak = true
@@ -512,6 +569,14 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
   local buf = create_display_buffer('[TCode Display]',
     '%#TCodeStatusLine# TCode: %{g:tcode_status} %=')
   local ns = vim.api.nvim_create_namespace('tcode')
+
+  -- Use treesitter to render only user/assistant content as markdown.
+  -- set_included_regions() restricts parsing to tracked line ranges.
+  pcall(function()
+    ts_parser = vim.treesitter.get_parser(buf, 'markdown')
+    vim.treesitter.start(buf, 'markdown')
+    ts_parser:set_included_regions({})
+  end)
 
   local check_updates = create_jsonl_reader(M.display_file, buf, ns)
   M.display_watcher = watch_file(M.display_file, check_updates)
