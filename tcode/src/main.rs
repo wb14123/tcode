@@ -45,7 +45,7 @@ impl Provider {
 
     fn env_var_name(&self) -> &'static str {
         match self {
-            Provider::Claude => "ANTHROPIC_ACCESS_TOKEN",
+            Provider::Claude => "ANTHROPIC_API_KEY",
             Provider::OpenAi => "OPENAI_API_KEY",
             Provider::OpenRouter => "OPENROUTER_API_KEY",
         }
@@ -115,16 +115,21 @@ fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String)> {
 
     let llm: Box<dyn LLM> = match provider {
         Provider::Claude => {
-            let manager = claude_auth::load_token_manager().ok_or_else(|| {
-                anyhow!("No Claude authentication found. Run 'tcode claude-auth' to authenticate.")
-            })?;
-            let get_token: GetTokenFn = std::sync::Arc::new(move || {
-                let m = manager.clone();
-                Box::pin(async move {
-                    m.get_access_token().await.map_err(|e| e.to_string())
-                })
-            });
-            Box::new(Claude::with_get_token(get_token, &base_url))
+            // Try API key first, fall back to OAuth
+            if let Ok(api_key) = get_api_key(cli, provider) {
+                Box::new(Claude::with_base_url(&api_key, &base_url))
+            } else {
+                let manager = claude_auth::load_token_manager().ok_or_else(|| {
+                    anyhow!("No Claude authentication found. Set ANTHROPIC_API_KEY env, use --api-key, or run 'tcode claude-auth' to authenticate via OAuth.")
+                })?;
+                let get_token: GetTokenFn = std::sync::Arc::new(move || {
+                    let m = manager.clone();
+                    Box::pin(async move {
+                        m.get_access_token().await.map_err(|e| e.to_string())
+                    })
+                });
+                Box::new(Claude::with_get_token(get_token, &base_url))
+            }
         }
         Provider::OpenAi => {
             let api_key = get_api_key(cli, provider)?;
