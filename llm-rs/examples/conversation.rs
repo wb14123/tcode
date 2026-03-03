@@ -60,7 +60,7 @@ async fn main() -> anyhow::Result<()> {
     let manager = ConversationManager::new();
     let llm = Box::new(OpenRouter::new(&api_key));
 
-    let client = manager.new_conversation(
+    let (_, client) = manager.new_conversation(
         llm,
         "You are a helpful assistant. Use tools when needed to answer questions about weather and time.",
         model,
@@ -69,6 +69,7 @@ async fn main() -> anyhow::Result<()> {
             reasoning_effort: Some(ReasoningEffort::Medium),
             ..Default::default()
         },
+        false,
     )?;
 
     // Subscribe to messages (this must be done before sending to receive all messages)
@@ -176,8 +177,8 @@ fn print_message(msg: &Message) {
         Message::SubAgentStart { description, .. } => {
             println!("\n    [SubAgent started: {}]", description);
         }
-        Message::SubAgentEnd { .. } => {
-            println!("    [SubAgent ended]");
+        Message::SubAgentEnd { response, input_tokens, output_tokens, .. } => {
+            println!("    [SubAgent ended: {} chars, {} in / {} out tokens]", response.len(), input_tokens, output_tokens);
         }
         Message::AssistantRequestEnd {
             total_input_tokens,
@@ -188,8 +189,8 @@ fn print_message(msg: &Message) {
                 total_input_tokens, total_output_tokens
             );
         }
-        Message::ToolSummary { tool_call_id, summary, .. } => {
-            println!("    [Tool {} summary: {}]", tool_call_id, summary);
+        Message::SystemMessage { message, .. } => {
+            println!("    [System: {}]", message);
         }
     }
 }

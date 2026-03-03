@@ -5,7 +5,6 @@
 //! persisted across turns in stateless mode. For full reasoning persistence,
 //! use server-managed mode with `previous_response_id`.
 
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -21,7 +20,7 @@ use futures::StreamExt;
 use tokio_stream::Stream;
 
 use super::openai_common::{effort_to_str, normalize_schema_for_openai};
-use super::{ChatOptions, LLMEvent, LLMMessage, StopReason, ToolCall, LLM};
+use super::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall, LLM};
 use crate::tool::Tool;
 
 // ============================================================================
@@ -36,9 +35,7 @@ use crate::tool::Tool;
 pub struct OpenAI {
     client: async_openai::Client<OpenAIConfig>,
     cached_tools: Option<Vec<OAITool>>,
-    /// API key stored for summarization calls (uses Chat Completions API)
     api_key: String,
-    /// Base URL stored for summarization calls
     base_url: String,
 }
 
@@ -128,14 +125,11 @@ fn convert_messages(msgs: &[LLMMessage]) -> Vec<InputItem> {
             LLMMessage::ToolResult {
                 tool_call_id,
                 content,
-                cached_summary,
             } => {
-                // Use summary if available, otherwise full content
-                let effective_content = cached_summary.as_ref().unwrap_or(content);
                 items.push(InputItem::Item(Item::FunctionCallOutput(
                     FunctionCallOutputItemParam {
                         call_id: tool_call_id.clone(),
-                        output: FunctionCallOutput::Text(effective_content.clone()),
+                        output: FunctionCallOutput::Text(content.clone()),
                         id: None,
                         status: None,
                     },
@@ -146,19 +140,6 @@ fn convert_messages(msgs: &[LLMMessage]) -> Vec<InputItem> {
 
     items
 }
-
-// ============================================================================
-// Tool summarization constants
-// ============================================================================
-
-/// Default model for tool summarization
-const DEFAULT_SUMMARY_MODEL: &str = "gpt-4o-mini";
-
-/// Summarization prompt template
-const SUMMARIZATION_PROMPT: &str = r#"Summarize the following tool output concisely.
-Keep the summary under 500 chars. Output only the summary.
-
-{tool_output}"#;
 
 // ============================================================================
 // LLM trait implementation
@@ -185,64 +166,21 @@ impl LLM for OpenAI {
         };
     }
 
-    fn summarize_tool_output(
-        &self,
-        model: Option<&str>,
-        tool_output: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
-        let model = model.unwrap_or(DEFAULT_SUMMARY_MODEL).to_string();
-        let api_key = self.api_key.clone();
-        let base_url = self.base_url.clone();
-
-        // Build the prompt
-        let prompt = SUMMARIZATION_PROMPT.replace("{tool_output}", tool_output);
-
-        Box::pin(async move {
-            let http_client = reqwest::Client::new();
-
-            let request_body = serde_json::json!({
-                "model": model,
-                "max_tokens": 1024,
-                "messages": [{
-                    "role": "user",
-                    "content": prompt
-                }]
-            });
-
-            let url = format!("{}/chat/completions", base_url);
-            let response = http_client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", api_key))
-                .header("Content-Type", "application/json")
-                .json(&request_body)
-                .send()
-                .await
-                .map_err(|e| format!("Request failed: {}", e))?;
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                return Err(format!("API error {}: {}", status, body));
-            }
-
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| format!("JSON parse error: {}", e))?;
-
-            // Extract content from chat completions response
-            body.get("choices")
-                .and_then(|c| c.get(0))
-                .and_then(|c| c.get("message"))
-                .and_then(|m| m.get("content"))
-                .and_then(|c| c.as_str())
-                .map(|s| s.to_string())
-                .ok_or_else(|| "No content in response".to_string())
+    fn clone_box(&self) -> Box<dyn LLM> {
+        Box::new(OpenAI {
+            client: self.client.clone(),
+            cached_tools: None,
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone(),
         })
     }
 
-    fn default_tool_summary_model(&self) -> &'static str {
-        DEFAULT_SUMMARY_MODEL
+    fn available_models(&self) -> Vec<ModelInfo> {
+        vec![
+            ModelInfo { id: "gpt-5".into(), description: "Most capable OpenAI model".into() },
+            ModelInfo { id: "gpt-5-nano".into(), description: "Fast and cost-effective".into() },
+            ModelInfo { id: "o3".into(), description: "Reasoning model".into() },
+        ]
     }
 
     fn chat(

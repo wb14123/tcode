@@ -73,7 +73,7 @@ pub(crate) async fn terminate_child(child: &mut Child) -> Result<()> {
 
 use display::DisplayClient;
 use edit::EditClient;
-use llm_rs::llm::{ChatOptions, Claude, GetTokenFn, OpenAI, OpenRouter, ReasoningEffort, ToolSummarizationConfig, LLM};
+use llm_rs::llm::{ChatOptions, Claude, GetTokenFn, OpenAI, OpenRouter, ReasoningEffort, LLM};
 use server::Server;
 use session::Session;
 use tool_call_display::ToolCallDisplayClient;
@@ -88,21 +88,9 @@ fn get_api_key(cli: &Cli, provider: Provider) -> Result<String> {
 }
 
 /// Build ChatOptions from CLI args
-fn build_chat_options(cli: &Cli) -> ChatOptions {
-    let tool_summarization = if cli.no_tool_summary {
-        None
-    } else {
-        Some(ToolSummarizationConfig {
-            tool_summary_recent_count: cli.tool_summary_recent_count,
-            tool_summary_min_length: cli.tool_summary_min_length,
-            tool_summary_model: cli.tool_summary_model.clone(),
-            tool_summary_enabled: true,
-        })
-    };
-
+fn build_chat_options(_cli: &Cli) -> ChatOptions {
     ChatOptions {
         reasoning_effort: Some(ReasoningEffort::Medium),
-        tool_summarization,
         ..Default::default()
     }
 }
@@ -170,23 +158,6 @@ struct Cli {
     /// Session ID (defaults to tmux session name or "default")
     #[arg(long)]
     session: Option<String>,
-
-    // Tool summarization options
-    /// Number of recent tool results to keep in full (default: 3)
-    #[arg(long, default_value = "3")]
-    tool_summary_recent_count: usize,
-
-    /// Minimum content length to trigger tool output summarization (default: 2000)
-    #[arg(long, default_value = "2000")]
-    tool_summary_min_length: usize,
-
-    /// Model to use for tool summarization (default: provider's smallest)
-    #[arg(long)]
-    tool_summary_model: Option<String>,
-
-    /// Disable tool output summarization
-    #[arg(long)]
-    no_tool_summary: bool,
 }
 
 #[derive(Subcommand)]

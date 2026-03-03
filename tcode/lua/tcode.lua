@@ -364,31 +364,6 @@ local function render_event(buf, ns, event)
     end
     render_info(buf, ns, data, 'TOOL')
 
-  elseif variant == 'ToolSummary' then
-    -- Display tool summary with header
-    append_lines(buf, { '' })
-    local header_line = vim.api.nvim_buf_line_count(buf) - 1
-    vim.api.nvim_buf_set_extmark(buf, ns, header_line, 0, {
-      virt_text = { { '>>> SUMMARY', 'TCodeTool' } },
-      virt_text_pos = 'overlay',
-    })
-    append_lines(buf, { '' })
-    local summary_lines = vim.split(data.summary, '\n', { plain = true })
-    append_lines(buf, summary_lines)
-    -- Apply subtle highlight to summary
-    local start_row = vim.api.nvim_buf_line_count(buf) - #summary_lines
-    for i = 0, #summary_lines - 1 do
-      vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeThinking', start_row + i, 0, -1)
-    end
-    -- Add separator before raw output
-    append_lines(buf, { '' })
-    local sep_line = vim.api.nvim_buf_line_count(buf) - 1
-    vim.api.nvim_buf_set_extmark(buf, ns, sep_line, 0, {
-      virt_text = { { '--- Raw Output ---', 'TCodeTokens' } },
-      virt_text_pos = 'overlay',
-    })
-    append_lines(buf, { '' })
-
   elseif variant == 'SystemMessage' then
     -- Display system message with appropriate styling based on level
     local level = data.level or 'Info'
@@ -417,6 +392,12 @@ local function render_event(buf, ns, event)
     render_label(buf, ns, '>>> SUB-AGENT: ' .. (data.description or ''), 'TCodeTool', data)
 
   elseif variant == 'SubAgentEnd' then
+    -- Display subagent response
+    if data.response and data.response ~= '' then
+      append_lines(buf, { '' })
+      local response_lines = vim.split(data.response, '\n', { plain = true })
+      append_lines(buf, response_lines)
+    end
     render_info(buf, ns, data, 'sub-agent')
 
   elseif variant == 'AssistantRequestEnd' then

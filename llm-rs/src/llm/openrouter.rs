@@ -3,7 +3,6 @@
 //! Works with OpenRouter and other OpenAI Chat Completions-compatible providers.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -12,7 +11,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
-use super::{ChatOptions, LLMEvent, LLMMessage, StopReason, ToolCall, LLM};
+use super::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall, LLM};
 use super::openai_common::{self, ReasoningRequest, ToolDefinition};
 use crate::tool::Tool;
 
@@ -162,38 +161,6 @@ struct OutputTokensDetails {
 }
 
 // ============================================================================
-// Tool summarization constants
-// ============================================================================
-
-/// Default model for tool summarization
-const DEFAULT_SUMMARY_MODEL: &str = "openai/gpt-4o-mini";
-
-/// Summarization prompt template
-const SUMMARIZATION_PROMPT: &str = r#"Summarize the following tool output concisely.
-Keep the summary under 500 chars. Output only the summary.
-
-{tool_output}"#;
-
-// ============================================================================
-// Non-streaming response type for summarization
-// ============================================================================
-
-#[derive(Deserialize)]
-struct ChatCompletionResponse {
-    choices: Vec<ChatCompletionChoice>,
-}
-
-#[derive(Deserialize)]
-struct ChatCompletionChoice {
-    message: ChatCompletionMessage,
-}
-
-#[derive(Deserialize)]
-struct ChatCompletionMessage {
-    content: Option<String>,
-}
-
-// ============================================================================
 // Implementation
 // ============================================================================
 
@@ -202,59 +169,21 @@ impl LLM for OpenRouter {
         self.cached_tool_defs = openai_common::build_tool_defs(&tools);
     }
 
-    fn summarize_tool_output(
-        &self,
-        model: Option<&str>,
-        tool_output: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
-        let model = model.unwrap_or(DEFAULT_SUMMARY_MODEL).to_string();
-        let client = self.client.clone();
-        let api_key = self.api_key.clone();
-        let base_url = self.base_url.clone();
-
-        // Build the prompt
-        let prompt = SUMMARIZATION_PROMPT.replace("{tool_output}", tool_output);
-
-        Box::pin(async move {
-            let request_body = serde_json::json!({
-                "model": model,
-                "max_tokens": 1024,
-                "messages": [{
-                    "role": "user",
-                    "content": prompt
-                }]
-            });
-
-            let url = format!("{}/chat/completions", base_url);
-            let response = client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", api_key))
-                .header("Content-Type", "application/json")
-                .json(&request_body)
-                .send()
-                .await
-                .map_err(|e| format!("Request failed: {}", e))?;
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                return Err(format!("API error {}: {}", status, body));
-            }
-
-            let body: ChatCompletionResponse = response
-                .json()
-                .await
-                .map_err(|e| format!("JSON parse error: {}", e))?;
-
-            body.choices
-                .first()
-                .and_then(|c| c.message.content.clone())
-                .ok_or_else(|| "No content in response".to_string())
+    fn clone_box(&self) -> Box<dyn LLM> {
+        Box::new(OpenRouter {
+            client: self.client.clone(),
+            api_key: self.api_key.clone(),
+            base_url: self.base_url.clone(),
+            cached_tool_defs: None,
         })
     }
 
-    fn default_tool_summary_model(&self) -> &'static str {
-        DEFAULT_SUMMARY_MODEL
+    fn available_models(&self) -> Vec<ModelInfo> {
+        vec![
+            ModelInfo { id: "deepseek/deepseek-r1".into(), description: "DeepSeek R1 reasoning model".into() },
+            ModelInfo { id: "openai/gpt-5".into(), description: "OpenAI GPT-5".into() },
+            ModelInfo { id: "anthropic/claude-sonnet-4-6".into(), description: "Claude Sonnet 4.6".into() },
+        ]
     }
 
     fn chat(
@@ -344,13 +273,10 @@ impl LLM for OpenRouter {
                 LLMMessage::ToolResult {
                     tool_call_id,
                     content,
-                    cached_summary,
                 } => {
-                    // Use summary if available, otherwise full content
-                    let effective_content = cached_summary.as_ref().unwrap_or(content);
                     ChatMessage {
                         role: "tool",
-                        content: Some(effective_content.clone()),
+                        content: Some(content.clone()),
                         tool_call_id: Some(tool_call_id.clone()),
                         tool_calls: None,
                         reasoning_details: None,

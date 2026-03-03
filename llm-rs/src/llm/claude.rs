@@ -3,7 +3,6 @@
 //! Uses the Anthropic Messages API with OAuth authentication.
 
 use std::collections::HashMap;
-use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -12,7 +11,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
-use super::{ChatOptions, LLMEvent, LLMMessage, ReasoningEffort, StopReason, ToolCall, LLM};
+use super::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall, LLM};
 use crate::tool::Tool;
 
 // ============================================================================
@@ -399,16 +398,13 @@ fn convert_messages(msgs: &[LLMMessage]) -> (Option<Vec<SystemBlock>>, Vec<Claud
             LLMMessage::ToolResult {
                 tool_call_id,
                 content,
-                cached_summary,
             } => {
-                // Use summary if available, otherwise full content
-                let effective_content = cached_summary.as_ref().unwrap_or(content);
                 // Claude requires tool_result in a user message as content block
                 claude_messages.push(ClaudeMessage {
                     role: "user",
                     content: ClaudeContent::Blocks(vec![ContentBlock::ToolResult {
                         tool_use_id: tool_call_id.clone(),
-                        content: effective_content.clone(),
+                        content: content.clone(),
                     }]),
                 });
             }
@@ -436,89 +432,26 @@ fn convert_messages(msgs: &[LLMMessage]) -> (Option<Vec<SystemBlock>>, Vec<Claud
 // LLM trait implementation
 // ============================================================================
 
-/// Default model for tool summarization
-const DEFAULT_SUMMARY_MODEL: &str = "claude-sonnet-4-6";
-
-/// Summarization prompt template
-const SUMMARIZATION_PROMPT: &str = r#"Summarize the following tool output concisely.
-Keep the summary under 500 chars. Output only the summary.
-
-{tool_output}"#;
-
 impl LLM for Claude {
     fn register_tools(&mut self, tools: Vec<Arc<Tool>>) {
         self.cached_tool_defs = build_claude_tool_defs(&tools);
     }
 
-    fn summarize_tool_output(
-        &self,
-        model: Option<&str>,
-        tool_output: &str,
-    ) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send + '_>> {
-        let model = model.unwrap_or(DEFAULT_SUMMARY_MODEL).to_string();
-        let client = self.client.clone();
-        let get_token = self.get_token.clone();
-        let base_url = self.base_url.clone();
-
-        // Build the prompt
-        let prompt = SUMMARIZATION_PROMPT.replace("{tool_output}", tool_output);
-
-        Box::pin(async move {
-            // Get access token
-            let access_token = get_token().await.map_err(|e| format!("Token error: {}", e))?;
-
-            // Build non-streaming request
-            let request_body = serde_json::json!({
-                "model": model,
-                "max_tokens": 1024,
-                "messages": [{
-                    "role": "user",
-                    "content": prompt
-                }]
-            });
-
-            let url = format!("{}/v1/messages", base_url);
-            let response = client
-                .post(&url)
-                .header("Authorization", format!("Bearer {}", access_token))
-                .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json")
-                .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20")
-                .header("x-app", "cli")
-                .header("anthropic-dangerous-direct-browser-access", "true")
-                .json(&request_body)
-                .send()
-                .await
-                .map_err(|e| format!("Request failed: {}", e))?;
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                return Err(format!("API error {}: {}", status, body));
-            }
-
-            let body: serde_json::Value = response
-                .json()
-                .await
-                .map_err(|e| format!("JSON parse error: {}", e))?;
-
-            // Extract text from response
-            if let Some(content) = body.get("content").and_then(|c| c.as_array()) {
-                for block in content {
-                    if block.get("type").and_then(|t| t.as_str()) == Some("text") {
-                        if let Some(text) = block.get("text").and_then(|t| t.as_str()) {
-                            return Ok(text.to_string());
-                        }
-                    }
-                }
-            }
-
-            Err("No text content in response".to_string())
+    fn clone_box(&self) -> Box<dyn LLM> {
+        Box::new(Claude {
+            client: self.client.clone(),
+            get_token: self.get_token.clone(),
+            base_url: self.base_url.clone(),
+            cached_tool_defs: None,
         })
     }
 
-    fn default_tool_summary_model(&self) -> &'static str {
-        DEFAULT_SUMMARY_MODEL
+    fn available_models(&self) -> Vec<ModelInfo> {
+        vec![
+            ModelInfo { id: "claude-opus-4-6".into(), description: "Most capable, best for complex tasks".into() },
+            ModelInfo { id: "claude-sonnet-4-6".into(), description: "Balanced speed and capability".into() },
+            ModelInfo { id: "claude-haiku-4-5".into(), description: "Fast and cost-effective".into() },
+        ]
     }
 
     fn chat(

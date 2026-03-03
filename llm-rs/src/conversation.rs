@@ -1,11 +1,12 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::llm::{ChatOptions, LLMEvent, LLMMessage, StopReason, LLM};
+use crate::llm::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, StopReason, LLM};
 use crate::tool::Tool;
 use anyhow::Result;
+use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
 use tokio::task::JoinHandle;
@@ -14,6 +15,9 @@ use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
 
 type MessageID = i32;
+
+/// Maximum number of LLM call iterations for a subagent conversation.
+const SUBAGENT_MAX_ITERATIONS: usize = 20;
 
 /// Get current timestamp in milliseconds since Unix epoch
 fn now_millis() -> u64 {
@@ -103,6 +107,7 @@ pub enum Message {
         msg_id: MessageID,
         conversation_id: String,
         end_status: MessageEndStatus,
+        response: Arc<String>,
         input_tokens: i32,
         output_tokens: i32,
     },
@@ -113,13 +118,6 @@ pub enum Message {
         total_output_tokens: i32,
     },
 
-    /// Emitted when a tool output is summarized (lazy, when it moves beyond recent_count)
-    ToolSummary {
-        msg_id: MessageID,
-        tool_call_id: String,
-        summary: Arc<String>,
-    },
-
     /// System-level message (info, warning, error)
     SystemMessage {
         msg_id: MessageID,
@@ -128,6 +126,60 @@ pub enum Message {
         message: String,
     },
 }
+
+// ============================================================================
+// Subagent tool parameter types
+// ============================================================================
+
+#[derive(Deserialize, JsonSchema)]
+struct SubAgentParams {
+    /// Description of the task for the subagent to perform
+    task: String,
+    /// Model ID to use for the subagent (see available models in tool description)
+    model: String,
+}
+
+#[derive(Deserialize, JsonSchema)]
+struct GetSubAgentLogsParams {
+    /// The conversation ID of the subagent (returned from the subagent tool)
+    conversation_id: String,
+}
+
+/// Create the `subagent` tool with a dynamic description listing available models.
+pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
+    let models_list: Vec<String> = model_descriptions
+        .iter()
+        .map(|m| format!("  - `{}`: {}", m.id, m.description))
+        .collect();
+
+    let description = format!(
+        "Spawn a subagent to handle a task in its own context window. \
+         The subagent has access to all tools (except subagent and get_subagent_logs) \
+         and will return its final answer. Use this for tasks that produce large outputs \
+         (web fetches, research, multi-step tool use) so the results are summarized \
+         in the subagent's context rather than consuming your context window.\n\n\
+         Available models:\n{}",
+        models_list.join("\n")
+    );
+
+    let schema = schemars::schema_for!(SubAgentParams);
+    Tool::new_sentinel("subagent", description, schema)
+}
+
+/// Create the `get_subagent_logs` tool.
+pub fn create_get_subagent_logs_tool() -> Tool {
+    let schema = schemars::schema_for!(GetSubAgentLogsParams);
+    Tool::new_sentinel(
+        "get_subagent_logs",
+        "Retrieve the raw conversation log of a completed subagent for debugging. \
+         Returns the full message history of the subagent conversation.",
+        schema,
+    )
+}
+
+// ============================================================================
+// ConversationManager
+// ============================================================================
 
 pub struct ConversationManager {
     conversations: RwLock<HashMap<String, (Arc<ConversationClient>, JoinHandle<()>)>>,
@@ -143,19 +195,23 @@ impl Default for ConversationManager {
 
 /// Manages conversations so that any new client can attach to an existing conversation.
 impl ConversationManager {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self::default())
     }
+
     /// Create a new conversation. The new conversation will be kept in the manager's
     /// memory until it ends.
+    ///
+    /// Returns `(conversation_id, client)`.
     pub fn new_conversation(
-        &self,
+        self: &Arc<Self>,
         mut llm: Box<dyn LLM>,
         system_prompt: &str,
         model: &str,
         tools: Vec<Arc<Tool>>,
         chat_options: ChatOptions,
-    ) -> Result<Arc<ConversationClient>> {
+        single_turn: bool,
+    ) -> Result<(String, Arc<ConversationClient>)> {
         // Register tools with the LLM for caching
         llm.register_tools(tools.clone());
 
@@ -173,7 +229,7 @@ impl ConversationManager {
             vec![LLMMessage::System(system_prompt.to_string())]
         };
         let conversation_id = Uuid::new_v4().to_string();
-        let mut conversation = Conversation {
+        let conversation = Conversation {
             id: conversation_id.clone(),
             llm,
             model: model.to_string(),
@@ -191,17 +247,19 @@ impl ConversationManager {
                     new_msg_notify_tx: notify_tx,
                 })
             },
-            unsummarized_tool_indices: VecDeque::new(),
+            conversation_manager: Arc::clone(self),
+            single_turn,
         };
-        let client = &(&conversation).conversation_client.clone();
+        let client = conversation.conversation_client.clone();
         let task = tokio::spawn(async move {
-            conversation.start().await;
+            let mut conv = conversation;
+            conv.start().await;
         });
         self.conversations
             .write()
             .map_err(|e| anyhow::anyhow!("failed to acquire conversations write lock: {e}"))?
-            .insert(conversation_id, (client.clone(), task));
-        Ok(client.clone())
+            .insert(conversation_id.clone(), (client.clone(), task));
+        Ok((conversation_id, client))
     }
 
     /// Get a conversation by its id. It will try to load it from the manager's memory.
@@ -222,6 +280,10 @@ impl ConversationManager {
         Ok(()) // placeholder
     }
 }
+
+// ============================================================================
+// Conversation
+// ============================================================================
 
 pub struct Conversation {
     pub id: String,
@@ -253,10 +315,11 @@ pub struct Conversation {
     /// Chat options (includes reasoning config) for this conversation.
     chat_options: ChatOptions,
 
-    /// Queue of indices into llm_msgs for tool results not yet summarized.
-    /// When a new tool result is added, its index is pushed to this queue.
-    /// When the queue exceeds recent_count, the oldest is popped and summarized.
-    unsummarized_tool_indices: VecDeque<usize>,
+    /// Reference to the ConversationManager for creating subagent conversations.
+    conversation_manager: Arc<ConversationManager>,
+
+    /// When true, the conversation exits after one user message + LLM response cycle.
+    single_turn: bool,
 }
 
 /// Multi round LLM conversation. Thread and async safe.
@@ -282,15 +345,40 @@ impl Conversation {
 
             self.llm_msgs.push(LLMMessage::User(user_input));
             self.call_llm().await;
+
+            // Single-turn conversations exit after one cycle
+            if self.single_turn {
+                self.broadcast_msg(Message::AssistantRequestEnd {
+                    total_input_tokens: self.total_input_tokens,
+                    total_output_tokens: self.total_output_tokens,
+                });
+                break;
+            }
         }
     }
 
     /// Call the LLM and handle the response.
     /// It handles the tool call and continues the loop when there is no tool call request anymore.
     async fn call_llm(&mut self) {
+        let max_iterations = if self.single_turn { SUBAGENT_MAX_ITERATIONS } else { usize::MAX };
+        let mut iteration = 0;
+
         loop {
-            // Summarize old tool outputs before sending to LLM
-            self.prepare_tool_summaries().await;
+            iteration += 1;
+            if iteration > max_iterations {
+                tracing::warn!(
+                    conversation_id = %self.id,
+                    max_iterations,
+                    "subagent hit max iterations limit"
+                );
+                self.broadcast_msg(Message::SystemMessage {
+                    msg_id: self.next_msg_id(),
+                    created_at: now_millis(),
+                    level: SystemMessageLevel::Warning,
+                    message: format!("Subagent reached maximum iterations limit ({})", max_iterations),
+                });
+                break;
+            }
 
             let mut response_stream =
                 self.llm
@@ -398,6 +486,19 @@ impl Conversation {
 
     async fn execute_tool_calls(&mut self, tool_calls: Vec<crate::llm::ToolCall>) {
         for tool_call in tool_calls {
+            // Intercept subagent and get_subagent_logs tool calls
+            match tool_call.name.as_str() {
+                "subagent" => {
+                    self.execute_subagent(tool_call).await;
+                    continue;
+                }
+                "get_subagent_logs" => {
+                    self.execute_get_subagent_logs(tool_call).await;
+                    continue;
+                }
+                _ => {}
+            }
+
             let tool_msg_id = self.next_msg_id();
 
             tracing::info!(
@@ -469,103 +570,220 @@ impl Conversation {
             });
 
             // Push tool result with tool_call_id for proper API format
-            let idx = self.llm_msgs.len();
             self.llm_msgs.push(LLMMessage::ToolResult {
                 tool_call_id: tool_call.id,
                 content: tool_result,
-                cached_summary: None,
             });
-
-            // Track this tool result index for lazy summarization
-            self.unsummarized_tool_indices.push_back(idx);
         }
+    }
+
+    /// Execute a subagent tool call. Creates a new conversation via ConversationManager,
+    /// sends the task, collects the final answer, and returns it as a tool result.
+    async fn execute_subagent(&mut self, tool_call: crate::llm::ToolCall) {
+        let params: SubAgentParams = match serde_json::from_str(&tool_call.arguments) {
+            Ok(p) => p,
+            Err(e) => {
+                let error = format!("Error: Failed to parse subagent arguments: {}", e);
+                self.llm_msgs.push(LLMMessage::ToolResult {
+                    tool_call_id: tool_call.id,
+                    content: error,
+                });
+                return;
+            }
+        };
+
+        // Collect parent's tools, excluding subagent and get_subagent_logs
+        let subagent_tools: Vec<Arc<Tool>> = self.tools.values()
+            .filter(|t| t.name != "subagent" && t.name != "get_subagent_logs")
+            .cloned()
+            .collect();
+
+        // Create a new LLM instance for the subagent
+        let subagent_llm = self.llm.clone_box();
+
+        // Create the subagent conversation
+        let (subagent_conv_id, subagent_client) = match self.conversation_manager.new_conversation(
+            subagent_llm,
+            "You are a helpful assistant performing a specific task. Complete the task and provide a clear, concise answer.",
+            &params.model,
+            subagent_tools,
+            self.chat_options.clone(),
+            true, // single_turn
+        ) {
+            Ok(result) => result,
+            Err(e) => {
+                let error = format!("Error: Failed to create subagent conversation: {}", e);
+                self.llm_msgs.push(LLMMessage::ToolResult {
+                    tool_call_id: tool_call.id,
+                    content: error,
+                });
+                return;
+            }
+        };
+
+        // Broadcast SubAgentStart to parent
+        let task_preview = if params.task.len() > 100 {
+            format!("{}...", &params.task[..100])
+        } else {
+            params.task.clone()
+        };
+        self.broadcast_msg(Message::SubAgentStart {
+            msg_id: self.next_msg_id(),
+            conversation_id: subagent_conv_id.clone(),
+            description: task_preview,
+        });
+
+        // Subscribe to subagent messages before sending the task
+        let mut sub_stream = subagent_client.subscribe();
+
+        // Send the task to the subagent
+        if let Err(e) = subagent_client.send_chat(&params.task).await {
+            let error = format!("Error: Failed to send task to subagent: {}", e);
+            self.broadcast_msg(Message::SubAgentEnd {
+                msg_id: self.next_msg_id(),
+                conversation_id: subagent_conv_id,
+                end_status: MessageEndStatus::Failed,
+                response: Arc::new(error.clone()),
+                input_tokens: 0,
+                output_tokens: 0,
+            });
+            self.llm_msgs.push(LLMMessage::ToolResult {
+                tool_call_id: tool_call.id,
+                content: error,
+            });
+            return;
+        }
+
+        // Collect AssistantMessageChunk text until AssistantRequestEnd
+        let mut accumulated_text = String::new();
+        let mut sub_input_tokens = 0i32;
+        let mut sub_output_tokens = 0i32;
+        let mut end_status = MessageEndStatus::Succeeded;
+
+        while let Some(result) = sub_stream.next().await {
+            let msg = match result {
+                Ok(msg) => msg,
+                Err(_) => continue, // skip lagged messages
+            };
+
+            match &*msg {
+                Message::AssistantMessageChunk { content, .. } => {
+                    accumulated_text.push_str(content);
+                }
+                Message::AssistantMessageEnd { end_status: status, error, .. } => {
+                    if matches!(status, MessageEndStatus::Failed) {
+                        if let Some(err) = error {
+                            // If the subagent had an error, include it
+                            if accumulated_text.is_empty() {
+                                accumulated_text = format!("Error: Subagent failed: {}", err);
+                                end_status = MessageEndStatus::Failed;
+                            }
+                        }
+                    }
+                }
+                Message::AssistantRequestEnd { total_input_tokens, total_output_tokens } => {
+                    sub_input_tokens = *total_input_tokens;
+                    sub_output_tokens = *total_output_tokens;
+                    break;
+                }
+                _ => {} // ignore other messages
+            }
+        }
+
+        // Use the accumulated text as the tool result
+        let result_text = if accumulated_text.is_empty() {
+            format!("Subagent completed but produced no output. Conversation ID: {}", subagent_conv_id)
+        } else {
+            accumulated_text
+        };
+
+        // Broadcast SubAgentEnd to parent (includes the response)
+        self.broadcast_msg(Message::SubAgentEnd {
+            msg_id: self.next_msg_id(),
+            conversation_id: subagent_conv_id.clone(),
+            end_status,
+            response: Arc::new(result_text.clone()),
+            input_tokens: sub_input_tokens,
+            output_tokens: sub_output_tokens,
+        });
+
+        self.llm_msgs.push(LLMMessage::ToolResult {
+            tool_call_id: tool_call.id,
+            content: result_text,
+        });
+    }
+
+    /// Execute get_subagent_logs tool call. Reads the subagent's conversation messages.
+    async fn execute_get_subagent_logs(&mut self, tool_call: crate::llm::ToolCall) {
+        let params: GetSubAgentLogsParams = match serde_json::from_str(&tool_call.arguments) {
+            Ok(p) => p,
+            Err(e) => {
+                let error = format!("Error: Failed to parse get_subagent_logs arguments: {}", e);
+                self.llm_msgs.push(LLMMessage::ToolResult {
+                    tool_call_id: tool_call.id,
+                    content: error,
+                });
+                return;
+            }
+        };
+
+        let result = match self.conversation_manager.get_conversation(&params.conversation_id) {
+            Ok(Some(client)) => {
+                let msgs = client.get_messages();
+                // Format messages into a readable log
+                let mut log = String::new();
+                for msg in &msgs {
+                    match &**msg {
+                        Message::UserMessage { content, .. } => {
+                            log.push_str(&format!("[User] {}\n", content));
+                        }
+                        Message::AssistantMessageChunk { content, .. } => {
+                            log.push_str(content);
+                        }
+                        Message::AssistantMessageStart { .. } => {
+                            log.push_str("[Assistant] ");
+                        }
+                        Message::AssistantMessageEnd { input_tokens, output_tokens, .. } => {
+                            log.push_str(&format!("\n[tokens: {} in, {} out]\n", input_tokens, output_tokens));
+                        }
+                        Message::ToolMessageStart { tool_name, tool_args, .. } => {
+                            log.push_str(&format!("[Tool: {} args: {}]\n", tool_name, tool_args));
+                        }
+                        Message::ToolOutputChunk { content, .. } => {
+                            log.push_str(&format!("[Tool output] {}\n", content));
+                        }
+                        Message::ToolMessageEnd { .. } => {
+                            log.push_str("[Tool end]\n");
+                        }
+                        Message::SystemMessage { message, .. } => {
+                            log.push_str(&format!("[System] {}\n", message));
+                        }
+                        _ => {}
+                    }
+                }
+                if log.is_empty() {
+                    "No messages found for this conversation.".to_string()
+                } else {
+                    log
+                }
+            }
+            Ok(None) => {
+                format!("Error: Conversation '{}' not found", params.conversation_id)
+            }
+            Err(e) => {
+                format!("Error: Failed to get conversation: {}", e)
+            }
+        };
+
+        self.llm_msgs.push(LLMMessage::ToolResult {
+            tool_call_id: tool_call.id,
+            content: result,
+        });
     }
 
     /// Stop the current LLM response and all the messages in the queue.
     pub async fn break_conversation(&self) -> Result<()> {
         Ok(()) // placeholder
-    }
-
-    /// Lazily summarize old tool outputs before sending to LLM.
-    /// Uses a queue of message indices. When the queue exceeds recent_count,
-    /// pops the oldest and summarizes it if needed.
-    async fn prepare_tool_summaries(&mut self) {
-        // Get config from chat_options, return early if not enabled
-        let config = match &self.chat_options.tool_summarization {
-            Some(config) if config.tool_summary_enabled => config.clone(),
-            _ => return,
-        };
-
-        // Pop oldest tool indices from queue while it exceeds recent_count
-        while self.unsummarized_tool_indices.len() > config.tool_summary_recent_count {
-            let idx = match self.unsummarized_tool_indices.pop_front() {
-                Some(idx) => idx,
-                None => break,
-            };
-
-            // Extract info and check if summarization is needed
-            let (tool_call_id, content) = {
-                if let LLMMessage::ToolResult {
-                    tool_call_id,
-                    content,
-                    cached_summary,
-                } = &self.llm_msgs[idx]
-                {
-                    if cached_summary.is_some() {
-                        continue; // Already summarized
-                    }
-                    if content.len() <= config.tool_summary_min_length {
-                        continue; // Too short to summarize
-                    }
-                    (tool_call_id.clone(), content.clone())
-                } else {
-                    continue;
-                }
-            };
-
-            // Call the LLM to summarize
-            let model = config.tool_summary_model.as_deref();
-            match self.llm.summarize_tool_output(model, &content).await {
-                Ok(summary) => {
-                    tracing::info!(
-                        tool_call_id = %tool_call_id,
-                        original_len = content.len(),
-                        summary_len = summary.len(),
-                        "tool output summarized"
-                    );
-
-                    // Update the cached_summary directly via index
-                    if let LLMMessage::ToolResult {
-                        cached_summary, ..
-                    } = &mut self.llm_msgs[idx]
-                    {
-                        *cached_summary = Some(summary.clone());
-                    }
-
-                    // Broadcast the ToolSummary event
-                    self.broadcast_msg(Message::ToolSummary {
-                        msg_id: self.next_msg_id(),
-                        tool_call_id,
-                        summary: Arc::new(summary),
-                    });
-                }
-                Err(e) => {
-                    tracing::warn!(
-                        tool_call_id = %tool_call_id,
-                        error = %e,
-                        "failed to summarize tool output, using original"
-                    );
-                    // Broadcast error to UI
-                    self.broadcast_msg(Message::SystemMessage {
-                        msg_id: self.next_msg_id(),
-                        created_at: now_millis(),
-                        level: SystemMessageLevel::Warning,
-                        message: format!("Tool summarization failed: {}", e),
-                    });
-                    // Continue without summary - original content will be used
-                }
-            }
-        }
     }
 }
 
@@ -594,6 +812,11 @@ impl ConversationClient {
         self.new_msg_notify_tx.send(msg)
             .map_err(|e| anyhow::anyhow!("failed to send msg to the notification broadcast: {e}"))?;
         Ok(())
+    }
+
+    /// Get a snapshot of all messages in the conversation.
+    pub fn get_messages(&self) -> Vec<Arc<Message>> {
+        self.msgs.read().unwrap().clone()
     }
 
     /// Subscribe to the conversation's messages.

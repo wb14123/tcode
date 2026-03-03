@@ -5,8 +5,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
-use llm_rs::conversation::{ConversationManager, Message};
+use llm_rs::conversation::{ConversationManager, Message, create_subagent_tool, create_get_subagent_logs_tool};
 use llm_rs::llm::{ChatOptions, LLM};
+use llm_rs::tool::Tool;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -74,12 +75,23 @@ impl Server {
 
         // Create conversation manager
         let manager = ConversationManager::new();
-        let conversation_client = manager.new_conversation(
+
+        // Build tools list including subagent tools
+        let model_infos = self.llm.available_models();
+        let mut tools_list: Vec<Arc<Tool>> = vec![
+            Arc::new(tools::web_fetch_tool()),
+            Arc::new(tools::web_search_tool()),
+        ];
+        tools_list.push(Arc::new(create_subagent_tool(&model_infos)));
+        tools_list.push(Arc::new(create_get_subagent_logs_tool()));
+
+        let (_, conversation_client) = manager.new_conversation(
             self.llm,
             "You are a helpful assistant.",
             &self.model,
-            vec![Arc::new(tools::web_fetch_tool()), Arc::new(tools::web_search_tool())],
+            tools_list,
             self.chat_options.clone(),
+            false,
         )?;
 
         // Spawn background task to write conversation events to display files
@@ -225,23 +237,27 @@ impl Server {
                         }
                     }
 
-                    Message::ToolSummary { tool_call_id, summary, .. } => {
+                    Message::SubAgentStart { conversation_id, description, .. } => {
                         tracing::info!(
-                            tool_call_id,
-                            summary_len = summary.len(),
-                            "ToolSummary received"
+                            conversation_id,
+                            description,
+                            "SubAgentStart received"
                         );
-
-                        // Write summary to the per-tool-call file
-                        let tc_file = session_dir.join(format!("tool-call-{}.jsonl", tool_call_id));
-                        if tc_file.exists() {
-                            append_event(&tc_file, &event).await
-                                .context("Failed to append tool summary")?;
-                        }
-
-                        // Also write to main display so UI can update
                         append_event(&display_file, &event).await
-                            .context("Failed to append tool summary to display")?;
+                            .context("Failed to append subagent start to display")?;
+                    }
+
+                    Message::SubAgentEnd { conversation_id, end_status, input_tokens, output_tokens, response, .. } => {
+                        tracing::info!(
+                            conversation_id,
+                            ?end_status,
+                            response_len = response.len(),
+                            input_tokens,
+                            output_tokens,
+                            "SubAgentEnd received"
+                        );
+                        append_event(&display_file, &event).await
+                            .context("Failed to append subagent end to display")?;
                     }
 
                     _ => {

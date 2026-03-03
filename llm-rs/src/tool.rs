@@ -182,6 +182,29 @@ impl Tool {
         }
     }
 
+    /// Create a sentinel tool with a no-op handler.
+    ///
+    /// Sentinel tools are registered with the LLM so it sees their schemas,
+    /// but their execution is intercepted in `execute_tool_calls` rather than
+    /// going through the regular `tool.execute()` path.
+    pub fn new_sentinel(
+        name: impl Into<String>,
+        description: impl Into<String>,
+        param_schema: Schema,
+    ) -> Self {
+        Tool {
+            name: name.into(),
+            description: description.into(),
+            param_schema,
+            timeout: None,
+            handler: Box::new(|_| {
+                Box::pin(tokio_stream::once(
+                    "Error: This tool's execution is handled internally".to_string(),
+                ))
+            }),
+        }
+    }
+
     /// Execute the tool with a JSON string argument.
     ///
     /// Returns a stream of string outputs that can be consumed incrementally.
