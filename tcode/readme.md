@@ -151,7 +151,14 @@ All session data lives in `~/.tcode/sessions/{session_id}/`. Sessions persist af
 | `status.txt` | Server status |
 | `tool-call-{id}.jsonl` | Per-tool-call output stream |
 | `tool-call-{id}-status.txt` | Per-tool-call status |
+| `subagent-{conv_id}/` | Sub-session directory for a subagent (same file structure as parent) |
 | `debug.log` | Debug logging output |
+
+## Subagent Display
+
+When the LLM spawns a subagent, the server creates a sub-session directory at `{session_dir}/subagent-{conv_id}/` with the same file structure as the parent session (`display.jsonl`, `status.txt`, per-tool-call files). A nested event writer subscribes to the subagent's conversation events and writes them independently.
+
+In the main display, subagent blocks are rendered with `>>> SUB-AGENT: {description}` labels. Pressing `o` on a subagent block opens `tcode --session={parent_id}/subagent-{conv_id} display` in a new tmux window — the same display client used for main conversations. Tool call detail (`o` keybinding) works identically inside subagent displays.
 
 ## Neovim Plugin
 

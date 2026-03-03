@@ -61,6 +61,40 @@ User sends message via ConversationClient::send_chat()
         → On EndTurn: done, await next user message
 ```
 
+## Subagents
+
+The conversation manager supports spawning subagent conversations — independent single-turn conversations that run a task and return the result to the parent.
+
+### How It Works
+
+Two sentinel tools are registered with the LLM:
+
+- **`subagent`** — Takes a `task` (string) and `model` (model ID). The LLM calls this when it wants to delegate work.
+- **`get_subagent_logs`** — Takes a `conversation_id`. Returns the full message history of a completed subagent for inspection.
+
+Sentinel tools are registered in the LLM's tool schema but intercepted in the conversation loop rather than executing through the normal tool system.
+
+### Execution Flow
+
+```
+Parent conversation: LLM calls subagent tool(task, model)
+  → Conversation loop intercepts the tool call
+  → Creates new Conversation via ConversationManager::new_conversation(single_turn=true)
+  → Broadcasts SubAgentStart { conversation_id, description }
+  → Sends task to subagent, collects AssistantMessageChunk text
+  → On AssistantRequestEnd: broadcasts SubAgentEnd { response, tokens }
+  → Inserts response as ToolResult into parent's message history
+  → Parent LLM continues with the subagent's answer
+```
+
+### Design Decisions
+
+- **Single-turn**: Subagents run with `single_turn=true` — they process one user message, execute any tool calls, and exit after `AssistantRequestEnd`.
+- **Tool inheritance**: Subagents inherit the parent's tools except `subagent` and `get_subagent_logs`, preventing recursive spawning.
+- **Context isolation**: Each subagent gets its own conversation with independent message history and token tracking.
+- **Model selection**: The LLM chooses which model to use for the subagent from the available models list (included in the tool description).
+- **Max iterations**: Subagents are capped at 20 tool-call iterations to prevent runaway loops.
+
 ## Examples
 
 - `examples/openai_chat.rs` - Simple streaming chat with reasoning
