@@ -56,6 +56,11 @@ end
 local tc_ns = vim.api.nvim_create_namespace('tcode_tc_id')
 local tc_extmark_ids = {}  -- extmark_id -> tool_call_id
 
+-- Namespace and lookup table for subagent range extmarks.
+-- Maps extmark ID -> conversation_id so we can find which subagent a cursor line belongs to.
+local sa_ns = vim.api.nvim_create_namespace('tcode_sa_id')
+local sa_extmark_ids = {}  -- extmark_id -> conversation_id
+
 -- Thinking token state: track streaming thinking and collapsed entries
 local thinking_ns = vim.api.nvim_create_namespace('tcode_thinking')
 local thinking_entries = {}  -- extmark_id -> { content, expanded }
@@ -159,6 +164,21 @@ local function extend_tc_extmark(buf, tool_call_id, end_row)
   for _, mark in ipairs(marks) do
     if tc_extmark_ids[mark[1]] == tool_call_id then
       vim.api.nvim_buf_set_extmark(buf, tc_ns, mark[2], mark[3], {
+        id = mark[1],
+        end_row = end_row,
+        end_col = 0,
+      })
+      break
+    end
+  end
+end
+
+-- Find and update the range extmark for a conversation_id to extend to end_row
+local function extend_sa_extmark(buf, conversation_id, end_row)
+  local marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, {})
+  for _, mark in ipairs(marks) do
+    if sa_extmark_ids[mark[1]] == conversation_id then
+      vim.api.nvim_buf_set_extmark(buf, sa_ns, mark[2], mark[3], {
         id = mark[1],
         end_row = end_row,
         end_col = 0,
@@ -389,9 +409,23 @@ local function render_event(buf, ns, event)
     end
 
   elseif variant == 'SubAgentStart' then
-    render_label(buf, ns, '>>> SUB-AGENT: ' .. (data.description or ''), 'TCodeTool', data)
+    local label_line = render_label(buf, ns, '>>> SUB-AGENT: ' .. (data.description or ''), 'TCodeTool', data)
+    append_lines(buf, { '' })
+    -- Place a range extmark covering label through current last line
+    if data.conversation_id then
+      local last_line = vim.api.nvim_buf_line_count(buf) - 1
+      local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_line, 0, {
+        end_row = last_line,
+        end_col = 0,
+      })
+      sa_extmark_ids[mark_id] = data.conversation_id
+    end
 
   elseif variant == 'SubAgentEnd' then
+    -- Extend range extmark before rendering response
+    if data.conversation_id then
+      extend_sa_extmark(buf, data.conversation_id, vim.api.nvim_buf_line_count(buf) - 1)
+    end
     -- Display subagent response
     if data.response and data.response ~= '' then
       append_lines(buf, { '' })
@@ -399,6 +433,10 @@ local function render_event(buf, ns, event)
       append_lines(buf, response_lines)
     end
     render_info(buf, ns, data, 'sub-agent')
+    -- Extend extmark to cover info line
+    if data.conversation_id then
+      extend_sa_extmark(buf, data.conversation_id, vim.api.nvim_buf_line_count(buf) - 1)
+    end
 
   elseif variant == 'AssistantRequestEnd' then
     append_lines(buf, { '', '' })
@@ -590,6 +628,23 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
     if thinking_mark then
       toggle_thinking(buf, thinking_mark)
       return
+    end
+
+    -- Check for subagent extmark
+    if M.exe_path and M.session_id then
+      local sa_marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, { details = true })
+      for _, mark in ipairs(sa_marks) do
+        local start_row = mark[2]
+        local details = mark[4]
+        local end_row = details.end_row or start_row
+        if cursor_line >= start_row and cursor_line <= end_row and sa_extmark_ids[mark[1]] then
+          local conv_id = sa_extmark_ids[mark[1]]
+          local sa_session = M.session_id .. '/subagent-' .. conv_id
+          local cmd = string.format('%s --session=%s display', M.exe_path, sa_session)
+          vim.fn.system(string.format('tmux new-window -n "%s" "%s"', 'subagent', cmd))
+          return
+        end
+      end
     end
 
     -- Fall through to tool call detail
