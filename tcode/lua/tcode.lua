@@ -60,6 +60,7 @@ local tc_extmark_ids = {}  -- extmark_id -> tool_call_id
 -- Maps extmark ID -> conversation_id so we can find which subagent a cursor line belongs to.
 local sa_ns = vim.api.nvim_create_namespace('tcode_sa_id')
 local sa_extmark_ids = {}  -- extmark_id -> conversation_id
+local sa_label_marks = {}  -- conversation_id -> { extmark_id, ns, description }
 
 -- Thinking token state: track streaming thinking and collapsed entries
 local thinking_ns = vim.api.nvim_create_namespace('tcode_thinking')
@@ -104,11 +105,11 @@ local function render_label(buf, ns, prefix, hl_group, data)
   if ts then
     table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
   end
-  vim.api.nvim_buf_set_extmark(buf, ns, label_line, 0, {
+  local extmark_id = vim.api.nvim_buf_set_extmark(buf, ns, label_line, 0, {
     virt_text = virt,
     virt_text_pos = 'overlay',
   })
-  return label_line
+  return label_line, extmark_id
 end
 
 -- Render a token/status info line as virtual text, but errors as real text
@@ -409,10 +410,12 @@ local function render_event(buf, ns, event)
     end
 
   elseif variant == 'SubAgentStart' then
-    local label_line = render_label(buf, ns, '>>> SUB-AGENT: ' .. (data.description or ''), 'TCodeTool', data)
+    local description = data.description or ''
+    local label_line, label_extmark = render_label(buf, ns, '>>> SUB-AGENT: ' .. description .. ' [running]', 'TCodeTool', data)
     append_lines(buf, { '' })
     -- Place a range extmark covering label through current last line
     if data.conversation_id then
+      sa_label_marks[data.conversation_id] = { extmark_id = label_extmark, ns = ns, description = description }
       local last_line = vim.api.nvim_buf_line_count(buf) - 1
       local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_line, 0, {
         end_row = last_line,
@@ -422,20 +425,51 @@ local function render_event(buf, ns, event)
     end
 
   elseif variant == 'SubAgentEnd' then
-    -- Extend range extmark before rendering response
+    -- Extend range extmark
     if data.conversation_id then
       extend_sa_extmark(buf, data.conversation_id, vim.api.nvim_buf_line_count(buf) - 1)
     end
-    -- Display subagent response
-    if data.response and data.response ~= '' then
+    -- Update the start label in-place to show completion
+    if data.conversation_id and sa_label_marks[data.conversation_id] then
+      local info = sa_label_marks[data.conversation_id]
+      local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'done'
+      local status_hl = (data.end_status and data.end_status ~= 'Succeeded') and 'TCodeError' or 'TCodeTool'
+      local virt = {
+        { '>>> SUB-AGENT: ' .. info.description .. ' ', 'TCodeTool' },
+        { '[' .. status_text .. ']', status_hl },
+      }
+      local ts = format_time(data.created_at)
+      if ts then
+        table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
+      end
+      if data.input_tokens and data.output_tokens then
+        table.insert(virt, {
+          string.format('  [%d in / %d out]', data.input_tokens, data.output_tokens),
+          'TCodeTokens',
+        })
+      end
+      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
+      if mark_pos and mark_pos[1] then
+        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
+          id = info.extmark_id,
+          virt_text = virt,
+          virt_text_pos = 'overlay',
+        })
+      end
+      sa_label_marks[data.conversation_id] = nil
+    end
+    -- Render error as real text if present (needs to be visible/copyable)
+    if type(data.error) == 'string' and data.error ~= '' then
       append_lines(buf, { '' })
-      local response_lines = vim.split(data.response, '\n', { plain = true })
-      append_lines(buf, response_lines)
-    end
-    render_info(buf, ns, data, 'sub-agent')
-    -- Extend extmark to cover info line
-    if data.conversation_id then
-      extend_sa_extmark(buf, data.conversation_id, vim.api.nvim_buf_line_count(buf) - 1)
+      local error_start_line = vim.api.nvim_buf_line_count(buf) - 1
+      local error_lines = vim.split('Error: ' .. data.error, '\n', { plain = true })
+      vim.api.nvim_buf_set_lines(buf, error_start_line, error_start_line + 1, false, error_lines)
+      for i = 0, #error_lines - 1 do
+        vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeError', error_start_line + i, 0, -1)
+      end
+      if data.conversation_id then
+        extend_sa_extmark(buf, data.conversation_id, vim.api.nvim_buf_line_count(buf) - 1)
+      end
     end
 
   elseif variant == 'AssistantRequestEnd' then
