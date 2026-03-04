@@ -87,13 +87,28 @@ Parent conversation: LLM calls subagent tool(task, model)
   → Parent LLM continues with the subagent's answer
 ```
 
+### Nested Subagents
+
+Subagents can spawn their own subagents up to a configurable depth limit controlled by two parameters on `new_conversation()`:
+
+- **`subagent_depth`** — Current nesting level (0 for root conversations).
+- **`max_subagent_depth`** — Maximum allowed depth. A subagent at depth `d` receives the `subagent` and `get_subagent_logs` tools only if `d + 1 < max_subagent_depth`.
+
+```
+Root conversation (depth=0, max=3)
+  └─ Subagent A (depth=1, max=3) — has subagent tools
+       └─ Subagent B (depth=2, max=3) — NO subagent tools (2+1 >= 3)
+```
+
+The tcode CLI exposes `--max-subagent-depth` (default: 3) to control this.
+
 ### Design Decisions
 
 - **Single-turn**: Subagents run with `single_turn=true` — they process one user message, execute any tool calls, and exit after `AssistantRequestEnd`.
-- **Tool inheritance**: Subagents inherit the parent's tools except `subagent` and `get_subagent_logs`, preventing recursive spawning.
+- **Depth-limited nesting**: Subagents inherit the parent's tools including `subagent`/`get_subagent_logs` when the depth limit allows, enabling recursive delegation. At the deepest allowed level, these tools are excluded to prevent infinite nesting.
 - **Context isolation**: Each subagent gets its own conversation with independent message history and token tracking.
 - **Model selection**: The LLM chooses which model to use for the subagent from the available models list (included in the tool description).
-- **Max iterations**: Subagents are capped at 20 tool-call iterations to prevent runaway loops.
+- **Max iterations**: Subagents are capped at a configurable number of tool-call iterations (`--subagent-max-iterations`, default 50) to prevent runaway loops.
 
 ## Examples
 

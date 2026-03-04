@@ -22,7 +22,9 @@ fn fetch_and_extract(url: &str) -> Result<String> {
     }
 }
 
-/// Fetch a web page and return cleaned HTML content extracted by Readability
+/// Fetch a web page and return cleaned HTML content extracted by Readability.
+/// Note for LLM agent: You should prefer to use a sub agent (if available) to get useful
+/// information from the web page instead of keep the whole page content in the main conversation.
 #[tool(timeout_ms = 300000)]
 pub fn web_fetch(
     /// The URL to fetch and extract content from

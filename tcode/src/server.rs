@@ -45,6 +45,7 @@ pub struct Server {
     model: String,
     chat_options: ChatOptions,
     subagent_max_iterations: usize,
+    max_subagent_depth: usize,
 }
 
 impl Server {
@@ -57,6 +58,7 @@ impl Server {
         model: String,
         chat_options: ChatOptions,
         subagent_max_iterations: usize,
+        max_subagent_depth: usize,
     ) -> Self {
         Self {
             socket_path,
@@ -67,6 +69,7 @@ impl Server {
             model,
             chat_options,
             subagent_max_iterations,
+            max_subagent_depth,
         }
     }
 
@@ -106,6 +109,8 @@ impl Server {
             self.chat_options.clone(),
             false,
             self.subagent_max_iterations,
+            0, // root conversation depth
+            self.max_subagent_depth,
         )?;
 
         // Spawn background task to write conversation events to display files
@@ -335,13 +340,14 @@ fn run_event_writer(
                         Ok(Some(sa_client)) => {
                             let sa_events = Box::pin(sa_client.subscribe());
                             let sa_status_clone = sa_status.clone();
+                            let sa_mgr = Arc::clone(mgr);
                             let handle = tokio::spawn(async move {
                                 if let Err(e) = run_event_writer(
                                     sa_events,
                                     sa_display,
                                     sa_status_clone,
                                     sa_dir,
-                                    None,
+                                    Some(sa_mgr),
                                 ).await {
                                     tracing::error!(error = %e, "Subagent event writer failed");
                                 }

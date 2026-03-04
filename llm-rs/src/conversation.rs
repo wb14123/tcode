@@ -151,8 +151,9 @@ pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
 
     let description = format!(
         "Spawn a subagent to handle a task in its own context window. \
-         The subagent has access to all tools (except subagent and get_subagent_logs) \
-         and will return its final answer. Use this for tasks that produce large outputs \
+         The subagent has access to all tools and will return its final answer. \
+         Subagents may also spawn their own subagents up to the configured depth limit. \
+         Use this for tasks that produce large outputs \
          (web fetches, research, multi-step tool use) so the results are summarized \
          in the subagent's context rather than consuming your context window.\n\n\
          Available models:\n{}",
@@ -209,6 +210,8 @@ impl ConversationManager {
         chat_options: ChatOptions,
         single_turn: bool,
         subagent_max_iterations: usize,
+        subagent_depth: usize,
+        max_subagent_depth: usize,
     ) -> Result<(String, Arc<ConversationClient>)> {
         // Register tools with the LLM for caching
         llm.register_tools(tools.clone());
@@ -248,6 +251,8 @@ impl ConversationManager {
             conversation_manager: Arc::clone(self),
             single_turn,
             subagent_max_iterations,
+            subagent_depth,
+            max_subagent_depth,
         };
         let client = conversation.conversation_client.clone();
         let task = tokio::spawn(async move {
@@ -322,6 +327,12 @@ pub struct Conversation {
 
     /// Maximum number of LLM call iterations for subagent conversations.
     subagent_max_iterations: usize,
+
+    /// Current nesting depth of this conversation (0 = root).
+    subagent_depth: usize,
+
+    /// Maximum allowed nesting depth for subagents.
+    max_subagent_depth: usize,
 }
 
 /// Multi round LLM conversation. Thread and async safe.
@@ -594,9 +605,11 @@ impl Conversation {
             }
         };
 
-        // Collect parent's tools, excluding subagent and get_subagent_logs
+        // Collect parent's tools; include subagent tools only if depth allows nesting
+        let child_depth = self.subagent_depth + 1;
+        let allow_nesting = child_depth + 1 < self.max_subagent_depth;
         let subagent_tools: Vec<Arc<Tool>> = self.tools.values()
-            .filter(|t| t.name != "subagent" && t.name != "get_subagent_logs")
+            .filter(|t| allow_nesting || (t.name != "subagent" && t.name != "get_subagent_logs"))
             .cloned()
             .collect();
 
@@ -612,6 +625,8 @@ impl Conversation {
             self.chat_options.clone(),
             true, // single_turn
             self.subagent_max_iterations,
+            child_depth,
+            self.max_subagent_depth,
         ) {
             Ok(result) => result,
             Err(e) => {

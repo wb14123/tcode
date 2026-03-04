@@ -71,6 +71,8 @@ async fn main() -> anyhow::Result<()> {
         },
         false,
         20,
+        0, // subagent_depth (root)
+        3, // max_subagent_depth
     )?;
 
     // Subscribe to messages (this must be done before sending to receive all messages)

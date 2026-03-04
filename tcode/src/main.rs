@@ -162,6 +162,10 @@ struct Cli {
     /// Maximum number of LLM call iterations for subagent conversations
     #[arg(long, default_value_t = 50)]
     subagent_max_iterations: usize,
+
+    /// Maximum nesting depth for subagents (0 = no subagents, 1 = one level, etc.)
+    #[arg(long, default_value_t = 3)]
+    max_subagent_depth: usize,
 }
 
 #[derive(Subcommand)]
@@ -243,6 +247,7 @@ async fn main() -> Result<()> {
                 model,
                 chat_options,
                 cli.subagent_max_iterations,
+                cli.max_subagent_depth,
             );
             server.run().await
         }
@@ -396,6 +401,7 @@ async fn run_unified_inner(cli: Cli, session: Session, session_id: String) -> Re
         model,
         chat_options,
         cli.subagent_max_iterations,
+        cli.max_subagent_depth,
     );
 
     // Spawn server in background
