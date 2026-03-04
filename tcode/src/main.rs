@@ -158,6 +158,10 @@ struct Cli {
     /// Session ID (defaults to tmux session name or "default")
     #[arg(long)]
     session: Option<String>,
+
+    /// Maximum number of LLM call iterations for subagent conversations
+    #[arg(long, default_value_t = 50)]
+    subagent_max_iterations: usize,
 }
 
 #[derive(Subcommand)]
@@ -238,6 +242,7 @@ async fn main() -> Result<()> {
                 llm,
                 model,
                 chat_options,
+                cli.subagent_max_iterations,
             );
             server.run().await
         }
@@ -390,6 +395,7 @@ async fn run_unified_inner(cli: Cli, session: Session, session_id: String) -> Re
         llm,
         model,
         chat_options,
+        cli.subagent_max_iterations,
     );
 
     // Spawn server in background

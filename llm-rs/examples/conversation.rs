@@ -70,6 +70,7 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         },
         false,
+        20,
     )?;
 
     // Subscribe to messages (this must be done before sending to receive all messages)

@@ -16,9 +16,6 @@ use uuid::Uuid;
 
 type MessageID = i32;
 
-/// Maximum number of LLM call iterations for a subagent conversation.
-const SUBAGENT_MAX_ITERATIONS: usize = 20;
-
 /// Get current timestamp in milliseconds since Unix epoch
 fn now_millis() -> u64 {
     SystemTime::now()
@@ -211,6 +208,7 @@ impl ConversationManager {
         tools: Vec<Arc<Tool>>,
         chat_options: ChatOptions,
         single_turn: bool,
+        subagent_max_iterations: usize,
     ) -> Result<(String, Arc<ConversationClient>)> {
         // Register tools with the LLM for caching
         llm.register_tools(tools.clone());
@@ -249,6 +247,7 @@ impl ConversationManager {
             },
             conversation_manager: Arc::clone(self),
             single_turn,
+            subagent_max_iterations,
         };
         let client = conversation.conversation_client.clone();
         let task = tokio::spawn(async move {
@@ -320,6 +319,9 @@ pub struct Conversation {
 
     /// When true, the conversation exits after one user message + LLM response cycle.
     single_turn: bool,
+
+    /// Maximum number of LLM call iterations for subagent conversations.
+    subagent_max_iterations: usize,
 }
 
 /// Multi round LLM conversation. Thread and async safe.
@@ -360,7 +362,7 @@ impl Conversation {
     /// Call the LLM and handle the response.
     /// It handles the tool call and continues the loop when there is no tool call request anymore.
     async fn call_llm(&mut self) {
-        let max_iterations = if self.single_turn { SUBAGENT_MAX_ITERATIONS } else { usize::MAX };
+        let max_iterations = if self.single_turn { self.subagent_max_iterations } else { usize::MAX };
         let mut iteration = 0;
 
         loop {
@@ -609,6 +611,7 @@ impl Conversation {
             subagent_tools,
             self.chat_options.clone(),
             true, // single_turn
+            self.subagent_max_iterations,
         ) {
             Ok(result) => result,
             Err(e) => {

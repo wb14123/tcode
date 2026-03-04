@@ -44,6 +44,7 @@ pub struct Server {
     llm: Box<dyn LLM>,
     model: String,
     chat_options: ChatOptions,
+    subagent_max_iterations: usize,
 }
 
 impl Server {
@@ -55,6 +56,7 @@ impl Server {
         llm: Box<dyn LLM>,
         model: String,
         chat_options: ChatOptions,
+        subagent_max_iterations: usize,
     ) -> Self {
         Self {
             socket_path,
@@ -64,6 +66,7 @@ impl Server {
             llm,
             model,
             chat_options,
+            subagent_max_iterations,
         }
     }
 
@@ -102,6 +105,7 @@ impl Server {
             tools_list,
             self.chat_options.clone(),
             false,
+            self.subagent_max_iterations,
         )?;
 
         // Spawn background task to write conversation events to display files
