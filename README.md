@@ -33,7 +33,7 @@ llm-rs/               Root workspace
 │              ▼                                        │
 │  llm-rs (Core Library)                                │
 │  ├─ ConversationManager (multi-round chat loop)      │
-│  │   └─ Nested subagents (depth-limited delegation)  │
+│  │   └─ Multi-turn subagents (resumable, depth-limited)│
 │  ├─ LLM trait (provider-agnostic streaming interface)│
 │  │   ├─ OpenAI impl (Responses API)                  │
 │  │   ├─ OpenRouter impl (Chat Completions API)       │

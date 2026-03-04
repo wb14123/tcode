@@ -23,7 +23,7 @@ Manages multi-round LLM conversations with automatic tool execution loops.
 - **`ConversationManager`**: Creates and manages multiple concurrent conversations.
 - **`Conversation`**: The core loop - sends messages to LLM, processes responses, executes tool calls, and continues until the LLM returns EndTurn.
 - **`ConversationClient`**: Public API handle for sending user messages (`send_chat()`) and subscribing to conversation events via broadcast channel.
-- **Message types**: UserMessage, AssistantMessageStart/End/Chunk, ToolMessageStart/Output/End, and variants for sub-agents.
+- **Message types**: UserMessage, AssistantMessageStart/End/Chunk, ToolMessageStart/Output/End, SubAgentStart/End/TurnEnd/Continue, and AssistantRequestEnd.
 
 ### `tool` - Tool System
 
@@ -63,36 +63,64 @@ User sends message via ConversationClient::send_chat()
 
 ## Subagents
 
-The conversation manager supports spawning subagent conversations — independent single-turn conversations that run a task and return the result to the parent.
+The conversation manager supports spawning subagent conversations — independent conversations that run a task and return the result to the parent. Subagents are **multi-turn**: after completing their initial task they remain idle, allowing the parent to send follow-up messages without losing context.
 
 ### How It Works
 
-Two sentinel tools are registered with the LLM:
+Three sentinel tools are registered with the LLM:
 
-- **`subagent`** — Takes a `task` (string) and `model` (model ID). The LLM calls this when it wants to delegate work.
-- **`get_subagent_logs`** — Takes a `conversation_id`. Returns the full message history of a completed subagent for inspection.
+- **`subagent`** — Takes a `task` (string) and `model` (model ID). The LLM calls this when it wants to delegate work. Returns the result prefixed with `[subagent_id: <conversation_id>]`.
+- **`continue_subagent`** — Takes a `conversation_id` and `message`. Sends a follow-up message to an existing idle subagent and returns its response (also prefixed with `[subagent_id: ...]`).
+- **`get_subagent_logs`** — Takes a `conversation_id`. Returns the full message history of a subagent for inspection.
 
 Sentinel tools are registered in the LLM's tool schema but intercepted in the conversation loop rather than executing through the normal tool system.
 
 ### Execution Flow
 
+**Initial spawn:**
 ```
 Parent conversation: LLM calls subagent tool(task, model)
   → Conversation loop intercepts the tool call
   → Creates new Conversation via ConversationManager::new_conversation(single_turn=true)
   → Broadcasts SubAgentStart { conversation_id, description }
   → Sends task to subagent, collects AssistantMessageChunk text
-  → On AssistantRequestEnd: broadcasts SubAgentEnd { response, tokens }
-  → Inserts response as ToolResult into parent's message history
+  → On AssistantRequestEnd: broadcasts SubAgentTurnEnd { response, tokens }
+  → Subagent is now idle (conversation loop keeps running, awaiting follow-ups)
+  → Inserts "[subagent_id: ...]\n<response>" as ToolResult into parent's message history
   → Parent LLM continues with the subagent's answer
 ```
+
+**Follow-up (continue):**
+```
+Parent conversation: LLM calls continue_subagent(conversation_id, message)
+  → Looks up existing subagent via ConversationManager::get_conversation()
+  → Broadcasts SubAgentContinue { conversation_id, description }
+  → Subscribes to new messages only (subscribe_new(), no history replay)
+  → Sends follow-up via send_chat()
+  → Collects response until AssistantRequestEnd
+  → Broadcasts SubAgentTurnEnd { response, tokens }
+  → Inserts "[subagent_id: ...]\n<response>" as ToolResult
+```
+
+### Status Lifecycle
+
+```
+SubAgentStart    → "Running"   (subagent created and working)
+SubAgentTurnEnd  → "Idle"      (subagent alive, waiting for follow-up)
+SubAgentContinue → "Running"   (subagent resumed with new message)
+SubAgentTurnEnd  → "Idle"      (waiting again)
+...
+(cleaned up on server shutdown)
+```
+
+The `SubAgentEnd` message type still exists for terminal shutdown of a subagent but is not used in the normal flow — subagents transition to idle after each turn.
 
 ### Nested Subagents
 
 Subagents can spawn their own subagents up to a configurable depth limit controlled by two parameters on `new_conversation()`:
 
 - **`subagent_depth`** — Current nesting level (0 for root conversations).
-- **`max_subagent_depth`** — Maximum allowed depth. A subagent at depth `d` receives the `subagent` and `get_subagent_logs` tools only if `d + 1 < max_subagent_depth`.
+- **`max_subagent_depth`** — Maximum allowed depth. A subagent at depth `d` receives the `subagent`, `continue_subagent`, and `get_subagent_logs` tools only if `d + 1 < max_subagent_depth`.
 
 ```
 Root conversation (depth=0, max=3)
@@ -104,8 +132,8 @@ The tcode CLI exposes `--max-subagent-depth` (default: 3) to control this.
 
 ### Design Decisions
 
-- **Single-turn**: Subagents run with `single_turn=true` — they process one user message, execute any tool calls, and exit after `AssistantRequestEnd`.
-- **Depth-limited nesting**: Subagents inherit the parent's tools including `subagent`/`get_subagent_logs` when the depth limit allows, enabling recursive delegation. At the deepest allowed level, these tools are excluded to prevent infinite nesting.
+- **Multi-turn with idle state**: Subagents run with `single_turn=true` — they process one user message, execute any tool calls, and broadcast `AssistantRequestEnd` per turn, but keep their conversation loop running so the parent can resume them with `continue_subagent`. This preserves the subagent's full context across follow-ups without re-sending history.
+- **Depth-limited nesting**: Subagents inherit the parent's tools including `subagent`/`continue_subagent`/`get_subagent_logs` when the depth limit allows, enabling recursive delegation. At the deepest allowed level, these tools are excluded to prevent infinite nesting.
 - **Context isolation**: Each subagent gets its own conversation with independent message history and token tracking.
 - **Model selection**: The LLM chooses which model to use for the subagent from the available models list (included in the tool description).
 - **Max iterations**: Subagents are capped at a configurable number of tool-call iterations (`--subagent-max-iterations`, default 50) to prevent runaway loops.
