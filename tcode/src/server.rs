@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
-use llm_rs::conversation::{ConversationManager, Message, create_subagent_tool, create_get_subagent_logs_tool};
+use llm_rs::conversation::{ConversationManager, Message, create_subagent_tool, create_get_subagent_logs_tool, create_continue_subagent_tool};
 use llm_rs::llm::{ChatOptions, LLM};
 use llm_rs::tool::Tool;
 use tokio::fs::OpenOptions;
@@ -99,6 +99,7 @@ impl Server {
             Arc::new(tools::web_search_tool()),
         ];
         tools_list.push(Arc::new(create_subagent_tool(&model_infos)));
+        tools_list.push(Arc::new(create_continue_subagent_tool()));
         tools_list.push(Arc::new(create_get_subagent_logs_tool()));
 
         let (_, conversation_client) = manager.new_conversation(
@@ -386,6 +387,43 @@ fn run_event_writer(
 
                 append_event(&display_file, &event).await
                     .context("Failed to append subagent end to display")?;
+            }
+
+            Message::SubAgentTurnEnd { conversation_id, end_status, input_tokens, output_tokens, response, .. } => {
+                tracing::info!(
+                    conversation_id,
+                    ?end_status,
+                    response_len = response.len(),
+                    input_tokens,
+                    output_tokens,
+                    "SubAgentTurnEnd received"
+                );
+
+                // Write "Idle" status — do NOT abort the event writer or remove from subagents
+                if let Some(state) = subagents.get(conversation_id) {
+                    tokio::fs::write(&state.status_file_path, "Idle").await
+                        .context("Failed to write subagent idle status")?;
+                }
+
+                append_event(&display_file, &event).await
+                    .context("Failed to append subagent turn end to display")?;
+            }
+
+            Message::SubAgentContinue { conversation_id, description, .. } => {
+                tracing::info!(
+                    conversation_id,
+                    description,
+                    "SubAgentContinue received"
+                );
+
+                // Write "Running" status — subagent dir and event writer already exist
+                if let Some(state) = subagents.get(conversation_id) {
+                    tokio::fs::write(&state.status_file_path, "Running").await
+                        .context("Failed to write subagent running status")?;
+                }
+
+                append_event(&display_file, &event).await
+                    .context("Failed to append subagent continue to display")?;
             }
 
             _ => {

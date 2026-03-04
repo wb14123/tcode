@@ -109,6 +109,23 @@ pub enum Message {
         output_tokens: i32,
     },
 
+    /// A sub-agent turn completed but the conversation is still alive (idle).
+    SubAgentTurnEnd {
+        msg_id: MessageID,
+        conversation_id: String,
+        end_status: MessageEndStatus,
+        response: Arc<String>,
+        input_tokens: i32,
+        output_tokens: i32,
+    },
+
+    /// A sub-agent is being resumed with a follow-up message.
+    SubAgentContinue {
+        msg_id: MessageID,
+        conversation_id: String,
+        description: String,
+    },
+
     // assistant request to end the conversation, useful for sub agents
     AssistantRequestEnd {
         total_input_tokens: i32,
@@ -142,6 +159,14 @@ struct GetSubAgentLogsParams {
     conversation_id: String,
 }
 
+#[derive(Deserialize, JsonSchema)]
+struct ContinueSubAgentParams {
+    /// The conversation ID of the subagent to continue (from the [subagent_id: ...] prefix in previous results)
+    conversation_id: String,
+    /// The follow-up message to send to the subagent
+    message: String,
+}
+
 /// Create the `subagent` tool with a dynamic description listing available models.
 pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
     let models_list: Vec<String> = model_descriptions
@@ -171,6 +196,18 @@ pub fn create_get_subagent_logs_tool() -> Tool {
         "get_subagent_logs",
         "Retrieve the raw conversation log of a completed subagent for debugging. \
          Returns the full message history of the subagent conversation.",
+        schema,
+    )
+}
+
+/// Create the `continue_subagent` tool.
+pub fn create_continue_subagent_tool() -> Tool {
+    let schema = schemars::schema_for!(ContinueSubAgentParams);
+    Tool::new_sentinel(
+        "continue_subagent",
+        "Send a follow-up message to an existing idle subagent. \
+         Use this to continue a conversation with a subagent that has already responded. \
+         The conversation_id is found in the [subagent_id: ...] prefix of previous subagent results.",
         schema,
     )
 }
@@ -347,6 +384,10 @@ impl Conversation {
     }
 
     /// Start the worker loop for the conversation. Should only be called once.
+    ///
+    /// For single-turn (subagent) conversations, broadcasts `AssistantRequestEnd` after
+    /// each turn but keeps looping so the parent can send follow-up messages via
+    /// `continue_subagent`.
     async fn start(&mut self) {
         while let Some(user_input) = self.input_channel_rx.recv().await {
             let user_msg_id = self.next_msg_id();
@@ -359,13 +400,13 @@ impl Conversation {
             self.llm_msgs.push(LLMMessage::User(user_input));
             self.call_llm().await;
 
-            // Single-turn conversations exit after one cycle
+            // Single-turn conversations broadcast end-of-turn but keep looping
+            // so the parent can resume them with continue_subagent.
             if self.single_turn {
                 self.broadcast_msg(Message::AssistantRequestEnd {
                     total_input_tokens: self.total_input_tokens,
                     total_output_tokens: self.total_output_tokens,
                 });
-                break;
             }
         }
     }
@@ -499,7 +540,7 @@ impl Conversation {
 
     async fn execute_tool_calls(&mut self, tool_calls: Vec<crate::llm::ToolCall>) {
         for tool_call in tool_calls {
-            // Intercept subagent and get_subagent_logs tool calls
+            // Intercept subagent, get_subagent_logs, and continue_subagent tool calls
             match tool_call.name.as_str() {
                 "subagent" => {
                     self.execute_subagent(tool_call).await;
@@ -507,6 +548,10 @@ impl Conversation {
                 }
                 "get_subagent_logs" => {
                     self.execute_get_subagent_logs(tool_call).await;
+                    continue;
+                }
+                "continue_subagent" => {
+                    self.execute_continue_subagent(tool_call).await;
                     continue;
                 }
                 _ => {}
@@ -708,15 +753,15 @@ impl Conversation {
             }
         }
 
-        // Use the accumulated text as the tool result
+        // Use the accumulated text as the tool result, prefixed with subagent_id
         let result_text = if accumulated_text.is_empty() {
-            format!("Subagent completed but produced no output. Conversation ID: {}", subagent_conv_id)
+            format!("[subagent_id: {}]\nSubagent completed but produced no output.", subagent_conv_id)
         } else {
-            accumulated_text
+            format!("[subagent_id: {}]\n{}", subagent_conv_id, accumulated_text)
         };
 
-        // Broadcast SubAgentEnd to parent (includes the response)
-        self.broadcast_msg(Message::SubAgentEnd {
+        // Broadcast SubAgentTurnEnd — sub-agent is now idle, not done
+        self.broadcast_msg(Message::SubAgentTurnEnd {
             msg_id: self.next_msg_id(),
             conversation_id: subagent_conv_id.clone(),
             end_status,
@@ -732,6 +777,10 @@ impl Conversation {
     }
 
     /// Execute get_subagent_logs tool call. Reads the subagent's conversation messages.
+    /// Note to LLM agent: should prefer to use `execute_continue_subagent` if you need any more
+    /// info from the subagent, since the raw logs maybe very large, which makes subagent useless
+    /// to save context length. Only use this when you REALLY need to debug something
+    /// from subagent.
     async fn execute_get_subagent_logs(&mut self, tool_call: crate::llm::ToolCall) {
         let params: GetSubAgentLogsParams = match serde_json::from_str(&tool_call.arguments) {
             Ok(p) => p,
@@ -799,6 +848,132 @@ impl Conversation {
         });
     }
 
+    /// Execute continue_subagent tool call. Sends a follow-up message to an existing
+    /// idle subagent and collects the response.
+    async fn execute_continue_subagent(&mut self, tool_call: crate::llm::ToolCall) {
+        let params: ContinueSubAgentParams = match serde_json::from_str(&tool_call.arguments) {
+            Ok(p) => p,
+            Err(e) => {
+                let error = format!("Error: Failed to parse continue_subagent arguments: {}", e);
+                self.llm_msgs.push(LLMMessage::ToolResult {
+                    tool_call_id: tool_call.id,
+                    content: error,
+                });
+                return;
+            }
+        };
+
+        // Look up the existing subagent conversation
+        let subagent_client = match self.conversation_manager.get_conversation(&params.conversation_id) {
+            Ok(Some(client)) => client,
+            Ok(None) => {
+                let error = format!("Error: Subagent conversation '{}' not found", params.conversation_id);
+                self.llm_msgs.push(LLMMessage::ToolResult {
+                    tool_call_id: tool_call.id,
+                    content: error,
+                });
+                return;
+            }
+            Err(e) => {
+                let error = format!("Error: Failed to get subagent conversation: {}", e);
+                self.llm_msgs.push(LLMMessage::ToolResult {
+                    tool_call_id: tool_call.id,
+                    content: error,
+                });
+                return;
+            }
+        };
+
+        let msg_preview = if params.message.len() > 100 {
+            format!("{}...", &params.message[..100])
+        } else {
+            params.message.clone()
+        };
+
+        // Broadcast SubAgentContinue to show the sub-agent is running again
+        self.broadcast_msg(Message::SubAgentContinue {
+            msg_id: self.next_msg_id(),
+            conversation_id: params.conversation_id.clone(),
+            description: msg_preview,
+        });
+
+        // Subscribe to new messages only (avoid reprocessing history)
+        let mut sub_stream = subagent_client.subscribe_new();
+
+        // Send the follow-up message
+        if let Err(e) = subagent_client.send_chat(&params.message).await {
+            let error = format!("Error: Failed to send follow-up to subagent: {}", e);
+            self.broadcast_msg(Message::SubAgentTurnEnd {
+                msg_id: self.next_msg_id(),
+                conversation_id: params.conversation_id,
+                end_status: MessageEndStatus::Failed,
+                response: Arc::new(error.clone()),
+                input_tokens: 0,
+                output_tokens: 0,
+            });
+            self.llm_msgs.push(LLMMessage::ToolResult {
+                tool_call_id: tool_call.id,
+                content: error,
+            });
+            return;
+        }
+
+        // Collect response until AssistantRequestEnd
+        let mut accumulated_text = String::new();
+        let mut sub_input_tokens = 0i32;
+        let mut sub_output_tokens = 0i32;
+        let mut end_status = MessageEndStatus::Succeeded;
+
+        while let Some(result) = sub_stream.next().await {
+            let msg = match result {
+                Ok(msg) => msg,
+                Err(_) => continue,
+            };
+
+            match &*msg {
+                Message::AssistantMessageChunk { content, .. } => {
+                    accumulated_text.push_str(content);
+                }
+                Message::AssistantMessageEnd { end_status: status, error, .. } => {
+                    if matches!(status, MessageEndStatus::Failed) {
+                        if let Some(err) = error {
+                            if accumulated_text.is_empty() {
+                                accumulated_text = format!("Error: Subagent failed: {}", err);
+                                end_status = MessageEndStatus::Failed;
+                            }
+                        }
+                    }
+                }
+                Message::AssistantRequestEnd { total_input_tokens, total_output_tokens } => {
+                    sub_input_tokens = *total_input_tokens;
+                    sub_output_tokens = *total_output_tokens;
+                    break;
+                }
+                _ => {}
+            }
+        }
+
+        let result_text = if accumulated_text.is_empty() {
+            format!("[subagent_id: {}]\nSubagent completed but produced no output.", params.conversation_id)
+        } else {
+            format!("[subagent_id: {}]\n{}", params.conversation_id, accumulated_text)
+        };
+
+        self.broadcast_msg(Message::SubAgentTurnEnd {
+            msg_id: self.next_msg_id(),
+            conversation_id: params.conversation_id.clone(),
+            end_status,
+            response: Arc::new(result_text.clone()),
+            input_tokens: sub_input_tokens,
+            output_tokens: sub_output_tokens,
+        });
+
+        self.llm_msgs.push(LLMMessage::ToolResult {
+            tool_call_id: tool_call.id,
+            content: result_text,
+        });
+    }
+
     /// Stop the current LLM response and all the messages in the queue.
     pub async fn break_conversation(&self) -> Result<()> {
         Ok(()) // placeholder
@@ -847,5 +1022,12 @@ impl ConversationClient {
         let tx = self.new_msg_notify_tx.subscribe();
         let stream = BroadcastStream::new(tx);
         tokio_stream::iter(msgs.clone().into_iter().map(Ok)).chain(stream)
+    }
+
+    /// Subscribe to only new messages (no history replay).
+    /// Useful for continue_subagent to avoid reprocessing old messages.
+    pub fn subscribe_new(&self) -> impl Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + use<> {
+        let tx = self.new_msg_notify_tx.subscribe();
+        BroadcastStream::new(tx)
     }
 }

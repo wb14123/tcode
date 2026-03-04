@@ -472,6 +472,54 @@ local function render_event(buf, ns, event)
       end
     end
 
+  elseif variant == 'SubAgentTurnEnd' then
+    -- Extend range extmark
+    if data.conversation_id then
+      extend_sa_extmark(buf, data.conversation_id, vim.api.nvim_buf_line_count(buf) - 1)
+    end
+    -- Update the start label in-place to show idle status (do NOT clear from sa_label_marks)
+    if data.conversation_id and sa_label_marks[data.conversation_id] then
+      local info = sa_label_marks[data.conversation_id]
+      local status_hl = (data.end_status and data.end_status ~= 'Succeeded') and 'TCodeError' or 'TCodeTokens'
+      local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'idle'
+      local virt = {
+        { '>>> SUB-AGENT: ' .. info.description .. ' ', 'TCodeTool' },
+        { '[' .. status_text .. ']', status_hl },
+      }
+      if data.input_tokens and data.output_tokens then
+        table.insert(virt, {
+          string.format('  [%d in / %d out]', data.input_tokens, data.output_tokens),
+          'TCodeTokens',
+        })
+      end
+      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
+      if mark_pos and mark_pos[1] then
+        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
+          id = info.extmark_id,
+          virt_text = virt,
+          virt_text_pos = 'overlay',
+        })
+      end
+    end
+
+  elseif variant == 'SubAgentContinue' then
+    -- Update existing label to show running again
+    if data.conversation_id and sa_label_marks[data.conversation_id] then
+      local info = sa_label_marks[data.conversation_id]
+      local virt = {
+        { '>>> SUB-AGENT: ' .. info.description .. ' ', 'TCodeTool' },
+        { '[running]', 'TCodeTool' },
+      }
+      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
+      if mark_pos and mark_pos[1] then
+        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
+          id = info.extmark_id,
+          virt_text = virt,
+          virt_text_pos = 'overlay',
+        })
+      end
+    end
+
   elseif variant == 'AssistantRequestEnd' then
     append_lines(buf, { '', '' })
     local info_line = vim.api.nvim_buf_line_count(buf) - 1
