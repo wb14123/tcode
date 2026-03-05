@@ -35,10 +35,12 @@ or details behind a previous subagent's output, continue that subagent.
 
 ## Context Window Management
 
-Tools like `web_fetch` can return large amounts of text that consume your context window. \
-**Always delegate web fetches and web searches to a child subagent** instead of calling them directly unless you really have good reason. \
-The child subagent will read and summarize the content, returning only the relevant information to you. \
-This keeps your context window small and allows you to process more steps effectively.";
+Some tools (e.g. `web_fetch`) can return large amounts of text that consume your context window. \
+**Delegate tasks that may produce large outputs to a child subagent** instead of calling them directly, \
+unless your task is essentially just to perform that operation (i.e. you were spawned specifically for it). \
+The child subagent will process the content and return only the relevant information to you. \
+This keeps your context window small and allows you to handle more steps effectively. \
+Never re-delegate: if your assigned task is already a single tool call, just do it directly.";
 
 type MessageID = i32;
 
@@ -691,7 +693,7 @@ impl Conversation {
         // Create the subagent conversation
         let (subagent_conv_id, subagent_client) = match self.conversation_manager.new_conversation(
             subagent_llm,
-            &format!("You are a helpful assistant performing a specific task. Complete the task and provide a clear, concise answer.\n\n{}", SUBAGENT_RULES),
+            &format!("You are a subagent spawned to perform a specific task.\n\n{}", SUBAGENT_RULES),
             &params.model,
             subagent_tools,
             self.chat_options.clone(),
