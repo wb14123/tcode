@@ -1,4 +1,10 @@
 new Promise((resolve) => {
+    let resolved = false;
+    const done = (val) => { if (!resolved) { resolved = true; resolve(val); } };
+
+    // Best-effort: resolve after 15s even if network is still busy
+    setTimeout(() => done(true), 15000);
+
     const waitForReady = () => {
         if (document.readyState === 'complete') {
             waitForNetworkIdle();
@@ -43,9 +49,10 @@ new Promise((resolve) => {
         };
 
         const checkIdle = () => {
+            if (resolved) return;
             const timeSinceActivity = Date.now() - lastActivity;
             if (pendingRequests === 0 && timeSinceActivity >= IDLE_THRESHOLD_MS) {
-                resolve(true);
+                done(true);
             } else {
                 setTimeout(checkIdle, 100);
             }

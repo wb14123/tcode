@@ -37,10 +37,11 @@ pub fn navigate_and_wait(url: &str) -> Result<(Browser, Arc<Tab>)> {
     let tab = browser.new_tab()?;
 
     tab.navigate_to(url)?;
-    tab.wait_until_navigated()?;
+    let _ = tab.wait_until_navigated();
 
     // Wait for document.readyState to be 'complete' and network to be idle.
-    tab.evaluate(WAIT_FOR_IDLE_JS, true)?;
+    // Best-effort: if this fails (e.g. timeout), proceed with whatever has loaded.
+    let _ = tab.evaluate(WAIT_FOR_IDLE_JS, true);
 
     Ok((browser, tab))
 }
