@@ -55,7 +55,8 @@ Some tools (e.g. `web_fetch`) can return large amounts of text that consume your
 unless your task is essentially just to perform that operation (i.e. you were spawned specifically for it). \
 The child subagent will process the content and return only the relevant information to you. \
 This keeps your context window small and allows you to handle more steps effectively. \
-Never re-delegate: if your assigned task is already a single tool call, just do it directly.";
+Never re-delegate: if your assigned task is already just needed a single tool call, just do it directly. \
+Otherwise it will create an infinite loop of subagent calls.";
 
 type MessageID = i32;
 
@@ -224,6 +225,7 @@ pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
          Use this for tasks that produce large outputs \
          (web fetches, research, multi-step tool use) so the results are summarized \
          in the subagent's context rather than consuming your context window.\n\
+         Always start the prompt to the subagent with \"You are a subagent so that it knows it's a subagent.\".\n\
          Give sub tasks to sub agents, do not just give the same task you received to a subagent.\n\n
          Available models:\n{}",
         models_list.join("\n")
