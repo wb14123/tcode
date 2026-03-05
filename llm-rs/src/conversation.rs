@@ -14,6 +14,32 @@ use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
 
+/// Shared prompt rules appended to both root and subagent system prompts.
+pub const SUBAGENT_RULES: &str = "\
+## Subagent Management Rules
+
+1. **Prefer continuing over creating.** When a follow-up question relates \
+to work already done by an existing subagent, use `continue_subagent` \
+to query that subagent first. Only spawn a new subagent if the task is \
+genuinely independent of all prior subagent work.
+
+2. **Provenance over corroboration.** When asked \"what are your sources\" or \
+\"where did that come from,\" the goal is to trace the ACTUAL source of the \
+information — not to find new sources that agree with it. These are \
+fundamentally different tasks. Finding new supporting evidence is not the \
+same as citing your actual sources.
+
+3. **Before spawning a new subagent, check:** Could an existing subagent \
+answer this? If the question is about the process, sources, reasoning, \
+or details behind a previous subagent's output, continue that subagent.
+
+## Context Window Management
+
+Tools like `web_fetch` can return large amounts of text that consume your context window. \
+**Always delegate web fetches and web searches to a child subagent** instead of calling them directly unless you really have good reason. \
+The child subagent will read and summarize the content, returning only the relevant information to you. \
+This keeps your context window small and allows you to process more steps effectively.";
+
 type MessageID = i32;
 
 /// Get current timestamp in milliseconds since Unix epoch
@@ -665,7 +691,7 @@ impl Conversation {
         // Create the subagent conversation
         let (subagent_conv_id, subagent_client) = match self.conversation_manager.new_conversation(
             subagent_llm,
-            "You are a helpful assistant performing a specific task. Complete the task and provide a clear, concise answer.",
+            &format!("You are a helpful assistant performing a specific task. Complete the task and provide a clear, concise answer.\n\n{}", SUBAGENT_RULES),
             &params.model,
             subagent_tools,
             self.chat_options.clone(),
