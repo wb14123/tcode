@@ -180,7 +180,8 @@ pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
          Subagents may also spawn their own subagents up to the configured depth limit. \
          Use this for tasks that produce large outputs \
          (web fetches, research, multi-step tool use) so the results are summarized \
-         in the subagent's context rather than consuming your context window.\n\n\
+         in the subagent's context rather than consuming your context window.\n\
+         Give sub tasks to sub agents, do not just give the same task you received to a subagent.\n\n
          Available models:\n{}",
         models_list.join("\n")
     );

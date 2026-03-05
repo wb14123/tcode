@@ -164,7 +164,7 @@ struct Cli {
     subagent_max_iterations: usize,
 
     /// Maximum nesting depth for subagents (0 = no subagents, 1 = one level, etc.)
-    #[arg(long, default_value_t = 3)]
+    #[arg(long, default_value_t = 10)]
     max_subagent_depth: usize,
 }
 
