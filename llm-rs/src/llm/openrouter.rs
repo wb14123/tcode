@@ -472,11 +472,11 @@ impl LLM for OpenRouter {
                         if let Some(reason) = choice.finish_reason {
                             stop_reason = Some(match reason.as_str() {
                                 "tool_calls" => {
-                                    for (_, (id, name, args)) in tool_calls.drain() {
+                                    for (_, (id, name, args)) in tool_calls.iter() {
                                         yield LLMEvent::ToolCall(ToolCall {
-                                            id,
-                                            name,
-                                            arguments: args,
+                                            id: id.clone(),
+                                            name: name.clone(),
+                                            arguments: args.clone(),
                                         });
                                     }
                                     StopReason::ToolUse
@@ -491,11 +491,11 @@ impl LLM for OpenRouter {
 
             // Stream ended without [DONE]
             if !tool_calls.is_empty() {
-                for (_, (id, name, args)) in tool_calls.drain() {
+                for (_, (id, name, args)) in tool_calls.iter() {
                     yield LLMEvent::ToolCall(ToolCall {
-                        id,
-                        name,
-                        arguments: args,
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: args.clone(),
                     });
                 }
             }
@@ -505,7 +505,17 @@ impl LLM for OpenRouter {
             if !accumulated_text.is_empty() {
                 raw_msg["content"] = accumulated_text.into();
             }
-            // Note: tool_calls already drained above, but we don't need them in raw since we emitted ToolCall events
+            if !tool_calls.is_empty() {
+                raw_msg["tool_calls"] = serde_json::json!(
+                    tool_calls.values().map(|(id, name, args)| {
+                        serde_json::json!({
+                            "id": id,
+                            "type": "function",
+                            "function": { "name": name, "arguments": args }
+                        })
+                    }).collect::<Vec<_>>()
+                );
+            }
             if !accumulated_reasoning_details.is_empty() || !accumulated_reasoning_text.is_empty() {
                 let mut all_details = accumulated_reasoning_details;
                 if !accumulated_reasoning_text.is_empty() {
