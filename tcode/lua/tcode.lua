@@ -858,11 +858,7 @@ function M.setup_edit(msg_file)
     highlight TCodeEditStatus guibg=#282c34 guifg=#61afef ctermfg=75 ctermbg=236
   ]])
 
-  vim.api.nvim_buf_set_lines(0, 0, -1, false, {
-    '-- Type message, Enter to send, o for new line',
-    '',
-  })
-  vim.cmd('normal! G')
+  vim.api.nvim_buf_set_lines(0, 0, -1, false, { '' })
   vim.cmd('startinsert')
 end
 
