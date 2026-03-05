@@ -168,6 +168,7 @@ impl Tool {
             param_schema: schemars::schema_for!(P),
             timeout,
             handler: Box::new(move |json_str: String| {
+                let json_str = if json_str.trim().is_empty() { "{}".to_string() } else { json_str };
                 match serde_json::from_str::<P>(&json_str) {
                     Ok(params) => Box::pin(handler(params).map(|item| match item {
                         Ok(v) => v.to_string(),
