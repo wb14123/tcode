@@ -102,9 +102,29 @@ impl Server {
         tools_list.push(Arc::new(create_continue_subagent_tool()));
         tools_list.push(Arc::new(create_get_subagent_logs_tool()));
 
+        let system_prompt = "\
+You are a helpful assistant.
+
+## Subagent Management Rules
+
+1. **Prefer continuing over creating.** When a follow-up question relates \
+to work already done by an existing subagent, use `continue_subagent` \
+to query that subagent first. Only spawn a new subagent if the task is \
+genuinely independent of all prior subagent work.
+
+2. **Provenance over corroboration.** When asked \"what are your sources\" or \
+\"where did that come from,\" the goal is to trace the ACTUAL source of the \
+information — not to find new sources that agree with it. These are \
+fundamentally different tasks. Finding new supporting evidence is not the \
+same as citing your actual sources.
+
+3. **Before spawning a new subagent, check:** Could an existing subagent \
+answer this? If the question is about the process, sources, reasoning, \
+or details behind a previous subagent's output, continue that subagent.";
+
         let (_, conversation_client) = manager.new_conversation(
             self.llm,
-            "You are a helpful assistant.",
+            system_prompt,
             &self.model,
             tools_list,
             self.chat_options.clone(),
