@@ -5,7 +5,7 @@
 //! ```rust
 //! use schemars::JsonSchema;
 //! use serde::Deserialize;
-//! use llm_rs::tool::Tool;
+//! use llm_rs::tool::{Tool, ToolContext};
 //!
 //! #[derive(Deserialize, JsonSchema)]
 //! struct ReadFileParams {
@@ -18,13 +18,15 @@
 //!     "read_file",
 //!     "Read a file's contents",
 //!     None, // no timeout
-//!     |params: ReadFileParams| {
+//!     |_ctx: ToolContext, params: ReadFileParams| {
 //!         tokio_stream::once(Ok::<_, String>(format!("Reading {}", params.path)))
 //!     },
 //! );
 //!
 //! // Execute with JSON string
-//! let stream = tool.execute(r#"{"path": "/tmp/test.txt"}"#.to_string());
+//! use tokio_util::sync::CancellationToken;
+//! let ctx = ToolContext { cancel_token: CancellationToken::new() };
+//! let stream = tool.execute(ctx, r#"{"path": "/tmp/test.txt"}"#.to_string());
 //! ```
 
 use std::pin::Pin;
@@ -36,6 +38,15 @@ use schemars::Schema;
 use serde::de::DeserializeOwned;
 use tokio::time::Sleep;
 use tokio_stream::{Stream, StreamExt};
+
+pub use tokio_util::sync::CancellationToken;
+
+/// Context provided to every tool execution.
+/// Extensible — future additions (permissions, user info) go here.
+#[derive(Clone)]
+pub struct ToolContext {
+    pub cancel_token: CancellationToken,
+}
 
 /// Type alias for the boxed stream returned by tool execution.
 pub type ToolOutputStream = Pin<Box<dyn Stream<Item = String> + Send>>;
@@ -78,6 +89,42 @@ impl<S: Stream<Item = String>> Stream for TimeoutStream<S> {
     }
 }
 
+pin_project! {
+    /// A stream wrapper that stops yielding when a CancellationToken is cancelled.
+    struct CancellableStream<S> {
+        #[pin]
+        inner: S,
+        cancel_token: CancellationToken,
+        cancelled: bool,
+    }
+}
+
+impl<S: Stream<Item = String>> Stream for CancellableStream<S> {
+    type Item = String;
+
+    fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        let this = self.project();
+
+        if *this.cancelled {
+            return Poll::Ready(None);
+        }
+
+        // Check cancellation by polling the cancelled() future.
+        // We create a new future each time since CancellationToken::cancelled() is cheap.
+        let cancelled_fut = this.cancel_token.cancelled();
+        tokio::pin!(cancelled_fut);
+        if cancelled_fut.poll(cx).is_ready() {
+            *this.cancelled = true;
+            return Poll::Ready(Some(
+                "Error: Tool execution was cancelled".to_string(),
+            ));
+        }
+
+        // Poll the inner stream
+        this.inner.poll_next(cx)
+    }
+}
+
 /// Marker trait for valid tool parameter types.
 ///
 /// Automatically implemented for types that are:
@@ -97,7 +144,7 @@ impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send
 /// ```rust
 /// use schemars::JsonSchema;
 /// use serde::Deserialize;
-/// use llm_rs::tool::Tool;
+/// use llm_rs::tool::{Tool, ToolContext};
 ///
 /// #[derive(Deserialize, JsonSchema)]
 /// struct Params {
@@ -111,13 +158,15 @@ impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send
 ///     "search",
 ///     "Search the codebase",
 ///     None, // no timeout
-///     |params: Params| {
+///     |_ctx: ToolContext, params: Params| {
 ///         tokio_stream::once(Ok::<_, String>(format!("Searching for: {}", params.query)))
 ///     },
 /// );
 ///
 /// // Execute with JSON string
-/// let stream = tool.execute(r#"{"query": "foo"}"#.to_string());
+/// use tokio_util::sync::CancellationToken;
+/// let ctx = ToolContext { cancel_token: CancellationToken::new() };
+/// let stream = tool.execute(ctx, r#"{"query": "foo"}"#.to_string());
 /// ```
 pub struct Tool {
     /// Unique name for the tool.
@@ -128,13 +177,14 @@ pub struct Tool {
     pub param_schema: Schema,
     /// Optional timeout for tool execution.
     pub timeout: Option<Duration>,
-    handler: Box<dyn Fn(String) -> ToolOutputStream + Send + Sync>,
+    handler: Box<dyn Fn(ToolContext, String) -> ToolOutputStream + Send + Sync>,
 }
 
 impl Tool {
     /// Create a new tool.
     ///
-    /// The handler function receives typed parameters and returns a stream of Results.
+    /// The handler function receives a `ToolContext` and typed parameters,
+    /// and returns a stream of Results.
     /// JSON deserialization is handled automatically. Errors are formatted with "Error: " prefix.
     ///
     /// # Type Parameters
@@ -148,7 +198,7 @@ impl Tool {
     /// - `name`: Unique tool name (used by LLM to call the tool)
     /// - `description`: Human-readable description
     /// - `timeout`: Optional timeout for tool execution
-    /// - `handler`: Function that takes params, returns a stream of `Result<T, E>`
+    /// - `handler`: Function that takes `(ToolContext, params)`, returns a stream of `Result<T, E>`
     pub fn new<P, F, S, T, E>(
         name: impl Into<String>,
         description: impl Into<String>,
@@ -157,7 +207,7 @@ impl Tool {
     ) -> Self
     where
         P: ToolParams,
-        F: Fn(P) -> S + Send + Sync + 'static,
+        F: Fn(ToolContext, P) -> S + Send + Sync + 'static,
         S: Stream<Item = Result<T, E>> + Send + 'static,
         T: ToString + Send + 'static,
         E: ToString + Send + 'static,
@@ -167,10 +217,10 @@ impl Tool {
             description: description.into(),
             param_schema: schemars::schema_for!(P),
             timeout,
-            handler: Box::new(move |json_str: String| {
+            handler: Box::new(move |ctx: ToolContext, json_str: String| {
                 let json_str = if json_str.trim().is_empty() { "{}".to_string() } else { json_str };
                 match serde_json::from_str::<P>(&json_str) {
-                    Ok(params) => Box::pin(handler(params).map(|item| match item {
+                    Ok(params) => Box::pin(handler(ctx, params).map(|item| match item {
                         Ok(v) => v.to_string(),
                         Err(e) => format!("Error: {}", e.to_string()),
                     })),
@@ -198,7 +248,7 @@ impl Tool {
             description: description.into(),
             param_schema,
             timeout: None,
-            handler: Box::new(|_| {
+            handler: Box::new(|_ctx, _| {
                 Box::pin(tokio_stream::once(
                     "Error: This tool's execution is handled internally".to_string(),
                 ))
@@ -209,12 +259,14 @@ impl Tool {
     /// Execute the tool with a JSON string argument.
     ///
     /// Returns a stream of string outputs that can be consumed incrementally.
-    /// If a timeout is set, the stream will yield an error and terminate if
-    /// the total execution time exceeds the timeout.
-    pub fn execute(&self, arguments: String) -> ToolOutputStream {
-        let stream = (self.handler)(arguments);
+    /// The stream is always wrapped with `CancellableStream` so cancellation
+    /// stops output. If a timeout is set, `TimeoutStream` is also applied.
+    pub fn execute(&self, ctx: ToolContext, arguments: String) -> ToolOutputStream {
+        let cancel_token = ctx.cancel_token.clone();
+        let stream = (self.handler)(ctx, arguments);
 
-        match self.timeout {
+        // Apply timeout if configured
+        let stream: ToolOutputStream = match self.timeout {
             Some(timeout) => Box::pin(TimeoutStream {
                 inner: stream,
                 deadline: tokio::time::sleep(timeout),
@@ -222,6 +274,13 @@ impl Tool {
                 timeout_duration: timeout,
             }),
             None => stream,
-        }
+        };
+
+        // Always wrap with CancellableStream
+        Box::pin(CancellableStream {
+            inner: stream,
+            cancel_token,
+            cancelled: false,
+        })
     }
 }

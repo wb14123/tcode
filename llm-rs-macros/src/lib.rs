@@ -8,7 +8,7 @@ use proc_macro_crate::{crate_name, FoundCrate};
 use quote::{format_ident, quote};
 use syn::{
     parse::{Parse, ParseStream},
-    parse_macro_input, spanned::Spanned, Attribute, FnArg, ItemFn, Lit, Pat, PatType, Token,
+    parse_macro_input, spanned::Spanned, Attribute, FnArg, ItemFn, Lit, Pat, PatType, Token, Type,
 };
 
 /// Parsed attributes for the #[tool] macro.
@@ -70,6 +70,16 @@ fn get_crate_path() -> proc_macro2::TokenStream {
     }
 }
 
+/// Check if a type path ends with `ToolContext`.
+fn is_tool_context_type(ty: &Type) -> bool {
+    if let Type::Path(type_path) = ty {
+        if let Some(segment) = type_path.path.segments.last() {
+            return segment.ident == "ToolContext";
+        }
+    }
+    false
+}
+
 /// Attribute macro that transforms a function into an LLM tool.
 ///
 /// # Usage
@@ -91,6 +101,23 @@ fn get_crate_path() -> proc_macro2::TokenStream {
 ///
 /// // Creates a `read_file_tool()` function that returns a Tool
 /// let tool = read_file_tool();
+/// ```
+///
+/// # ToolContext
+///
+/// If the first parameter has type `ToolContext`, it is excluded from the
+/// generated params struct and passed through from the handler:
+///
+/// ```ignore
+/// #[tool]
+/// fn web_fetch(
+///     ctx: ToolContext,
+///     /// The URL to fetch
+///     url: String,
+/// ) -> impl Stream<Item = Result<String, anyhow::Error>> {
+///     // ctx.cancel_token can be used for deep cancellation
+///     async_stream::stream! { /* ... */ }
+/// }
 /// ```
 ///
 /// # Generated Code
@@ -152,10 +179,26 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Extract doc comments from function for tool description
     let description = extract_doc_comments(&input_fn.attrs);
 
+    // Detect if the first parameter is ToolContext
+    let mut has_tool_context = false;
+    let mut tool_context_ident = None;
+    let all_args: Vec<_> = input_fn.sig.inputs.iter().collect();
+
+    if let Some(FnArg::Typed(pat_type)) = all_args.first() {
+        if is_tool_context_type(&pat_type.ty) {
+            has_tool_context = true;
+            if let Pat::Ident(pat_ident) = &*pat_type.pat {
+                tool_context_ident = Some(pat_ident.ident.clone());
+            }
+        }
+    }
+
     // Extract parameters with their names, types, and attributes
-    // Validate that all parameters are supported (no self, no complex patterns)
+    // Skip the first param if it's ToolContext
+    let args_to_process = if has_tool_context { &all_args[1..] } else { &all_args[..] };
+
     let mut params = Vec::new();
-    for arg in input_fn.sig.inputs.iter() {
+    for arg in args_to_process {
         match arg {
             FnArg::Receiver(receiver) => {
                 // self, &self, &mut self - not supported
@@ -187,6 +230,18 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
         }
     }
 
+    // Also validate the ToolContext param itself (if present) isn't a complex pattern
+    if has_tool_context {
+        if let Some(FnArg::Receiver(receiver)) = all_args.first() {
+            return syn::Error::new(
+                receiver.span(),
+                "#[tool] cannot be used on methods with `self` parameter.",
+            )
+            .to_compile_error()
+            .into();
+        }
+    }
+
     // Generate struct fields with ALL attributes (doc + serde)
     let struct_fields = params.iter().map(|(name, ty, attrs)| {
         quote! {
@@ -215,9 +270,19 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     // Generate the tool constructor function
     let tool_fn_name = format_ident!("{}_tool", fn_name);
 
-    let handler_body = quote! {
-        |params: #params_struct_name| {
-            #fn_name(#(params.#field_names),*)
+    // Generate handler body depending on whether ToolContext is present
+    let handler_body = if has_tool_context {
+        let ctx_ident = tool_context_ident.as_ref().unwrap();
+        quote! {
+            |#ctx_ident: #crate_path::tool::ToolContext, params: #params_struct_name| {
+                #fn_name(#ctx_ident, #(params.#field_names),*)
+            }
+        }
+    } else {
+        quote! {
+            |_ctx: #crate_path::tool::ToolContext, params: #params_struct_name| {
+                #fn_name(#(params.#field_names),*)
+            }
         }
     };
 
@@ -235,6 +300,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let fn_output = &input_fn.sig.output;
 
     // Strip doc/serde attrs from function params (they go to the struct)
+    // For ToolContext param, keep it as-is (no attrs to strip)
     let clean_inputs: Vec<_> = input_fn
         .sig
         .inputs

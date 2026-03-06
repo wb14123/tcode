@@ -1,6 +1,7 @@
 use std::fmt::Write;
 
 use anyhow::{anyhow, Result};
+use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 use serde::Deserialize;
 
@@ -73,13 +74,19 @@ fn search_and_extract(query: &str) -> Result<String> {
 /// Search the web using Kagi and return structured search results
 #[tool(timeout_ms = 300000)]
 pub fn web_search(
+    ctx: ToolContext,
     /// The search query
     query: String,
 ) -> impl tokio_stream::Stream<Item = Result<String>> {
     async_stream::stream! {
-        yield tokio::task::spawn_blocking(move || search_and_extract(&query))
-            .await
-            .map_err(anyhow::Error::from)
-            .flatten()
+        let handle = tokio::task::spawn_blocking(move || search_and_extract(&query));
+        tokio::select! {
+            result = handle => {
+                yield result.map_err(anyhow::Error::from).flatten();
+            }
+            _ = ctx.cancel_token.cancelled() => {
+                yield Err(anyhow!("Cancelled"));
+            }
+        }
     }
 }

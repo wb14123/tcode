@@ -184,7 +184,7 @@ mod tests {
             "get_weather",
             "Get the current weather for a city",
             None,
-            |_params: EmptyParams| {
+            |_ctx: crate::tool::ToolContext, _params: EmptyParams| {
                 tokio_stream::once(Ok::<String, String>("Sunny, 22C".to_string()))
             },
         );

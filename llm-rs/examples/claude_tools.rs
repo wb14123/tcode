@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use llm_rs::llm::{ChatOptions, Claude, LLMEvent, LLMMessage, StopReason, LLM};
 use llm_rs::tool;
-use llm_rs::tool::Tool;
+use llm_rs::tool::{CancellationToken, Tool, ToolContext};
 use tokio_stream::StreamExt;
 
 // Tool definitions using the #[tool] macro
@@ -101,7 +101,8 @@ async fn main() {
 
                         // Find and execute the tool
                         let result = if let Some(tool) = tools.get(&tool_call.name) {
-                            let mut result_stream = tool.execute(tool_call.arguments.clone());
+                            let ctx = ToolContext { cancel_token: CancellationToken::new() };
+                            let mut result_stream = tool.execute(ctx, tool_call.arguments.clone());
                             let mut result = String::new();
                             while let Some(chunk) = result_stream.next().await {
                                 result.push_str(&chunk);

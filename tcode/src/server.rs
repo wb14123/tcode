@@ -529,6 +529,10 @@ async fn handle_client_inner(
                             send_msg(&mut sink, &ServerMessage::Ack).await?;
                         }
                     }
+                    ClientMessage::Cancel => {
+                        conv_client.cancel();
+                        send_msg(&mut sink, &ServerMessage::Ack).await?;
+                    }
                     ClientMessage::Shutdown => {
                         let _ = shutdown_tx.send(());
                         return Ok(());

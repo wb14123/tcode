@@ -1,4 +1,5 @@
 use anyhow::{anyhow, Result};
+use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 
 use crate::browser;
@@ -31,14 +32,20 @@ fn fetch_and_extract(url: &str) -> Result<String> {
 /// to get the content if blocked, just say so in the response.
 #[tool(timeout_ms = 300000)]
 pub fn web_fetch(
+    ctx: ToolContext,
     /// The URL to fetch and extract content from
     url: String,
 ) -> impl tokio_stream::Stream<Item = Result<String>> {
     async_stream::stream! {
-        yield tokio::task::spawn_blocking(move || fetch_and_extract(&url))
-            .await
-            .map_err(anyhow::Error::from)
-            .flatten()
+        let handle = tokio::task::spawn_blocking(move || fetch_and_extract(&url));
+        tokio::select! {
+            result = handle => {
+                yield result.map_err(anyhow::Error::from).flatten();
+            }
+            _ = ctx.cancel_token.cancelled() => {
+                yield Err(anyhow!("Cancelled"));
+            }
+        }
     }
 }
 

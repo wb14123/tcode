@@ -1,10 +1,14 @@
 #[cfg(test)]
 mod tests {
-    use crate::tool::Tool;
+    use crate::tool::{CancellationToken, Tool, ToolContext};
     use schemars::JsonSchema;
     use serde::Deserialize;
     use std::time::Duration;
     use tokio_stream::StreamExt;
+
+    fn test_ctx() -> ToolContext {
+        ToolContext { cancel_token: CancellationToken::new() }
+    }
 
     #[derive(Deserialize, JsonSchema)]
     struct TestParams {
@@ -17,7 +21,7 @@ mod tests {
 
     #[test]
     fn test_tool_creation() {
-        let tool = Tool::new("test_tool", "A test tool", None, |_params: TestParams| {
+        let tool = Tool::new("test_tool", "A test tool", None, |_ctx: ToolContext, _params: TestParams| {
             tokio_stream::empty::<Result<String, String>>()
         });
 
@@ -27,7 +31,7 @@ mod tests {
 
     #[test]
     fn test_tool_param_schema() {
-        let tool = Tool::new("test_tool", "A test tool", None, |_params: TestParams| {
+        let tool = Tool::new("test_tool", "A test tool", None, |_ctx: ToolContext, _params: TestParams| {
             tokio_stream::empty::<Result<String, String>>()
         });
 
@@ -58,7 +62,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execute_json() {
-        let tool = Tool::new("greeter", "Greet someone", None, |params: TestParams| {
+        let tool = Tool::new("greeter", "Greet someone", None, |_ctx: ToolContext, params: TestParams| {
             let msg = params.message.clone();
             let count = params.count.unwrap_or(1);
             tokio_stream::iter((0..count).map(move |i| {
@@ -68,7 +72,7 @@ mod tests {
 
         // Execute with JSON string
         let json_args = r#"{"message": "Rust", "count": 2}"#.to_string();
-        let mut stream = tool.execute(json_args);
+        let mut stream = tool.execute(test_ctx(), json_args);
 
         let mut results = Vec::new();
         while let Some(item) = stream.next().await {
@@ -82,7 +86,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execute_with_default() {
-        let tool = Tool::new("greeter", "Greet someone", None, |params: TestParams| {
+        let tool = Tool::new("greeter", "Greet someone", None, |_ctx: ToolContext, params: TestParams| {
             let msg = params.message.clone();
             let count = params.count.unwrap_or(1);
             tokio_stream::iter((0..count).map(move |i| {
@@ -92,7 +96,7 @@ mod tests {
 
         // Execute without optional field (uses default)
         let json_args = r#"{"message": "Default"}"#.to_string();
-        let mut stream = tool.execute(json_args);
+        let mut stream = tool.execute(test_ctx(), json_args);
 
         let mut results = Vec::new();
         while let Some(item) = stream.next().await {
@@ -105,13 +109,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execute_invalid_json() {
-        let tool = Tool::new("greeter", "Greet someone", None, |params: TestParams| {
+        let tool = Tool::new("greeter", "Greet someone", None, |_ctx: ToolContext, params: TestParams| {
             tokio_stream::once(Ok::<_, String>(format!("Hello, {}!", params.message)))
         });
 
         // Execute with invalid JSON
         let json_args = r#"not valid json"#.to_string();
-        let mut stream = tool.execute(json_args);
+        let mut stream = tool.execute(test_ctx(), json_args);
 
         let result = stream.next().await.unwrap();
         assert!(result.starts_with("Error: Failed to parse tool arguments:"));
@@ -119,13 +123,13 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execute_missing_required_field() {
-        let tool = Tool::new("greeter", "Greet someone", None, |params: TestParams| {
+        let tool = Tool::new("greeter", "Greet someone", None, |_ctx: ToolContext, params: TestParams| {
             tokio_stream::once(Ok::<_, String>(format!("Hello, {}!", params.message)))
         });
 
         // Execute with missing required field
         let json_args = r#"{"count": 5}"#.to_string();
-        let mut stream = tool.execute(json_args);
+        let mut stream = tool.execute(test_ctx(), json_args);
 
         let result = stream.next().await.unwrap();
         assert!(result.starts_with("Error: Failed to parse tool arguments:"));
@@ -134,12 +138,12 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execute_error() {
-        let tool = Tool::new("fallible", "A fallible tool", None, |_params: TestParams| {
+        let tool = Tool::new("fallible", "A fallible tool", None, |_ctx: ToolContext, _params: TestParams| {
             tokio_stream::once(Err::<String, _>("something went wrong".to_string()))
         });
 
         let json_args = r#"{"message": "test"}"#.to_string();
-        let mut stream = tool.execute(json_args);
+        let mut stream = tool.execute(test_ctx(), json_args);
 
         let result = stream.next().await.unwrap();
         assert_eq!(result, "Error: something went wrong");
@@ -147,7 +151,7 @@ mod tests {
 
     #[test]
     fn test_tool_default_timeout() {
-        let tool = Tool::new("test", "A test tool", None, |_: TestParams| {
+        let tool = Tool::new("test", "A test tool", None, |_ctx: ToolContext, _: TestParams| {
             tokio_stream::empty::<Result<String, String>>()
         });
 
@@ -160,7 +164,7 @@ mod tests {
             "test",
             "A test tool",
             Some(Duration::from_secs(30)),
-            |_: TestParams| tokio_stream::empty::<Result<String, String>>(),
+            |_ctx: ToolContext, _: TestParams| tokio_stream::empty::<Result<String, String>>(),
         );
 
         assert_eq!(tool.timeout, Some(Duration::from_secs(30)));
@@ -172,7 +176,7 @@ mod tests {
             "test",
             "A test tool",
             Some(Duration::from_millis(500)),
-            |_: TestParams| tokio_stream::empty::<Result<String, String>>(),
+            |_ctx: ToolContext, _: TestParams| tokio_stream::empty::<Result<String, String>>(),
         );
 
         assert_eq!(tool.timeout, Some(Duration::from_millis(500)));
@@ -184,7 +188,7 @@ mod tests {
             "slow",
             "A slow tool",
             Some(Duration::from_millis(100)),
-            |_: TestParams| {
+            |_ctx: ToolContext, _: TestParams| {
                 async_stream::stream! {
                     // Yield first item immediately
                     yield Ok::<_, String>("first".to_string());
@@ -196,7 +200,7 @@ mod tests {
         );
 
         let json_args = r#"{"message": "test"}"#.to_string();
-        let mut stream = tool.execute(json_args);
+        let mut stream = tool.execute(test_ctx(), json_args);
 
         let mut results = Vec::new();
         while let Some(item) = stream.next().await {
@@ -215,7 +219,7 @@ mod tests {
             "slow",
             "A slow tool",
             Some(Duration::from_millis(50)),
-            |_: TestParams| {
+            |_ctx: ToolContext, _: TestParams| {
                 async_stream::stream! {
                     // Sleep longer than timeout before yielding anything
                     tokio::time::sleep(Duration::from_millis(200)).await;
@@ -225,16 +229,57 @@ mod tests {
         );
 
         let json_args = r#"{"message": "test"}"#.to_string();
-        let mut stream = tool.execute(json_args);
+        let mut stream = tool.execute(test_ctx(), json_args);
 
         let result = stream.next().await.unwrap();
         assert!(result.contains("timed out"), "Expected timeout, got: {}", result);
     }
 
+    #[tokio::test]
+    async fn test_tool_cancellation() {
+        let tool = Tool::new(
+            "slow",
+            "A slow tool",
+            None,
+            |_ctx: ToolContext, _: TestParams| {
+                async_stream::stream! {
+                    yield Ok::<_, String>("first".to_string());
+                    tokio::time::sleep(Duration::from_secs(10)).await;
+                    yield Ok::<_, String>("second".to_string());
+                }
+            },
+        );
+
+        let cancel_token = CancellationToken::new();
+        let ctx = ToolContext { cancel_token: cancel_token.clone() };
+
+        let json_args = r#"{"message": "test"}"#.to_string();
+        let mut stream = tool.execute(ctx, json_args);
+
+        // Get first item
+        let first = stream.next().await.unwrap();
+        assert_eq!(first, "first");
+
+        // Cancel
+        cancel_token.cancel();
+
+        // Should get cancellation message
+        let cancelled = stream.next().await.unwrap();
+        assert!(cancelled.contains("cancelled"), "Expected cancelled, got: {}", cancelled);
+
+        // Stream should end
+        assert!(stream.next().await.is_none());
+    }
+
     // Tests for #[tool] macro
     mod macro_tests {
         use crate::tool;
+        use crate::tool::{CancellationToken, ToolContext};
         use tokio_stream::StreamExt;
+
+        fn test_ctx() -> ToolContext {
+            ToolContext { cancel_token: CancellationToken::new() }
+        }
 
         /// Search the codebase for a pattern
         #[tool]
@@ -286,7 +331,7 @@ mod tests {
             let tool = search_code_tool();
 
             let json_args = r#"{"query": "foo", "limit": 3}"#.to_string();
-            let mut stream = tool.execute(json_args);
+            let mut stream = tool.execute(test_ctx(), json_args);
 
             let mut results = Vec::new();
             while let Some(item) = stream.next().await {
@@ -305,7 +350,7 @@ mod tests {
 
             // Without optional limit parameter
             let json_args = r#"{"query": "bar"}"#.to_string();
-            let mut stream = tool.execute(json_args);
+            let mut stream = tool.execute(test_ctx(), json_args);
 
             let mut results = Vec::new();
             while let Some(item) = stream.next().await {
@@ -372,14 +417,40 @@ mod tests {
             let tool = fallible_operation_tool();
 
             // Test success case
-            let mut stream = tool.execute(r#"{"should_fail": false}"#.to_string());
+            let mut stream = tool.execute(test_ctx(), r#"{"should_fail": false}"#.to_string());
             let result = stream.next().await.unwrap();
             assert_eq!(result, "success");
 
             // Test error case
-            let mut stream = tool.execute(r#"{"should_fail": true}"#.to_string());
+            let mut stream = tool.execute(test_ctx(), r#"{"should_fail": true}"#.to_string());
             let result = stream.next().await.unwrap();
             assert_eq!(result, "Error: intentional failure");
+        }
+
+        /// A tool with ToolContext
+        #[tool]
+        fn ctx_aware_tool(
+            ctx: ToolContext,
+            /// Some input data
+            data: String,
+        ) -> impl tokio_stream::Stream<Item = Result<String, String>> {
+            let is_cancelled = ctx.cancel_token.is_cancelled();
+            tokio_stream::once(Ok(format!("data={}, cancelled={}", data, is_cancelled)))
+        }
+
+        #[tokio::test]
+        async fn test_tool_macro_with_tool_context() {
+            let tool = ctx_aware_tool_tool();
+
+            // ToolContext should not appear in the schema
+            let schema_json = serde_json::to_value(&tool.param_schema).unwrap();
+            let props = schema_json["properties"].as_object().unwrap();
+            assert!(props.contains_key("data"));
+            assert!(!props.contains_key("ctx"));
+
+            let mut stream = tool.execute(test_ctx(), r#"{"data": "hello"}"#.to_string());
+            let result = stream.next().await.unwrap();
+            assert_eq!(result, "data=hello, cancelled=false");
         }
     }
 }
