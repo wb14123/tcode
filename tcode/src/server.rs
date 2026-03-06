@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
-use llm_rs::conversation::{ConversationManager, Message, create_subagent_tool, create_get_subagent_logs_tool, create_continue_subagent_tool};
+use llm_rs::conversation::{ConversationManager, ConversationState, Message, create_subagent_tool, create_get_subagent_logs_tool, create_continue_subagent_tool};
 use llm_rs::llm::{ChatOptions, LLM};
 use llm_rs::tool::Tool;
 use tokio::fs::OpenOptions;
@@ -41,6 +41,7 @@ pub struct Server {
     display_file: PathBuf,
     status_file: PathBuf,
     session_dir: PathBuf,
+    conversation_state_file: PathBuf,
     llm: Box<dyn LLM>,
     model: String,
     chat_options: ChatOptions,
@@ -54,6 +55,7 @@ impl Server {
         display_file: PathBuf,
         status_file: PathBuf,
         session_dir: PathBuf,
+        conversation_state_file: PathBuf,
         llm: Box<dyn LLM>,
         model: String,
         chat_options: ChatOptions,
@@ -65,6 +67,7 @@ impl Server {
             display_file,
             status_file,
             session_dir,
+            conversation_state_file,
             llm,
             model,
             chat_options,
@@ -83,12 +86,6 @@ impl Server {
         let listener = UnixListener::bind(&self.socket_path)
             .with_context(|| format!("Failed to bind Unix socket at {:?}", self.socket_path))?;
 
-        // Initialize display files
-        tokio::fs::write(&self.display_file, "").await
-            .with_context(|| format!("Failed to initialize display file {:?}", self.display_file))?;
-        tokio::fs::write(&self.status_file, "Ready").await
-            .with_context(|| format!("Failed to initialize status file {:?}", self.status_file))?;
-
         // Create conversation manager
         let manager = ConversationManager::new();
 
@@ -103,50 +100,103 @@ impl Server {
         tools_list.push(Arc::new(create_continue_subagent_tool()));
         tools_list.push(Arc::new(create_get_subagent_logs_tool()));
 
-        let system_prompt = format!("You are a helpful assistant.\n\n{}", llm_rs::conversation::SUBAGENT_RULES);
+        let resuming = self.conversation_state_file.exists();
 
-        let (_, conversation_client) = manager.new_conversation(
-            self.llm,
-            &system_prompt,
-            &self.model,
-            tools_list,
-            self.chat_options.clone(),
-            false,
-            self.subagent_max_iterations,
-            0, // root conversation depth
-            self.max_subagent_depth,
-        )?;
+        let conversation_client = if resuming {
+            tracing::info!("Resuming conversation from {:?}", self.conversation_state_file);
 
-        // Spawn background task to write conversation events to display files
-        let manager_clone = Arc::clone(&manager);
-        let events = Box::pin(conversation_client.subscribe());
-        let display_file = self.display_file.clone();
-        let status_file = self.status_file.clone();
-        let session_dir = self.session_dir.clone();
-        let mut event_writer = tokio::spawn(run_event_writer(
-            events,
-            display_file,
-            status_file,
-            session_dir,
-            Some(manager_clone),
-        ));
+            // Load root conversation state
+            let state_json = std::fs::read_to_string(&self.conversation_state_file)
+                .with_context(|| format!("Failed to read {:?}", self.conversation_state_file))?;
+            let root_state: ConversationState = serde_json::from_str(&state_json)
+                .with_context(|| "Failed to parse conversation-state.json")?;
+
+            // Resume the full conversation tree (root + all subagents)
+            let (_, client, resumed_subagents) = manager.resume_conversation_tree(
+                root_state,
+                self.llm,
+                tools_list,
+                self.subagent_max_iterations,
+                self.max_subagent_depth,
+                self.session_dir.clone(),
+            )?;
+
+            // Spawn event writers for resumed subagents (appending to existing files)
+            for sa in &resumed_subagents {
+                tracing::info!(conversation_id = %sa.conversation_id, "Resumed subagent conversation");
+                let mgr_clone = Arc::clone(&manager);
+                let sa_events = Box::pin(sa.client.subscribe_new());
+                let sa_display = sa.state_dir.join("display.jsonl");
+                let sa_status = sa.state_dir.join("status.txt");
+                let sa_dir_clone = sa.state_dir.clone();
+                tokio::spawn(async move {
+                    if let Err(e) = run_event_writer(
+                        sa_events, sa_display, sa_status, sa_dir_clone, Some(mgr_clone),
+                    ).await {
+                        tracing::error!(error = %e, "Resumed subagent event writer failed");
+                    }
+                });
+            }
+
+            // Do NOT truncate display.jsonl on resume; subscribe to new events only
+            tokio::fs::write(&self.status_file, "Ready").await
+                .with_context(|| format!("Failed to write status file {:?}", self.status_file))?;
+
+            let manager_clone = Arc::clone(&manager);
+            let events = Box::pin(client.subscribe_new());
+            let display_file = self.display_file.clone();
+            let status_file = self.status_file.clone();
+            let session_dir = self.session_dir.clone();
+            tokio::spawn(run_event_writer(
+                events, display_file, status_file, session_dir, Some(manager_clone),
+            ));
+
+            client
+        } else {
+            // New conversation path
+            tokio::fs::write(&self.display_file, "").await
+                .with_context(|| format!("Failed to initialize display file {:?}", self.display_file))?;
+            tokio::fs::write(&self.status_file, "Ready").await
+                .with_context(|| format!("Failed to initialize status file {:?}", self.status_file))?;
+
+            let system_prompt = format!("You are a helpful assistant.\n\n{}", llm_rs::conversation::SUBAGENT_RULES);
+
+            let (_, client) = manager.new_conversation(
+                self.llm,
+                &system_prompt,
+                &self.model,
+                tools_list,
+                self.chat_options.clone(),
+                false,
+                self.subagent_max_iterations,
+                0, // root conversation depth
+                self.max_subagent_depth,
+                Some(self.session_dir.clone()),
+            )?;
+
+            let manager_clone = Arc::clone(&manager);
+            let events = Box::pin(client.subscribe());
+            let display_file = self.display_file.clone();
+            let status_file = self.status_file.clone();
+            let session_dir = self.session_dir.clone();
+            tokio::spawn(run_event_writer(
+                events, display_file, status_file, session_dir, Some(manager_clone),
+            ));
+
+            client
+        };
 
         // Shutdown signal
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
         let shutdown_tx = Arc::new(shutdown_tx);
         let socket_path = self.socket_path.clone();
 
-        // Accept loop — also monitors event writer task
+        // Accept loop
         let mut shutdown_rx = shutdown_tx.subscribe();
         loop {
             tokio::select! {
                 biased;
                 _ = shutdown_rx.recv() => break,
-                result = &mut event_writer => {
-                    result.context("Event writer task panicked")?
-                        .context("Event writer failed")?;
-                    break;
-                }
                 result = listener.accept() => {
                     let (stream, _) = result?;
                     let conv_client = Arc::clone(&conversation_client);

@@ -7,3 +7,6 @@ pub use llm_rs_macros::tool;
 
 #[cfg(test)]
 mod tool_tests;
+
+#[cfg(test)]
+mod conversation_tests;

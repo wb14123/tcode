@@ -104,6 +104,11 @@ impl Session {
         self.session_dir.join(format!("tool-call-{}-status.txt", tool_call_id))
     }
 
+    /// Path for the conversation state file (persisted LLM conversation)
+    pub fn conversation_state_file(&self) -> PathBuf {
+        self.session_dir.join("conversation-state.json")
+    }
+
     /// Path for stdout log (captures injected stdout from tools like proxychains)
     pub fn stdout_log(&self) -> PathBuf {
         self.session_dir.join("stdout.log")

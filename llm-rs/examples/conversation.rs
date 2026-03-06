@@ -73,6 +73,7 @@ async fn main() -> anyhow::Result<()> {
         20,
         0, // subagent_depth (root)
         3, // max_subagent_depth
+        None, // state_dir (no persistence for this example)
     )?;
 
     // Subscribe to messages (this must be done before sending to receive all messages)
@@ -182,6 +183,12 @@ fn print_message(msg: &Message) {
         }
         Message::SubAgentEnd { response, input_tokens, output_tokens, .. } => {
             println!("    [SubAgent ended: {} chars, {} in / {} out tokens]", response.len(), input_tokens, output_tokens);
+        }
+        Message::SubAgentTurnEnd { response, input_tokens, output_tokens, .. } => {
+            println!("    [SubAgent turn ended: {} chars, {} in / {} out tokens]", response.len(), input_tokens, output_tokens);
+        }
+        Message::SubAgentContinue { description, .. } => {
+            println!("    [SubAgent continued: {}]", description);
         }
         Message::AssistantRequestEnd {
             total_input_tokens,

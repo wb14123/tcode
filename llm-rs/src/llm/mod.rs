@@ -19,6 +19,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
 
+use serde::{Deserialize, Serialize};
+
 use crate::tool::Tool;
 
 // ============================================================================
@@ -26,7 +28,7 @@ use crate::tool::Tool;
 // ============================================================================
 
 /// Reasoning effort level for thinking models.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum ReasoningEffort {
     XHigh,
     High,
@@ -43,7 +45,7 @@ pub struct ModelInfo {
 }
 
 /// Options for LLM chat requests.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct ChatOptions {
     /// Maximum tokens for the response output. If not set, provider defaults are used.
     pub max_tokens: Option<u32>,
@@ -61,7 +63,7 @@ pub struct ChatOptions {
 // ============================================================================
 
 /// Message content for LLM conversations.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub enum LLMMessage {
     System(String),
     User(String),
@@ -100,7 +102,7 @@ pub enum StopReason {
 }
 
 /// A tool call requested by the model.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ToolCall {
     /// Unique identifier for this tool call (used to match tool results)
     pub id: String,

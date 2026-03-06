@@ -185,6 +185,11 @@ enum Commands {
     Browser,
     /// Authenticate with Claude via OAuth and get an API key
     ClaudeAuth,
+    /// Attach to an existing session and resume the conversation
+    Attach {
+        /// The session ID to attach to
+        session_id: String,
+    },
     /// List active sessions
     Sessions,
 }
@@ -243,6 +248,7 @@ async fn main() -> Result<()> {
                 session.display_file(),
                 session.status_file(),
                 session.session_dir().clone(),
+                session.conversation_state_file(),
                 llm,
                 model,
                 chat_options,
@@ -271,6 +277,24 @@ async fn main() -> Result<()> {
             let session = Session::new(session_id)?;
             let client = ToolCallDisplayClient::new(session, lua_path, tool_call_id);
             client.run().await
+        }
+        Some(Commands::Attach { ref session_id }) => {
+            if !is_in_tmux() {
+                anyhow::bail!("tcode attach must be run inside tmux.\nRun `tcode serve` to start the server without tmux.");
+            }
+            let session_id = session_id.clone();
+            let session = Session::new(session_id.clone())?;
+            if !session.conversation_state_file().exists() {
+                anyhow::bail!("No conversation state found for session '{}'. Nothing to resume.", session_id);
+            }
+            let (llm, model) = create_llm(&cli)?;
+            let chat_options = build_chat_options(&cli);
+            run_unified_with_session(
+                session, session_id,
+                llm, model, chat_options,
+                cli.subagent_max_iterations, cli.max_subagent_depth,
+                "Attaching to session",
+            ).await
         }
         Some(Commands::Sessions) => {
             use std::os::unix::net::UnixStream;
@@ -352,69 +376,70 @@ async fn run_browser() -> Result<()> {
 }
 
 async fn run_unified(cli: Cli, _lua_path: PathBuf) -> Result<()> {
-    // Check if running inside tmux
     if !is_in_tmux() {
         anyhow::bail!("tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux.");
     }
 
-    // Generate new session ID and create session directory first
     let session_id = session::generate_session_id();
     let session = Session::new(session_id.clone())?;
+    let (llm, model) = create_llm(&cli)?;
+    let chat_options = build_chat_options(&cli);
 
-    // Redirect stdout/stderr to log files to prevent injected output (e.g. from proxychains4)
-    // from corrupting the TUI display. Save original stdout to print session ID.
+    run_unified_with_session(
+        session, session_id,
+        llm, model, chat_options,
+        cli.subagent_max_iterations, cli.max_subagent_depth,
+        "Session",
+    ).await
+}
+
+/// Shared entry point for unified mode: redirects stdio, initializes tracing,
+/// starts the server, creates tmux panes, and waits for the display to exit.
+async fn run_unified_with_session(
+    session: Session,
+    session_id: String,
+    llm: Box<dyn LLM>,
+    model: String,
+    chat_options: ChatOptions,
+    subagent_max_iterations: usize,
+    max_subagent_depth: usize,
+    label: &str,
+) -> Result<()> {
     let original_stdout = tty_stdio::redirect_output_to_files(
         &session.stdout_log(),
         &session.stderr_log(),
     );
-    tty_stdio::write_to_terminal(original_stdout, &format!("Session: {}\n", session_id));
+    tty_stdio::write_to_terminal(original_stdout, &format!("{}: {}\n", label, session_id));
 
     init_tracing(&session_id);
 
-    // Run the main logic, catching any errors to display them to the terminal
-    // (since stderr is now redirected to a log file)
-    let result = run_unified_inner(cli, session, session_id).await;
-    if let Err(ref e) = result {
-        tty_stdio::write_error_to_terminal(&format!("Error: {:?}", e));
-    }
-    result
-}
-
-async fn run_unified_inner(cli: Cli, session: Session, session_id: String) -> Result<()> {
-    let (llm, model) = create_llm(&cli)?;
-    let chat_options = build_chat_options(&cli);
-
     let socket_path = session.socket_path();
 
-    // Get the path to the current executable
     let exe_path = std::env::current_exe().context("Failed to determine current executable path")?;
     let exe_str = exe_path.to_string_lossy();
     let session_arg = format!("--session={}", session_id);
 
-    // Start server as a background task
     let server = Server::new(
         socket_path,
         session.display_file(),
         session.status_file(),
         session.session_dir().clone(),
+        session.conversation_state_file(),
         llm,
         model,
         chat_options,
-        cli.subagent_max_iterations,
-        cli.max_subagent_depth,
+        subagent_max_iterations,
+        max_subagent_depth,
     );
 
-    // Spawn server in background
     let server_handle = tokio::spawn(async move {
         if let Err(e) = server.run().await {
             eprintln!("[Server] Error: {}", e);
         }
     });
 
-    // Wait for server to start and create socket
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    // Create edit pane (bottom 30%) and capture the pane ID
     let edit_cmd = format!("{} {} edit", exe_str, session_arg);
 
     let output = Command::new("tmux")
@@ -430,8 +455,6 @@ async fn run_unified_inner(cli: Cli, session: Session, session_id: String) -> Re
         }
     };
 
-    // Run display client as a separate process with the original terminal fds.
-    // This bypasses the redirected stdout/stderr.
     let display_cmd = format!("{} {} display", exe_str, session_arg);
     let (stdin, stdout, stderr) = tty_stdio::get_original_stdio()
         .context("Failed to get original stdio fds")?;
@@ -444,16 +467,19 @@ async fn run_unified_inner(cli: Cli, session: Session, session_id: String) -> Re
         .spawn()
         .context("Failed to spawn display process")?;
 
-    // Wait for display to exit
     let result = display_child.wait();
 
-    // Kill the edit pane to ensure it exits
     let _ = Command::new("tmux")
         .args(["kill-pane", "-t", &edit_pane_id])
         .output();
 
-    // Abort server task (it should already be shutting down)
     server_handle.abort();
 
-    result.map(|_| ()).context("Display process failed")
+    match result {
+        Ok(_) => Ok(()),
+        Err(e) => {
+            tty_stdio::write_error_to_terminal(&format!("Error: {:?}", e));
+            Err(anyhow::anyhow!(e).context("Display process failed"))
+        }
+    }
 }

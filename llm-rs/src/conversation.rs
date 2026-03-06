@@ -1,9 +1,10 @@
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::llm::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, StopReason, LLM};
+use crate::llm::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall, LLM};
 use crate::tool::Tool;
 use anyhow::Result;
 use schemars::JsonSchema;
@@ -57,6 +58,67 @@ The child subagent will process the content and return only the relevant informa
 This keeps your context window small and allows you to handle more steps effectively. \
 Never re-delegate: if your assigned task is already just needed a single tool call, just do it directly. \
 Otherwise it will create an infinite loop of subagent calls.";
+
+/// Serializable snapshot of a conversation's state for persistence and resume.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConversationState {
+    pub id: String,
+    pub model: String,
+    pub llm_msgs: Vec<LLMMessage>,
+    pub chat_options: ChatOptions,
+    pub msg_id_counter: i32,
+    pub total_input_tokens: i32,
+    pub total_output_tokens: i32,
+    pub single_turn: bool,
+    pub subagent_depth: usize,
+}
+
+/// Fill in synthetic "cancelled" ToolResults for any tool calls that lack results.
+///
+/// LLM APIs require a tool_result after every tool_use. If the conversation was
+/// interrupted mid-tool-call, some tool_calls may lack results. This function
+/// finds the last Assistant message with tool_calls and adds "cancelled" results
+/// for any tool_call_ids that don't have a corresponding ToolResult after it.
+pub fn fill_cancelled_tool_results(llm_msgs: &mut Vec<LLMMessage>) {
+    // Find the last Assistant message with tool_calls
+    let last_assistant_with_tools = llm_msgs.iter().enumerate().rev().find_map(|(i, msg)| {
+        if let LLMMessage::Assistant { tool_calls, .. } = msg {
+            if !tool_calls.is_empty() {
+                return Some((i, tool_calls.clone()));
+            }
+        }
+        None
+    });
+
+    let Some((assistant_idx, tool_calls)) = last_assistant_with_tools else {
+        return;
+    };
+
+    // Collect tool_call_ids that already have ToolResults after the assistant message
+    let existing_result_ids: std::collections::HashSet<&str> = llm_msgs[assistant_idx + 1..]
+        .iter()
+        .filter_map(|msg| {
+            if let LLMMessage::ToolResult { tool_call_id, .. } = msg {
+                Some(tool_call_id.as_str())
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    // Add synthetic "cancelled" results for missing ones
+    let missing: Vec<ToolCall> = tool_calls
+        .into_iter()
+        .filter(|tc| !existing_result_ids.contains(tc.id.as_str()))
+        .collect();
+
+    for tc in missing {
+        llm_msgs.push(LLMMessage::ToolResult {
+            tool_call_id: tc.id,
+            content: "Tool call was cancelled due to conversation interruption.".to_string(),
+        });
+    }
+}
 
 type MessageID = i32;
 
@@ -286,6 +348,36 @@ impl ConversationManager {
     /// Returns `(conversation_id, client)`.
     pub fn new_conversation(
         self: &Arc<Self>,
+        llm: Box<dyn LLM>,
+        system_prompt: &str,
+        model: &str,
+        tools: Vec<Arc<Tool>>,
+        chat_options: ChatOptions,
+        single_turn: bool,
+        subagent_max_iterations: usize,
+        subagent_depth: usize,
+        max_subagent_depth: usize,
+        state_dir: Option<PathBuf>,
+    ) -> Result<(String, Arc<ConversationClient>)> {
+        let conversation_id = Uuid::new_v4().to_string();
+        self.new_conversation_with_id(
+            conversation_id,
+            llm,
+            system_prompt,
+            model,
+            tools,
+            chat_options,
+            single_turn,
+            subagent_max_iterations,
+            subagent_depth,
+            max_subagent_depth,
+            state_dir,
+        )
+    }
+
+    pub fn new_conversation_with_id(
+        self: &Arc<Self>,
+        conversation_id: String,
         mut llm: Box<dyn LLM>,
         system_prompt: &str,
         model: &str,
@@ -295,6 +387,7 @@ impl ConversationManager {
         subagent_max_iterations: usize,
         subagent_depth: usize,
         max_subagent_depth: usize,
+        state_dir: Option<PathBuf>,
     ) -> Result<(String, Arc<ConversationClient>)> {
         // Register tools with the LLM for caching
         llm.register_tools(tools.clone());
@@ -312,7 +405,6 @@ impl ConversationManager {
         } else {
             vec![LLMMessage::System(system_prompt.to_string())]
         };
-        let conversation_id = Uuid::new_v4().to_string();
         let conversation = Conversation {
             id: conversation_id.clone(),
             llm,
@@ -336,6 +428,8 @@ impl ConversationManager {
             subagent_max_iterations,
             subagent_depth,
             max_subagent_depth,
+            state_dir,
+            needs_initial_llm_call: false,
         };
         let client = conversation.conversation_client.clone();
         let task = tokio::spawn(async move {
@@ -366,6 +460,173 @@ impl ConversationManager {
     pub fn end_conversation(&self, _conversation_id: &str) -> Result<()> {
         Ok(()) // placeholder
     }
+
+    /// Resume a conversation from a persisted `ConversationState`.
+    ///
+    /// Calls `fill_cancelled_tool_results()` on the loaded llm_msgs,
+    /// creates a `Conversation` with pre-populated state, and spawns it.
+    /// If the last message is `User` or `ToolResult`, sets `needs_initial_llm_call`
+    /// so the conversation auto-calls the LLM on start.
+    pub fn resume_conversation(
+        self: &Arc<Self>,
+        mut state: ConversationState,
+        mut llm: Box<dyn LLM>,
+        tools: Vec<Arc<Tool>>,
+        subagent_max_iterations: usize,
+        max_subagent_depth: usize,
+        state_dir: Option<PathBuf>,
+    ) -> Result<(String, Arc<ConversationClient>)> {
+        // Fill in cancelled tool results for interrupted conversations
+        fill_cancelled_tool_results(&mut state.llm_msgs);
+
+        // Register tools with the LLM for caching
+        llm.register_tools(tools.clone());
+
+        let tools_map: HashMap<String, Arc<Tool>> = tools
+            .into_iter()
+            .map(|t| (t.name.clone(), t))
+            .collect();
+
+        // Determine if LLM needs to respond on resume
+        let needs_initial_llm_call = match state.llm_msgs.last() {
+            Some(LLMMessage::User(_)) | Some(LLMMessage::ToolResult { .. }) => true,
+            _ => false,
+        };
+
+        let (input_tx, input_rx) = mpsc::channel(10);
+        let (notify_tx, _) = broadcast::channel(100);
+
+        let conversation_id = state.id.clone();
+        let conversation = Conversation {
+            id: conversation_id.clone(),
+            llm,
+            model: state.model,
+            tools: tools_map,
+            llm_msgs: state.llm_msgs,
+            input_channel_rx: input_rx,
+            msg_id_counter: AtomicI32::new(state.msg_id_counter),
+            total_input_tokens: state.total_input_tokens,
+            total_output_tokens: state.total_output_tokens,
+            chat_options: state.chat_options,
+            conversation_client: Arc::new(ConversationClient {
+                msgs: RwLock::new(Vec::new()),
+                input_channel_tx: input_tx,
+                new_msg_notify_tx: notify_tx,
+            }),
+            conversation_manager: Arc::clone(self),
+            single_turn: state.single_turn,
+            subagent_max_iterations,
+            subagent_depth: state.subagent_depth,
+            max_subagent_depth,
+            state_dir,
+            needs_initial_llm_call,
+        };
+
+        let client = conversation.conversation_client.clone();
+        let task = tokio::spawn(async move {
+            let mut conv = conversation;
+            conv.start().await;
+        });
+
+        self.conversations
+            .write()
+            .map_err(|e| anyhow::anyhow!("failed to acquire conversations write lock: {e}"))?
+            .insert(conversation_id.clone(), (client.clone(), task));
+
+        Ok((conversation_id, client))
+    }
+
+    /// Resume a full conversation tree from persisted state.
+    ///
+    /// Scans `state_dir` for `subagent-*/conversation-state.json`, resumes those
+    /// first (so they're registered in the manager for `continue_subagent`), then
+    /// resumes the root conversation.
+    ///
+    /// Returns the root client and a list of all resumed subagent conversations
+    /// (so the caller can attach event writers or other UI).
+    pub fn resume_conversation_tree(
+        self: &Arc<Self>,
+        state: ConversationState,
+        llm: Box<dyn LLM>,
+        tools: Vec<Arc<Tool>>,
+        subagent_max_iterations: usize,
+        max_subagent_depth: usize,
+        state_dir: PathBuf,
+    ) -> Result<(String, Arc<ConversationClient>, Vec<ResumedSubagent>)> {
+        // Find all subagent states (depth-first: nested before parent)
+        let subagent_states = find_subagent_states(&state_dir);
+        let mut resumed_subagents = Vec::new();
+
+        for (sa_dir, sa_state) in subagent_states {
+            let sa_llm = llm.clone_box();
+            let sa_tools = tools.clone();
+            let (sa_id, sa_client) = self.resume_conversation(
+                sa_state,
+                sa_llm,
+                sa_tools,
+                subagent_max_iterations,
+                max_subagent_depth,
+                Some(sa_dir.clone()),
+            )?;
+            resumed_subagents.push(ResumedSubagent {
+                conversation_id: sa_id,
+                client: sa_client,
+                state_dir: sa_dir,
+            });
+        }
+
+        // Resume root conversation
+        let (root_id, root_client) = self.resume_conversation(
+            state,
+            llm,
+            tools,
+            subagent_max_iterations,
+            max_subagent_depth,
+            Some(state_dir),
+        )?;
+
+        Ok((root_id, root_client, resumed_subagents))
+    }
+}
+
+/// Info about a resumed subagent conversation, returned by
+/// [`ConversationManager::resume_conversation_tree`].
+pub struct ResumedSubagent {
+    pub conversation_id: String,
+    pub client: Arc<ConversationClient>,
+    pub state_dir: PathBuf,
+}
+
+/// Recursively find subagent conversation states in a directory.
+///
+/// Returns entries depth-first (nested subagents before their parents)
+/// so they can be resumed in dependency order.
+fn find_subagent_states(dir: &Path) -> Vec<(PathBuf, ConversationState)> {
+    let mut results = Vec::new();
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return results;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
+                if name.starts_with("subagent-") {
+                    // Recurse into nested subagents first
+                    results.extend(find_subagent_states(&path));
+
+                    let state_file = path.join("conversation-state.json");
+                    if state_file.exists() {
+                        if let Ok(json) = std::fs::read_to_string(&state_file) {
+                            if let Ok(state) = serde_json::from_str::<ConversationState>(&json) {
+                                results.push((path, state));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    results
 }
 
 // ============================================================================
@@ -416,6 +677,12 @@ pub struct Conversation {
 
     /// Maximum allowed nesting depth for subagents.
     max_subagent_depth: usize,
+
+    /// Directory where this conversation saves its state. None = no persistence.
+    state_dir: Option<PathBuf>,
+
+    /// When true, auto-call LLM on start (for resumed conversations with pending response).
+    needs_initial_llm_call: bool,
 }
 
 /// Multi round LLM conversation. Thread and async safe.
@@ -429,12 +696,57 @@ impl Conversation {
         let _ = self.conversation_client.notify_msg(msg);
     }
 
+    fn snapshot_state(&self) -> ConversationState {
+        ConversationState {
+            id: self.id.clone(),
+            model: self.model.clone(),
+            llm_msgs: self.llm_msgs.clone(),
+            chat_options: self.chat_options.clone(),
+            msg_id_counter: self.msg_id_counter.load(std::sync::atomic::Ordering::SeqCst),
+            total_input_tokens: self.total_input_tokens,
+            total_output_tokens: self.total_output_tokens,
+            single_turn: self.single_turn,
+            subagent_depth: self.subagent_depth,
+        }
+    }
+
+    fn save_state(&self) {
+        if let Some(ref dir) = self.state_dir {
+            let state = self.snapshot_state();
+            if let Ok(json) = serde_json::to_string_pretty(&state) {
+                let tmp = dir.join("conversation-state.json.tmp");
+                let target = dir.join("conversation-state.json");
+                if std::fs::write(&tmp, &json).is_ok() {
+                    let _ = std::fs::rename(&tmp, &target);
+                }
+            }
+        }
+    }
+
+    fn push_llm_msg(&mut self, msg: LLMMessage) {
+        self.llm_msgs.push(msg);
+        self.save_state();
+    }
+
     /// Start the worker loop for the conversation. Should only be called once.
     ///
     /// For single-turn (subagent) conversations, broadcasts `AssistantRequestEnd` after
     /// each turn but keeps looping so the parent can send follow-up messages via
     /// `continue_subagent`.
     async fn start(&mut self) {
+        // If resumed with a pending response, auto-call LLM
+        if self.needs_initial_llm_call {
+            self.needs_initial_llm_call = false;
+            self.call_llm().await;
+            self.save_state();
+            if self.single_turn {
+                self.broadcast_msg(Message::AssistantRequestEnd {
+                    total_input_tokens: self.total_input_tokens,
+                    total_output_tokens: self.total_output_tokens,
+                });
+            }
+        }
+
         while let Some(user_input) = self.input_channel_rx.recv().await {
             let user_msg_id = self.next_msg_id();
             self.broadcast_msg(Message::UserMessage {
@@ -443,7 +755,7 @@ impl Conversation {
                 content: Arc::new(user_input.clone()),
             });
 
-            self.llm_msgs.push(LLMMessage::User(user_input));
+            self.push_llm_msg(LLMMessage::User(user_input));
             self.call_llm().await;
 
             // Single-turn conversations broadcast end-of-turn but keep looping
@@ -548,7 +860,7 @@ impl Conversation {
                         if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
                             // Add assistant message with tool calls to llm_msgs
                             let tool_calls = std::mem::take(&mut pending_tool_calls);
-                            self.llm_msgs.push(LLMMessage::Assistant {
+                            self.push_llm_msg(LLMMessage::Assistant {
                                 content: accumulated_text.clone(),
                                 tool_calls: tool_calls.clone(),
                                 raw: raw.clone(),
@@ -557,7 +869,7 @@ impl Conversation {
                             should_continue = true;
                         } else if !accumulated_text.is_empty() || raw.is_some() {
                             // Add assistant response to llm_msgs for context
-                            self.llm_msgs.push(LLMMessage::Assistant {
+                            self.push_llm_msg(LLMMessage::Assistant {
                                 content: accumulated_text.clone(),
                                 tool_calls: vec![],
                                 raw: raw.clone(),
@@ -674,7 +986,7 @@ impl Conversation {
             });
 
             // Push tool result with tool_call_id for proper API format
-            self.llm_msgs.push(LLMMessage::ToolResult {
+            self.push_llm_msg(LLMMessage::ToolResult {
                 tool_call_id: tool_call.id,
                 content: tool_result,
             });
@@ -688,7 +1000,7 @@ impl Conversation {
             Ok(p) => p,
             Err(e) => {
                 let error = format!("Error: Failed to parse subagent arguments: {}", e);
-                self.llm_msgs.push(LLMMessage::ToolResult {
+                self.push_llm_msg(LLMMessage::ToolResult {
                     tool_call_id: tool_call.id,
                     content: error,
                 });
@@ -707,8 +1019,17 @@ impl Conversation {
         // Create a new LLM instance for the subagent
         let subagent_llm = self.llm.clone_box();
 
+        // Pre-generate subagent conversation ID so we can create its state_dir
+        let subagent_conv_id_pre = Uuid::new_v4().to_string();
+        let subagent_state_dir = self.state_dir.as_ref().map(|d| {
+            let dir = d.join(format!("subagent-{}", subagent_conv_id_pre));
+            std::fs::create_dir_all(&dir).ok();
+            dir
+        });
+
         // Create the subagent conversation
-        let (subagent_conv_id, subagent_client) = match self.conversation_manager.new_conversation(
+        let (subagent_conv_id, subagent_client) = match self.conversation_manager.new_conversation_with_id(
+            subagent_conv_id_pre,
             subagent_llm,
             &format!("You are a subagent spawned to perform a specific task.\n\n{}", SUBAGENT_RULES),
             &params.model,
@@ -718,11 +1039,12 @@ impl Conversation {
             self.subagent_max_iterations,
             child_depth,
             self.max_subagent_depth,
+            subagent_state_dir,
         ) {
             Ok(result) => result,
             Err(e) => {
                 let error = format!("Error: Failed to create subagent conversation: {}", e);
-                self.llm_msgs.push(LLMMessage::ToolResult {
+                self.push_llm_msg(LLMMessage::ToolResult {
                     tool_call_id: tool_call.id,
                     content: error,
                 });
@@ -756,7 +1078,7 @@ impl Conversation {
                 input_tokens: 0,
                 output_tokens: 0,
             });
-            self.llm_msgs.push(LLMMessage::ToolResult {
+            self.push_llm_msg(LLMMessage::ToolResult {
                 tool_call_id: tool_call.id,
                 content: error,
             });
@@ -816,7 +1138,7 @@ impl Conversation {
             output_tokens: sub_output_tokens,
         });
 
-        self.llm_msgs.push(LLMMessage::ToolResult {
+        self.push_llm_msg(LLMMessage::ToolResult {
             tool_call_id: tool_call.id,
             content: result_text,
         });
@@ -832,7 +1154,7 @@ impl Conversation {
             Ok(p) => p,
             Err(e) => {
                 let error = format!("Error: Failed to parse get_subagent_logs arguments: {}", e);
-                self.llm_msgs.push(LLMMessage::ToolResult {
+                self.push_llm_msg(LLMMessage::ToolResult {
                     tool_call_id: tool_call.id,
                     content: error,
                 });
@@ -888,7 +1210,7 @@ impl Conversation {
             }
         };
 
-        self.llm_msgs.push(LLMMessage::ToolResult {
+        self.push_llm_msg(LLMMessage::ToolResult {
             tool_call_id: tool_call.id,
             content: result,
         });
@@ -901,7 +1223,7 @@ impl Conversation {
             Ok(p) => p,
             Err(e) => {
                 let error = format!("Error: Failed to parse continue_subagent arguments: {}", e);
-                self.llm_msgs.push(LLMMessage::ToolResult {
+                self.push_llm_msg(LLMMessage::ToolResult {
                     tool_call_id: tool_call.id,
                     content: error,
                 });
@@ -914,7 +1236,7 @@ impl Conversation {
             Ok(Some(client)) => client,
             Ok(None) => {
                 let error = format!("Error: Subagent conversation '{}' not found", params.conversation_id);
-                self.llm_msgs.push(LLMMessage::ToolResult {
+                self.push_llm_msg(LLMMessage::ToolResult {
                     tool_call_id: tool_call.id,
                     content: error,
                 });
@@ -922,7 +1244,7 @@ impl Conversation {
             }
             Err(e) => {
                 let error = format!("Error: Failed to get subagent conversation: {}", e);
-                self.llm_msgs.push(LLMMessage::ToolResult {
+                self.push_llm_msg(LLMMessage::ToolResult {
                     tool_call_id: tool_call.id,
                     content: error,
                 });
@@ -957,7 +1279,7 @@ impl Conversation {
                 input_tokens: 0,
                 output_tokens: 0,
             });
-            self.llm_msgs.push(LLMMessage::ToolResult {
+            self.push_llm_msg(LLMMessage::ToolResult {
                 tool_call_id: tool_call.id,
                 content: error,
             });
@@ -1014,7 +1336,7 @@ impl Conversation {
             output_tokens: sub_output_tokens,
         });
 
-        self.llm_msgs.push(LLMMessage::ToolResult {
+        self.push_llm_msg(LLMMessage::ToolResult {
             tool_call_id: tool_call.id,
             content: result_text,
         });
