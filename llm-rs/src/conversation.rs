@@ -406,7 +406,7 @@ impl ConversationManager {
                     msgs: RwLock::new(Vec::new()),
                     input_channel_tx: input_tx,
                     new_msg_notify_tx: notify_tx,
-                    cancel_token: std::sync::Mutex::new(CancellationToken::new()),
+                    tool_cancel_tokens: std::sync::Mutex::new(HashMap::new()),
                 })
             },
             conversation_manager: Arc::clone(self),
@@ -528,7 +528,7 @@ impl ConversationManager {
                 msgs: RwLock::new(Vec::new()),
                 input_channel_tx: input_tx,
                 new_msg_notify_tx: notify_tx,
-                cancel_token: std::sync::Mutex::new(CancellationToken::new()),
+                tool_cancel_tokens: std::sync::Mutex::new(HashMap::new()),
             }),
             conversation_manager: Arc::clone(self),
             single_turn: state.single_turn,
@@ -892,16 +892,13 @@ impl Conversation {
                 break;
             }
 
-            // Get a fresh cancel token for this iteration
-            let cancel_token = self.conversation_client.reset_cancel_token();
-
+            // TODO: LLM stream cancellation will be restored with cancel_all()
             let mut response_stream =
                 self.llm
                     .chat(self.model.as_str(), &self.llm_msgs, &self.chat_options);
             let mut accumulated_text = String::new();
             let mut pending_tool_calls = Vec::new();
             let mut should_continue = false;
-            let mut cancelled = false;
 
             // Broadcast assistant message start
             self.broadcast_msg(Message::AssistantMessageStart {
@@ -909,143 +906,102 @@ impl Conversation {
                 created_at: now_millis(),
             });
 
-            loop {
-                tokio::select! {
-                    biased;
-                    _ = cancel_token.cancelled() => {
-                        cancelled = true;
+            while let Some(event) = response_stream.next().await {
+                match event {
+                    LLMEvent::MessageStart { input_tokens } => {
+                        self.total_input_tokens += input_tokens;
+                    }
+                    LLMEvent::TextDelta(text) => {
+                        accumulated_text.push_str(&text);
+                        let chunk_msg_id = self.next_msg_id();
+                        self.broadcast_msg(Message::AssistantMessageChunk {
+                            msg_id: chunk_msg_id,
+                            content: Arc::new(text),
+                        });
+                    }
+                    LLMEvent::ThinkingDelta(text) => {
+                        // Reasoning is streamed for display; raw field handles round-tripping
+                        self.broadcast_msg(Message::AssistantThinkingChunk {
+                            msg_id: self.next_msg_id(),
+                            content: Arc::new(text),
+                        });
+                    }
+                    LLMEvent::ToolCall(tool_call) => {
+                        pending_tool_calls.push(tool_call);
+                    }
+                    LLMEvent::MessageEnd {
+                        stop_reason,
+                        input_tokens,
+                        output_tokens,
+                        reasoning_tokens,
+                        raw,
+                    } => {
+                        self.total_input_tokens += input_tokens;
+                        self.total_output_tokens += output_tokens;
+
+                        let (end_status, error) = if stop_reason == StopReason::MaxTokens {
+                            (
+                                MessageEndStatus::Failed,
+                                Some("Response truncated: maximum token limit reached".to_string()),
+                            )
+                        } else {
+                            (MessageEndStatus::Succeeded, None)
+                        };
+
                         self.broadcast_msg(Message::AssistantMessageEnd {
                             msg_id: self.next_msg_id(),
-                            end_status: MessageEndStatus::Cancelled,
-                            error: None,
+                            end_status,
+                            error,
+                            input_tokens,
+                            output_tokens,
+                            reasoning_tokens,
+                        });
+
+                        // Handle tool calls if any
+                        if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
+                            // Add assistant message with tool calls to llm_msgs
+                            let tool_calls = std::mem::take(&mut pending_tool_calls);
+                            self.push_llm_msg(LLMMessage::Assistant {
+                                content: accumulated_text.clone(),
+                                tool_calls: tool_calls.clone(),
+                                raw: raw.clone(),
+                            });
+                            self.execute_tool_calls(tool_calls).await;
+                            should_continue = true;
+                        } else if !accumulated_text.is_empty() || raw.is_some() {
+                            // Add assistant response to llm_msgs for context
+                            self.push_llm_msg(LLMMessage::Assistant {
+                                content: accumulated_text.clone(),
+                                tool_calls: vec![],
+                                raw: raw.clone(),
+                            });
+                        }
+                        break;
+                    }
+                    LLMEvent::Error(error) => {
+                        self.broadcast_msg(Message::AssistantMessageEnd {
+                            msg_id: self.next_msg_id(),
+                            end_status: MessageEndStatus::Failed,
+                            error: Some(error),
                             input_tokens: 0,
                             output_tokens: 0,
                             reasoning_tokens: 0,
                         });
-                        break;
-                    }
-                    event = response_stream.next() => {
-                        let Some(event) = event else { break };
-                        match event {
-                            LLMEvent::MessageStart { input_tokens } => {
-                                self.total_input_tokens += input_tokens;
-                            }
-                            LLMEvent::TextDelta(text) => {
-                                accumulated_text.push_str(&text);
-                                let chunk_msg_id = self.next_msg_id();
-                                self.broadcast_msg(Message::AssistantMessageChunk {
-                                    msg_id: chunk_msg_id,
-                                    content: Arc::new(text),
-                                });
-                            }
-                            LLMEvent::ThinkingDelta(text) => {
-                                // Reasoning is streamed for display; raw field handles round-tripping
-                                self.broadcast_msg(Message::AssistantThinkingChunk {
-                                    msg_id: self.next_msg_id(),
-                                    content: Arc::new(text),
-                                });
-                            }
-                            LLMEvent::ToolCall(tool_call) => {
-                                pending_tool_calls.push(tool_call);
-                            }
-                            LLMEvent::MessageEnd {
-                                stop_reason,
-                                input_tokens,
-                                output_tokens,
-                                reasoning_tokens,
-                                raw,
-                            } => {
-                                self.total_input_tokens += input_tokens;
-                                self.total_output_tokens += output_tokens;
-
-                                let (end_status, error) = if stop_reason == StopReason::MaxTokens {
-                                    (
-                                        MessageEndStatus::Failed,
-                                        Some("Response truncated: maximum token limit reached".to_string()),
-                                    )
-                                } else {
-                                    (MessageEndStatus::Succeeded, None)
-                                };
-
-                                self.broadcast_msg(Message::AssistantMessageEnd {
-                                    msg_id: self.next_msg_id(),
-                                    end_status,
-                                    error,
-                                    input_tokens,
-                                    output_tokens,
-                                    reasoning_tokens,
-                                });
-
-                                // Handle tool calls if any
-                                if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
-                                    // Add assistant message with tool calls to llm_msgs
-                                    let tool_calls = std::mem::take(&mut pending_tool_calls);
-                                    self.push_llm_msg(LLMMessage::Assistant {
-                                        content: accumulated_text.clone(),
-                                        tool_calls: tool_calls.clone(),
-                                        raw: raw.clone(),
-                                    });
-                                    self.execute_tool_calls(&cancel_token, tool_calls).await;
-                                    should_continue = !cancel_token.is_cancelled();
-                                } else if !accumulated_text.is_empty() || raw.is_some() {
-                                    // Add assistant response to llm_msgs for context
-                                    self.push_llm_msg(LLMMessage::Assistant {
-                                        content: accumulated_text.clone(),
-                                        tool_calls: vec![],
-                                        raw: raw.clone(),
-                                    });
-                                }
-                                break;
-                            }
-                            LLMEvent::Error(error) => {
-                                self.broadcast_msg(Message::AssistantMessageEnd {
-                                    msg_id: self.next_msg_id(),
-                                    end_status: MessageEndStatus::Failed,
-                                    error: Some(error),
-                                    input_tokens: 0,
-                                    output_tokens: 0,
-                                    reasoning_tokens: 0,
-                                });
-                                return;
-                            }
-                        }
+                        return;
                     }
                 }
             }
 
-            if cancelled || !should_continue {
+            if !should_continue {
                 break;
             }
         }
     }
 
-    async fn execute_tool_calls(&mut self, cancel_token: &CancellationToken, tool_calls: Vec<crate::llm::ToolCall>) {
+    async fn execute_tool_calls(&mut self, tool_calls: Vec<crate::llm::ToolCall>) {
         for tool_call in tool_calls {
-            // Check if cancelled before starting each tool
-            if cancel_token.is_cancelled() {
-                // Emit cancelled ToolResult for skipped tools
-                self.broadcast_msg(Message::ToolMessageStart {
-                    msg_id: self.next_msg_id(),
-                    tool_call_id: tool_call.id.clone(),
-                    created_at: now_millis(),
-                    tool_name: tool_call.name.clone(),
-                    tool_args: tool_call.arguments.clone(),
-                });
-                self.broadcast_msg(Message::ToolMessageEnd {
-                    msg_id: self.next_msg_id(),
-                    tool_call_id: tool_call.id.clone(),
-                    end_status: MessageEndStatus::Cancelled,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                });
-                self.push_llm_msg(LLMMessage::ToolResult {
-                    tool_call_id: tool_call.id,
-                    content: "Tool call was cancelled.".to_string(),
-                });
-                continue;
-            }
-
-            // Intercept subagent, get_subagent_logs, and continue_subagent tool calls
+            // Intercept subagent and continue_subagent tool calls — no cancellation support for now.
+            // Proper subagent cancellation (with cleanup) will be added alongside cancel_all().
             match tool_call.name.as_str() {
                 "subagent" => {
                     self.execute_subagent(tool_call).await;
@@ -1057,6 +1013,9 @@ impl Conversation {
                 }
                 _ => {}
             }
+
+            // Register a per-tool cancellation token
+            let tool_token = self.conversation_client.register_tool_token(&tool_call.id);
 
             let tool_msg_id = self.next_msg_id();
 
@@ -1077,7 +1036,7 @@ impl Conversation {
             });
 
             // Look up and execute the tool
-            let ctx = ToolContext { cancel_token: cancel_token.clone() };
+            let ctx = ToolContext { cancel_token: tool_token.clone() };
             let (end_status, tool_result) = if let Some(tool) = self.tools.get(&tool_call.name) {
                 tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");
                 // Execute the tool and stream output chunks
@@ -1103,7 +1062,7 @@ impl Conversation {
                     result_len = result_parts.iter().map(|s| s.len()).sum::<usize>(),
                     "tool stream finished"
                 );
-                let status = if cancel_token.is_cancelled() {
+                let status = if tool_token.is_cancelled() {
                     MessageEndStatus::Cancelled
                 } else {
                     MessageEndStatus::Succeeded
@@ -1125,6 +1084,9 @@ impl Conversation {
                 });
                 (MessageEndStatus::Failed, error_msg)
             };
+
+            // Unregister the per-tool token now that execution is done
+            self.conversation_client.unregister_tool_token(&tool_call.id);
 
             self.broadcast_msg(Message::ToolMessageEnd {
                 msg_id: self.next_msg_id(),
@@ -1314,21 +1276,32 @@ pub struct ConversationClient {
     msgs: RwLock<Vec<Arc<Message>>>,
     input_channel_tx: mpsc::Sender<String>,
     new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
-    cancel_token: std::sync::Mutex<CancellationToken>,
+    tool_cancel_tokens: std::sync::Mutex<HashMap<String, CancellationToken>>,
 }
 
 impl ConversationClient {
-    /// Cancel the currently running tool call / LLM response.
-    pub fn cancel(&self) {
-        self.cancel_token.lock().unwrap().cancel();
+    /// Cancel a specific tool call by its ID. Returns true if the tool was found and cancelled.
+    pub fn cancel_tool(&self, tool_call_id: &str) -> bool {
+        let tokens = self.tool_cancel_tokens.lock().unwrap();
+        if let Some(token) = tokens.get(tool_call_id) {
+            token.cancel();
+            true
+        } else {
+            false
+        }
     }
 
-    /// Create a fresh token for a new call_llm iteration.
-    pub(crate) fn reset_cancel_token(&self) -> CancellationToken {
-        let new = CancellationToken::new();
-        let clone = new.clone();
-        *self.cancel_token.lock().unwrap() = new;
+    /// Register a cancellation token for a tool call. Returns the token for use during execution.
+    pub(crate) fn register_tool_token(&self, tool_call_id: &str) -> CancellationToken {
+        let token = CancellationToken::new();
+        let clone = token.clone();
+        self.tool_cancel_tokens.lock().unwrap().insert(tool_call_id.to_string(), token);
         clone
+    }
+
+    /// Remove a tool's cancellation token after it completes.
+    pub(crate) fn unregister_tool_token(&self, tool_call_id: &str) {
+        self.tool_cancel_tokens.lock().unwrap().remove(tool_call_id);
     }
 
     /// Send a chat to the conversation. Returns after the message is queued. The message
@@ -1371,5 +1344,18 @@ impl ConversationClient {
     pub fn subscribe_new(&self) -> impl Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + use<> {
         let tx = self.new_msg_notify_tx.subscribe();
         BroadcastStream::new(tx)
+    }
+
+    /// Create a test-only ConversationClient with dummy channels.
+    #[cfg(test)]
+    pub(crate) fn new_for_test() -> Self {
+        let (input_tx, _input_rx) = mpsc::channel(10);
+        let (notify_tx, _) = broadcast::channel(100);
+        ConversationClient {
+            msgs: RwLock::new(Vec::new()),
+            input_channel_tx: input_tx,
+            new_msg_notify_tx: notify_tx,
+            tool_cancel_tokens: std::sync::Mutex::new(HashMap::new()),
+        }
     }
 }

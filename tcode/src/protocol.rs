@@ -5,8 +5,8 @@ use serde::{Deserialize, Serialize};
 pub enum ClientMessage {
     /// Send a user message to the conversation
     SendMessage { content: String },
-    /// Cancel the currently running tool call / LLM response
-    Cancel,
+    /// Cancel a specific tool call by its ID
+    CancelTool { tool_call_id: String },
     /// Request server shutdown (broadcasts to all clients)
     Shutdown,
 }

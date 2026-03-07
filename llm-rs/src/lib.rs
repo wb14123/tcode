@@ -9,4 +9,7 @@ pub use llm_rs_macros::tool;
 mod tool_tests;
 
 #[cfg(test)]
+mod llm_tests;
+
+#[cfg(test)]
 mod conversation_tests;

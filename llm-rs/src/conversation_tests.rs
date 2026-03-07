@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::conversation::{fill_cancelled_tool_results, ConversationState};
+    use crate::conversation::{fill_cancelled_tool_results, ConversationClient, ConversationState};
     use crate::llm::{ChatOptions, LLMMessage, ReasoningEffort, ToolCall};
 
     fn make_tool_call(id: &str, name: &str) -> ToolCall {
@@ -64,135 +64,6 @@ mod tests {
         // Verify chat_options
         assert_eq!(deserialized.chat_options.max_tokens, Some(4096));
         assert_eq!(deserialized.chat_options.reasoning_effort, Some(ReasoningEffort::Medium));
-    }
-
-    // ======== LLMMessage serde round-trip ========
-
-    #[test]
-    fn llm_message_system_serde() {
-        let msg = LLMMessage::System("system prompt".to_string());
-        let json = serde_json::to_string(&msg).unwrap();
-        let deserialized: LLMMessage = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            LLMMessage::System(s) => assert_eq!(s, "system prompt"),
-            _ => panic!("Expected System variant"),
-        }
-    }
-
-    #[test]
-    fn llm_message_user_serde() {
-        let msg = LLMMessage::User("hello".to_string());
-        let json = serde_json::to_string(&msg).unwrap();
-        let deserialized: LLMMessage = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            LLMMessage::User(s) => assert_eq!(s, "hello"),
-            _ => panic!("Expected User variant"),
-        }
-    }
-
-    #[test]
-    fn llm_message_assistant_with_raw_serde() {
-        let raw = serde_json::json!({
-            "content": [
-                {"type": "thinking", "text": "Let me think..."},
-                {"type": "text", "text": "Hello!"}
-            ]
-        });
-        let msg = LLMMessage::Assistant {
-            content: "Hello!".to_string(),
-            tool_calls: vec![make_tool_call("tc1", "search")],
-            raw: Some(raw.clone()),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let deserialized: LLMMessage = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            LLMMessage::Assistant { content, tool_calls, raw: r } => {
-                assert_eq!(content, "Hello!");
-                assert_eq!(tool_calls.len(), 1);
-                assert_eq!(tool_calls[0].id, "tc1");
-                assert_eq!(tool_calls[0].name, "search");
-                assert_eq!(r, Some(raw));
-            }
-            _ => panic!("Expected Assistant variant"),
-        }
-    }
-
-    #[test]
-    fn llm_message_tool_result_serde() {
-        let msg = LLMMessage::ToolResult {
-            tool_call_id: "tc1".to_string(),
-            content: "result data".to_string(),
-        };
-        let json = serde_json::to_string(&msg).unwrap();
-        let deserialized: LLMMessage = serde_json::from_str(&json).unwrap();
-        match deserialized {
-            LLMMessage::ToolResult { tool_call_id, content } => {
-                assert_eq!(tool_call_id, "tc1");
-                assert_eq!(content, "result data");
-            }
-            _ => panic!("Expected ToolResult variant"),
-        }
-    }
-
-    // ======== ChatOptions serde round-trip ========
-
-    #[test]
-    fn chat_options_serde_all_fields() {
-        let opts = ChatOptions {
-            max_tokens: Some(8192),
-            reasoning_effort: Some(ReasoningEffort::High),
-            reasoning_budget: None,
-            exclude_reasoning: true,
-        };
-        let json = serde_json::to_string(&opts).unwrap();
-        let deserialized: ChatOptions = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.max_tokens, Some(8192));
-        assert_eq!(deserialized.reasoning_effort, Some(ReasoningEffort::High));
-        assert!(deserialized.exclude_reasoning);
-    }
-
-    #[test]
-    fn chat_options_serde_defaults() {
-        let opts = ChatOptions::default();
-        let json = serde_json::to_string(&opts).unwrap();
-        let deserialized: ChatOptions = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.max_tokens, None);
-        assert_eq!(deserialized.reasoning_effort, None);
-        assert_eq!(deserialized.reasoning_budget, None);
-        assert!(!deserialized.exclude_reasoning);
-    }
-
-    // ======== ReasoningEffort serde ========
-
-    #[test]
-    fn reasoning_effort_serde_all_variants() {
-        for effort in [
-            ReasoningEffort::XHigh,
-            ReasoningEffort::High,
-            ReasoningEffort::Medium,
-            ReasoningEffort::Low,
-            ReasoningEffort::Minimal,
-        ] {
-            let json = serde_json::to_string(&effort).unwrap();
-            let deserialized: ReasoningEffort = serde_json::from_str(&json).unwrap();
-            assert_eq!(deserialized, effort);
-        }
-    }
-
-    // ======== ToolCall serde ========
-
-    #[test]
-    fn tool_call_serde() {
-        let tc = ToolCall {
-            id: "call_123".to_string(),
-            name: "web_fetch".to_string(),
-            arguments: r#"{"url":"https://example.com"}"#.to_string(),
-        };
-        let json = serde_json::to_string(&tc).unwrap();
-        let deserialized: ToolCall = serde_json::from_str(&json).unwrap();
-        assert_eq!(deserialized.id, "call_123");
-        assert_eq!(deserialized.name, "web_fetch");
-        assert_eq!(deserialized.arguments, r#"{"url":"https://example.com"}"#);
     }
 
     // ======== fill_cancelled_tool_results ========
@@ -303,5 +174,49 @@ mod tests {
             LLMMessage::ToolResult { tool_call_id, .. } => assert_eq!(tool_call_id, "b"),
             _ => panic!("Expected ToolResult"),
         }
+    }
+
+    // ======== Per-tool cancellation ========
+
+    #[test]
+    fn cancel_tool_unknown_returns_false() {
+        let client = ConversationClient::new_for_test();
+        assert!(!client.cancel_tool("nonexistent"));
+    }
+
+    #[test]
+    fn register_cancel_unregister_workflow() {
+        let client = ConversationClient::new_for_test();
+
+        // Register a token
+        let token = client.register_tool_token("tc1");
+        assert!(!token.is_cancelled());
+
+        // Cancel it
+        assert!(client.cancel_tool("tc1"));
+        assert!(token.is_cancelled());
+
+        // Unregister it
+        client.unregister_tool_token("tc1");
+
+        // Now cancel_tool returns false since it's unregistered
+        assert!(!client.cancel_tool("tc1"));
+    }
+
+    #[test]
+    fn cancel_one_tool_leaves_others_running() {
+        let client = ConversationClient::new_for_test();
+
+        let token_a = client.register_tool_token("a");
+        let token_b = client.register_tool_token("b");
+
+        // Cancel only tool "a"
+        assert!(client.cancel_tool("a"));
+        assert!(token_a.is_cancelled());
+        assert!(!token_b.is_cancelled());
+
+        // Tool "b" is still cancellable
+        assert!(client.cancel_tool("b"));
+        assert!(token_b.is_cancelled());
     }
 }

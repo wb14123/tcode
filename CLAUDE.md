@@ -23,3 +23,9 @@ If compilation fails and more context is needed, re-run without tail to see full
 1. `cargo check` - Use for quick validation (fastest)
 2. `cargo build` - Use when actually need to run the binary
 3. `cargo test` - Use for running tests
+
+## Test Organization
+
+- Place tests in separate `*_tests.rs` files, one per module being tested (e.g. `conversation_tests.rs`, `llm_tests.rs`, `tool_tests.rs`)
+- Register test modules in `lib.rs` with `#[cfg(test)] mod <name>_tests;`
+- Do NOT put tests inline in source files — keep source and test files separate

@@ -529,9 +529,14 @@ async fn handle_client_inner(
                             send_msg(&mut sink, &ServerMessage::Ack).await?;
                         }
                     }
-                    ClientMessage::Cancel => {
-                        conv_client.cancel();
-                        send_msg(&mut sink, &ServerMessage::Ack).await?;
+                    ClientMessage::CancelTool { tool_call_id } => {
+                        if conv_client.cancel_tool(&tool_call_id) {
+                            send_msg(&mut sink, &ServerMessage::Ack).await?;
+                        } else {
+                            send_msg(&mut sink, &ServerMessage::Error {
+                                message: format!("Tool call '{}' not found", tool_call_id),
+                            }).await?;
+                        }
                     }
                     ClientMessage::Shutdown => {
                         let _ = shutdown_tx.send(());
