@@ -13,8 +13,12 @@ use std::process::Command;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
+use bytes::Bytes;
 use clap::{Parser, Subcommand, ValueEnum};
+use futures::{SinkExt, StreamExt};
+use tokio::net::UnixStream;
 use tokio::process::Child;
+use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing_subscriber::EnvFilter;
 
 /// LLM provider selection
@@ -190,6 +194,11 @@ enum Commands {
         /// The session ID to attach to
         session_id: String,
     },
+    /// Cancel a running tool call
+    CancelTool {
+        /// The tool call ID to cancel
+        tool_call_id: String,
+    },
     /// List active sessions
     Sessions,
 }
@@ -277,6 +286,27 @@ async fn main() -> Result<()> {
             let session = Session::new(session_id)?;
             let client = ToolCallDisplayClient::new(session, lua_path, tool_call_id);
             client.run().await
+        }
+        Some(Commands::CancelTool { tool_call_id }) => {
+            let session_id = require_session(cli.session)?;
+            // Extract root session ID (strip /subagent-* suffix) since the socket
+            // is only in the root session directory
+            let root_session_id = session_id.split("/subagent-").next().unwrap_or(&session_id).to_string();
+            let session = Session::new(root_session_id)?;
+            let stream = UnixStream::connect(session.socket_path()).await
+                .context("Failed to connect to server socket. Is the server running?")?;
+            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+            let msg = protocol::ClientMessage::CancelTool { tool_call_id };
+            let json = serde_json::to_vec(&msg)?;
+            framed.send(Bytes::from(json)).await?;
+            if let Some(Ok(resp)) = framed.next().await {
+                let resp: protocol::ServerMessage = serde_json::from_slice(&resp)?;
+                match resp {
+                    protocol::ServerMessage::Ack => println!("Tool cancelled"),
+                    protocol::ServerMessage::Error { message } => eprintln!("Error: {}", message),
+                }
+            }
+            Ok(())
         }
         Some(Commands::Attach { ref session_id }) => {
             if !is_in_tmux() {

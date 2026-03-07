@@ -82,6 +82,10 @@ Opens a neovim buffer that renders the conversation by tailing `display.jsonl`. 
 
 Opens a neovim buffer showing the detailed output of a specific tool execution. Reads from per-tool-call JSONL files.
 
+### `tcode cancel-tool <tool-call-id> --session <id>`
+
+Cancels a running tool call. Connects to the server's Unix socket, sends a `CancelTool` message, and prints the result. Used by the display pane's `Ctrl-k` keybinding. Works across all conversations (root and subagents) — the `--session` can be a subagent session ID; the root session's socket is resolved automatically.
+
 ### `tcode browser`
 
 Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) that the headless browser tools need.
@@ -159,6 +163,24 @@ All session data lives in `~/.tcode/sessions/{session_id}/`. Sessions persist af
 When the LLM spawns a subagent, the server creates a sub-session directory at `{session_dir}/subagent-{conv_id}/` with the same file structure as the parent session (`display.jsonl`, `status.txt`, per-tool-call files). A nested event writer subscribes to the subagent's conversation events and writes them independently.
 
 In the main display, subagent blocks are rendered with `>>> SUB-AGENT: {description}` labels. Pressing `o` on a subagent block opens `tcode --session={parent_id}/subagent-{conv_id} display` in a new tmux window — the same display client used for main conversations. Tool call detail (`o` keybinding) works identically inside subagent displays.
+
+## Display Keybindings
+
+| Key | Context | Action |
+|-----|---------|--------|
+| `o` | Thinking block | Toggle expand/collapse of thinking content |
+| `o` | Subagent block | Open subagent display in a new tmux window |
+| `o` | Tool call block | Open tool call detail in a new tmux window |
+| `Ctrl-k` | Running tool call | Cancel the tool call (with confirmation popup) |
+| `q` | Anywhere | Quit |
+
+Context is determined by cursor position using extmarks. For `Ctrl-k`, a `[Ctrl-k to cancel]` hint is shown on the tool label while the tool is running and removed when it finishes.
+
+## Tool Cancellation
+
+The server maintains a shared map of `tool_call_id -> ConversationClient`, populated by event writers as they process `ToolMessageStart`/`ToolMessageEnd` events. This allows cancellation to work across all conversations (root and subagents) without the display needing to know which conversation owns a tool call.
+
+Flow: `Ctrl-k` in display → confirmation popup → `tcode cancel-tool <id>` CLI → Unix socket → server looks up owning `ConversationClient` → `CancellationToken::cancel()` → tool stream aborted.
 
 ## Neovim Plugin
 

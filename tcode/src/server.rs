@@ -18,7 +18,13 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+use llm_rs::conversation::ConversationClient;
+
 use crate::protocol::{ClientMessage, ServerMessage};
+
+/// Shared map from tool_call_id -> ConversationClient that owns the tool.
+/// Populated by event writers on ToolMessageStart, cleaned up on ToolMessageEnd.
+type ToolClientMap = Arc<std::sync::Mutex<HashMap<String, Arc<ConversationClient>>>>;
 
 /// Per-tool-call tracking state used by the event writer.
 struct ToolCallState {
@@ -100,6 +106,8 @@ impl Server {
         tools_list.push(Arc::new(create_continue_subagent_tool()));
 
 
+        let tool_clients: ToolClientMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
+
         let resuming = self.conversation_state_file.exists();
 
         let conversation_client = if resuming {
@@ -129,9 +137,12 @@ impl Server {
                 let sa_display = sa.state_dir.join("display.jsonl");
                 let sa_status = sa.state_dir.join("status.txt");
                 let sa_dir_clone = sa.state_dir.clone();
+                let sa_conv_client = Arc::clone(&sa.client);
+                let sa_tool_clients = Arc::clone(&tool_clients);
                 tokio::spawn(async move {
                     if let Err(e) = run_event_writer(
                         sa_events, sa_display, sa_status, sa_dir_clone, Some(mgr_clone),
+                        sa_conv_client, sa_tool_clients,
                     ).await {
                         tracing::error!(error = %e, "Resumed subagent event writer failed");
                     }
@@ -147,8 +158,11 @@ impl Server {
             let display_file = self.display_file.clone();
             let status_file = self.status_file.clone();
             let session_dir = self.session_dir.clone();
+            let root_client = Arc::clone(&client);
+            let tc_map = Arc::clone(&tool_clients);
             tokio::spawn(run_event_writer(
                 events, display_file, status_file, session_dir, Some(manager_clone),
+                root_client, tc_map,
             ));
 
             client
@@ -179,8 +193,11 @@ impl Server {
             let display_file = self.display_file.clone();
             let status_file = self.status_file.clone();
             let session_dir = self.session_dir.clone();
+            let root_client = Arc::clone(&client);
+            let tc_map = Arc::clone(&tool_clients);
             tokio::spawn(run_event_writer(
                 events, display_file, status_file, session_dir, Some(manager_clone),
+                root_client, tc_map,
             ));
 
             client
@@ -200,8 +217,9 @@ impl Server {
                 result = listener.accept() => {
                     let (stream, _) = result?;
                     let conv_client = Arc::clone(&conversation_client);
+                    let tc_map = Arc::clone(&tool_clients);
                     let shutdown_tx = Arc::clone(&shutdown_tx);
-                    tokio::spawn(handle_client(stream, conv_client, shutdown_tx));
+                    tokio::spawn(handle_client(stream, conv_client, tc_map, shutdown_tx));
                 }
             }
         }
@@ -227,6 +245,8 @@ fn run_event_writer(
     status_file: PathBuf,
     session_dir: PathBuf,
     manager: Option<Arc<ConversationManager>>,
+    conv_client: Arc<ConversationClient>,
+    tool_clients: ToolClientMap,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(async move {
     let mut tool_calls: HashMap<String, ToolCallState> = HashMap::new();
@@ -295,6 +315,7 @@ fn run_event_writer(
                     tool_name: tool_name.clone(),
                     accumulated_preview: String::new(),
                 });
+                tool_clients.lock().unwrap().insert(tool_call_id.clone(), Arc::clone(&conv_client));
             }
 
             Message::ToolOutputChunk { tool_call_id, content, .. } => {
@@ -330,6 +351,7 @@ fn run_event_writer(
                     ?end_status,
                     "ToolMessageEnd received"
                 );
+                tool_clients.lock().unwrap().remove(tool_call_id.as_str());
                 if let Some(state) = tool_calls.remove(tool_call_id) {
                     // Write truncated preview to main display as a single ToolOutputChunk
                     if !state.accumulated_preview.is_empty() {
@@ -395,6 +417,8 @@ fn run_event_writer(
                             let sa_events = Box::pin(sa_client.subscribe());
                             let sa_status_clone = sa_status.clone();
                             let sa_mgr = Arc::clone(mgr);
+                            let sa_tool_clients = Arc::clone(&tool_clients);
+                            let sa_conv_client = Arc::clone(&sa_client);
                             let handle = tokio::spawn(async move {
                                 if let Err(e) = run_event_writer(
                                     sa_events,
@@ -402,6 +426,8 @@ fn run_event_writer(
                                     sa_status_clone,
                                     sa_dir,
                                     Some(sa_mgr),
+                                    sa_conv_client,
+                                    sa_tool_clients,
                                 ).await {
                                     tracing::error!(error = %e, "Subagent event writer failed");
                                 }
@@ -493,18 +519,20 @@ fn run_event_writer(
 
 async fn handle_client(
     stream: UnixStream,
-    conv_client: Arc<llm_rs::conversation::ConversationClient>,
+    conv_client: Arc<ConversationClient>,
+    tool_clients: ToolClientMap,
     shutdown_tx: Arc<broadcast::Sender<()>>,
 ) {
     let shutdown_rx = shutdown_tx.subscribe();
-    if let Err(e) = handle_client_inner(stream, conv_client, shutdown_tx, shutdown_rx).await {
+    if let Err(e) = handle_client_inner(stream, conv_client, tool_clients, shutdown_tx, shutdown_rx).await {
         eprintln!("[Server] Client handler error: {}", e);
     }
 }
 
 async fn handle_client_inner(
     stream: UnixStream,
-    conv_client: Arc<llm_rs::conversation::ConversationClient>,
+    conv_client: Arc<ConversationClient>,
+    tool_clients: ToolClientMap,
     shutdown_tx: Arc<broadcast::Sender<()>>,
     mut shutdown_rx: broadcast::Receiver<()>,
 ) -> Result<()> {
@@ -530,7 +558,9 @@ async fn handle_client_inner(
                         }
                     }
                     ClientMessage::CancelTool { tool_call_id } => {
-                        if conv_client.cancel_tool(&tool_call_id) {
+                        let client = tool_clients.lock().unwrap().get(&tool_call_id).cloned();
+                        if let Some(client) = client {
+                            client.cancel_tool(&tool_call_id);
                             send_msg(&mut sink, &ServerMessage::Ack).await?;
                         } else {
                             send_msg(&mut sink, &ServerMessage::Error {

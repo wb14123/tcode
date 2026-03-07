@@ -77,7 +77,7 @@ cargo run -p tcode -- edit      # Editor pane (connects to running server)
 cargo run -p tcode -- display   # Display pane (connects to running server)
 ```
 
-Session data is stored at `/tmp/tcode/sessions/{session_id}/`.
+Session data is stored at `~/.tcode/sessions/{session_id}/`.
 
 ## Crate Details
 

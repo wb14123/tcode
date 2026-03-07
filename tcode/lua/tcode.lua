@@ -55,6 +55,8 @@ end
 -- Maps extmark ID -> tool_call_id so we can find which tool call a cursor line belongs to.
 local tc_ns = vim.api.nvim_create_namespace('tcode_tc_id')
 local tc_extmark_ids = {}  -- extmark_id -> tool_call_id
+local tc_tool_names = {}   -- tool_call_id -> tool_name
+local tc_label_marks = {}  -- tool_call_id -> { extmark_id, ns, tool_name }
 
 -- Namespace and lookup table for subagent range extmarks.
 -- Maps extmark ID -> conversation_id so we can find which subagent a cursor line belongs to.
@@ -353,7 +355,25 @@ local function render_event(buf, ns, event)
     render_info(buf, ns, data, nil)
 
   elseif variant == 'ToolMessageStart' then
-    local label_line = render_label(buf, ns, '>>> TOOL: ' .. (data.tool_name or ''), 'TCodeTool', data)
+    local tool_name = data.tool_name or ''
+    local label_line, label_extmark = render_label(buf, ns, '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
+    -- Store tool name and label extmark for cancel hint updates
+    if data.tool_call_id then
+      tc_tool_names[data.tool_call_id] = tool_name
+      tc_label_marks[data.tool_call_id] = { extmark_id = label_extmark, ns = ns, tool_name = tool_name }
+      -- Update label to include cancel hint
+      local virt = { { '>>> TOOL: ' .. tool_name, 'TCodeTool' } }
+      local ts = format_time(data.created_at)
+      if ts then
+        table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
+      end
+      table.insert(virt, { '  [Ctrl-k to cancel]', 'TCodeTokens' })
+      vim.api.nvim_buf_set_extmark(buf, ns, label_line, 0, {
+        id = label_extmark,
+        virt_text = virt,
+        virt_text_pos = 'overlay',
+      })
+    end
     if data.tool_args and data.tool_args ~= '' and data.tool_args ~= '{}' then
       append_lines(buf, { '' })
       local args_line = vim.api.nvim_buf_line_count(buf) - 1
@@ -382,6 +402,20 @@ local function render_event(buf, ns, event)
   elseif variant == 'ToolMessageEnd' then
     if data.tool_call_id then
       extend_tc_extmark(buf, data.tool_call_id, vim.api.nvim_buf_line_count(buf) - 1)
+      -- Remove cancel hint from label
+      if tc_label_marks[data.tool_call_id] then
+        local info = tc_label_marks[data.tool_call_id]
+        local virt = { { '>>> TOOL: ' .. info.tool_name, 'TCodeTool' } }
+        local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
+        if mark_pos and mark_pos[1] then
+          vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
+            id = info.extmark_id,
+            virt_text = virt,
+            virt_text_pos = 'overlay',
+          })
+        end
+        tc_label_marks[data.tool_call_id] = nil
+      end
     end
     render_info(buf, ns, data, 'TOOL')
 
@@ -751,6 +785,76 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
     local cmd = string.format('%s --session=%s tool-call %s', M.exe_path, M.session_id, tool_call_id)
     vim.fn.system(string.format('tmux new-window -n "%s" "%s"', 'tool-detail', cmd))
   end, { buffer = true, silent = true, desc = 'Open tool call detail' })
+
+  -- Cancel tool call with confirmation popup
+  vim.keymap.set('n', '<C-k>', function()
+    if not M.exe_path or not M.session_id then
+      vim.notify('Session info not available', vim.log.levels.ERROR)
+      return
+    end
+
+    local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
+    local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, { details = true })
+    local tool_call_id = nil
+    for _, mark in ipairs(marks) do
+      local start_row = mark[2]
+      local details = mark[4]
+      local end_row = details.end_row or start_row
+      if cursor_line >= start_row and cursor_line <= end_row and tc_extmark_ids[mark[1]] then
+        tool_call_id = tc_extmark_ids[mark[1]]
+        break
+      end
+    end
+
+    if not tool_call_id then
+      vim.notify('No tool call under cursor', vim.log.levels.WARN)
+      return
+    end
+
+    -- Check if the tool is still running (has a label mark with cancel hint)
+    if not tc_label_marks[tool_call_id] then
+      vim.notify('Tool call already finished', vim.log.levels.INFO)
+      return
+    end
+
+    local tool_name = tc_tool_names[tool_call_id] or 'unknown'
+
+    -- Create confirmation popup
+    local popup_buf = vim.api.nvim_create_buf(false, true)
+    local prompt = "Cancel tool '" .. tool_name .. "'? (y/n)"
+    vim.api.nvim_buf_set_lines(popup_buf, 0, -1, false, { prompt })
+    local width = #prompt + 4
+    local popup_win = vim.api.nvim_open_win(popup_buf, true, {
+      relative = 'cursor',
+      row = 1,
+      col = 0,
+      width = width,
+      height = 1,
+      style = 'minimal',
+      border = 'rounded',
+    })
+
+    local function close_popup()
+      if vim.api.nvim_win_is_valid(popup_win) then
+        vim.api.nvim_win_close(popup_win, true)
+      end
+      if vim.api.nvim_buf_is_valid(popup_buf) then
+        vim.api.nvim_buf_delete(popup_buf, { force = true })
+      end
+    end
+
+    local function do_cancel()
+      close_popup()
+      local cmd = string.format('%s --session=%s cancel-tool %s', M.exe_path, M.session_id, tool_call_id)
+      local result = vim.fn.system(cmd)
+      vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
+    end
+
+    vim.keymap.set('n', 'y', do_cancel, { buffer = popup_buf, nowait = true })
+    vim.keymap.set('n', 'n', close_popup, { buffer = popup_buf, nowait = true })
+    vim.keymap.set('n', 'q', close_popup, { buffer = popup_buf, nowait = true })
+    vim.keymap.set('n', '<Esc>', close_popup, { buffer = popup_buf, nowait = true })
+  end, { buffer = true, silent = true, desc = 'Cancel tool call' })
 end
 
 -- Setup tool call display window for viewing a single tool call's details
