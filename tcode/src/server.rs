@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
-use llm_rs::conversation::{ConversationManager, ConversationState, Message, create_subagent_tool, create_get_subagent_logs_tool, create_continue_subagent_tool};
+use llm_rs::conversation::{ConversationManager, ConversationState, Message, create_subagent_tool, create_continue_subagent_tool};
 use llm_rs::llm::{ChatOptions, LLM};
 use llm_rs::tool::Tool;
 use tokio::fs::OpenOptions;
@@ -98,7 +98,7 @@ impl Server {
         ];
         tools_list.push(Arc::new(create_subagent_tool(&model_infos)));
         tools_list.push(Arc::new(create_continue_subagent_tool()));
-        tools_list.push(Arc::new(create_get_subagent_logs_tool()));
+
 
         let resuming = self.conversation_state_file.exists();
 
