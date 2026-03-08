@@ -50,7 +50,7 @@ fn search_and_extract(query: &str) -> Result<String> {
     let encoded = urlencoding::encode(query);
     let url = format!("https://kagi.com/search?q={encoded}");
 
-    let (_browser, tab) = browser::navigate_and_wait(&url)?;
+    let tab = browser::open_tab(&url)?;
 
     let result = tab.evaluate(EXTRACT_SEARCH_RESULTS_JS, false)?;
 

@@ -9,7 +9,7 @@ const EXTRACT_CONTENT_JS: &str = include_str!("extract-content.js");
 
 /// Fetch a web page using headless Chrome and extract clean HTML using Readability.js.
 fn fetch_and_extract(url: &str) -> Result<String> {
-    let (_browser, tab) = browser::navigate_and_wait(url)?;
+    let tab = browser::open_tab(url)?;
 
     tab.evaluate(READABILITY_JS, false)?;
     let result = tab.evaluate(EXTRACT_CONTENT_JS, false)?;

@@ -72,6 +72,7 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
+    #[ignore] // requires OPENAI_API_KEY
     async fn test_openai_basic_chat() {
         let client = OpenAI::new(get_openai_key());
         let messages = vec![
@@ -108,6 +109,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires OPENAI_API_KEY
     async fn test_openai_reasoning() {
         let client = OpenAI::new(get_openai_key());
         let messages = vec![
@@ -178,6 +180,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires OPENAI_API_KEY
     async fn test_openai_tool_call() {
         // Define a simple tool
         let tool = Tool::new::<EmptyParams, _, _, _, _>(
@@ -226,6 +229,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires OPENAI_API_KEY
     async fn test_openai_reasoning_multi_turn() {
         let client = OpenAI::new(get_openai_key());
         let options = ChatOptions {
@@ -305,6 +309,7 @@ mod tests {
     // ========================================================================
 
     #[tokio::test]
+    #[ignore] // requires OPENROUTER_API_KEY
     async fn test_openrouter_basic_chat() {
         let client = OpenRouter::new(get_openrouter_key());
         let messages = vec![
@@ -333,6 +338,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[ignore] // requires OPENROUTER_API_KEY
     async fn test_openrouter_multi_turn() {
         let client = OpenRouter::new(get_openrouter_key());
 
