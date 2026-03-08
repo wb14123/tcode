@@ -51,6 +51,10 @@ or details behind a previous subagent's output, continue that subagent.
 do something similar as the current task. It will create unnecessary nested \
 subagents and increase the context window.
 
+8. **Do not use subagent to avoid block.** If some operations are blocked, \
+do not try to use subagent to try the same thing. It will be blocked as well \
+and the only thing you are doing is waste tokens.
+
 ## Context Window Management
 
 Some tools (e.g. `web_fetch`) can return large amounts of text that consume your context window. \

@@ -116,7 +116,7 @@ impl<S: Stream<Item = String>> Stream for CancellableStream<S> {
         if cancelled_fut.poll(cx).is_ready() {
             *this.cancelled = true;
             return Poll::Ready(Some(
-                "Error: Tool execution was cancelled".to_string(),
+                "Error: Tool execution was cancelled by the user. Do not retry this tool call. Instead, ask the user what they would like to do.".to_string(),
             ));
         }
 
