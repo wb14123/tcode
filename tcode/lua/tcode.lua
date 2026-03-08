@@ -70,7 +70,8 @@ local thinking_entries = {}  -- extmark_id -> { content, expanded }
 local thinking_state = {
   is_thinking = false,
   start_row = nil,
-  content = '',
+  content_parts = {},  -- accumulate chunks in a table, concat only when needed
+  last_highlighted_row = nil,  -- track last highlighted row to avoid re-highlighting
 }
 
 -- Treesitter markdown regions: only user/assistant message text is rendered as markdown.
@@ -78,8 +79,10 @@ local thinking_state = {
 local md_regions = {}   -- list of {start_row, end_row} (0-indexed)
 local ts_parser = nil   -- treesitter LanguageTree, set in setup_display
 local assistant_md = { started = false, start_row = nil, region_idx = nil }
+local ts_batch_depth = 0  -- >0 means we're in a batch; defer treesitter parsing
+local ts_dirty = false    -- set when update_ts_regions was deferred
 
-local function update_ts_regions(buf)
+local function flush_ts_regions(buf)
   if not ts_parser then return end
   if not vim.api.nvim_buf_is_valid(buf) then return end
   local regions = {}
@@ -96,6 +99,15 @@ local function update_ts_regions(buf)
     ts_parser:set_included_regions(regions)
     ts_parser:parse(true)
   end)
+  ts_dirty = false
+end
+
+local function update_ts_regions(buf)
+  if ts_batch_depth > 0 then
+    ts_dirty = true
+    return
+  end
+  flush_ts_regions(buf)
 end
 
 -- Render a label line with optional timestamp as virtual text
@@ -211,14 +223,15 @@ local function collapse_thinking(buf, ns)
 
   -- Store for later expansion
   thinking_entries[mark_id] = {
-    content = thinking_state.content,
+    content = table.concat(thinking_state.content_parts),
     expanded = false,
   }
 
   -- Reset thinking state
   thinking_state.is_thinking = false
-  thinking_state.content = ''
+  thinking_state.content_parts = {}
   thinking_state.start_row = nil
+  thinking_state.last_highlighted_row = nil
 end
 
 -- Find a thinking extmark at the given buffer line (0-indexed)
@@ -317,15 +330,18 @@ local function render_event(buf, ns, event)
     if not thinking_state.is_thinking then
       thinking_state.is_thinking = true
       thinking_state.start_row = vim.api.nvim_buf_line_count(buf) - 1  -- 0-indexed row where append_text writes
-      thinking_state.content = ''
+      thinking_state.content_parts = {}
+      thinking_state.last_highlighted_row = thinking_state.start_row - 1
     end
-    thinking_state.content = thinking_state.content .. data.content
+    table.insert(thinking_state.content_parts, data.content)
     append_text(buf, data.content)
-    -- Apply thinking highlight to all lines from start_row to end of buffer
+    -- Only highlight newly added lines (avoid O(n²) re-highlighting)
     local end_line = vim.api.nvim_buf_line_count(buf) - 1
-    for i = thinking_state.start_row, end_line do
+    local from = thinking_state.last_highlighted_row + 1
+    for i = from, end_line do
       vim.api.nvim_buf_add_highlight(buf, thinking_ns, 'TCodeThinking', i, 0, -1)
     end
+    thinking_state.last_highlighted_row = end_line
 
   elseif variant == 'AssistantMessageChunk' then
     if thinking_state.is_thinking then
@@ -648,6 +664,9 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
 
       vim.bo[buf].modifiable = true
 
+      -- Batch mode: defer treesitter parsing until after all events are processed
+      ts_batch_depth = ts_batch_depth + 1
+
       for _, line in ipairs(lines) do
         if line ~= '' then
           local ok, event = pcall(vim.json.decode, line)
@@ -659,6 +678,11 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
             render_event(buf, ns, event)
           end
         end
+      end
+
+      ts_batch_depth = ts_batch_depth - 1
+      if ts_batch_depth == 0 and ts_dirty then
+        flush_ts_regions(buf)
       end
 
       if win ~= -1 and was_at_bottom then
