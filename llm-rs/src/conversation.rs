@@ -419,7 +419,6 @@ impl ConversationManager {
             subagent_depth,
             max_subagent_depth,
             state_dir,
-            needs_initial_llm_call: false,
         };
         self.spawn_conversation(conversation)
     }
@@ -485,8 +484,6 @@ impl ConversationManager {
     ///
     /// Calls `fill_cancelled_tool_results()` on the loaded llm_msgs,
     /// creates a `Conversation` with pre-populated state, and spawns it.
-    /// If the last message is `User` or `ToolResult`, sets `needs_initial_llm_call`
-    /// so the conversation auto-calls the LLM on start.
     pub fn resume_conversation(
         self: &Arc<Self>,
         mut state: ConversationState,
@@ -506,12 +503,6 @@ impl ConversationManager {
             .into_iter()
             .map(|t| (t.name.clone(), t))
             .collect();
-
-        // Determine if LLM needs to respond on resume
-        let needs_initial_llm_call = match state.llm_msgs.last() {
-            Some(LLMMessage::User(_)) | Some(LLMMessage::ToolResult { .. }) => true,
-            _ => false,
-        };
 
         let (input_tx, input_rx) = mpsc::channel(10);
         let (notify_tx, _) = broadcast::channel(100);
@@ -540,7 +531,6 @@ impl ConversationManager {
             subagent_depth: state.subagent_depth,
             max_subagent_depth,
             state_dir,
-            needs_initial_llm_call,
         };
 
         self.spawn_conversation(conversation)
@@ -761,8 +751,6 @@ pub struct Conversation {
     /// Directory where this conversation saves its state. None = no persistence.
     state_dir: Option<PathBuf>,
 
-    /// When true, auto-call LLM on start (for resumed conversations with pending response).
-    needs_initial_llm_call: bool,
 }
 
 /// Multi round LLM conversation. Thread and async safe.
@@ -838,19 +826,6 @@ impl Conversation {
     /// each turn but keeps looping so the parent can send follow-up messages via
     /// `continue_subagent`.
     async fn start(&mut self) {
-        // If resumed with a pending response, auto-call LLM
-        if self.needs_initial_llm_call {
-            self.needs_initial_llm_call = false;
-            self.call_llm().await;
-            self.save_state();
-            if self.single_turn {
-                self.broadcast_msg(Message::AssistantRequestEnd {
-                    total_input_tokens: self.total_input_tokens,
-                    total_output_tokens: self.total_output_tokens,
-                });
-            }
-        }
-
         while let Some(user_input) = self.input_channel_rx.recv().await {
             let user_msg_id = self.next_msg_id();
             self.broadcast_msg(Message::UserMessage {
