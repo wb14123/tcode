@@ -6,6 +6,7 @@ mod server;
 mod session;
 mod session_picker;
 mod tool_call_display;
+mod tree;
 mod tty_stdio;
 
 use std::fs;
@@ -199,6 +200,8 @@ enum Commands {
     },
     /// List active sessions
     Sessions,
+    /// Show tree view of subagents and tool calls
+    Tree,
 }
 
 fn get_lua_path() -> PathBuf {
@@ -370,6 +373,17 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Commands::Tree) => {
+            let session_id = match cli.session.clone() {
+                Some(id) => id,
+                None => match session_picker::pick_session()? {
+                    Some(id) => id,
+                    None => return Ok(()),
+                },
+            };
+            let session = Session::new(session_id)?;
+            tree::run_tree(session)
+        }
         Some(Commands::Browser) => run_browser().await,
         Some(Commands::ClaudeAuth) => claude_auth::run().await,
     }
@@ -494,6 +508,14 @@ async fn run_unified_with_session(
 
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
+    // Capture current pane ID before splitting (for tree pane placement)
+    let current_pane_id = Command::new("tmux")
+        .args(["display-message", "-p", "#{pane_id}"])
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+
     let edit_cmd = format!("{} {} edit", exe_str, session_arg);
 
     let output = Command::new("tmux")
@@ -508,6 +530,28 @@ async fn run_unified_with_session(
             return Err(e);
         }
     };
+
+    // Spawn tree pane to the right of the display pane (without stealing focus)
+    let tree_cmd = format!("{} {} tree", exe_str, session_arg);
+    let tree_pane_id = if !current_pane_id.is_empty() {
+        Command::new("tmux")
+            .args([
+                "split-window", "-h", "-d", "-p", "25",
+                "-t", &current_pane_id,
+                "-P", "-F", "#{pane_id}",
+                &tree_cmd,
+            ])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    } else {
+        None
+    };
+
+    // Focus the edit pane so the user starts typing there
+    let _ = Command::new("tmux")
+        .args(["select-pane", "-t", &edit_pane_id])
+        .output();
 
     let display_cmd = format!("{} {} display", exe_str, session_arg);
     let (stdin, stdout, stderr) = tty_stdio::get_original_stdio()
@@ -526,6 +570,12 @@ async fn run_unified_with_session(
     let _ = Command::new("tmux")
         .args(["kill-pane", "-t", &edit_pane_id])
         .output();
+
+    if let Some(ref tree_pane) = tree_pane_id {
+        let _ = Command::new("tmux")
+            .args(["kill-pane", "-t", tree_pane])
+            .output();
+    }
 
     server_handle.abort();
 

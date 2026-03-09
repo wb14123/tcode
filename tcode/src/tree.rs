@@ -1,0 +1,998 @@
+use std::collections::HashMap;
+use std::fs::{self, File};
+use std::io::{self, Read, Seek, SeekFrom};
+use std::path::{Path, PathBuf};
+use std::sync::mpsc;
+use std::time::Duration;
+
+use anyhow::Result;
+use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::execute;
+use crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
+use llm_rs::conversation::{Message, MessageEndStatus};
+use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use ratatui::Terminal;
+use ratatui::backend::CrosstermBackend;
+use ratatui::layout::{Constraint, Layout};
+use ratatui::style::{Color, Modifier, Style};
+use ratatui::text::{Line, Span};
+use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+
+use crate::session::Session;
+
+// ---------------------------------------------------------------------------
+// Data types
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone)]
+enum NodeStatus {
+    Running,
+    Idle,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+impl NodeStatus {
+    fn label(&self) -> &'static str {
+        match self {
+            NodeStatus::Running => "running",
+            NodeStatus::Idle => "idle",
+            NodeStatus::Succeeded => "done",
+            NodeStatus::Failed => "failed",
+            NodeStatus::Cancelled => "cancelled",
+        }
+    }
+
+    fn color(&self) -> Color {
+        match self {
+            NodeStatus::Running => Color::Yellow,
+            NodeStatus::Idle => Color::DarkGray,
+            NodeStatus::Succeeded => Color::Green,
+            NodeStatus::Failed | NodeStatus::Cancelled => Color::Red,
+        }
+    }
+
+    fn from_end_status(s: &MessageEndStatus) -> Self {
+        match s {
+            MessageEndStatus::Succeeded => NodeStatus::Succeeded,
+            MessageEndStatus::Failed => NodeStatus::Failed,
+            MessageEndStatus::Cancelled => NodeStatus::Cancelled,
+            MessageEndStatus::Timeout => NodeStatus::Failed,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+enum NodeType {
+    Root {
+        session_id: String,
+    },
+    ToolCall {
+        tool_call_id: String,
+        tool_name: String,
+        tool_args: String,
+        status: NodeStatus,
+        input_tokens: i32,
+        output_tokens: i32,
+    },
+    SubAgent {
+        conversation_id: String,
+        description: String,
+        status: NodeStatus,
+        input_tokens: i32,
+        output_tokens: i32,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct TreeNode {
+    kind: NodeType,
+    depth: usize,
+    children: Vec<usize>,
+    collapsed: bool,
+}
+
+struct FileTracker {
+    offset: u64,
+    line_buffer: String,
+    /// Index of the Root or SubAgent node that owns this conversation dir.
+    owner_node: usize,
+}
+
+struct TreeState {
+    arena: Vec<TreeNode>,
+    /// Visible node indices (rebuilt by `rebuild_visible`).
+    visible: Vec<usize>,
+    selected: usize,
+    filter_active_only: bool,
+    /// display.jsonl path → tracker.
+    file_trackers: HashMap<PathBuf, FileTracker>,
+    /// dir path → root/subagent node index.
+    dir_to_node: HashMap<PathBuf, usize>,
+    /// tool_call_id → node index.
+    tool_call_idx: HashMap<String, usize>,
+    /// conversation_id → node index.
+    conversation_idx: HashMap<String, usize>,
+    /// Session root directory.
+    session_dir: PathBuf,
+    /// Session ID (for display).
+    session_id: String,
+}
+
+impl TreeState {
+    fn new(session_dir: PathBuf, session_id: String) -> Self {
+        let mut state = TreeState {
+            arena: Vec::new(),
+            visible: Vec::new(),
+            selected: 0,
+            filter_active_only: false,
+            file_trackers: HashMap::new(),
+            dir_to_node: HashMap::new(),
+            tool_call_idx: HashMap::new(),
+            conversation_idx: HashMap::new(),
+            session_dir: session_dir.clone(),
+            session_id: session_id.clone(),
+        };
+        // Create root node
+        let root_idx = state.arena.len();
+        state.arena.push(TreeNode {
+            kind: NodeType::Root { session_id },
+            depth: 0,
+            children: Vec::new(),
+            collapsed: false,
+        });
+        state.dir_to_node.insert(session_dir.clone(), root_idx);
+
+        // Register the main display.jsonl
+        let display_file = session_dir.join("display.jsonl");
+        state.file_trackers.insert(
+            display_file,
+            FileTracker {
+                offset: 0,
+                line_buffer: String::new(),
+                owner_node: root_idx,
+            },
+        );
+        state
+    }
+
+    /// Full refresh: reset offsets to 0 and re-read everything.
+    fn full_refresh(&mut self) {
+        // Reset all trackers to start
+        for tracker in self.file_trackers.values_mut() {
+            tracker.offset = 0;
+            tracker.line_buffer.clear();
+        }
+        // Clear children of root but keep root itself
+        self.arena[0].children.clear();
+        self.arena.truncate(1);
+        self.tool_call_idx.clear();
+        self.conversation_idx.clear();
+        // Keep only the root dir mapping
+        let root_dir = self.session_dir.clone();
+        self.dir_to_node.clear();
+        self.dir_to_node.insert(root_dir, 0);
+        // Keep only root display.jsonl tracker
+        let root_display = self.session_dir.join("display.jsonl");
+        let old_trackers: Vec<PathBuf> = self.file_trackers.keys().cloned().collect();
+        for path in old_trackers {
+            if path != root_display {
+                self.file_trackers.remove(&path);
+            } else if let Some(t) = self.file_trackers.get_mut(&path) {
+                t.offset = 0;
+                t.line_buffer.clear();
+                t.owner_node = 0;
+            }
+        }
+        // Now discover subagent dirs and register them
+        self.discover_subagent_dirs(&self.session_dir.clone(), 0, 1);
+        // Read all files
+        self.read_all_files();
+        self.rebuild_visible();
+    }
+
+    /// Discover subagent-* directories recursively from `dir` and register trackers.
+    fn discover_subagent_dirs(&mut self, dir: &Path, parent_node: usize, depth: usize) {
+        let entries = match fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(_) => return,
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if !path.is_dir() {
+                continue;
+            }
+            let name = match path.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n.to_string(),
+                None => continue,
+            };
+            if !name.starts_with("subagent-") {
+                continue;
+            }
+            let conversation_id = name.strip_prefix("subagent-").unwrap().to_string();
+
+            // Only create node if not already tracked
+            if !self.dir_to_node.contains_key(&path) {
+                let node_idx = self.arena.len();
+                self.arena.push(TreeNode {
+                    kind: NodeType::SubAgent {
+                        conversation_id: conversation_id.clone(),
+                        description: String::new(),
+                        status: NodeStatus::Running,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    },
+                    depth,
+                    children: Vec::new(),
+                    collapsed: false,
+                });
+                self.arena[parent_node].children.push(node_idx);
+                self.dir_to_node.insert(path.clone(), node_idx);
+                self.conversation_idx
+                    .insert(conversation_id.clone(), node_idx);
+
+                let display_file = path.join("display.jsonl");
+                if !self.file_trackers.contains_key(&display_file) {
+                    self.file_trackers.insert(
+                        display_file,
+                        FileTracker {
+                            offset: 0,
+                            line_buffer: String::new(),
+                            owner_node: node_idx,
+                        },
+                    );
+                }
+            }
+
+            // Recurse into this subagent dir
+            let node_idx = self.dir_to_node[&path];
+            let next_depth = depth + 1;
+            self.discover_subagent_dirs(&path, node_idx, next_depth);
+        }
+    }
+
+    /// Read new bytes from all tracked files and process events.
+    fn read_all_files(&mut self) {
+        let paths: Vec<PathBuf> = self.file_trackers.keys().cloned().collect();
+        for path in paths {
+            self.read_file(&path);
+        }
+    }
+
+    /// Read new bytes from a single tracked file and process events.
+    fn read_file(&mut self, path: &PathBuf) {
+        let (offset, owner_node, mut line_buffer) = match self.file_trackers.get(path) {
+            Some(t) => (t.offset, t.owner_node, t.line_buffer.clone()),
+            None => return,
+        };
+
+        let file_size = match fs::metadata(path) {
+            Ok(m) => m.len(),
+            Err(_) => return,
+        };
+        if file_size <= offset {
+            return;
+        }
+
+        let mut file = match File::open(path) {
+            Ok(f) => f,
+            Err(_) => return,
+        };
+        if let Err(e) = file.seek(SeekFrom::Start(offset)) {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to seek in JSONL file");
+            return;
+        }
+
+        let mut new_bytes = Vec::new();
+        if let Err(e) = file.read_to_end(&mut new_bytes) {
+            tracing::warn!(path = %path.display(), error = %e, "Failed to read JSONL file");
+            return;
+        }
+        let new_text = String::from_utf8_lossy(&new_bytes);
+
+        // Prepend buffered partial line
+        let combined = if line_buffer.is_empty() {
+            new_text.to_string()
+        } else {
+            let mut s = std::mem::take(&mut line_buffer);
+            s.push_str(&new_text);
+            s
+        };
+
+        let mut lines: Vec<&str> = combined.split('\n').collect();
+        // If no trailing newline, last element is incomplete
+        let last = lines.pop().unwrap_or("");
+        let new_line_buffer = if combined.ends_with('\n') {
+            // last is "" after split, nothing buffered
+            String::new()
+        } else {
+            last.to_string()
+        };
+
+        // Determine the directory that owns this file
+        let dir = path
+            .parent()
+            .unwrap_or(Path::new(""))
+            .to_path_buf();
+
+        for line in &lines {
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+            match serde_json::from_str::<Message>(line) {
+                Ok(msg) => self.process_event(&dir, owner_node, &msg),
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        line = %line.chars().take(80).collect::<String>(),
+                        "Failed to parse JSONL line"
+                    );
+                }
+            }
+        }
+
+        // Update tracker
+        if let Some(tracker) = self.file_trackers.get_mut(path) {
+            tracker.offset = offset + new_bytes.len() as u64;
+            tracker.line_buffer = new_line_buffer;
+        }
+    }
+
+    /// Incremental update: discover new subagent dirs, read new bytes from all files.
+    fn incremental_update(&mut self) {
+        // Discover any new subagent dirs
+        let root = self.session_dir.clone();
+        self.discover_subagent_dirs(&root, 0, 1);
+        // Read new data from all tracked files
+        self.read_all_files();
+        self.rebuild_visible();
+    }
+
+    /// Process a single Message event, updating tree nodes.
+    fn process_event(&mut self, dir: &Path, owner_node: usize, msg: &Message) {
+        match msg {
+            Message::ToolMessageStart {
+                tool_call_id,
+                tool_name,
+                tool_args,
+                ..
+            } => {
+                if self.tool_call_idx.contains_key(tool_call_id) {
+                    return; // Already tracked
+                }
+                let depth = self.arena[owner_node].depth + 1;
+                let node_idx = self.arena.len();
+                self.arena.push(TreeNode {
+                    kind: NodeType::ToolCall {
+                        tool_call_id: tool_call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        tool_args: tool_args.clone(),
+                        status: NodeStatus::Running,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    },
+                    depth,
+                    children: Vec::new(),
+                    collapsed: false,
+                });
+                self.arena[owner_node].children.push(node_idx);
+                self.tool_call_idx.insert(tool_call_id.clone(), node_idx);
+            }
+            Message::ToolMessageEnd {
+                tool_call_id,
+                end_status,
+                input_tokens,
+                output_tokens,
+                ..
+            } => {
+                if let Some(&idx) = self.tool_call_idx.get(tool_call_id) {
+                    if let NodeType::ToolCall {
+                        status,
+                        input_tokens: it,
+                        output_tokens: ot,
+                        ..
+                    } = &mut self.arena[idx].kind
+                    {
+                        *status = NodeStatus::from_end_status(end_status);
+                        *it = *input_tokens;
+                        *ot = *output_tokens;
+                    }
+                }
+            }
+            Message::SubAgentStart {
+                conversation_id,
+                description,
+                ..
+            } => {
+                // The subagent node may already exist from directory discovery
+                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
+                    // Update description and status
+                    if let NodeType::SubAgent {
+                        description: desc,
+                        status,
+                        ..
+                    } = &mut self.arena[idx].kind
+                    {
+                        *desc = description.clone();
+                        *status = NodeStatus::Running;
+                    }
+                } else {
+                    // Create new subagent node (dir may not exist yet)
+                    let depth = self.arena[owner_node].depth + 1;
+                    let node_idx = self.arena.len();
+                    self.arena.push(TreeNode {
+                        kind: NodeType::SubAgent {
+                            conversation_id: conversation_id.clone(),
+                            description: description.clone(),
+                            status: NodeStatus::Running,
+                            input_tokens: 0,
+                            output_tokens: 0,
+                        },
+                        depth,
+                        children: Vec::new(),
+                        collapsed: false,
+                    });
+                    self.arena[owner_node].children.push(node_idx);
+                    self.conversation_idx
+                        .insert(conversation_id.clone(), node_idx);
+
+                    // Register the subagent directory and display file if they exist
+                    let sa_dir = dir.join(format!("subagent-{}", conversation_id));
+                    if sa_dir.is_dir() {
+                        self.dir_to_node.insert(sa_dir.clone(), node_idx);
+                        let sa_display = sa_dir.join("display.jsonl");
+                        if !self.file_trackers.contains_key(&sa_display) {
+                            self.file_trackers.insert(
+                                sa_display,
+                                FileTracker {
+                                    offset: 0,
+                                    line_buffer: String::new(),
+                                    owner_node: node_idx,
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            Message::SubAgentEnd {
+                conversation_id,
+                end_status,
+                input_tokens,
+                output_tokens,
+                ..
+            } => {
+                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
+                    if let NodeType::SubAgent {
+                        status,
+                        input_tokens: it,
+                        output_tokens: ot,
+                        ..
+                    } = &mut self.arena[idx].kind
+                    {
+                        *status = NodeStatus::from_end_status(end_status);
+                        *it = *input_tokens;
+                        *ot = *output_tokens;
+                    }
+                }
+            }
+            Message::SubAgentTurnEnd {
+                conversation_id,
+                input_tokens,
+                output_tokens,
+                ..
+            } => {
+                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
+                    if let NodeType::SubAgent {
+                        status,
+                        input_tokens: it,
+                        output_tokens: ot,
+                        ..
+                    } = &mut self.arena[idx].kind
+                    {
+                        *status = NodeStatus::Idle;
+                        *it = *input_tokens;
+                        *ot = *output_tokens;
+                    }
+                }
+            }
+            Message::SubAgentContinue {
+                conversation_id, ..
+            } => {
+                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
+                    if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
+                        *status = NodeStatus::Running;
+                    }
+                }
+            }
+            // All other message types are ignored
+            _ => {}
+        }
+    }
+
+    /// Rebuild the visible list from the arena using DFS.
+    fn rebuild_visible(&mut self) {
+        self.visible.clear();
+        if self.arena.is_empty() {
+            return;
+        }
+        // Start DFS from root's children (root itself is not shown)
+        let root_children: Vec<usize> = self.arena[0].children.clone();
+        for &child_idx in &root_children {
+            self.dfs_collect(child_idx);
+        }
+        // Clamp selected
+        if !self.visible.is_empty() && self.selected >= self.visible.len() {
+            self.selected = self.visible.len() - 1;
+        }
+    }
+
+    fn dfs_collect(&mut self, idx: usize) {
+        // If filtering active only, skip finished nodes without running children
+        if self.filter_active_only && !self.has_active_descendant(idx) {
+            return;
+        }
+        self.visible.push(idx);
+        if !self.arena[idx].collapsed {
+            let children: Vec<usize> = self.arena[idx].children.clone();
+            for &child_idx in &children {
+                self.dfs_collect(child_idx);
+            }
+        }
+    }
+
+    fn has_active_descendant(&self, idx: usize) -> bool {
+        let node = &self.arena[idx];
+        let is_active = match &node.kind {
+            NodeType::Root { .. } => true,
+            NodeType::ToolCall { status, .. } | NodeType::SubAgent { status, .. } => {
+                matches!(status, NodeStatus::Running)
+            }
+        };
+        if is_active {
+            return true;
+        }
+        for &child in &node.children {
+            if self.has_active_descendant(child) {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Toggle collapse on the selected node.
+    fn toggle_collapse(&mut self) {
+        if let Some(&idx) = self.visible.get(self.selected) {
+            if !self.arena[idx].children.is_empty() {
+                self.arena[idx].collapsed = !self.arena[idx].collapsed;
+                self.rebuild_visible();
+            }
+        }
+    }
+
+    fn move_up(&mut self) {
+        if !self.visible.is_empty() && self.selected > 0 {
+            self.selected -= 1;
+        }
+    }
+
+    fn move_down(&mut self) {
+        if !self.visible.is_empty() && self.selected < self.visible.len() - 1 {
+            self.selected += 1;
+        }
+    }
+
+    fn toggle_filter(&mut self) {
+        self.filter_active_only = !self.filter_active_only;
+        self.rebuild_visible();
+    }
+
+    /// Open detail view for the selected node in a new tmux window.
+    fn open_detail(&self) {
+        let idx = match self.visible.get(self.selected) {
+            Some(&i) => i,
+            None => return,
+        };
+        let node = &self.arena[idx];
+        let exe = match std::env::current_exe() {
+            Ok(e) => e.to_string_lossy().to_string(),
+            Err(_) => return,
+        };
+        let cmd = match &node.kind {
+            NodeType::ToolCall { tool_call_id, .. } => {
+                format!(
+                    "{} --session={} tool-call {}",
+                    exe, self.session_id, tool_call_id
+                )
+            }
+            NodeType::SubAgent {
+                conversation_id, ..
+            } => {
+                // Open the subagent's display
+                format!(
+                    "{} --session={}/subagent-{} display",
+                    exe, self.session_id, conversation_id
+                )
+            }
+            NodeType::Root { .. } => return,
+        };
+        let _ = std::process::Command::new("tmux")
+            .args(["new-window", &cmd])
+            .output();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Rendering
+// ---------------------------------------------------------------------------
+
+fn render_tree(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    state: &mut TreeState,
+    list_state: &mut ListState,
+) -> Result<()> {
+    terminal.draw(|f| {
+        let chunks = Layout::vertical([
+            Constraint::Length(1),  // Title
+            Constraint::Min(3),    // Tree
+            Constraint::Length(2), // Help
+        ])
+        .split(f.area());
+
+        // Title
+        let title = Line::from(vec![
+            Span::styled(
+                format!(" Tree: {} ", state.session_id),
+                Style::default()
+                    .fg(Color::Cyan)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "({} nodes) ",
+                    state.arena.len().saturating_sub(1) // exclude root
+                ),
+                Style::default().fg(Color::DarkGray),
+            ),
+            if state.filter_active_only {
+                Span::styled("[showing: running] ", Style::default().fg(Color::Yellow))
+            } else {
+                Span::styled("[showing: all] ", Style::default().fg(Color::DarkGray))
+            },
+        ]);
+        f.render_widget(Paragraph::new(title), chunks[0]);
+
+        // Tree list
+        let items: Vec<ListItem> = state
+            .visible
+            .iter()
+            .enumerate()
+            .map(|(vi, &node_idx)| render_node_line(state, node_idx, vi, f.area().width as usize))
+            .collect();
+
+        let list = List::new(items)
+            .block(Block::default().borders(Borders::ALL))
+            .highlight_style(
+                Style::default()
+                    .add_modifier(Modifier::BOLD)
+                    .add_modifier(Modifier::REVERSED),
+            );
+        f.render_stateful_widget(list, chunks[1], list_state);
+
+        // Help bar
+        let help = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(" j/↓", Style::default().fg(Color::Yellow)),
+                Span::raw(" down  "),
+                Span::styled("k/↑", Style::default().fg(Color::Yellow)),
+                Span::raw(" up  "),
+                Span::styled("Space", Style::default().fg(Color::Yellow)),
+                Span::raw(" collapse  "),
+                Span::styled("Enter/o", Style::default().fg(Color::Yellow)),
+                Span::raw(" open  "),
+            ]),
+            Line::from(vec![
+                Span::styled(" f", Style::default().fg(Color::Yellow)),
+                Span::raw(" running/all  "),
+                Span::styled("R", Style::default().fg(Color::Yellow)),
+                Span::raw(" refresh  "),
+                Span::styled("q", Style::default().fg(Color::Yellow)),
+                Span::raw(" quit"),
+            ]),
+        ]);
+        f.render_widget(help, chunks[2]);
+    })?;
+    Ok(())
+}
+
+/// Extract a compact summary from tool_args JSON.
+/// e.g. for Bash: show the command; for Read: show the file_path; otherwise flatten key=val.
+fn summarize_tool_args(args: &str) -> String {
+    let obj: serde_json::Value = match serde_json::from_str(args) {
+        Ok(v) => v,
+        Err(_) => return String::new(),
+    };
+    let map = match obj.as_object() {
+        Some(m) => m,
+        None => return String::new(),
+    };
+    // Pick the most useful single field if present
+    for key in &["command", "file_path", "pattern", "query", "url", "prompt"] {
+        if let Some(val) = map.get(*key) {
+            if let Some(s) = val.as_str() {
+                return s.to_string();
+            }
+        }
+    }
+    // Fallback: show all fields compactly
+    let parts: Vec<String> = map
+        .iter()
+        .filter_map(|(k, v)| {
+            let s = match v {
+                serde_json::Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            Some(format!("{}={}", k, s))
+        })
+        .collect();
+    parts.join(" ")
+}
+
+fn strip_subagent_prefix(desc: &str) -> String {
+    let prefixes = [
+        "You are a sub agent. ",
+        "You are a sub agent.",
+        "You are a subagent. ",
+        "You are a subagent.",
+        "You are a sub-agent. ",
+        "You are a sub-agent.",
+    ];
+    let mut s = desc;
+    for prefix in &prefixes {
+        if let Some(rest) = s.strip_prefix(prefix) {
+            s = rest;
+            break;
+        }
+    }
+    s.trim().to_string()
+}
+
+fn render_node_line(state: &TreeState, node_idx: usize, _vi: usize, width: usize) -> ListItem<'static> {
+    let node = &state.arena[node_idx];
+    let depth = node.depth;
+
+    // Build tree connector prefix
+    let indent = if depth > 1 {
+        "│  ".repeat(depth - 1)
+    } else {
+        String::new()
+    };
+    let connector = if depth > 0 {
+        // Check if this is the last child of its parent
+        let is_last = is_last_visible_sibling(state, node_idx);
+        if is_last { "└─ " } else { "├─ " }
+    } else {
+        ""
+    };
+
+    let (label, status_span, tokens_span, collapse_indicator) = match &node.kind {
+        NodeType::Root { session_id } => (
+            format!("Root: {}", session_id),
+            Span::raw(""),
+            Span::raw(""),
+            String::new(),
+        ),
+        NodeType::ToolCall {
+            tool_name,
+            tool_args,
+            status,
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            let tok = if *input_tokens > 0 || *output_tokens > 0 {
+                Span::styled(
+                    format!(" [{}/{}]", input_tokens, output_tokens),
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::raw("")
+            };
+            let args_summary = summarize_tool_args(tool_args);
+            let label = if args_summary.is_empty() {
+                format!("[tool] {}", tool_name)
+            } else {
+                format!("[tool] {} {}", tool_name, args_summary)
+            };
+            (
+                label,
+                Span::styled(
+                    status.label().to_string(),
+                    Style::default().fg(status.color()),
+                ),
+                tok,
+                String::new(),
+            )
+        }
+        NodeType::SubAgent {
+            description,
+            status,
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            let desc = strip_subagent_prefix(description);
+            let tok = if *input_tokens > 0 || *output_tokens > 0 {
+                Span::styled(
+                    format!(" [{}/{}]", input_tokens, output_tokens),
+                    Style::default().fg(Color::DarkGray),
+                )
+            } else {
+                Span::raw("")
+            };
+            let collapse = if !node.children.is_empty() {
+                if node.collapsed {
+                    " [+]".to_string()
+                } else {
+                    " [-]".to_string()
+                }
+            } else {
+                String::new()
+            };
+            (
+                format!("[agent] {}", desc),
+                Span::styled(
+                    status.label().to_string(),
+                    Style::default().fg(status.color()),
+                ),
+                tok,
+                collapse,
+            )
+        }
+    };
+
+    // Build the line: prefix + label (truncated to fit) + padding + status + tokens
+    let prefix = format!("{}{}", indent, connector);
+    let status_text = format!("{}", status_span.content);
+    let tokens_text = format!("{}", tokens_span.content);
+    let right_len = status_text.len() + tokens_text.len();
+    let collapse_len = collapse_indicator.len();
+    // Reserve: 2 for borders, 1 for min padding between label and status
+    let fixed_overhead = prefix.len() + collapse_len + right_len + 3;
+    let max_label_width = width.saturating_sub(fixed_overhead);
+    let label = if label.len() > max_label_width && max_label_width > 3 {
+        format!("{}...", &label[..max_label_width - 3])
+    } else {
+        label
+    };
+
+    let left_part = format!("{}{}{}", prefix, label, collapse_indicator);
+    let total_left = left_part.len();
+    let padding = if width > total_left + right_len + 2 {
+        " ".repeat(width - total_left - right_len - 2)
+    } else {
+        " ".to_string()
+    };
+
+    let type_color = match &node.kind {
+        NodeType::Root { .. } => Color::Cyan,
+        NodeType::ToolCall { .. } => Color::Blue,
+        NodeType::SubAgent { .. } => Color::Magenta,
+    };
+
+    ListItem::new(Line::from(vec![
+        Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+        Span::styled(label, Style::default().fg(type_color)),
+        Span::styled(collapse_indicator, Style::default().fg(Color::DarkGray)),
+        Span::raw(padding),
+        status_span,
+        tokens_span,
+    ]))
+}
+
+/// Check if a node is the last visible sibling among its parent's children.
+fn is_last_visible_sibling(state: &TreeState, node_idx: usize) -> bool {
+    // Find this node's parent
+    for node in &state.arena {
+        if node.children.contains(&node_idx) {
+            return node.children.last() == Some(&node_idx);
+        }
+    }
+    true
+}
+
+// ---------------------------------------------------------------------------
+// Entry point
+// ---------------------------------------------------------------------------
+
+/// Run the interactive tree view for a session.
+pub fn run_tree(session: Session) -> Result<()> {
+    let session_dir = session.session_dir().clone();
+    let session_id = session_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("unknown")
+        .to_string();
+
+    // Set up notify watcher
+    let (fs_tx, fs_rx) = mpsc::channel();
+    let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
+        if let Ok(event) = res {
+            let _ = fs_tx.send(event);
+        }
+    })?;
+
+    // Watch session directory recursively (inotify auto-watches new subdirs)
+    if session_dir.exists() {
+        watcher.watch(&session_dir, RecursiveMode::Recursive)?;
+    }
+
+    // Initialize terminal
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    // Build initial tree state
+    let mut state = TreeState::new(session_dir.clone(), session_id);
+    state.full_refresh();
+
+    let mut list_state = ListState::default();
+    if !state.visible.is_empty() {
+        list_state.select(Some(0));
+    }
+
+    // Event loop
+    loop {
+        // 1. Drain filesystem events
+        let mut fs_changed = false;
+        while let Ok(_event) = fs_rx.try_recv() {
+            fs_changed = true;
+        }
+        if fs_changed {
+            state.incremental_update();
+            // Keep selection in bounds
+            if !state.visible.is_empty() && state.selected >= state.visible.len() {
+                state.selected = state.visible.len() - 1;
+            }
+        }
+
+        // 2. Sync list_state with tree state
+        if state.visible.is_empty() {
+            list_state.select(None);
+        } else {
+            list_state.select(Some(state.selected));
+        }
+
+        // 3. Render
+        render_tree(&mut terminal, &mut state, &mut list_state)?;
+
+        // 4. Handle keyboard input (poll with timeout)
+        if event::poll(Duration::from_millis(200))? {
+            if let Event::Key(key) = event::read()? {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Down | KeyCode::Char('j') => state.move_down(),
+                    KeyCode::Up | KeyCode::Char('k') => state.move_up(),
+                    KeyCode::Char(' ') => state.toggle_collapse(),
+                    KeyCode::Enter | KeyCode::Char('o') => state.open_detail(),
+                    KeyCode::Char('f') => state.toggle_filter(),
+                    KeyCode::Char('R') => state.full_refresh(),
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    // Teardown
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    Ok(())
+}
