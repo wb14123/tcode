@@ -611,23 +611,27 @@ fn find_subagent_states(dir: &Path) -> Vec<(PathBuf, ConversationState)> {
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.is_dir() {
-            if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with("subagent-") {
-                    // Recurse into nested subagents first
-                    results.extend(find_subagent_states(&path));
-
-                    let state_file = path.join("conversation-state.json");
-                    if state_file.exists() {
-                        if let Ok(json) = std::fs::read_to_string(&state_file) {
-                            if let Ok(state) = serde_json::from_str::<ConversationState>(&json) {
-                                results.push((path, state));
-                            }
-                        }
-                    }
-                }
-            }
+        if !path.is_dir() {
+            continue;
         }
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("subagent-") {
+            continue;
+        }
+
+        // Recurse into nested subagents first
+        results.extend(find_subagent_states(&path));
+
+        let state_file = path.join("conversation-state.json");
+        let Ok(json) = std::fs::read_to_string(&state_file) else {
+            continue;
+        };
+        let Ok(state) = serde_json::from_str::<ConversationState>(&json) else {
+            continue;
+        };
+        results.push((path, state));
     }
     results
 }
@@ -692,15 +696,11 @@ async fn collect_subagent_response(
             Message::AssistantMessageChunk { content, .. } => {
                 resp.text.push_str(content);
             }
-            Message::AssistantMessageEnd { end_status: status, error, .. } => {
-                if matches!(status, MessageEndStatus::Failed) {
-                    if let Some(err) = error {
-                        if resp.text.is_empty() {
-                            resp.text = format!("Error: Subagent failed: {}", err);
-                            resp.end_status = MessageEndStatus::Failed;
-                        }
-                    }
-                }
+            Message::AssistantMessageEnd {
+                end_status: MessageEndStatus::Failed, error: Some(err), ..
+            } if resp.text.is_empty() => {
+                resp.text = format!("Error: Subagent failed: {}", err);
+                resp.end_status = MessageEndStatus::Failed;
             }
             Message::AssistantRequestEnd { total_input_tokens, total_output_tokens } => {
                 resp.input_tokens = *total_input_tokens;
