@@ -29,3 +29,10 @@ If compilation fails and more context is needed, re-run without tail to see full
 - Place tests in separate `*_tests.rs` files, one per module being tested (e.g. `conversation_tests.rs`, `llm_tests.rs`, `tool_tests.rs`)
 - Register test modules in `lib.rs` with `#[cfg(test)] mod <name>_tests;`
 - Do NOT put tests inline in source files — keep source and test files separate
+
+## Error Handling
+
+- **Never** use `let _ =` to silently discard `Result` values
+- At minimum, log the error with `tracing::error!` or `tracing::warn!`
+- Prefer returning `Result` to the caller so they can decide how to handle the error
+- This applies to both production code and fire-and-forget calls (e.g. broadcasting, file writes)
