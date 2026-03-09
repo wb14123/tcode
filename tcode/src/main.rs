@@ -191,10 +191,7 @@ enum Commands {
     /// Authenticate with Claude via OAuth and get an API key
     ClaudeAuth,
     /// Attach to an existing session and resume the conversation
-    Attach {
-        /// The session ID to attach to (interactive picker if omitted)
-        session_id: Option<String>,
-    },
+    Attach,
     /// Cancel a running tool call
     CancelTool {
         /// The tool call ID to cancel
@@ -309,9 +306,9 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Some(Commands::Attach { ref session_id }) => {
-            let session_id = match session_id {
-                Some(id) => id.clone(),
+        Some(Commands::Attach) => {
+            let session_id = match cli.session.clone() {
+                Some(id) => id,
                 None => match session_picker::pick_session()? {
                     Some(id) => id,
                     None => return Ok(()),
