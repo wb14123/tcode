@@ -328,20 +328,40 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Sessions) => {
             use std::os::unix::net::UnixStream;
+            use llm_rs::conversation::SessionMeta;
             let sessions = session::list_sessions()?;
             if sessions.is_empty() {
                 println!("No sessions in ~/.tcode/sessions/");
             } else {
+                // Collect session info with metadata for sorting
+                let mut entries: Vec<(String, String, Option<String>, u64)> = sessions
+                    .into_iter()
+                    .map(|id| {
+                        let session = Session::new(id.clone())?;
+                        let status = if UnixStream::connect(session.socket_path()).is_ok() {
+                            "active"
+                        } else {
+                            "inactive"
+                        };
+                        let meta = std::fs::read_to_string(session.session_meta_file())
+                            .ok()
+                            .and_then(|json| serde_json::from_str::<SessionMeta>(&json).ok());
+                        let last_active = meta.as_ref().and_then(|m| m.last_active_at).unwrap_or(0);
+                        let description = meta.and_then(|m| m.description);
+                        Ok((id, status.to_string(), description, last_active))
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+
+                // Sort by last_active_at descending (most recent first)
+                entries.sort_by(|a, b| b.3.cmp(&a.3));
+
                 println!("Sessions:");
-                for id in sessions {
-                    let session = Session::new(id.clone())?;
-                    // Try to connect to socket to check if server is running
-                    let status = if UnixStream::connect(session.socket_path()).is_ok() {
-                        "active"
+                for (id, status, description, _) in entries {
+                    if let Some(desc) = description {
+                        println!("  {} ({}) {}", id, status, desc);
                     } else {
-                        "inactive"
-                    };
-                    println!("  {} ({})", id, status);
+                        println!("  {} ({})", id, status);
+                    }
                 }
             }
             Ok(())

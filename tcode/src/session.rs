@@ -109,6 +109,11 @@ impl Session {
         self.session_dir.join("conversation-state.json")
     }
 
+    /// Path for the lightweight session metadata file
+    pub fn session_meta_file(&self) -> PathBuf {
+        self.session_dir.join("session-meta.json")
+    }
+
     /// Path for stdout log (captures injected stdout from tools like proxychains)
     pub fn stdout_log(&self) -> PathBuf {
         self.session_dir.join("stdout.log")

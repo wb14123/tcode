@@ -65,6 +65,17 @@ This keeps your context window small and allows you to handle more steps effecti
 Never re-delegate: if your assigned task is already just needed a single tool call, just do it directly. \
 Otherwise it will create an infinite loop of subagent calls.";
 
+/// Lightweight metadata written alongside conversation state for quick access
+/// (e.g. session listing) without loading the full state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionMeta {
+    pub description: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<u64>,
+    #[serde(default)]
+    pub last_active_at: Option<u64>,
+}
+
 /// Serializable snapshot of a conversation's state for persistence and resume.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ConversationState {
@@ -426,6 +437,8 @@ impl ConversationManager {
             total_input_tokens: 0,
             total_output_tokens: 0,
             single_turn,
+            description: None,
+            created_at: Some(now_millis()),
             env: ConversationEnv {
                 client,
                 conversation_manager: Arc::clone(self),
@@ -515,6 +528,24 @@ impl ConversationManager {
         state_dir: Option<PathBuf>,
     ) -> Result<(String, Arc<ConversationClient>)> {
         fill_cancelled_tool_results(&mut state.llm_msgs);
+
+        // Load session metadata (description, created_at) from session-meta.json
+        let meta = state_dir.as_ref()
+            .and_then(|dir| std::fs::read_to_string(dir.join("session-meta.json")).ok())
+            .and_then(|json| serde_json::from_str::<SessionMeta>(&json).ok());
+
+        // Back-fill description from first user message for old sessions without metadata
+        let description = meta.as_ref().and_then(|m| m.description.clone()).or_else(|| {
+            state.llm_msgs.iter().find_map(|msg| {
+                if let LLMMessage::User(text) = msg {
+                    Some(truncate_preview(text, 80))
+                } else {
+                    None
+                }
+            })
+        });
+        let created_at = meta.and_then(|m| m.created_at).or(Some(now_millis()));
+
         let (tools_map, input_rx, client) = prepare_conversation(&mut *llm, tools, state.msg_id_counter);
         let conversation = Conversation {
             id: state.id.clone(),
@@ -525,6 +556,8 @@ impl ConversationManager {
             total_input_tokens: state.total_input_tokens,
             total_output_tokens: state.total_output_tokens,
             single_turn: state.single_turn,
+            description,
+            created_at,
             env: ConversationEnv {
                 client,
                 conversation_manager: Arc::clone(self),
@@ -749,6 +782,12 @@ pub struct Conversation {
     /// When true, the conversation exits after one user message + LLM response cycle.
     single_turn: bool,
 
+    /// Truncated first user input used as session description.
+    description: Option<String>,
+
+    /// Timestamp (millis since epoch) when the conversation was created.
+    created_at: Option<u64>,
+
     /// Cloneable environment passed to spawned tool-execution tasks.
     env: ConversationEnv,
 }
@@ -785,6 +824,18 @@ impl Conversation {
             let target = dir.join("conversation-state.json");
             std::fs::write(&tmp, &json)?;
             std::fs::rename(&tmp, &target)?;
+
+            // Write lightweight session-meta.json for quick access (e.g. session listing)
+            let meta = SessionMeta {
+                description: self.description.clone(),
+                created_at: self.created_at,
+                last_active_at: Some(now_millis()),
+            };
+            let meta_json = serde_json::to_string_pretty(&meta)?;
+            let meta_tmp = dir.join("session-meta.json.tmp");
+            let meta_target = dir.join("session-meta.json");
+            std::fs::write(&meta_tmp, &meta_json)?;
+            std::fs::rename(&meta_tmp, &meta_target)?;
         }
         Ok(())
     }
@@ -828,6 +879,11 @@ impl Conversation {
                 created_at: now_millis(),
                 content: Arc::new(user_input.clone()),
             })?;
+
+            // Capture first user input as session description
+            if self.description.is_none() {
+                self.description = Some(truncate_preview(&user_input, 80));
+            }
 
             self.push_llm_msg(LLMMessage::User(user_input))?;
             self.call_llm().await?;
