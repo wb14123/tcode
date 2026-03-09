@@ -273,6 +273,19 @@ struct ContinueSubAgentParams {
     message: String,
 }
 
+/// Cloneable conversation environment passed to spawned tool-execution tasks.
+#[derive(Clone)]
+struct ConversationEnv {
+    client: Arc<ConversationClient>,
+    conversation_manager: Arc<ConversationManager>,
+    tools: HashMap<String, Arc<Tool>>,
+    chat_options: ChatOptions,
+    subagent_max_iterations: usize,
+    subagent_depth: usize,
+    max_subagent_depth: usize,
+    state_dir: Option<PathBuf>,
+}
+
 /// Create the `subagent` tool with a dynamic description listing available models.
 pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
     let models_list: Vec<String> = model_descriptions
@@ -307,6 +320,26 @@ pub fn create_continue_subagent_tool() -> Tool {
          The conversation_id is found in the [subagent_id: ...] prefix of previous subagent results.",
         schema,
     )
+}
+
+/// Prepare tools and channels common to both new and resumed conversations.
+fn prepare_conversation(
+    llm: &mut dyn LLM,
+    tools: Vec<Arc<Tool>>,
+    msg_id_start: i32,
+) -> (HashMap<String, Arc<Tool>>, mpsc::Receiver<String>, Arc<ConversationClient>) {
+    llm.register_tools(tools.clone());
+    let tools_map = tools.into_iter().map(|t| (t.name.clone(), t)).collect();
+    let (input_tx, input_rx) = mpsc::channel(10);
+    let (notify_tx, _) = broadcast::channel(100);
+    let client = Arc::new(ConversationClient {
+        msg_id_counter: AtomicI32::new(msg_id_start),
+        msgs: RwLock::new(Vec::new()),
+        input_channel_tx: input_tx,
+        new_msg_notify_tx: notify_tx,
+        tool_cancel_tokens: std::sync::Mutex::new(HashMap::new()),
+    });
+    (tools_map, input_rx, client)
 }
 
 // ============================================================================
@@ -378,17 +411,7 @@ impl ConversationManager {
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
     ) -> Result<(String, Arc<ConversationClient>)> {
-        // Register tools with the LLM for caching
-        llm.register_tools(tools.clone());
-
-        // Convert tools list to HashMap for O(1) lookup during execution
-        let tools_map: HashMap<String, Arc<Tool>> = tools
-            .into_iter()
-            .map(|t| (t.name.clone(), t))
-            .collect();
-
-        let (input_tx, input_rx) = mpsc::channel(10);
-        let (notify_tx, _) = broadcast::channel(100);
+        let (tools_map, input_rx, client) = prepare_conversation(&mut *llm, tools, 0);
         let llm_msgs = if system_prompt.is_empty() {
             vec![]
         } else {
@@ -398,27 +421,21 @@ impl ConversationManager {
             id: conversation_id.clone(),
             llm,
             model: model.to_string(),
-            tools: tools_map,
             llm_msgs,
             input_channel_rx: input_rx,
-            msg_id_counter: Arc::new(AtomicI32::new(0)),
             total_input_tokens: 0,
             total_output_tokens: 0,
-            chat_options,
-            conversation_client: {
-                Arc::new(ConversationClient {
-                    msgs: RwLock::new(Vec::new()),
-                    input_channel_tx: input_tx,
-                    new_msg_notify_tx: notify_tx,
-                    tool_cancel_tokens: std::sync::Mutex::new(HashMap::new()),
-                })
-            },
-            conversation_manager: Arc::clone(self),
             single_turn,
-            subagent_max_iterations,
-            subagent_depth,
-            max_subagent_depth,
-            state_dir,
+            env: ConversationEnv {
+                client,
+                conversation_manager: Arc::clone(self),
+                tools: tools_map,
+                chat_options,
+                subagent_max_iterations,
+                subagent_depth,
+                max_subagent_depth,
+                state_dir,
+            },
         };
         self.spawn_conversation(conversation)
     }
@@ -429,15 +446,13 @@ impl ConversationManager {
         conversation: Conversation,
     ) -> Result<(String, Arc<ConversationClient>)> {
         let conversation_id = conversation.id.clone();
-        let client = conversation.conversation_client.clone();
+        let client = conversation.env.client.clone();
         let watcher_client = client.clone();
-        let watcher_counter = conversation.msg_id_counter.clone();
         let task = tokio::spawn(async move {
             let mut conv = conversation;
             if let Err(e) = conv.start().await {
                 log_and_broadcast_system_message(
-                    &conv.conversation_client,
-                    &conv.msg_id_counter,
+                    &conv.env.client,
                     SystemMessageLevel::Error,
                     format!("Conversation ended with error: {}", e),
                 );
@@ -455,7 +470,6 @@ impl ConversationManager {
                 };
                 log_and_broadcast_system_message(
                     &watcher_client,
-                    &watcher_counter,
                     SystemMessageLevel::Error,
                     msg,
                 );
@@ -500,46 +514,28 @@ impl ConversationManager {
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
     ) -> Result<(String, Arc<ConversationClient>)> {
-        // Fill in cancelled tool results for interrupted conversations
         fill_cancelled_tool_results(&mut state.llm_msgs);
-
-        // Register tools with the LLM for caching
-        llm.register_tools(tools.clone());
-
-        let tools_map: HashMap<String, Arc<Tool>> = tools
-            .into_iter()
-            .map(|t| (t.name.clone(), t))
-            .collect();
-
-        let (input_tx, input_rx) = mpsc::channel(10);
-        let (notify_tx, _) = broadcast::channel(100);
-
-        let conversation_id = state.id.clone();
+        let (tools_map, input_rx, client) = prepare_conversation(&mut *llm, tools, state.msg_id_counter);
         let conversation = Conversation {
-            id: conversation_id.clone(),
+            id: state.id.clone(),
             llm,
             model: state.model,
-            tools: tools_map,
             llm_msgs: state.llm_msgs,
             input_channel_rx: input_rx,
-            msg_id_counter: Arc::new(AtomicI32::new(state.msg_id_counter)),
             total_input_tokens: state.total_input_tokens,
             total_output_tokens: state.total_output_tokens,
-            chat_options: state.chat_options,
-            conversation_client: Arc::new(ConversationClient {
-                msgs: RwLock::new(Vec::new()),
-                input_channel_tx: input_tx,
-                new_msg_notify_tx: notify_tx,
-                tool_cancel_tokens: std::sync::Mutex::new(HashMap::new()),
-            }),
-            conversation_manager: Arc::clone(self),
             single_turn: state.single_turn,
-            subagent_max_iterations,
-            subagent_depth: state.subagent_depth,
-            max_subagent_depth,
-            state_dir,
+            env: ConversationEnv {
+                client,
+                conversation_manager: Arc::clone(self),
+                tools: tools_map,
+                chat_options: state.chat_options,
+                subagent_max_iterations,
+                subagent_depth: state.subagent_depth,
+                max_subagent_depth,
+                state_dir,
+            },
         };
-
         self.spawn_conversation(conversation)
     }
 
@@ -639,7 +635,6 @@ fn find_subagent_states(dir: &Path) -> Vec<(PathBuf, ConversationState)> {
 /// Log a message and broadcast it as a SystemMessage to the conversation client.
 fn log_and_broadcast_system_message(
     client: &ConversationClient,
-    msg_id_counter: &AtomicI32,
     level: SystemMessageLevel,
     message: String,
 ) {
@@ -649,7 +644,7 @@ fn log_and_broadcast_system_message(
         SystemMessageLevel::Info => tracing::info!(%message),
     }
     if let Err(e) = client.notify_msg(Message::SystemMessage {
-        msg_id: msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        msg_id: client.next_msg_id(),
         created_at: now_millis(),
         level,
         message,
@@ -740,56 +735,32 @@ pub struct Conversation {
 
     model: String,
 
-    /// Tools available for the conversation, keyed by tool name for O(1) lookup.
-    tools: HashMap<String, Arc<Tool>>,
-
     /// LLM messages so far. Used to keep tracking the current messages and send the next message
     /// to LLM.
     llm_msgs: Vec<LLMMessage>,
 
-    conversation_client: Arc<ConversationClient>,
-
     /// Chat input receiver. Used for Conversation to poll the messages.
     input_channel_rx: mpsc::Receiver<String>,
-
-    /// Message ID counter for generating unique message IDs.
-    msg_id_counter: Arc<AtomicI32>,
 
     /// Accumulated token usage.
     total_input_tokens: i32,
     total_output_tokens: i32,
 
-    /// Chat options (includes reasoning config) for this conversation.
-    chat_options: ChatOptions,
-
-    /// Reference to the ConversationManager for creating subagent conversations.
-    conversation_manager: Arc<ConversationManager>,
-
     /// When true, the conversation exits after one user message + LLM response cycle.
     single_turn: bool,
 
-    /// Maximum number of LLM call iterations for subagent conversations.
-    subagent_max_iterations: usize,
-
-    /// Current nesting depth of this conversation (0 = root).
-    subagent_depth: usize,
-
-    /// Maximum allowed nesting depth for subagents.
-    max_subagent_depth: usize,
-
-    /// Directory where this conversation saves its state. None = no persistence.
-    state_dir: Option<PathBuf>,
-
+    /// Cloneable environment passed to spawned tool-execution tasks.
+    env: ConversationEnv,
 }
 
 /// Multi round LLM conversation. Thread and async safe.
 impl Conversation {
     fn next_msg_id(&self) -> MessageID {
-        self.msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        self.env.client.next_msg_id()
     }
 
     fn broadcast_msg(&self, msg: Message) -> Result<()> {
-        self.conversation_client.notify_msg(msg)
+        self.env.client.notify_msg(msg)
     }
 
     fn snapshot_state(&self) -> ConversationState {
@@ -797,17 +768,17 @@ impl Conversation {
             id: self.id.clone(),
             model: self.model.clone(),
             llm_msgs: self.llm_msgs.clone(),
-            chat_options: self.chat_options.clone(),
-            msg_id_counter: self.msg_id_counter.load(std::sync::atomic::Ordering::SeqCst),
+            chat_options: self.env.chat_options.clone(),
+            msg_id_counter: self.env.client.msg_id_counter_value(),
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
             single_turn: self.single_turn,
-            subagent_depth: self.subagent_depth,
+            subagent_depth: self.env.subagent_depth,
         }
     }
 
     fn save_state(&self) -> Result<()> {
-        if let Some(ref dir) = self.state_dir {
+        if let Some(ref dir) = self.env.state_dir {
             let state = self.snapshot_state();
             let json = serde_json::to_string_pretty(&state)?;
             let tmp = dir.join("conversation-state.json.tmp");
@@ -826,15 +797,14 @@ impl Conversation {
     /// Broadcast SubAgentTurnEnd for a subagent response (without pushing to llm_msgs).
     /// Returns `(tool_call_id, result_text)` for the caller to push.
     fn broadcast_subagent_turn_end(
-        conversation_client: &ConversationClient,
-        msg_id_counter: &AtomicI32,
+        client: &ConversationClient,
         conversation_id: &str,
         response: &SubagentResponse,
     ) -> Result<String> {
         let result_text = format_subagent_result(conversation_id, &response.text);
 
-        conversation_client.notify_msg(Message::SubAgentTurnEnd {
-            msg_id: msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        client.notify_msg(Message::SubAgentTurnEnd {
+            msg_id: client.next_msg_id(),
             conversation_id: conversation_id.to_string(),
             end_status: response.end_status.clone(),
             response: Arc::new(result_text.clone()),
@@ -877,15 +847,14 @@ impl Conversation {
     /// Call the LLM and handle the response.
     /// It handles the tool call and continues the loop when there is no tool call request anymore.
     async fn call_llm(&mut self) -> Result<()> {
-        let max_iterations = if self.single_turn { self.subagent_max_iterations } else { usize::MAX };
+        let max_iterations = if self.single_turn { self.env.subagent_max_iterations } else { usize::MAX };
         let mut iteration = 0;
 
         loop {
             iteration += 1;
             if iteration > max_iterations {
                 log_and_broadcast_system_message(
-                    &self.conversation_client,
-                    &self.msg_id_counter,
+                    &self.env.client,
                     SystemMessageLevel::Warning,
                     format!("Subagent reached maximum iterations limit ({})", max_iterations),
                 );
@@ -895,7 +864,7 @@ impl Conversation {
             // TODO: LLM stream cancellation will be restored with cancel_all()
             let mut response_stream =
                 self.llm
-                    .chat(self.model.as_str(), &self.llm_msgs, &self.chat_options);
+                    .chat(self.model.as_str(), &self.llm_msgs, &self.env.chat_options);
             let mut accumulated_text = String::new();
             let mut pending_tool_calls = Vec::new();
             let mut should_continue = false;
@@ -1000,51 +969,25 @@ impl Conversation {
     }
 
     async fn execute_tool_calls(&mut self, tool_calls: Vec<ToolCall>) -> Result<()> {
-        // Clone shared state needed by spawned tasks
-        let client = Arc::clone(&self.conversation_client);
-        let counter = Arc::clone(&self.msg_id_counter);
-        let conv_mgr = Arc::clone(&self.conversation_manager);
-        let tools = self.tools.clone();
-        let chat_options = self.chat_options.clone();
-        let subagent_max_iterations = self.subagent_max_iterations;
-        let subagent_depth = self.subagent_depth;
-        let max_subagent_depth = self.max_subagent_depth;
-        let state_dir = self.state_dir.clone();
-
         let mut join_set = tokio::task::JoinSet::new();
 
         for tool_call in tool_calls {
-            let client = Arc::clone(&client);
-            let counter = Arc::clone(&counter);
-            let conv_mgr = Arc::clone(&conv_mgr);
-            let tools = tools.clone();
-
+            let env = self.env.clone();
             match tool_call.name.as_str() {
                 "subagent" => {
                     let llm = self.llm.clone_box();
-                    let chat_options = chat_options.clone();
-                    let state_dir = state_dir.clone();
                     join_set.spawn(async move {
-                        execute_subagent_standalone(
-                            tool_call, client, counter, conv_mgr, tools, llm,
-                            chat_options, subagent_max_iterations, subagent_depth,
-                            max_subagent_depth, state_dir,
-                        ).await
+                        execute_subagent_standalone(tool_call, env, llm).await
                     });
                 }
                 "continue_subagent" => {
                     join_set.spawn(async move {
-                        execute_continue_subagent_standalone(
-                            tool_call, client, counter, conv_mgr,
-                        ).await
+                        execute_continue_subagent_standalone(tool_call, env).await
                     });
                 }
                 _ => {
-                    let tool_arc = tools.get(&tool_call.name).cloned();
                     join_set.spawn(async move {
-                        execute_regular_tool(
-                            tool_call, tool_arc, client, counter,
-                        ).await
+                        execute_regular_tool(tool_call, env).await
                     });
                 }
             }
@@ -1062,8 +1005,7 @@ impl Conversation {
                 }
                 Err(e) => {
                     log_and_broadcast_system_message(
-                        &self.conversation_client,
-                        &self.msg_id_counter,
+                        &self.env.client,
                         SystemMessageLevel::Error,
                         format!("Tool call task failed: {}", e),
                     );
@@ -1079,14 +1021,12 @@ impl Conversation {
 /// Returns `(tool_call_id, result_content)` for the caller to push into llm_msgs.
 async fn execute_regular_tool(
     tool_call: ToolCall,
-    tool_arc: Option<Arc<Tool>>,
-    conversation_client: Arc<ConversationClient>,
-    msg_id_counter: Arc<AtomicI32>,
+    env: ConversationEnv,
 ) -> Result<(String, String)> {
-    // Register a per-tool cancellation token
-    let tool_token = conversation_client.register_tool_token(&tool_call.id);
+    let tool_arc = env.tools.get(&tool_call.name).cloned();
+    let tool_token = env.client.register_tool_token(&tool_call.id);
 
-    let tool_msg_id = msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    let tool_msg_id = env.client.next_msg_id();
 
     tracing::info!(
         tool_call_id = %tool_call.id,
@@ -1095,8 +1035,7 @@ async fn execute_regular_tool(
         "executing tool call"
     );
 
-    // Broadcast tool start
-    conversation_client.notify_msg(Message::ToolMessageStart {
+    env.client.notify_msg(Message::ToolMessageStart {
         msg_id: tool_msg_id,
         tool_call_id: tool_call.id.clone(),
         created_at: now_millis(),
@@ -1104,12 +1043,10 @@ async fn execute_regular_tool(
         tool_args: tool_call.arguments.clone(),
     })?;
 
-    // Look up and execute the tool
-    let ctx = ToolContext { cancel_token: tool_token.clone() };
+    let tool_ctx = ToolContext { cancel_token: tool_token.clone() };
     let (end_status, tool_result) = if let Some(tool) = tool_arc {
         tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");
-        // Execute the tool and stream output chunks
-        let mut output_stream = tool.execute(ctx, tool_call.arguments.clone());
+        let mut output_stream = tool.execute(tool_ctx, tool_call.arguments.clone());
         let mut result_parts = Vec::new();
         while let Some(chunk) = output_stream.next().await {
             tracing::debug!(
@@ -1117,9 +1054,8 @@ async fn execute_regular_tool(
                 chunk_len = chunk.len(),
                 "tool output chunk"
             );
-            // Broadcast each chunk immediately with its own msg_id
-            conversation_client.notify_msg(Message::ToolOutputChunk {
-                msg_id: msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+            env.client.notify_msg(Message::ToolOutputChunk {
+                msg_id: env.client.next_msg_id(),
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
                 content: Arc::new(chunk.clone()),
@@ -1140,14 +1076,12 @@ async fn execute_regular_tool(
     } else {
         let error_msg = format!("Error: Tool '{}' not found", tool_call.name);
         log_and_broadcast_system_message(
-            &conversation_client,
-            &msg_id_counter,
+            &env.client,
             SystemMessageLevel::Error,
             format!("Tool '{}' not found", tool_call.name),
         );
-        // Broadcast the error as a chunk too
-        conversation_client.notify_msg(Message::ToolOutputChunk {
-            msg_id: msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        env.client.notify_msg(Message::ToolOutputChunk {
+            msg_id: env.client.next_msg_id(),
             tool_call_id: tool_call.id.clone(),
             tool_name: tool_call.name.clone(),
             content: Arc::new(error_msg.clone()),
@@ -1155,11 +1089,10 @@ async fn execute_regular_tool(
         (MessageEndStatus::Failed, error_msg)
     };
 
-    // Unregister the per-tool token now that execution is done
-    conversation_client.unregister_tool_token(&tool_call.id);
+    env.client.unregister_tool_token(&tool_call.id);
 
-    conversation_client.notify_msg(Message::ToolMessageEnd {
-        msg_id: msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    env.client.notify_msg(Message::ToolMessageEnd {
+        msg_id: env.client.next_msg_id(),
         tool_call_id: tool_call.id.clone(),
         end_status,
         input_tokens: 0,
@@ -1173,16 +1106,8 @@ async fn execute_regular_tool(
 /// Returns `(tool_call_id, result_content)` for the caller to push into llm_msgs.
 async fn execute_subagent_standalone(
     tool_call: ToolCall,
-    conversation_client: Arc<ConversationClient>,
-    msg_id_counter: Arc<AtomicI32>,
-    conversation_manager: Arc<ConversationManager>,
-    tools: HashMap<String, Arc<Tool>>,
+    env: ConversationEnv,
     llm: Box<dyn LLM>,
-    chat_options: ChatOptions,
-    subagent_max_iterations: usize,
-    subagent_depth: usize,
-    max_subagent_depth: usize,
-    state_dir: Option<PathBuf>,
 ) -> Result<(String, String)> {
     let params: SubAgentParams = match serde_json::from_str(&tool_call.arguments) {
         Ok(p) => p,
@@ -1192,33 +1117,33 @@ async fn execute_subagent_standalone(
     };
 
     // Collect parent's tools; include subagent tools only if depth allows nesting
-    let child_depth = subagent_depth + 1;
-    let allow_nesting = child_depth + 1 < max_subagent_depth;
-    let subagent_tools: Vec<Arc<Tool>> = tools.values()
+    let child_depth = env.subagent_depth + 1;
+    let allow_nesting = child_depth + 1 < env.max_subagent_depth;
+    let subagent_tools: Vec<Arc<Tool>> = env.tools.values()
         .filter(|t| allow_nesting || t.name != "subagent")
         .cloned()
         .collect();
 
     // Pre-generate subagent conversation ID so we can create its state_dir
     let subagent_conv_id_pre = Uuid::new_v4().to_string();
-    let subagent_state_dir = state_dir.as_ref().map(|d| {
+    let subagent_state_dir = env.state_dir.as_ref().map(|d| {
         let dir = d.join(format!("subagent-{}", subagent_conv_id_pre));
         std::fs::create_dir_all(&dir)?;
         Ok::<_, anyhow::Error>(dir)
     }).transpose()?;
 
     // Create the subagent conversation
-    let (subagent_conv_id, subagent_client) = match conversation_manager.new_conversation_with_id(
+    let (subagent_conv_id, subagent_client) = match env.conversation_manager.new_conversation_with_id(
         subagent_conv_id_pre,
         llm,
         &format!("You are a subagent spawned to perform a specific task.\n\n{}", SUBAGENT_RULES),
         &params.model,
         subagent_tools,
-        chat_options,
+        env.chat_options.clone(),
         true, // single_turn
-        subagent_max_iterations,
+        env.subagent_max_iterations,
         child_depth,
-        max_subagent_depth,
+        env.max_subagent_depth,
         subagent_state_dir,
     ) {
         Ok(result) => result,
@@ -1227,22 +1152,19 @@ async fn execute_subagent_standalone(
         }
     };
 
-    // Broadcast SubAgentStart to parent
     let task_preview = truncate_preview(&params.task, 100);
-    conversation_client.notify_msg(Message::SubAgentStart {
-        msg_id: msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    env.client.notify_msg(Message::SubAgentStart {
+        msg_id: env.client.next_msg_id(),
         conversation_id: subagent_conv_id.clone(),
         description: task_preview,
     })?;
 
-    // Subscribe to subagent messages before sending the task
     let mut sub_stream = subagent_client.subscribe();
 
-    // Send the task to the subagent
     if let Err(e) = subagent_client.send_chat(&params.task).await {
         let error = format!("Error: Failed to send task to subagent: {}", e);
-        conversation_client.notify_msg(Message::SubAgentEnd {
-            msg_id: msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        env.client.notify_msg(Message::SubAgentEnd {
+            msg_id: env.client.next_msg_id(),
             conversation_id: subagent_conv_id,
             end_status: MessageEndStatus::Failed,
             response: Arc::new(error.clone()),
@@ -1252,10 +1174,9 @@ async fn execute_subagent_standalone(
         return Ok((tool_call.id, error));
     }
 
-    // Collect response and finalize
     let response = collect_subagent_response(&mut sub_stream).await;
     let result_text = Conversation::broadcast_subagent_turn_end(
-        &conversation_client, &msg_id_counter, &subagent_conv_id, &response,
+        &env.client, &subagent_conv_id, &response,
     )?;
     Ok((tool_call.id, result_text))
 }
@@ -1264,9 +1185,7 @@ async fn execute_subagent_standalone(
 /// Returns `(tool_call_id, result_content)` for the caller to push into llm_msgs.
 async fn execute_continue_subagent_standalone(
     tool_call: ToolCall,
-    conversation_client: Arc<ConversationClient>,
-    msg_id_counter: Arc<AtomicI32>,
-    conversation_manager: Arc<ConversationManager>,
+    env: ConversationEnv,
 ) -> Result<(String, String)> {
     let params: ContinueSubAgentParams = match serde_json::from_str(&tool_call.arguments) {
         Ok(p) => p,
@@ -1275,8 +1194,7 @@ async fn execute_continue_subagent_standalone(
         }
     };
 
-    // Look up the existing subagent conversation
-    let subagent_client = match conversation_manager.get_conversation(&params.conversation_id) {
+    let subagent_client = match env.conversation_manager.get_conversation(&params.conversation_id) {
         Ok(Some(client)) => client,
         Ok(None) => {
             return Ok((tool_call.id, format!("Error: Subagent conversation '{}' not found", params.conversation_id)));
@@ -1288,21 +1206,18 @@ async fn execute_continue_subagent_standalone(
 
     let msg_preview = truncate_preview(&params.message, 100);
 
-    // Broadcast SubAgentContinue to show the sub-agent is running again
-    conversation_client.notify_msg(Message::SubAgentContinue {
-        msg_id: msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+    env.client.notify_msg(Message::SubAgentContinue {
+        msg_id: env.client.next_msg_id(),
         conversation_id: params.conversation_id.clone(),
         description: msg_preview,
     })?;
 
-    // Subscribe to new messages only (avoid reprocessing history)
     let mut sub_stream = subagent_client.subscribe_new();
 
-    // Send the follow-up message
     if let Err(e) = subagent_client.send_chat(&params.message).await {
         let error = format!("Error: Failed to send follow-up to subagent: {}", e);
-        conversation_client.notify_msg(Message::SubAgentTurnEnd {
-            msg_id: msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        env.client.notify_msg(Message::SubAgentTurnEnd {
+            msg_id: env.client.next_msg_id(),
             conversation_id: params.conversation_id,
             end_status: MessageEndStatus::Failed,
             response: Arc::new(error.clone()),
@@ -1312,10 +1227,9 @@ async fn execute_continue_subagent_standalone(
         return Ok((tool_call.id, error));
     }
 
-    // Collect response and finalize
     let response = collect_subagent_response(&mut sub_stream).await;
     let result_text = Conversation::broadcast_subagent_turn_end(
-        &conversation_client, &msg_id_counter, &params.conversation_id, &response,
+        &env.client, &params.conversation_id, &response,
     )?;
     Ok((tool_call.id, result_text))
 }
@@ -1323,6 +1237,7 @@ async fn execute_continue_subagent_standalone(
 
 /// Use for the client to send chat messages and subscribe to the conversation's messages.
 pub struct ConversationClient {
+    msg_id_counter: AtomicI32,
     msgs: RwLock<Vec<Arc<Message>>>,
     input_channel_tx: mpsc::Sender<String>,
     new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
@@ -1330,6 +1245,16 @@ pub struct ConversationClient {
 }
 
 impl ConversationClient {
+    /// Allocate the next unique message ID.
+    pub(crate) fn next_msg_id(&self) -> MessageID {
+        self.msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Read the current counter value (for snapshotting state).
+    pub(crate) fn msg_id_counter_value(&self) -> i32 {
+        self.msg_id_counter.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
     /// Cancel a specific tool call by its ID. Returns true if the tool was found and cancelled.
     pub fn cancel_tool(&self, tool_call_id: &str) -> bool {
         let tokens = self.tool_cancel_tokens.lock().unwrap();
@@ -1402,6 +1327,7 @@ impl ConversationClient {
         let (input_tx, _input_rx) = mpsc::channel(10);
         let (notify_tx, _) = broadcast::channel(100);
         ConversationClient {
+            msg_id_counter: AtomicI32::new(0),
             msgs: RwLock::new(Vec::new()),
             input_channel_tx: input_tx,
             new_msg_notify_tx: notify_tx,
