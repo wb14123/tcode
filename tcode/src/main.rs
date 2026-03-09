@@ -4,6 +4,7 @@ mod edit;
 mod protocol;
 mod server;
 mod session;
+mod session_picker;
 mod tool_call_display;
 mod tty_stdio;
 
@@ -191,8 +192,8 @@ enum Commands {
     ClaudeAuth,
     /// Attach to an existing session and resume the conversation
     Attach {
-        /// The session ID to attach to
-        session_id: String,
+        /// The session ID to attach to (interactive picker if omitted)
+        session_id: Option<String>,
     },
     /// Cancel a running tool call
     CancelTool {
@@ -309,10 +310,16 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::Attach { ref session_id }) => {
+            let session_id = match session_id {
+                Some(id) => id.clone(),
+                None => match session_picker::pick_session()? {
+                    Some(id) => id,
+                    None => return Ok(()),
+                },
+            };
             if !is_in_tmux() {
                 anyhow::bail!("tcode attach must be run inside tmux.\nRun `tcode serve` to start the server without tmux.");
             }
-            let session_id = session_id.clone();
             let session = Session::new(session_id.clone())?;
             if !session.conversation_state_file().exists() {
                 anyhow::bail!("No conversation state found for session '{}'. Nothing to resume.", session_id);
