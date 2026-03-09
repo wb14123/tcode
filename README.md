@@ -71,6 +71,10 @@ cargo test            # Run tests
 # Inside a tmux session - starts server + display + edit panes
 cargo run -p tcode
 
+# Attach to a previous session (interactive picker or --session <id>)
+cargo run -p tcode -- attach                  # Interactive picker
+cargo run -p tcode -- --session <id> attach   # Direct
+
 # Or start components separately
 cargo run -p tcode -- serve     # Server only
 cargo run -p tcode -- edit      # Editor pane (connects to running server)

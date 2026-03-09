@@ -62,27 +62,31 @@ Each provider has its own default model, base URL, and environment variable for 
 
 Starts the server and opens display + edit panes in the current tmux session. Generates a unique 8-character session ID (e.g., `abc12def`) and prints it on startup. Session files persist in `~/.tcode/sessions/{id}/`.
 
+### `tcode [--session <id>] attach`
+
+Attaches to an existing session and resumes the conversation in the current tmux session. If `--session` is omitted, an interactive picker lets you select from available sessions. Must be run inside tmux.
+
 ### `tcode sessions`
 
 Lists all sessions with their status (active/inactive). Active sessions have a running server.
 
-### `tcode serve --session <id>`
+### `tcode --session <id> serve`
 
 Starts just the server process (no tmux integration). Requires `--session` flag.
 
-### `tcode edit --session <id>`
+### `tcode --session <id> edit`
 
 Opens a neovim editor for composing and sending messages to the server. Watches `edit-msg.txt` for changes and sends content over the Unix socket.
 
-### `tcode display --session <id>`
+### `tcode --session <id> display`
 
 Opens a neovim buffer that renders the conversation by tailing `display.jsonl`. Shows user messages, assistant responses, tool calls, and token usage with syntax highlighting.
 
-### `tcode tool-call <tool-call-id> --session <id>`
+### `tcode --session <id> tool-call <tool-call-id>`
 
 Opens a neovim buffer showing the detailed output of a specific tool execution. Reads from per-tool-call JSONL files.
 
-### `tcode cancel-tool <tool-call-id> --session <id>`
+### `tcode --session <id> cancel-tool <tool-call-id>`
 
 Cancels a running tool call. Connects to the server's Unix socket, sends a `CancelTool` message, and prints the result. Used by the display pane's `Ctrl-k` keybinding. Works across all conversations (root and subagents) — the `--session` can be a subagent session ID; the root session's socket is resolved automatically.
 
