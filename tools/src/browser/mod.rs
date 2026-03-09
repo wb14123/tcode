@@ -105,6 +105,15 @@ fn ensure_checker_thread(idle_timeout: Duration) {
     }
 }
 
+/// Explicitly shut down the shared browser, killing the Chrome process.
+/// Call this before process exit to prevent orphaned Chrome processes,
+/// since Rust does not run destructors on statics.
+pub fn shutdown_browser() {
+    if let Ok(mut state) = BROWSER_STATE.lock() {
+        state.browser.take();
+    }
+}
+
 /// Open a new tab in the shared browser, navigate to the URL, and wait for load.
 ///
 /// Returns a `TabGuard` that derefs to `Tab`. When the guard is dropped, the tab

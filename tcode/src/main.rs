@@ -565,7 +565,26 @@ async fn run_unified_with_session(
         .spawn()
         .context("Failed to spawn display process")?;
 
-    let result = display_child.wait();
+    let display_pid = display_child.id();
+    let result = {
+        let wait_handle = tokio::task::spawn_blocking(move || display_child.wait());
+        tokio::select! {
+            result = wait_handle => {
+                result.unwrap_or_else(|e| Err(std::io::Error::other(e)))
+            }
+            _ = tokio::signal::ctrl_c() => {
+                // Ctrl+C received — terminate display child so we can proceed to cleanup
+                nix::sys::signal::kill(
+                    nix::unistd::Pid::from_raw(display_pid as i32),
+                    nix::sys::signal::Signal::SIGTERM,
+                ).ok();
+                Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "interrupted by Ctrl+C"))
+            }
+        }
+    };
+
+    // Always clean up: kill Chrome, tmux panes, and server — regardless of how we exited
+    tools::browser::shutdown_browser();
 
     let _ = Command::new("tmux")
         .args(["kill-pane", "-t", &edit_pane_id])
@@ -581,6 +600,7 @@ async fn run_unified_with_session(
 
     match result {
         Ok(_) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::Interrupted => Ok(()),
         Err(e) => {
             tty_stdio::write_error_to_terminal(&format!("Error: {:?}", e));
             Err(anyhow::anyhow!(e).context("Display process failed"))
