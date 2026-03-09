@@ -431,10 +431,16 @@ impl ConversationManager {
         let conversation_id = conversation.id.clone();
         let client = conversation.conversation_client.clone();
         let watcher_client = client.clone();
+        let watcher_counter = conversation.msg_id_counter.clone();
         let task = tokio::spawn(async move {
             let mut conv = conversation;
             if let Err(e) = conv.start().await {
-                tracing::error!(error = %e, "conversation ended with error");
+                log_and_broadcast_system_message(
+                    &conv.conversation_client,
+                    &conv.msg_id_counter,
+                    SystemMessageLevel::Error,
+                    format!("Conversation ended with error: {}", e),
+                );
             }
         });
         let abort_handle = task.abort_handle();
@@ -447,15 +453,12 @@ impl ConversationManager {
                 } else {
                     "Conversation task cancelled".to_string()
                 };
-                tracing::error!(error = %msg, "conversation task failed");
-                if let Err(e) = watcher_client.notify_msg(Message::SystemMessage {
-                    msg_id: 0,
-                    created_at: now_millis(),
-                    level: SystemMessageLevel::Error,
-                    message: msg,
-                }) {
-                    tracing::warn!(error = %e, "failed to broadcast conversation failure");
-                }
+                log_and_broadcast_system_message(
+                    &watcher_client,
+                    &watcher_counter,
+                    SystemMessageLevel::Error,
+                    msg,
+                );
             }
         });
 
@@ -631,6 +634,28 @@ fn find_subagent_states(dir: &Path) -> Vec<(PathBuf, ConversationState)> {
         }
     }
     results
+}
+
+/// Log a message and broadcast it as a SystemMessage to the conversation client.
+fn log_and_broadcast_system_message(
+    client: &ConversationClient,
+    msg_id_counter: &AtomicI32,
+    level: SystemMessageLevel,
+    message: String,
+) {
+    match &level {
+        SystemMessageLevel::Error => tracing::error!(%message),
+        SystemMessageLevel::Warning => tracing::warn!(%message),
+        SystemMessageLevel::Info => tracing::info!(%message),
+    }
+    if let Err(e) = client.notify_msg(Message::SystemMessage {
+        msg_id: msg_id_counter.fetch_add(1, std::sync::atomic::Ordering::SeqCst),
+        created_at: now_millis(),
+        level,
+        message,
+    }) {
+        tracing::warn!(error = %e, "failed to broadcast system message");
+    }
 }
 
 /// Truncate a string for preview display, appending "..." if truncated.
@@ -858,17 +883,12 @@ impl Conversation {
         loop {
             iteration += 1;
             if iteration > max_iterations {
-                tracing::warn!(
-                    conversation_id = %self.id,
-                    max_iterations,
-                    "subagent hit max iterations limit"
+                log_and_broadcast_system_message(
+                    &self.conversation_client,
+                    &self.msg_id_counter,
+                    SystemMessageLevel::Warning,
+                    format!("Subagent reached maximum iterations limit ({})", max_iterations),
                 );
-                self.broadcast_msg(Message::SystemMessage {
-                    msg_id: self.next_msg_id(),
-                    created_at: now_millis(),
-                    level: SystemMessageLevel::Warning,
-                    message: format!("Subagent reached maximum iterations limit ({})", max_iterations),
-                })?;
                 break;
             }
 
@@ -1041,7 +1061,12 @@ impl Conversation {
                     })?;
                 }
                 Err(e) => {
-                    tracing::error!(error = %e, "tool call task panicked or was cancelled");
+                    log_and_broadcast_system_message(
+                        &self.conversation_client,
+                        &self.msg_id_counter,
+                        SystemMessageLevel::Error,
+                        format!("Tool call task failed: {}", e),
+                    );
                 }
             }
         }
@@ -1114,10 +1139,11 @@ async fn execute_regular_tool(
         (status, result_parts.join(""))
     } else {
         let error_msg = format!("Error: Tool '{}' not found", tool_call.name);
-        tracing::error!(
-            tool_call_id = %tool_call.id,
-            tool_name = %tool_call.name,
-            "tool not found"
+        log_and_broadcast_system_message(
+            &conversation_client,
+            &msg_id_counter,
+            SystemMessageLevel::Error,
+            format!("Tool '{}' not found", tool_call.name),
         );
         // Broadcast the error as a chunk too
         conversation_client.notify_msg(Message::ToolOutputChunk {
