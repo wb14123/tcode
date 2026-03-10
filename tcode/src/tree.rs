@@ -481,6 +481,7 @@ impl TreeState {
             }
             Message::SubAgentTurnEnd {
                 conversation_id,
+                end_status,
                 input_tokens,
                 output_tokens,
                 ..
@@ -493,7 +494,10 @@ impl TreeState {
                         ..
                     } = &mut self.arena[idx].kind
                     {
-                        *status = NodeStatus::Idle;
+                        *status = match end_status {
+                            MessageEndStatus::Cancelled => NodeStatus::Cancelled,
+                            _ => NodeStatus::Idle,
+                        };
                         *it = *input_tokens;
                         *ot = *output_tokens;
                     }
@@ -588,6 +592,36 @@ impl TreeState {
     fn toggle_filter(&mut self) {
         self.filter_active_only = !self.filter_active_only;
         self.rebuild_visible();
+    }
+
+    /// Cancel the selected subagent conversation via the cancel-conversation CLI command.
+    fn cancel_selected(&self) {
+        let idx = match self.visible.get(self.selected) {
+            Some(&i) => i,
+            None => return,
+        };
+        let node = &self.arena[idx];
+        let conversation_id = match &node.kind {
+            NodeType::SubAgent { conversation_id, status, .. } => {
+                if matches!(status, NodeStatus::Running | NodeStatus::Idle) {
+                    conversation_id
+                } else {
+                    return; // Already finished
+                }
+            }
+            _ => return, // Only subagents can be cancelled
+        };
+        let exe = match std::env::current_exe() {
+            Ok(e) => e.to_string_lossy().to_string(),
+            Err(_) => return,
+        };
+        let _ = std::process::Command::new(&exe)
+            .args([
+                &format!("--session={}", self.session_id),
+                "cancel-conversation",
+                conversation_id,
+            ])
+            .output();
     }
 
     /// Open detail view for the selected node in a new tmux window.
@@ -695,7 +729,9 @@ fn render_tree(
                 Span::raw(" open  "),
             ]),
             Line::from(vec![
-                Span::styled(" f", Style::default().fg(Color::Yellow)),
+                Span::styled(" C-k", Style::default().fg(Color::Yellow)),
+                Span::raw(" cancel  "),
+                Span::styled("f", Style::default().fg(Color::Yellow)),
                 Span::raw(" running/all  "),
                 Span::styled("R", Style::default().fg(Color::Yellow)),
                 Span::raw(" refresh  "),
@@ -977,15 +1013,20 @@ pub fn run_tree(session: Session) -> Result<()> {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Down | KeyCode::Char('j') => state.move_down(),
-                    KeyCode::Up | KeyCode::Char('k') => state.move_up(),
-                    KeyCode::Char(' ') => state.toggle_collapse(),
-                    KeyCode::Enter | KeyCode::Char('o') => state.open_detail(),
-                    KeyCode::Char('f') => state.toggle_filter(),
-                    KeyCode::Char('R') => state.full_refresh(),
-                    _ => {}
+                // Handle Ctrl-k before plain k (cancel vs move up)
+                if key.code == KeyCode::Char('k') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                    state.cancel_selected();
+                } else {
+                    match key.code {
+                        KeyCode::Char('q') => break,
+                        KeyCode::Down | KeyCode::Char('j') => state.move_down(),
+                        KeyCode::Up | KeyCode::Char('k') => state.move_up(),
+                        KeyCode::Char(' ') => state.toggle_collapse(),
+                        KeyCode::Enter | KeyCode::Char('o') => state.open_detail(),
+                        KeyCode::Char('f') => state.toggle_filter(),
+                        KeyCode::Char('R') => state.full_refresh(),
+                        _ => {}
+                    }
                 }
             }
         }

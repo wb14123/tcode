@@ -198,6 +198,11 @@ enum Commands {
         /// The tool call ID to cancel
         tool_call_id: String,
     },
+    /// Cancel an entire conversation (cascades to all tools and child subagents)
+    CancelConversation {
+        /// The conversation ID to cancel
+        conversation_id: String,
+    },
     /// List active sessions
     Sessions,
     /// Show tree view of subagents and tool calls
@@ -304,6 +309,25 @@ async fn main() -> Result<()> {
                 let resp: protocol::ServerMessage = serde_json::from_slice(&resp)?;
                 match resp {
                     protocol::ServerMessage::Ack => println!("Tool cancelled"),
+                    protocol::ServerMessage::Error { message } => eprintln!("Error: {}", message),
+                }
+            }
+            Ok(())
+        }
+        Some(Commands::CancelConversation { conversation_id }) => {
+            let session_id = require_session(cli.session)?;
+            let root_session_id = session_id.split("/subagent-").next().unwrap_or(&session_id).to_string();
+            let session = Session::new(root_session_id)?;
+            let stream = UnixStream::connect(session.socket_path()).await
+                .context("Failed to connect to server socket. Is the server running?")?;
+            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+            let msg = protocol::ClientMessage::CancelConversation { conversation_id };
+            let json = serde_json::to_vec(&msg)?;
+            framed.send(Bytes::from(json)).await?;
+            if let Some(Ok(resp)) = framed.next().await {
+                let resp: protocol::ServerMessage = serde_json::from_slice(&resp)?;
+                match resp {
+                    protocol::ServerMessage::Ack => println!("Conversation cancelled"),
                     protocol::ServerMessage::Error { message } => eprintln!("Error: {}", message),
                 }
             }

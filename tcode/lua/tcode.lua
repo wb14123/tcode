@@ -82,6 +82,39 @@ local assistant_md = { started = false, start_row = nil, region_idx = nil }
 local ts_batch_depth = 0  -- >0 means we're in a batch; defer treesitter parsing
 local ts_dirty = false    -- set when update_ts_regions was deferred
 
+--- Show a y/n confirmation popup at the cursor and execute callback on confirm.
+local function confirm_popup(prompt, on_confirm)
+  local popup_buf = vim.api.nvim_create_buf(false, true)
+  vim.api.nvim_buf_set_lines(popup_buf, 0, -1, false, { prompt })
+  local width = #prompt + 4
+  local popup_win = vim.api.nvim_open_win(popup_buf, true, {
+    relative = 'cursor',
+    row = 1,
+    col = 0,
+    width = width,
+    height = 1,
+    style = 'minimal',
+    border = 'rounded',
+  })
+
+  local function close_popup()
+    if vim.api.nvim_win_is_valid(popup_win) then
+      vim.api.nvim_win_close(popup_win, true)
+    end
+    if vim.api.nvim_buf_is_valid(popup_buf) then
+      vim.api.nvim_buf_delete(popup_buf, { force = true })
+    end
+  end
+
+  vim.keymap.set('n', 'y', function()
+    close_popup()
+    on_confirm()
+  end, { buffer = popup_buf, nowait = true })
+  vim.keymap.set('n', 'n', close_popup, { buffer = popup_buf, nowait = true })
+  vim.keymap.set('n', 'q', close_popup, { buffer = popup_buf, nowait = true })
+  vim.keymap.set('n', '<Esc>', close_popup, { buffer = popup_buf, nowait = true })
+end
+
 local function flush_ts_regions(buf)
   if not ts_parser then return end
   if not vim.api.nvim_buf_is_valid(buf) then return end
@@ -888,7 +921,8 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
     vim.fn.system(string.format('tmux new-window -n "%s" "%s"', 'tool-detail', cmd))
   end, { buffer = true, silent = true, desc = 'Open tool call detail' })
 
-  -- Cancel tool call with confirmation popup
+  -- Cancel tool or subagent with confirmation popup (Ctrl-k)
+  -- Checks subagent first, then tool call.
   vim.keymap.set('n', '<C-k>', function()
     if not M.exe_path or not M.session_id then
       vim.notify('Session info not available', vim.log.levels.ERROR)
@@ -896,6 +930,30 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
     end
 
     local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
+
+    -- Check for subagent under cursor first
+    local sa_marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, { details = true })
+    for _, mark in ipairs(sa_marks) do
+      local start_row = mark[2]
+      local details = mark[4]
+      local end_row = details.end_row or start_row
+      if cursor_line >= start_row and cursor_line <= end_row and sa_extmark_ids[mark[1]] then
+        local conv_id = sa_extmark_ids[mark[1]]
+        if not sa_label_marks[conv_id] then
+          vim.notify('Subagent already finished', vim.log.levels.INFO)
+          return
+        end
+        local desc = sa_label_marks[conv_id].description or conv_id
+        confirm_popup("Cancel subagent '" .. desc .. "'? (y/n)", function()
+          local cmd = string.format('%s --session=%s cancel-conversation %s', M.exe_path, M.session_id, conv_id)
+          local result = vim.fn.system(cmd)
+          vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
+        end)
+        return
+      end
+    end
+
+    -- Fall through to tool call cancel
     local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, { details = true })
     local tool_call_id = nil
     for _, mark in ipairs(marks) do
@@ -909,54 +967,53 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
     end
 
     if not tool_call_id then
-      vim.notify('No tool call under cursor', vim.log.levels.WARN)
+      vim.notify('No tool call or subagent under cursor', vim.log.levels.WARN)
       return
     end
 
-    -- Check if the tool is still running (has a label mark with cancel hint)
     if not tc_label_marks[tool_call_id] then
       vim.notify('Tool call already finished', vim.log.levels.INFO)
       return
     end
 
     local tool_name = tc_tool_names[tool_call_id] or 'unknown'
-
-    -- Create confirmation popup
-    local popup_buf = vim.api.nvim_create_buf(false, true)
-    local prompt = "Cancel tool '" .. tool_name .. "'? (y/n)"
-    vim.api.nvim_buf_set_lines(popup_buf, 0, -1, false, { prompt })
-    local width = #prompt + 4
-    local popup_win = vim.api.nvim_open_win(popup_buf, true, {
-      relative = 'cursor',
-      row = 1,
-      col = 0,
-      width = width,
-      height = 1,
-      style = 'minimal',
-      border = 'rounded',
-    })
-
-    local function close_popup()
-      if vim.api.nvim_win_is_valid(popup_win) then
-        vim.api.nvim_win_close(popup_win, true)
-      end
-      if vim.api.nvim_buf_is_valid(popup_buf) then
-        vim.api.nvim_buf_delete(popup_buf, { force = true })
-      end
-    end
-
-    local function do_cancel()
-      close_popup()
+    confirm_popup("Cancel tool '" .. tool_name .. "'? (y/n)", function()
       local cmd = string.format('%s --session=%s cancel-tool %s', M.exe_path, M.session_id, tool_call_id)
       local result = vim.fn.system(cmd)
       vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
+    end)
+  end, { buffer = true, silent = true, desc = 'Cancel tool or subagent' })
+
+  -- Cancel entire conversation with confirmation popup (Ctrl-C)
+  vim.keymap.set('n', '<C-c>', function()
+    if not M.exe_path or not M.session_id then
+      vim.notify('Session info not available', vim.log.levels.ERROR)
+      return
     end
 
-    vim.keymap.set('n', 'y', do_cancel, { buffer = popup_buf, nowait = true })
-    vim.keymap.set('n', 'n', close_popup, { buffer = popup_buf, nowait = true })
-    vim.keymap.set('n', 'q', close_popup, { buffer = popup_buf, nowait = true })
-    vim.keymap.set('n', '<Esc>', close_popup, { buffer = popup_buf, nowait = true })
-  end, { buffer = true, silent = true, desc = 'Cancel tool call' })
+    -- Read conversation ID from conversation-state.json in the session directory
+    local session_dir = vim.fn.fnamemodify(M.display_file, ':h')
+    local state_file = session_dir .. '/conversation-state.json'
+    local f = io.open(state_file, 'r')
+    if not f then
+      vim.notify('Cannot read conversation state', vim.log.levels.ERROR)
+      return
+    end
+    local content = f:read('*a')
+    f:close()
+    local ok, data = pcall(vim.json.decode, content)
+    if not ok or not data or not data.id then
+      vim.notify('Cannot parse conversation state', vim.log.levels.ERROR)
+      return
+    end
+    local conv_id = data.id
+
+    confirm_popup("Cancel conversation? (y/n)", function()
+      local cmd = string.format('%s --session=%s cancel-conversation %s', M.exe_path, M.session_id, conv_id)
+      local result = vim.fn.system(cmd)
+      vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
+    end)
+  end, { buffer = true, silent = true, desc = 'Cancel conversation' })
 end
 
 -- Setup tool call display window for viewing a single tool call's details

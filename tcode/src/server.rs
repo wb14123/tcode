@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
-use llm_rs::conversation::{ConversationManager, ConversationState, Message, create_subagent_tool, create_continue_subagent_tool};
+use llm_rs::conversation::{ConversationManager, ConversationState, Message, MessageEndStatus, create_subagent_tool, create_continue_subagent_tool};
 use llm_rs::llm::{ChatOptions, LLM};
 use llm_rs::tool::Tool;
 use tokio::fs::OpenOptions;
@@ -220,7 +220,8 @@ impl Server {
                     let conv_client = Arc::clone(&conversation_client);
                     let tc_map = Arc::clone(&tool_clients);
                     let shutdown_tx = Arc::clone(&shutdown_tx);
-                    tokio::spawn(handle_client(stream, conv_client, tc_map, shutdown_tx));
+                    let mgr = Arc::clone(&manager);
+                    tokio::spawn(handle_client(stream, conv_client, tc_map, shutdown_tx, mgr));
                 }
             }
         }
@@ -482,10 +483,14 @@ fn run_event_writer(
                     "SubAgentTurnEnd received"
                 );
 
-                // Write "Idle" status — do NOT abort the event writer or remove from subagents
+                // Write status — do NOT abort the event writer or remove from subagents
                 if let Some(state) = subagents.get(conversation_id) {
-                    tokio::fs::write(&state.status_file_path, "Idle").await
-                        .context("Failed to write subagent idle status")?;
+                    let status_str = match end_status {
+                        MessageEndStatus::Cancelled => "Cancelled",
+                        _ => "Idle",
+                    };
+                    tokio::fs::write(&state.status_file_path, status_str).await
+                        .context("Failed to write subagent status")?;
                 }
 
                 append_event(&display_file, &event).await
@@ -526,9 +531,10 @@ async fn handle_client(
     conv_client: Arc<ConversationClient>,
     tool_clients: ToolClientMap,
     shutdown_tx: Arc<broadcast::Sender<()>>,
+    manager: Arc<ConversationManager>,
 ) {
     let shutdown_rx = shutdown_tx.subscribe();
-    if let Err(e) = handle_client_inner(stream, conv_client, tool_clients, shutdown_tx, shutdown_rx).await {
+    if let Err(e) = handle_client_inner(stream, conv_client, tool_clients, shutdown_tx, shutdown_rx, manager).await {
         eprintln!("[Server] Client handler error: {}", e);
     }
 }
@@ -539,6 +545,7 @@ async fn handle_client_inner(
     tool_clients: ToolClientMap,
     shutdown_tx: Arc<broadcast::Sender<()>>,
     mut shutdown_rx: broadcast::Receiver<()>,
+    manager: Arc<ConversationManager>,
 ) -> Result<()> {
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
     let (mut sink, mut stream) = framed.split();
@@ -570,6 +577,24 @@ async fn handle_client_inner(
                             send_msg(&mut sink, &ServerMessage::Error {
                                 message: format!("Tool call '{}' not found", tool_call_id),
                             }).await?;
+                        }
+                    }
+                    ClientMessage::CancelConversation { conversation_id } => {
+                        match manager.get_conversation(&conversation_id) {
+                            Ok(Some(client)) => {
+                                client.cancel();
+                                send_msg(&mut sink, &ServerMessage::Ack).await?;
+                            }
+                            Ok(None) => {
+                                send_msg(&mut sink, &ServerMessage::Error {
+                                    message: format!("Conversation '{}' not found", conversation_id),
+                                }).await?;
+                            }
+                            Err(e) => {
+                                send_msg(&mut sink, &ServerMessage::Error {
+                                    message: format!("Error looking up conversation: {}", e),
+                                }).await?;
+                            }
                         }
                     }
                     ClientMessage::Shutdown => {

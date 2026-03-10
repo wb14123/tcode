@@ -7,6 +7,8 @@ pub enum ClientMessage {
     SendMessage { content: String },
     /// Cancel a specific tool call by its ID
     CancelTool { tool_call_id: String },
+    /// Cancel an entire conversation (cascades to all tools and child subagents)
+    CancelConversation { conversation_id: String },
     /// Request server shutdown (broadcasts to all clients)
     Shutdown,
 }

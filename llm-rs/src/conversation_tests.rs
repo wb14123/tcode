@@ -219,4 +219,114 @@ mod tests {
         assert!(client.cancel_tool("b"));
         assert!(token_b.is_cancelled());
     }
+
+    // ======== Conversation-level cancellation ========
+
+    #[test]
+    fn cancel_conversation_cancels_all_tools() {
+        let client = ConversationClient::new_for_test();
+
+        let tool_a = client.register_tool_token("a");
+        let tool_b = client.register_tool_token("b");
+        let tool_c = client.register_tool_token("c");
+
+        assert!(!tool_a.is_cancelled());
+        assert!(!tool_b.is_cancelled());
+        assert!(!tool_c.is_cancelled());
+
+        // Cancelling the conversation cancels all child tool tokens
+        client.cancel();
+
+        assert!(tool_a.is_cancelled());
+        assert!(tool_b.is_cancelled());
+        assert!(tool_c.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_tool_does_not_cancel_conversation() {
+        let client = ConversationClient::new_for_test();
+
+        let tool_a = client.register_tool_token("a");
+        let tool_b = client.register_tool_token("b");
+
+        // Cancel individual tool "a"
+        client.cancel_tool("a");
+        assert!(tool_a.is_cancelled());
+
+        // Conversation cancel token and other tools are NOT cancelled
+        let conv_token = client.current_cancel_token();
+        assert!(!conv_token.is_cancelled());
+        assert!(!tool_b.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_cascades_to_children() {
+        use std::sync::Arc;
+
+        let parent = ConversationClient::new_for_test();
+        let child = Arc::new(ConversationClient::new_for_test());
+        let grandchild = Arc::new(ConversationClient::new_for_test());
+
+        // Build parent -> child -> grandchild
+        child.register_child("grandchild-1".to_string(), Arc::clone(&grandchild));
+        parent.register_child("child-1".to_string(), Arc::clone(&child));
+
+        // Register tool tokens at each level
+        let parent_tool = parent.register_tool_token("pt");
+        let child_tool = child.register_tool_token("ct");
+        let grandchild_tool = grandchild.register_tool_token("gt");
+
+        // Nothing cancelled yet
+        assert!(!parent_tool.is_cancelled());
+        assert!(!child_tool.is_cancelled());
+        assert!(!grandchild_tool.is_cancelled());
+
+        // Cancel parent — should cascade to child and grandchild
+        parent.cancel();
+
+        assert!(parent_tool.is_cancelled());
+        assert!(child.current_cancel_token().is_cancelled());
+        assert!(child_tool.is_cancelled());
+        assert!(grandchild.current_cancel_token().is_cancelled());
+        assert!(grandchild_tool.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_and_resume() {
+        let client = ConversationClient::new_for_test();
+
+        let tool_before = client.register_tool_token("before");
+
+        // Cancel the conversation
+        client.cancel();
+        assert!(tool_before.is_cancelled());
+        assert!(client.current_cancel_token().is_cancelled());
+
+        // Reset the cancel token (simulating what start() does after cancellation)
+        client.reset_cancel_token();
+
+        // New cancel token is fresh
+        assert!(!client.current_cancel_token().is_cancelled());
+
+        // New tool tokens created after reset are healthy
+        let tool_after = client.register_tool_token("after");
+        assert!(!tool_after.is_cancelled());
+
+        // Can still cancel individual tools
+        assert!(client.cancel_tool("after"));
+        assert!(tool_after.is_cancelled());
+    }
+
+    #[test]
+    fn cancel_is_idempotent() {
+        let client = ConversationClient::new_for_test();
+        let tool = client.register_tool_token("t1");
+
+        // Multiple cancels should not panic
+        client.cancel();
+        client.cancel();
+        client.cancel();
+
+        assert!(tool.is_cancelled());
+    }
 }
