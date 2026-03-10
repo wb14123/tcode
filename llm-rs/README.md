@@ -115,6 +115,29 @@ SubAgentTurnEnd  → "Idle"      (waiting again)
 
 The `SubAgentEnd` message type still exists for terminal shutdown of a subagent but is not used in the normal flow — subagents transition to idle after each turn.
 
+### Cancellation
+
+Conversations support cancellation at multiple granularities:
+
+- **Tool-level**: `ConversationClient::cancel_tool(id)` cancels a single tool's `CancellationToken`.
+- **Conversation-level**: `ConversationClient::cancel()` cancels the conversation's cancel token (which cascades to all child tool tokens since they are created as `child_token()`), recursively cancels all registered child subagent conversations, and broadcasts a system warning.
+
+**Cancel token hierarchy:**
+```
+ConversationClient cancel_token
+  ├─ tool "a" token (child_token)
+  ├─ tool "b" token (child_token)
+  └─ children
+       └─ child ConversationClient cancel_token
+            ├─ tool "c" token (child_token)
+            └─ children
+                 └─ grandchild ConversationClient ...
+```
+
+**Resumability**: After cancellation, the cancel token is reset (`reset_cancel_token()`) so the conversation can accept new messages. This allows subagents to be resumed via `continue_subagent` after being cancelled.
+
+**User-interrupted flag**: When a child subagent is cancelled by the user, the parent's `user_interrupted` flag is set. The parent's `call_llm` loop checks this flag after executing tool calls and breaks if set, returning control to the user rather than auto-continuing with tool results. The cancelled subagent's result includes a message telling the LLM not to retry unless the user explicitly asks.
+
 ### Nested Subagents
 
 Subagents can spawn their own subagents up to a configurable depth limit controlled by two parameters on `new_conversation()`:

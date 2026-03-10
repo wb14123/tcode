@@ -90,6 +90,25 @@ Opens a neovim buffer showing the detailed output of a specific tool execution. 
 
 Cancels a running tool call. Connects to the server's Unix socket, sends a `CancelTool` message, and prints the result. Used by the display pane's `Ctrl-k` keybinding. Works across all conversations (root and subagents) — the `--session` can be a subagent session ID; the root session's socket is resolved automatically.
 
+### `tcode --session <id> cancel-conversation <conversation-id>`
+
+Cancels an entire conversation, cascading to all running tools and child subagents. The server looks up the conversation via `ConversationManager`, calls `ConversationClient::cancel()`, which recursively cancels the conversation's cancel token (and all child tool tokens), all registered child subagent conversations, and broadcasts a system warning. The `--session` can be a subagent session ID; the root session's socket is resolved automatically.
+
+### `tcode --session <id> tree`
+
+Opens a TUI tree view of the conversation's subagents and tool calls. Displays status, token usage, and hierarchical nesting. Automatically shown as a right pane when starting a new session.
+
+| Key | Action |
+|-----|--------|
+| `j`/`↓` | Move down |
+| `k`/`↑` | Move up |
+| `Space` | Toggle collapse/expand |
+| `Enter`/`o` | Open detail in new tmux window |
+| `Ctrl-k` | Cancel selected subagent (running or idle) |
+| `f` | Toggle filter (running only / all) |
+| `R` | Full refresh |
+| `q` | Quit |
+
 ### `tcode browser`
 
 Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) that the headless browser tools need.
@@ -175,16 +194,34 @@ In the main display, subagent blocks are rendered with `>>> SUB-AGENT: {descript
 | `o` | Thinking block | Toggle expand/collapse of thinking content |
 | `o` | Subagent block | Open subagent display in a new tmux window |
 | `o` | Tool call block | Open tool call detail in a new tmux window |
+| `Ctrl-k` | Running subagent | Cancel the subagent conversation (with confirmation popup) |
 | `Ctrl-k` | Running tool call | Cancel the tool call (with confirmation popup) |
+| `Ctrl-c` | Anywhere | Cancel the entire conversation (with confirmation popup) |
 | `q` | Anywhere | Quit |
 
-Context is determined by cursor position using extmarks. For `Ctrl-k`, a `[Ctrl-k to cancel]` hint is shown on the tool label while the tool is running and removed when it finishes.
+Context is determined by cursor position using extmarks. `Ctrl-k` checks for a subagent under the cursor first, then falls back to tool call. A `[Ctrl-k to cancel]` hint is shown on tool/subagent labels while they are running and removed when they finish. `Ctrl-c` reads the root conversation ID from `conversation-state.json` and cancels it, cascading to all running tools and child subagents.
 
-## Tool Cancellation
+## Cancellation
+
+### Tool Cancellation
 
 The server maintains a shared map of `tool_call_id -> ConversationClient`, populated by event writers as they process `ToolMessageStart`/`ToolMessageEnd` events. This allows cancellation to work across all conversations (root and subagents) without the display needing to know which conversation owns a tool call.
 
 Flow: `Ctrl-k` in display → confirmation popup → `tcode cancel-tool <id>` CLI → Unix socket → server looks up owning `ConversationClient` → `CancellationToken::cancel()` → tool stream aborted.
+
+### Conversation Cancellation
+
+Conversations can be cancelled at the conversation level, which cascades to all running tools and child subagents. Each `ConversationClient` holds a conversation-level `CancellationToken`; individual tool tokens are children of this token, so cancelling the conversation automatically cancels all tools. Child subagent clients are tracked in a `children` map and recursively cancelled.
+
+**Cancelling a conversation:**
+Flow: `Ctrl-c` in display (or `Ctrl-k` on a subagent) → confirmation popup → `tcode cancel-conversation <id>` CLI → Unix socket → server looks up `ConversationClient` via `ConversationManager::get_conversation()` → `ConversationClient::cancel()` → cascades to all tools and child subagents.
+
+**After cancellation:**
+- The LLM streaming loop detects the cancelled token and broadcasts `AssistantMessageEnd(Cancelled)`.
+- Any pending tool calls that were interrupted get `ToolMessageEnd(Cancelled)` or `SubAgentTurnEnd(Cancelled)` messages.
+- The cancel token is then reset so the conversation can accept new messages (subagents can be resumed via `continue_subagent`).
+- When a child subagent is cancelled, the parent's `user_interrupted` flag is set, causing the parent's `call_llm` loop to break and return to waiting for user input rather than auto-continuing with tool results.
+- Cancelled subagent results include a message telling the LLM not to retry unless the user explicitly asks.
 
 ## Neovim Plugin
 
