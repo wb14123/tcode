@@ -571,7 +571,7 @@ local function render_event(buf, ns, event)
 
   elseif variant == 'SubAgentStart' then
     local description = data.description or ''
-    local label_line, label_extmark = render_label(buf, ns, '>>> SUB-AGENT: ' .. description .. ' [running]', 'TCodeTool', data)
+    local label_line, label_extmark = render_label(buf, ns, '>>> SUB-AGENT: [running] ' .. description, 'TCodeTool', data)
     append_lines(buf, { '' })
     -- Place a range extmark covering label through current last line
     if data.conversation_id then
@@ -591,7 +591,7 @@ local function render_event(buf, ns, event)
       local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'done'
       local status_hl = (data.end_status and data.end_status ~= 'Succeeded') and 'TCodeError' or 'TCodeTool'
       local virt = {
-        { '>>> SUB-AGENT: ' .. info.description .. ' ', 'TCodeTool' },
+        { '>>> SUB-AGENT: ', 'TCodeTool' },
         { '[' .. status_text .. ']', status_hl },
       }
       local ts = format_time(data.created_at)
@@ -604,6 +604,7 @@ local function render_event(buf, ns, event)
           'TCodeTokens',
         })
       end
+      table.insert(virt, { ' ' .. info.description, 'TCodeTool' })
       local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
       if mark_pos and mark_pos[1] then
         vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
@@ -644,7 +645,7 @@ local function render_event(buf, ns, event)
       local status_hl = (data.end_status and data.end_status ~= 'Succeeded') and 'TCodeError' or 'TCodeTokens'
       local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'idle'
       local virt = {
-        { '>>> SUB-AGENT: ' .. info.description .. ' ', 'TCodeTool' },
+        { '>>> SUB-AGENT: ', 'TCodeTool' },
         { '[' .. status_text .. ']', status_hl },
       }
       if data.input_tokens and data.output_tokens then
@@ -653,6 +654,7 @@ local function render_event(buf, ns, event)
           'TCodeTokens',
         })
       end
+      table.insert(virt, { ' ' .. info.description, 'TCodeTool' })
       local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
       if mark_pos and mark_pos[1] then
         vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
@@ -668,8 +670,9 @@ local function render_event(buf, ns, event)
     if data.conversation_id and sa_label_marks[data.conversation_id] then
       local info = sa_label_marks[data.conversation_id]
       local virt = {
-        { '>>> SUB-AGENT: ' .. info.description .. ' ', 'TCodeTool' },
+        { '>>> SUB-AGENT: ', 'TCodeTool' },
         { '[running]', 'TCodeTool' },
+        { ' ' .. info.description, 'TCodeTool' },
       }
       local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
       if mark_pos and mark_pos[1] then
