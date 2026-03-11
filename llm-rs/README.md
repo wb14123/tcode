@@ -54,11 +54,17 @@ For OpenAI, the model works normally but loses visibility into its previous chai
 
 ```
 User sends message via ConversationClient::send_chat()
-  → Conversation loop calls LLM with message history
-    → LLM streams back LLMEvents
+  → Single event loop receives Message::UserMessage
+    → Calls LLM with message history, streams LLMEvents
       → Events broadcast to all subscribers as Messages
-        → On ToolUse: execute tool, collect output, loop back to LLM
-        → On EndTurn: done, await next user message
+        → On ToolUse: spawn tool tasks (fire-and-forget)
+        → On EndTurn with pending tools: wait for tool completions
+        → Tool tasks send results back as Message::ToolOutputChunk / ToolMessageEnd
+        → Once all pending tools complete: call LLM again with tool results
+        → On EndTurn with no pending tools: done, await next user message
+  → If user sends a new message while tools are running:
+    → Cancel outstanding tools, fill synthetic "cancelled" results
+    → Call LLM with the new user message
 ```
 
 ## Subagents
@@ -136,7 +142,7 @@ ConversationClient cancel_token
 
 **Resumability**: After cancellation, the cancel token is reset (`reset_cancel_token()`) so the conversation can accept new messages. This allows subagents to be resumed via `continue_subagent` after being cancelled.
 
-**User-interrupted flag**: When a child subagent is cancelled by the user, the parent's `user_interrupted` flag is set. The parent's `call_llm` loop checks this flag after executing tool calls and breaks if set, returning control to the user rather than auto-continuing with tool results. The cancelled subagent's result includes a message telling the LLM not to retry unless the user explicitly asks.
+**User message during tool execution**: When a user sends a new message while tools are still running, the event loop cancels outstanding tools, accumulates any partial results already received, fills synthetic "cancelled" results for remaining tools via `fill_remaining_cancelled()`, and then proceeds with the new user message. This replaces the old `user_interrupted` flag approach with a unified event-loop-based mechanism.
 
 ### Nested Subagents
 
