@@ -442,6 +442,7 @@ impl ConversationManager {
             total_output_tokens: 0,
             single_turn,
             pending_tools: HashSet::new(),
+            cancelled_tools: HashSet::new(),
             accumulated_tool_content: HashMap::new(),
             llm_calls: 0,
             description: None,
@@ -564,6 +565,7 @@ impl ConversationManager {
             total_output_tokens: state.total_output_tokens,
             single_turn: state.single_turn,
             pending_tools: HashSet::new(),
+            cancelled_tools: HashSet::new(),
             accumulated_tool_content: HashMap::new(),
             llm_calls: 0,
             description,
@@ -806,6 +808,11 @@ pub struct Conversation {
     /// Outstanding tool_call_ids waiting for completion.
     pending_tools: HashSet<String>,
 
+    /// Tool_call_ids that completed with `Cancelled` status in the current turn.
+    /// When all pending tools finish and any were cancelled, the LLM is NOT called
+    /// automatically — instead a SystemMessage is broadcast and the turn pauses.
+    cancelled_tools: HashSet<String>,
+
     /// Accumulated tool output per tool_call_id (chunks joined).
     accumulated_tool_content: HashMap<String, String>,
 
@@ -916,6 +923,15 @@ impl Conversation {
                     }
                     // Cancelled with pending tools (external cancel, not user message)
                     self.fill_remaining_cancelled(false)?;
+                    self.cancelled_tools.clear();
+                    self.broadcast_msg(Message::AssistantMessageEnd {
+                        msg_id: self.next_msg_id(),
+                        end_status: MessageEndStatus::Cancelled,
+                        error: None,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        reasoning_tokens: 0,
+                    })?;
                     self.finish_turn()?;
                 }
                 msg = self.input_channel_rx.recv() => {
@@ -928,6 +944,7 @@ impl Conversation {
                                 self.fill_remaining_cancelled(true)?;
                                 self.env.client.reset_cancel_token();
                             }
+                            self.cancelled_tools.clear();
                             self.broadcast_msg(Message::UserMessage {
                                 msg_id: self.next_msg_id(),
                                 created_at: now_millis(),
@@ -949,8 +966,11 @@ impl Conversation {
                             }
                             // else: stale message from cancelled tool, ignore
                         }
-                        Message::ToolMessageEnd { tool_call_id, .. } => {
+                        Message::ToolMessageEnd { tool_call_id, end_status, .. } => {
                             if self.pending_tools.remove(&tool_call_id) {
+                                if end_status == MessageEndStatus::Cancelled {
+                                    self.cancelled_tools.insert(tool_call_id.clone());
+                                }
                                 let content = self.accumulated_tool_content
                                     .remove(&tool_call_id).unwrap_or_default();
                                 self.push_llm_msg(LLMMessage::ToolResult {
@@ -958,8 +978,19 @@ impl Conversation {
                                     content,
                                 })?;
                                 if self.pending_tools.is_empty() {
-                                    self.call_llm().await?;
-                                    self.maybe_finish_turn()?;
+                                    if self.cancelled_tools.is_empty() {
+                                        self.call_llm().await?;
+                                        self.maybe_finish_turn()?;
+                                    } else {
+                                        // Some tools were cancelled — pause and let the user decide
+                                        self.cancelled_tools.clear();
+                                        log_and_broadcast_system_message(
+                                            &self.env.client,
+                                            SystemMessageLevel::Info,
+                                            "Some tools/subagents were cancelled. Send a new message to continue the conversation.".to_string(),
+                                        );
+                                        self.maybe_finish_turn()?;
+                                    }
                                 }
                             }
                             // else: stale message from cancelled tool, ignore
@@ -1353,7 +1384,7 @@ async fn execute_subagent_standalone(
 ) -> Result<()> {
     let mut guard = ToolCompleteGuard::new(tool_call.id.clone(), loop_tx.clone());
 
-    let result_text = execute_subagent_inner(&tool_call, &env, llm, &cancel_token).await;
+    let (result_text, subagent_cancelled) = execute_subagent_inner(&tool_call, &env, llm, &cancel_token).await;
 
     env.client.unregister_tool_token(&tool_call.id);
 
@@ -1365,10 +1396,11 @@ async fn execute_subagent_standalone(
         content: Arc::new(result_text),
     }).await?;
 
+    let cancelled = cancel_token.is_cancelled() || subagent_cancelled;
     loop_tx.send(Message::ToolMessageEnd {
         msg_id: 0,
         tool_call_id: tool_call.id.clone(),
-        end_status: if cancel_token.is_cancelled() { MessageEndStatus::Cancelled } else { MessageEndStatus::Succeeded },
+        end_status: if cancelled { MessageEndStatus::Cancelled } else { MessageEndStatus::Succeeded },
         input_tokens: 0,
         output_tokens: 0,
     }).await?;
@@ -1377,17 +1409,17 @@ async fn execute_subagent_standalone(
     Ok(())
 }
 
-/// Inner logic for subagent execution, returns the result text.
+/// Inner logic for subagent execution, returns `(result_text, was_cancelled)`.
 async fn execute_subagent_inner(
     tool_call: &ToolCall,
     env: &ConversationEnv,
     llm: Box<dyn LLM>,
     cancel_token: &CancellationToken,
-) -> String {
+) -> (String, bool) {
     let params: SubAgentParams = match serde_json::from_str(&tool_call.arguments) {
         Ok(p) => p,
         Err(e) => {
-            return format!("Error: Failed to parse subagent arguments: {}", e);
+            return (format!("Error: Failed to parse subagent arguments: {}", e), false);
         }
     };
 
@@ -1408,7 +1440,7 @@ async fn execute_subagent_inner(
     }).transpose() {
         Ok(d) => d,
         Err(e) => {
-            return format!("Error: Failed to create subagent state dir: {}", e);
+            return (format!("Error: Failed to create subagent state dir: {}", e), false);
         }
     };
 
@@ -1428,7 +1460,7 @@ async fn execute_subagent_inner(
     ) {
         Ok(result) => result,
         Err(e) => {
-            return format!("Error: Failed to create subagent conversation: {}", e);
+            return (format!("Error: Failed to create subagent conversation: {}", e), false);
         }
     };
 
@@ -1458,7 +1490,7 @@ async fn execute_subagent_inner(
         }) {
             tracing::error!(error = %e2, "failed to broadcast SubAgentEnd");
         }
-        return error;
+        return (error, false);
     }
 
     let response = tokio::select! {
@@ -1470,7 +1502,8 @@ async fn execute_subagent_inner(
         resp = collect_subagent_response(&mut sub_stream) => resp
     };
 
-    match Conversation::broadcast_subagent_turn_end(
+    let was_cancelled = response.end_status == MessageEndStatus::Cancelled;
+    let text = match Conversation::broadcast_subagent_turn_end(
         &env.client, &subagent_conv_id, &response,
     ) {
         Ok(text) => text,
@@ -1478,7 +1511,8 @@ async fn execute_subagent_inner(
             tracing::error!(error = %e, "failed to broadcast SubAgentTurnEnd");
             format_subagent_result(&subagent_conv_id, &response.text, &response.end_status)
         }
-    }
+    };
+    (text, was_cancelled)
 }
 
 /// Execute continue_subagent tool call as a standalone async function.
@@ -1491,7 +1525,7 @@ async fn execute_continue_subagent_standalone(
 ) -> Result<()> {
     let mut guard = ToolCompleteGuard::new(tool_call.id.clone(), loop_tx.clone());
 
-    let result_text = execute_continue_subagent_inner(&tool_call, &env, &cancel_token).await;
+    let (result_text, subagent_cancelled) = execute_continue_subagent_inner(&tool_call, &env, &cancel_token).await;
 
     env.client.unregister_tool_token(&tool_call.id);
 
@@ -1503,10 +1537,11 @@ async fn execute_continue_subagent_standalone(
         content: Arc::new(result_text),
     }).await?;
 
+    let cancelled = cancel_token.is_cancelled() || subagent_cancelled;
     loop_tx.send(Message::ToolMessageEnd {
         msg_id: 0,
         tool_call_id: tool_call.id.clone(),
-        end_status: if cancel_token.is_cancelled() { MessageEndStatus::Cancelled } else { MessageEndStatus::Succeeded },
+        end_status: if cancelled { MessageEndStatus::Cancelled } else { MessageEndStatus::Succeeded },
         input_tokens: 0,
         output_tokens: 0,
     }).await?;
@@ -1515,26 +1550,26 @@ async fn execute_continue_subagent_standalone(
     Ok(())
 }
 
-/// Inner logic for continue_subagent execution, returns the result text.
+/// Inner logic for continue_subagent execution, returns `(result_text, was_cancelled)`.
 async fn execute_continue_subagent_inner(
     tool_call: &ToolCall,
     env: &ConversationEnv,
     cancel_token: &CancellationToken,
-) -> String {
+) -> (String, bool) {
     let params: ContinueSubAgentParams = match serde_json::from_str(&tool_call.arguments) {
         Ok(p) => p,
         Err(e) => {
-            return format!("Error: Failed to parse continue_subagent arguments: {}", e);
+            return (format!("Error: Failed to parse continue_subagent arguments: {}", e), false);
         }
     };
 
     let subagent_client = match env.conversation_manager.get_conversation(&params.conversation_id) {
         Ok(Some(client)) => client,
         Ok(None) => {
-            return format!("Error: Subagent conversation '{}' not found", params.conversation_id);
+            return (format!("Error: Subagent conversation '{}' not found", params.conversation_id), false);
         }
         Err(e) => {
-            return format!("Error: Failed to get subagent conversation: {}", e);
+            return (format!("Error: Failed to get subagent conversation: {}", e), false);
         }
     };
 
@@ -1565,7 +1600,7 @@ async fn execute_continue_subagent_inner(
         }) {
             tracing::error!(error = %e2, "failed to broadcast SubAgentTurnEnd");
         }
-        return error;
+        return (error, false);
     }
 
     let response = tokio::select! {
@@ -1577,7 +1612,8 @@ async fn execute_continue_subagent_inner(
         resp = collect_subagent_response(&mut sub_stream) => resp
     };
 
-    match Conversation::broadcast_subagent_turn_end(
+    let was_cancelled = response.end_status == MessageEndStatus::Cancelled;
+    let text = match Conversation::broadcast_subagent_turn_end(
         &env.client, &params.conversation_id, &response,
     ) {
         Ok(text) => text,
@@ -1585,7 +1621,8 @@ async fn execute_continue_subagent_inner(
             tracing::error!(error = %e, "failed to broadcast SubAgentTurnEnd");
             format_subagent_result(&params.conversation_id, &response.text, &response.end_status)
         }
-    }
+    };
+    (text, was_cancelled)
 }
 
 
