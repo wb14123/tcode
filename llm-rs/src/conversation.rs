@@ -1,6 +1,7 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::future::Future;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicI32};
+use std::sync::atomic::AtomicI32;
 use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -14,6 +15,7 @@ use tokio::task::AbortHandle;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
+
 
 /// Shared prompt rules appended to both root and subagent system prompts.
 pub const SUBAGENT_RULES: &str = "\
@@ -338,10 +340,10 @@ fn prepare_conversation(
     llm: &mut dyn LLM,
     tools: Vec<Arc<Tool>>,
     msg_id_start: i32,
-) -> (HashMap<String, Arc<Tool>>, mpsc::Receiver<String>, Arc<ConversationClient>) {
+) -> (HashMap<String, Arc<Tool>>, mpsc::Receiver<Message>, Arc<ConversationClient>) {
     llm.register_tools(tools.clone());
     let tools_map = tools.into_iter().map(|t| (t.name.clone(), t)).collect();
-    let (input_tx, input_rx) = mpsc::channel(10);
+    let (input_tx, input_rx) = mpsc::channel(100);
     let (notify_tx, _) = broadcast::channel(100);
     let client = Arc::new(ConversationClient {
         msg_id_counter: AtomicI32::new(msg_id_start),
@@ -351,7 +353,6 @@ fn prepare_conversation(
         tool_cancel_tokens: std::sync::Mutex::new(HashMap::new()),
         cancel_token: std::sync::Mutex::new(CancellationToken::new()),
         children: std::sync::Mutex::new(HashMap::new()),
-        user_interrupted: AtomicBool::new(false),
     });
     (tools_map, input_rx, client)
 }
@@ -440,6 +441,9 @@ impl ConversationManager {
             total_input_tokens: 0,
             total_output_tokens: 0,
             single_turn,
+            pending_tools: HashSet::new(),
+            accumulated_tool_content: HashMap::new(),
+            llm_calls: 0,
             description: None,
             created_at: Some(now_millis()),
             env: ConversationEnv {
@@ -559,6 +563,9 @@ impl ConversationManager {
             total_input_tokens: state.total_input_tokens,
             total_output_tokens: state.total_output_tokens,
             single_turn: state.single_turn,
+            pending_tools: HashSet::new(),
+            accumulated_tool_content: HashMap::new(),
+            llm_calls: 0,
             description,
             created_at,
             env: ConversationEnv {
@@ -786,8 +793,8 @@ pub struct Conversation {
     /// to LLM.
     llm_msgs: Vec<LLMMessage>,
 
-    /// Chat input receiver. Used for Conversation to poll the messages.
-    input_channel_rx: mpsc::Receiver<String>,
+    /// Event loop receiver. Receives user messages and tool completion signals.
+    input_channel_rx: mpsc::Receiver<Message>,
 
     /// Accumulated token usage.
     total_input_tokens: i32,
@@ -795,6 +802,15 @@ pub struct Conversation {
 
     /// When true, the conversation exits after one user message + LLM response cycle.
     single_turn: bool,
+
+    /// Outstanding tool_call_ids waiting for completion.
+    pending_tools: HashSet<String>,
+
+    /// Accumulated tool output per tool_call_id (chunks joined).
+    accumulated_tool_content: HashMap<String, String>,
+
+    /// Number of LLM calls since the last user message (for subagent max_iterations).
+    llm_calls: usize,
 
     /// Truncated first user input used as session description.
     description: Option<String>,
@@ -880,394 +896,358 @@ impl Conversation {
         Ok(result_text)
     }
 
-    /// Start the worker loop for the conversation. Should only be called once.
+    /// Single event loop for the conversation. Should only be called once.
     ///
-    /// For single-turn (subagent) conversations, broadcasts `AssistantRequestEnd` after
-    /// each turn but keeps looping so the parent can send follow-up messages via
-    /// `continue_subagent`.
-    ///
-    /// The loop is cancel-aware: when the conversation's cancel token fires, the current
-    /// `call_llm()` is interrupted and an `AssistantRequestEnd` is broadcast (for
-    /// single-turn conversations). The cancel token is then reset so the conversation
-    /// can be resumed later via `continue_subagent`.
+    /// Receives user messages and tool completion signals through the same channel.
+    /// Tool tasks are fire-and-forget, sending results back through `input_channel_tx`.
+    /// When a user sends a message while tools run, cancel tokens fire, partial results
+    /// are accumulated, remaining tools get synthetic cancelled results, and the LLM is
+    /// called with the new user message.
     async fn start(&mut self) -> Result<()> {
         loop {
             let cancel_token = self.env.client.current_cancel_token();
-
-            let user_input = tokio::select! {
+            tokio::select! {
                 biased;
                 _ = cancel_token.cancelled() => {
-                    // Cancelled while idle — reset token and continue waiting
-                    self.env.client.reset_cancel_token();
-                    continue;
+                    if self.pending_tools.is_empty() {
+                        // Cancelled while idle — reset token and continue waiting
+                        self.env.client.reset_cancel_token();
+                        continue;
+                    }
+                    // Cancelled with pending tools (external cancel, not user message)
+                    self.fill_remaining_cancelled(false)?;
+                    self.finish_turn()?;
                 }
-                result = self.input_channel_rx.recv() => {
-                    match result {
-                        Some(input) => input,
-                        None => break, // Channel closed
+                msg = self.input_channel_rx.recv() => {
+                    let Some(msg) = msg else { break };
+                    match msg {
+                        Message::UserMessage { content, .. } => {
+                            // If tools are pending, cancel them and fill synthetic results
+                            if !self.pending_tools.is_empty() {
+                                self.env.client.cancel_silent();
+                                self.fill_remaining_cancelled(true)?;
+                                self.env.client.reset_cancel_token();
+                            }
+                            self.broadcast_msg(Message::UserMessage {
+                                msg_id: self.next_msg_id(),
+                                created_at: now_millis(),
+                                content: Arc::clone(&content),
+                            })?;
+                            if self.description.is_none() {
+                                self.description = Some(truncate_preview(&content, 80));
+                            }
+                            self.push_llm_msg(LLMMessage::User(content.to_string()))?;
+                            self.llm_calls = 0;
+                            self.call_llm().await?;
+                            self.maybe_finish_turn()?;
+                        }
+                        Message::ToolOutputChunk { tool_call_id, content, .. } => {
+                            if self.pending_tools.contains(&tool_call_id) {
+                                self.accumulated_tool_content
+                                    .entry(tool_call_id).or_default()
+                                    .push_str(&content);
+                            }
+                            // else: stale message from cancelled tool, ignore
+                        }
+                        Message::ToolMessageEnd { tool_call_id, .. } => {
+                            if self.pending_tools.remove(&tool_call_id) {
+                                let content = self.accumulated_tool_content
+                                    .remove(&tool_call_id).unwrap_or_default();
+                                self.push_llm_msg(LLMMessage::ToolResult {
+                                    tool_call_id,
+                                    content,
+                                })?;
+                                if self.pending_tools.is_empty() {
+                                    self.call_llm().await?;
+                                    self.maybe_finish_turn()?;
+                                }
+                            }
+                            // else: stale message from cancelled tool, ignore
+                        }
+                        other => {
+                            tracing::error!("unexpected message type in event loop: {:?}", other);
+                        }
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Call the LLM if allowed by max_iterations and not cancelled.
+    /// Streams the response, handles tool spawning and cancellation internally.
+    async fn call_llm(&mut self) -> Result<()> {
+        let max = if self.single_turn { self.env.subagent_max_iterations } else { usize::MAX };
+        if self.llm_calls >= max {
+            log_and_broadcast_system_message(
+                &self.env.client,
+                SystemMessageLevel::Warning,
+                format!("Subagent reached maximum iterations limit ({})", max),
+            );
+            return Ok(());
+        }
+        let cancel_token = self.env.client.current_cancel_token();
+        if cancel_token.is_cancelled() { return Ok(()); }
+
+        let mut response_stream =
+            self.llm
+                .chat(self.model.as_str(), &self.llm_msgs, &self.env.chat_options);
+        let mut accumulated_text = String::new();
+        let mut pending_tool_calls = Vec::new();
+
+        self.broadcast_msg(Message::AssistantMessageStart {
+            msg_id: self.next_msg_id(),
+            created_at: now_millis(),
+        })?;
+
+        loop {
+            let event = tokio::select! {
+                biased;
+                _ = cancel_token.cancelled() => {
+                    self.broadcast_msg(Message::AssistantMessageEnd {
+                        msg_id: self.next_msg_id(),
+                        end_status: MessageEndStatus::Cancelled,
+                        error: None,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        reasoning_tokens: 0,
+                    })?;
+                    self.llm_calls += 1;
+                    return Ok(());
+                }
+                event = response_stream.next() => {
+                    match event {
+                        Some(e) => e,
+                        None => { self.llm_calls += 1; return Ok(()); }
                     }
                 }
             };
 
-            let user_msg_id = self.next_msg_id();
-            self.broadcast_msg(Message::UserMessage {
-                msg_id: user_msg_id,
-                created_at: now_millis(),
-                content: Arc::new(user_input.clone()),
-            })?;
+            match event {
+                LLMEvent::MessageStart { input_tokens } => {
+                    self.total_input_tokens += input_tokens;
+                }
+                LLMEvent::TextDelta(text) => {
+                    accumulated_text.push_str(&text);
+                    self.broadcast_msg(Message::AssistantMessageChunk {
+                        msg_id: self.next_msg_id(),
+                        content: Arc::new(text),
+                    })?;
+                }
+                LLMEvent::ThinkingDelta(text) => {
+                    self.broadcast_msg(Message::AssistantThinkingChunk {
+                        msg_id: self.next_msg_id(),
+                        content: Arc::new(text),
+                    })?;
+                }
+                LLMEvent::ToolCall(tool_call) => {
+                    pending_tool_calls.push(tool_call);
+                }
+                LLMEvent::MessageEnd {
+                    stop_reason,
+                    input_tokens,
+                    output_tokens,
+                    reasoning_tokens,
+                    raw,
+                } => {
+                    self.total_input_tokens += input_tokens;
+                    self.total_output_tokens += output_tokens;
 
-            // Capture first user input as session description
-            if self.description.is_none() {
-                self.description = Some(truncate_preview(&user_input, 80));
-            }
+                    let (end_status, error) = if stop_reason == StopReason::MaxTokens {
+                        (
+                            MessageEndStatus::Failed,
+                            Some("Response truncated: maximum token limit reached".to_string()),
+                        )
+                    } else {
+                        (MessageEndStatus::Succeeded, None)
+                    };
 
-            self.push_llm_msg(LLMMessage::User(user_input))?;
-            self.call_llm().await?;
-
-            // Single-turn conversations broadcast end-of-turn but keep looping
-            // so the parent can resume them with continue_subagent.
-            if self.single_turn {
-                self.broadcast_msg(Message::AssistantRequestEnd {
-                    total_input_tokens: self.total_input_tokens,
-                    total_output_tokens: self.total_output_tokens,
-                })?;
-            }
-
-            // Reset cancel token after each turn so the conversation is resumable
-            self.env.client.reset_cancel_token();
-        }
-        Ok(())
-    }
-
-    /// Call the LLM and handle the response.
-    /// It handles the tool call and continues the loop when there is no tool call request anymore.
-    /// Respects the conversation's cancel token: when cancelled mid-stream, broadcasts
-    /// `AssistantMessageEnd(Cancelled)` and breaks the loop.
-    async fn call_llm(&mut self) -> Result<()> {
-        let max_iterations = if self.single_turn { self.env.subagent_max_iterations } else { usize::MAX };
-        let mut iteration = 0;
-
-        loop {
-            iteration += 1;
-            if iteration > max_iterations {
-                log_and_broadcast_system_message(
-                    &self.env.client,
-                    SystemMessageLevel::Warning,
-                    format!("Subagent reached maximum iterations limit ({})", max_iterations),
-                );
-                break;
-            }
-
-            // Check cancel token before starting a new LLM call
-            let cancel_token = self.env.client.current_cancel_token();
-            if cancel_token.is_cancelled() {
-                break;
-            }
-
-            let mut response_stream =
-                self.llm
-                    .chat(self.model.as_str(), &self.llm_msgs, &self.env.chat_options);
-            let mut accumulated_text = String::new();
-            let mut pending_tool_calls = Vec::new();
-            let mut should_continue = false;
-            let mut cancelled = false;
-
-            // Broadcast assistant message start
-            self.broadcast_msg(Message::AssistantMessageStart {
-                msg_id: self.next_msg_id(),
-                created_at: now_millis(),
-            })?;
-
-            loop {
-                let event = tokio::select! {
-                    biased;
-                    _ = cancel_token.cancelled() => {
-                        cancelled = true;
-                        break;
-                    }
-                    event = response_stream.next() => {
-                        match event {
-                            Some(e) => e,
-                            None => break, // Stream ended
-                        }
-                    }
-                };
-
-                match event {
-                    LLMEvent::MessageStart { input_tokens } => {
-                        self.total_input_tokens += input_tokens;
-                    }
-                    LLMEvent::TextDelta(text) => {
-                        accumulated_text.push_str(&text);
-                        let chunk_msg_id = self.next_msg_id();
-                        self.broadcast_msg(Message::AssistantMessageChunk {
-                            msg_id: chunk_msg_id,
-                            content: Arc::new(text),
-                        })?;
-                    }
-                    LLMEvent::ThinkingDelta(text) => {
-                        // Reasoning is streamed for display; raw field handles round-tripping
-                        self.broadcast_msg(Message::AssistantThinkingChunk {
-                            msg_id: self.next_msg_id(),
-                            content: Arc::new(text),
-                        })?;
-                    }
-                    LLMEvent::ToolCall(tool_call) => {
-                        pending_tool_calls.push(tool_call);
-                    }
-                    LLMEvent::MessageEnd {
-                        stop_reason,
+                    self.broadcast_msg(Message::AssistantMessageEnd {
+                        msg_id: self.next_msg_id(),
+                        end_status,
+                        error,
                         input_tokens,
                         output_tokens,
                         reasoning_tokens,
-                        raw,
-                    } => {
-                        self.total_input_tokens += input_tokens;
-                        self.total_output_tokens += output_tokens;
+                    })?;
 
-                        let (end_status, error) = if stop_reason == StopReason::MaxTokens {
-                            (
-                                MessageEndStatus::Failed,
-                                Some("Response truncated: maximum token limit reached".to_string()),
-                            )
-                        } else {
-                            (MessageEndStatus::Succeeded, None)
-                        };
-
-                        self.broadcast_msg(Message::AssistantMessageEnd {
-                            msg_id: self.next_msg_id(),
-                            end_status,
-                            error,
-                            input_tokens,
-                            output_tokens,
-                            reasoning_tokens,
+                    if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
+                        let tool_calls = std::mem::take(&mut pending_tool_calls);
+                        self.push_llm_msg(LLMMessage::Assistant {
+                            content: accumulated_text,
+                            tool_calls: tool_calls.clone(),
+                            raw,
                         })?;
-
-                        // Handle tool calls if any
-                        if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
-                            // Add assistant message with tool calls to llm_msgs
-                            let tool_calls = std::mem::take(&mut pending_tool_calls);
-                            self.push_llm_msg(LLMMessage::Assistant {
-                                content: accumulated_text.clone(),
-                                tool_calls: tool_calls.clone(),
-                                raw: raw.clone(),
-                            })?;
-                            self.execute_tool_calls(tool_calls).await?;
-                            should_continue = true;
-                        } else if !accumulated_text.is_empty() || raw.is_some() {
-                            // Add assistant response to llm_msgs for context
-                            self.push_llm_msg(LLMMessage::Assistant {
-                                content: accumulated_text.clone(),
-                                tool_calls: vec![],
-                                raw: raw.clone(),
-                            })?;
-                        }
-                        break;
-                    }
-                    LLMEvent::Error(error) => {
-                        self.broadcast_msg(Message::AssistantMessageEnd {
-                            msg_id: self.next_msg_id(),
-                            end_status: MessageEndStatus::Failed,
-                            error: Some(error),
-                            input_tokens: 0,
-                            output_tokens: 0,
-                            reasoning_tokens: 0,
+                        self.spawn_tool_tasks(tool_calls);
+                    } else if !accumulated_text.is_empty() || raw.is_some() {
+                        self.push_llm_msg(LLMMessage::Assistant {
+                            content: accumulated_text,
+                            tool_calls: vec![],
+                            raw,
                         })?;
-                        return Ok(());
                     }
+                    self.llm_calls += 1;
+                    return Ok(());
+                }
+                LLMEvent::Error(error) => {
+                    self.broadcast_msg(Message::AssistantMessageEnd {
+                        msg_id: self.next_msg_id(),
+                        end_status: MessageEndStatus::Failed,
+                        error: Some(error),
+                        input_tokens: 0,
+                        output_tokens: 0,
+                        reasoning_tokens: 0,
+                    })?;
+                    self.llm_calls += 1;
+                    return Ok(());
                 }
             }
+        }
+    }
 
-            if cancelled {
-                self.broadcast_msg(Message::AssistantMessageEnd {
-                    msg_id: self.next_msg_id(),
-                    end_status: MessageEndStatus::Cancelled,
-                    error: None,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    reasoning_tokens: 0,
-                })?;
-                break;
-            }
+    /// Finish a turn if no tools are pending (normal path).
+    fn maybe_finish_turn(&mut self) -> Result<()> {
+        if !self.pending_tools.is_empty() { return Ok(()); }
+        self.finish_turn()
+    }
 
-            // If cancellation happened during execute_tool_calls (not during LLM streaming),
-            // the cancelled flag won't be set but the token is cancelled. Broadcast a
-            // Cancelled end so that collect_subagent_response (for subagent conversations)
-            // picks up the cancelled status and the parent gets the "do not retry" message.
-            if should_continue && cancel_token.is_cancelled() {
-                self.broadcast_msg(Message::AssistantMessageEnd {
-                    msg_id: self.next_msg_id(),
-                    end_status: MessageEndStatus::Cancelled,
-                    error: None,
-                    input_tokens: 0,
-                    output_tokens: 0,
-                    reasoning_tokens: 0,
-                })?;
-                break;
-            }
+    /// Force finish a turn (called from cancel path).
+    fn finish_turn(&mut self) -> Result<()> {
+        if self.single_turn {
+            self.broadcast_msg(Message::AssistantRequestEnd {
+                total_input_tokens: self.total_input_tokens,
+                total_output_tokens: self.total_output_tokens,
+            })?;
+        }
+        self.env.client.reset_cancel_token();
+        Ok(())
+    }
 
-            // A child subagent was user-cancelled: break so the conversation returns
-            // to waiting for user input instead of auto-continuing the LLM loop.
-            // The tool results (including the "do not retry" message) are already in
-            // llm_msgs, so the LLM will see them on the next user-initiated turn.
-            if should_continue && self.env.client.take_user_interrupted() {
-                log_and_broadcast_system_message(
-                    &self.env.client,
-                    SystemMessageLevel::Warning,
-                    "Paused: a tool call or subagent was cancelled by the user. \
-                     Send a new message to continue."
-                        .to_string(),
-                );
-                break;
-            }
-
-            if !should_continue {
-                break;
-            }
+    /// Fill synthetic results for all pending tools. No waiting.
+    fn fill_remaining_cancelled(&mut self, user_interrupted: bool) -> Result<()> {
+        for id in std::mem::take(&mut self.pending_tools) {
+            let raw = self.accumulated_tool_content.remove(&id).unwrap_or_default();
+            let content = if user_interrupted {
+                if raw.is_empty() {
+                    "Tool execution was interrupted because the user sent a new message.".into()
+                } else {
+                    format!(
+                        "Tool execution was interrupted because the user sent \
+                         a new message. Partial result:\n{}", raw
+                    )
+                }
+            } else if raw.is_empty() {
+                "Tool call was cancelled due to conversation interruption.".into()
+            } else {
+                format!("Tool call was cancelled. Partial result:\n{}", raw)
+            };
+            self.push_llm_msg(LLMMessage::ToolResult {
+                tool_call_id: id,
+                content,
+            })?;
         }
         Ok(())
     }
 
-    async fn execute_tool_calls(&mut self, tool_calls: Vec<ToolCall>) -> Result<()> {
-        let mut join_set = tokio::task::JoinSet::new();
-
-        // Track (tool_call_id, tool_name) so we can broadcast the right cancellation
-        // message type for each aborted tool.
-        let all_tool_calls: Vec<(String, String)> = tool_calls.iter()
-            .map(|tc| (tc.id.clone(), tc.name.clone()))
-            .collect();
-        let mut collected_ids = std::collections::HashSet::new();
-
-        // Shared map for subagent futures to register their tool_call_id → conversation_id,
-        // so the cleanup loop can broadcast SubAgentTurnEnd(Cancelled) for aborted subagents.
-        let subagent_tool_map: Arc<std::sync::Mutex<HashMap<String, String>>> =
-            Arc::new(std::sync::Mutex::new(HashMap::new()));
+    /// Spawn fire-and-forget tasks for each tool call. Cancel tokens are created
+    /// here (before any reset) so they're children of the current conversation token.
+    fn spawn_tool_tasks(&mut self, tool_calls: Vec<ToolCall>) {
+        let loop_tx = self.env.client.input_channel_tx.clone();
 
         for tool_call in tool_calls {
+            self.pending_tools.insert(tool_call.id.clone());
+            let cancel_token = self.env.client.register_tool_token(&tool_call.id);
             let env = self.env.clone();
+            let tx = loop_tx.clone();
+
+            let client = env.client.clone();
             match tool_call.name.as_str() {
                 "subagent" => {
                     let llm = self.llm.clone_box();
-                    let sa_map = Arc::clone(&subagent_tool_map);
-                    join_set.spawn(async move {
-                        execute_subagent_standalone(tool_call, env, llm, sa_map).await
+                    spawn_tool_task(client, async move {
+                        execute_subagent_standalone(tool_call, env, llm, tx, cancel_token).await
                     });
                 }
                 "continue_subagent" => {
-                    let sa_map = Arc::clone(&subagent_tool_map);
-                    join_set.spawn(async move {
-                        execute_continue_subagent_standalone(tool_call, env, sa_map).await
+                    spawn_tool_task(client, async move {
+                        execute_continue_subagent_standalone(tool_call, env, tx, cancel_token).await
                     });
                 }
                 _ => {
-                    join_set.spawn(async move {
-                        execute_regular_tool(tool_call, env).await
+                    spawn_tool_task(client, async move {
+                        execute_regular_tool(tool_call, env, tx, cancel_token).await
                     });
                 }
             }
         }
-
-        // Collect results, but abort all tasks if the conversation is cancelled.
-        let cancel_token = self.env.client.current_cancel_token();
-        loop {
-            tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => {
-                    join_set.abort_all();
-                    // Drain remaining results: tasks that completed before the abort
-                    // return their result; aborted tasks return JoinError::is_cancelled().
-                    while let Some(result) = join_set.join_next().await {
-                        if let Ok(Ok((tool_call_id, content))) = result {
-                            collected_ids.insert(tool_call_id.clone());
-                            if let Err(e) = self.push_llm_msg(LLMMessage::ToolResult {
-                                tool_call_id,
-                                content,
-                            }) {
-                                tracing::error!(error = %e, "Failed to push drained tool result");
-                            }
-                        }
-                    }
-                    break;
-                }
-                result = join_set.join_next() => {
-                    match result {
-                        Some(Ok(inner)) => {
-                            let (tool_call_id, content) = inner?;
-                            collected_ids.insert(tool_call_id.clone());
-                            self.push_llm_msg(LLMMessage::ToolResult {
-                                tool_call_id,
-                                content,
-                            })?;
-                        }
-                        Some(Err(e)) => {
-                            if !e.is_cancelled() {
-                                log_and_broadcast_system_message(
-                                    &self.env.client,
-                                    SystemMessageLevel::Error,
-                                    format!("Tool call task failed: {}", e),
-                                );
-                            }
-                        }
-                        None => break, // All tasks completed
-                    }
-                }
-            }
-        }
-
-        // Fill cancelled results and broadcast UI messages for aborted tools.
-        for (id, name) in &all_tool_calls {
-            if collected_ids.contains(id) {
-                continue;
-            }
-            self.push_llm_msg(LLMMessage::ToolResult {
-                tool_call_id: id.clone(),
-                content: "Tool call was cancelled due to conversation interruption.".to_string(),
-            })?;
-
-            match name.as_str() {
-                "subagent" | "continue_subagent" => {
-                    // Broadcast SubAgentTurnEnd(Cancelled) so the UI knows this subagent
-                    // is done. Only if we have a conversation_id (meaning SubAgentStart
-                    // was already broadcast).
-                    if let Some(conv_id) = subagent_tool_map.lock().unwrap().get(id).cloned() {
-                        self.env.client.notify_msg(Message::SubAgentTurnEnd {
-                            msg_id: self.env.client.next_msg_id(),
-                            conversation_id: conv_id,
-                            end_status: MessageEndStatus::Cancelled,
-                            response: Arc::new(String::new()),
-                            input_tokens: 0,
-                            output_tokens: 0,
-                        })?;
-                    }
-                }
-                _ => {
-                    // Broadcast ToolMessageEnd(Cancelled) so the UI closes the tool call.
-                    self.env.client.notify_msg(Message::ToolMessageEnd {
-                        msg_id: self.env.client.next_msg_id(),
-                        tool_call_id: id.clone(),
-                        end_status: MessageEndStatus::Cancelled,
-                        input_tokens: 0,
-                        output_tokens: 0,
-                    })?;
-                }
-            }
-        }
-
-        Ok(())
     }
+}
 
+/// Spawn a tool task future, logging and broadcasting any error it returns.
+fn spawn_tool_task(
+    client: Arc<ConversationClient>,
+    fut: impl Future<Output = Result<()>> + Send + 'static,
+) {
+    tokio::spawn(async move {
+        if let Err(e) = fut.await {
+            let message = format!("Tool task failed: {}", e);
+            tracing::error!(%message);
+            if let Err(e2) = client.notify_msg(Message::SystemMessage {
+                msg_id: client.next_msg_id(),
+                created_at: now_millis(),
+                level: SystemMessageLevel::Error,
+                message,
+            }) {
+                tracing::error!(error = %e2, "failed to broadcast tool task error");
+            }
+        }
+    });
+}
+
+/// Drop guard that sends a `ToolMessageEnd(Failed)` through the event loop channel
+/// if the tool task panics. Safety net so the main loop never gets stuck waiting.
+struct ToolCompleteGuard {
+    tool_call_id: String,
+    loop_tx: mpsc::Sender<Message>,
+    defused: bool,
+}
+
+impl ToolCompleteGuard {
+    fn new(tool_call_id: String, loop_tx: mpsc::Sender<Message>) -> Self {
+        Self { tool_call_id, loop_tx, defused: false }
+    }
+    fn defuse(&mut self) { self.defused = true; }
+}
+
+impl Drop for ToolCompleteGuard {
+    fn drop(&mut self) {
+        if !self.defused {
+            // Best-effort send — the channel is bounded so we use try_send.
+            if let Err(e) = self.loop_tx.try_send(Message::ToolMessageEnd {
+                msg_id: 0,
+                tool_call_id: self.tool_call_id.clone(),
+                end_status: MessageEndStatus::Failed,
+                input_tokens: 0,
+                output_tokens: 0,
+            }) {
+                tracing::error!(tool_call_id = %self.tool_call_id, error = %e,
+                    "ToolCompleteGuard: failed to send ToolMessageEnd on panic");
+            }
+        }
+    }
 }
 
 /// Execute a regular (non-subagent) tool call as a standalone async function.
-/// Returns `(tool_call_id, result_content)` for the caller to push into llm_msgs.
+/// Sends results through `loop_tx` for the main event loop.
 async fn execute_regular_tool(
     tool_call: ToolCall,
     env: ConversationEnv,
-) -> Result<(String, String)> {
-    let tool_arc = env.tools.get(&tool_call.name).cloned();
-    let tool_token = env.client.register_tool_token(&tool_call.id);
+    loop_tx: mpsc::Sender<Message>,
+    cancel_token: CancellationToken,
+) -> Result<()> {
+    let mut guard = ToolCompleteGuard::new(tool_call.id.clone(), loop_tx.clone());
 
-    let tool_msg_id = env.client.next_msg_id();
+    let tool_arc = env.tools.get(&tool_call.name).cloned();
 
     tracing::info!(
         tool_call_id = %tool_call.id,
@@ -1277,14 +1257,14 @@ async fn execute_regular_tool(
     );
 
     env.client.notify_msg(Message::ToolMessageStart {
-        msg_id: tool_msg_id,
+        msg_id: env.client.next_msg_id(),
         tool_call_id: tool_call.id.clone(),
         created_at: now_millis(),
         tool_name: tool_call.name.clone(),
         tool_args: tool_call.arguments.clone(),
     })?;
 
-    let tool_ctx = ToolContext { cancel_token: tool_token.clone() };
+    let tool_ctx = ToolContext { cancel_token: cancel_token.clone() };
     let (end_status, tool_result) = if let Some(tool) = tool_arc {
         tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");
         let mut output_stream = tool.execute(tool_ctx, tool_call.arguments.clone());
@@ -1308,8 +1288,7 @@ async fn execute_regular_tool(
             result_len = result_parts.iter().map(|s| s.len()).sum::<usize>(),
             "tool stream finished"
         );
-        let status = if tool_token.is_cancelled() {
-            env.client.set_user_interrupted();
+        let status = if cancel_token.is_cancelled() {
             MessageEndStatus::Cancelled
         } else {
             MessageEndStatus::Succeeded
@@ -1333,29 +1312,82 @@ async fn execute_regular_tool(
 
     env.client.unregister_tool_token(&tool_call.id);
 
+    // Send full result to main event loop
+    loop_tx.send(Message::ToolOutputChunk {
+        msg_id: 0,
+        tool_call_id: tool_call.id.clone(),
+        tool_name: tool_call.name.clone(),
+        content: Arc::new(tool_result),
+    }).await?;
+
+    // Broadcast ToolMessageEnd for UI
     env.client.notify_msg(Message::ToolMessageEnd {
         msg_id: env.client.next_msg_id(),
         tool_call_id: tool_call.id.clone(),
-        end_status,
+        end_status: end_status.clone(),
         input_tokens: 0,
         output_tokens: 0,
     })?;
 
-    Ok((tool_call.id, tool_result))
+    // Send ToolMessageEnd to event loop
+    loop_tx.send(Message::ToolMessageEnd {
+        msg_id: 0,
+        tool_call_id: tool_call.id.clone(),
+        end_status,
+        input_tokens: 0,
+        output_tokens: 0,
+    }).await?;
+
+    guard.defuse();
+    Ok(())
 }
 
 /// Execute a subagent tool call as a standalone async function.
-/// Returns `(tool_call_id, result_content)` for the caller to push into llm_msgs.
+/// Sends results through `loop_tx` for the main event loop.
 async fn execute_subagent_standalone(
     tool_call: ToolCall,
     env: ConversationEnv,
     llm: Box<dyn LLM>,
-    subagent_tool_map: Arc<std::sync::Mutex<HashMap<String, String>>>,
-) -> Result<(String, String)> {
+    loop_tx: mpsc::Sender<Message>,
+    cancel_token: CancellationToken,
+) -> Result<()> {
+    let mut guard = ToolCompleteGuard::new(tool_call.id.clone(), loop_tx.clone());
+
+    let result_text = execute_subagent_inner(&tool_call, &env, llm, &cancel_token).await;
+
+    env.client.unregister_tool_token(&tool_call.id);
+
+    // Send full result to main event loop
+    loop_tx.send(Message::ToolOutputChunk {
+        msg_id: 0,
+        tool_call_id: tool_call.id.clone(),
+        tool_name: tool_call.name.clone(),
+        content: Arc::new(result_text),
+    }).await?;
+
+    loop_tx.send(Message::ToolMessageEnd {
+        msg_id: 0,
+        tool_call_id: tool_call.id.clone(),
+        end_status: if cancel_token.is_cancelled() { MessageEndStatus::Cancelled } else { MessageEndStatus::Succeeded },
+        input_tokens: 0,
+        output_tokens: 0,
+    }).await?;
+
+    guard.defuse();
+    Ok(())
+}
+
+/// Inner logic for subagent execution, returns the result text.
+async fn execute_subagent_inner(
+    tool_call: &ToolCall,
+    env: &ConversationEnv,
+    llm: Box<dyn LLM>,
+    cancel_token: &CancellationToken,
+) -> String {
     let params: SubAgentParams = match serde_json::from_str(&tool_call.arguments) {
         Ok(p) => p,
         Err(e) => {
-            return Ok((tool_call.id, format!("Error: Failed to parse subagent arguments: {}", e)));
+            return format!("Error: Failed to parse subagent arguments: {}", e);
         }
     };
 
@@ -1369,11 +1401,16 @@ async fn execute_subagent_standalone(
 
     // Pre-generate subagent conversation ID so we can create its state_dir
     let subagent_conv_id_pre = Uuid::new_v4().to_string();
-    let subagent_state_dir = env.state_dir.as_ref().map(|d| {
+    let subagent_state_dir = match env.state_dir.as_ref().map(|d| {
         let dir = d.join(format!("subagent-{}", subagent_conv_id_pre));
         std::fs::create_dir_all(&dir)?;
         Ok::<_, anyhow::Error>(dir)
-    }).transpose()?;
+    }).transpose() {
+        Ok(d) => d,
+        Err(e) => {
+            return format!("Error: Failed to create subagent state dir: {}", e);
+        }
+    };
 
     // Create the subagent conversation
     let (subagent_conv_id, subagent_client) = match env.conversation_manager.new_conversation_with_id(
@@ -1391,107 +1428,164 @@ async fn execute_subagent_standalone(
     ) {
         Ok(result) => result,
         Err(e) => {
-            return Ok((tool_call.id, format!("Error: Failed to create subagent conversation: {}", e)));
+            return format!("Error: Failed to create subagent conversation: {}", e);
         }
     };
 
     // Register subagent as a child for cascading cancellation
     env.client.register_child(subagent_conv_id.clone(), Arc::clone(&subagent_client));
-    subagent_tool_map.lock().unwrap()
-        .insert(tool_call.id.clone(), subagent_conv_id.clone());
 
     let task_preview = truncate_preview(&params.task, 100);
-    env.client.notify_msg(Message::SubAgentStart {
+    if let Err(e) = env.client.notify_msg(Message::SubAgentStart {
         msg_id: env.client.next_msg_id(),
         conversation_id: subagent_conv_id.clone(),
         description: task_preview,
-    })?;
+    }) {
+        tracing::error!(error = %e, "failed to broadcast SubAgentStart");
+    }
 
     let mut sub_stream = subagent_client.subscribe();
 
     if let Err(e) = subagent_client.send_chat(&params.task).await {
         let error = format!("Error: Failed to send task to subagent: {}", e);
-        env.client.notify_msg(Message::SubAgentEnd {
+        if let Err(e2) = env.client.notify_msg(Message::SubAgentEnd {
             msg_id: env.client.next_msg_id(),
             conversation_id: subagent_conv_id,
             end_status: MessageEndStatus::Failed,
             response: Arc::new(error.clone()),
             input_tokens: 0,
             output_tokens: 0,
-        })?;
-        return Ok((tool_call.id, error));
+        }) {
+            tracing::error!(error = %e2, "failed to broadcast SubAgentEnd");
+        }
+        return error;
     }
 
-    let response = collect_subagent_response(&mut sub_stream).await;
-    if response.end_status == MessageEndStatus::Cancelled {
-        env.client.set_user_interrupted();
-    }
-    let result_text = Conversation::broadcast_subagent_turn_end(
+    let response = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            subagent_client.cancel();
+            collect_subagent_response(&mut sub_stream).await
+        }
+        resp = collect_subagent_response(&mut sub_stream) => resp
+    };
+
+    match Conversation::broadcast_subagent_turn_end(
         &env.client, &subagent_conv_id, &response,
-    )?;
-    Ok((tool_call.id, result_text))
+    ) {
+        Ok(text) => text,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to broadcast SubAgentTurnEnd");
+            format_subagent_result(&subagent_conv_id, &response.text, &response.end_status)
+        }
+    }
 }
 
 /// Execute continue_subagent tool call as a standalone async function.
-/// Returns `(tool_call_id, result_content)` for the caller to push into llm_msgs.
+/// Sends results through `loop_tx` for the main event loop.
 async fn execute_continue_subagent_standalone(
     tool_call: ToolCall,
     env: ConversationEnv,
-    subagent_tool_map: Arc<std::sync::Mutex<HashMap<String, String>>>,
-) -> Result<(String, String)> {
+    loop_tx: mpsc::Sender<Message>,
+    cancel_token: CancellationToken,
+) -> Result<()> {
+    let mut guard = ToolCompleteGuard::new(tool_call.id.clone(), loop_tx.clone());
+
+    let result_text = execute_continue_subagent_inner(&tool_call, &env, &cancel_token).await;
+
+    env.client.unregister_tool_token(&tool_call.id);
+
+    // Send full result to main event loop
+    loop_tx.send(Message::ToolOutputChunk {
+        msg_id: 0,
+        tool_call_id: tool_call.id.clone(),
+        tool_name: tool_call.name.clone(),
+        content: Arc::new(result_text),
+    }).await?;
+
+    loop_tx.send(Message::ToolMessageEnd {
+        msg_id: 0,
+        tool_call_id: tool_call.id.clone(),
+        end_status: if cancel_token.is_cancelled() { MessageEndStatus::Cancelled } else { MessageEndStatus::Succeeded },
+        input_tokens: 0,
+        output_tokens: 0,
+    }).await?;
+
+    guard.defuse();
+    Ok(())
+}
+
+/// Inner logic for continue_subagent execution, returns the result text.
+async fn execute_continue_subagent_inner(
+    tool_call: &ToolCall,
+    env: &ConversationEnv,
+    cancel_token: &CancellationToken,
+) -> String {
     let params: ContinueSubAgentParams = match serde_json::from_str(&tool_call.arguments) {
         Ok(p) => p,
         Err(e) => {
-            return Ok((tool_call.id, format!("Error: Failed to parse continue_subagent arguments: {}", e)));
+            return format!("Error: Failed to parse continue_subagent arguments: {}", e);
         }
     };
 
     let subagent_client = match env.conversation_manager.get_conversation(&params.conversation_id) {
         Ok(Some(client)) => client,
         Ok(None) => {
-            return Ok((tool_call.id, format!("Error: Subagent conversation '{}' not found", params.conversation_id)));
+            return format!("Error: Subagent conversation '{}' not found", params.conversation_id);
         }
         Err(e) => {
-            return Ok((tool_call.id, format!("Error: Failed to get subagent conversation: {}", e)));
+            return format!("Error: Failed to get subagent conversation: {}", e);
         }
     };
 
     // Register subagent as a child for cascading cancellation (idempotent via HashMap)
     env.client.register_child(params.conversation_id.clone(), Arc::clone(&subagent_client));
-    subagent_tool_map.lock().unwrap()
-        .insert(tool_call.id.clone(), params.conversation_id.clone());
 
     let msg_preview = truncate_preview(&params.message, 100);
 
-    env.client.notify_msg(Message::SubAgentContinue {
+    if let Err(e) = env.client.notify_msg(Message::SubAgentContinue {
         msg_id: env.client.next_msg_id(),
         conversation_id: params.conversation_id.clone(),
         description: msg_preview,
-    })?;
+    }) {
+        tracing::error!(error = %e, "failed to broadcast SubAgentContinue");
+    }
 
     let mut sub_stream = subagent_client.subscribe_new();
 
     if let Err(e) = subagent_client.send_chat(&params.message).await {
         let error = format!("Error: Failed to send follow-up to subagent: {}", e);
-        env.client.notify_msg(Message::SubAgentTurnEnd {
+        if let Err(e2) = env.client.notify_msg(Message::SubAgentTurnEnd {
             msg_id: env.client.next_msg_id(),
             conversation_id: params.conversation_id,
             end_status: MessageEndStatus::Failed,
             response: Arc::new(error.clone()),
             input_tokens: 0,
             output_tokens: 0,
-        })?;
-        return Ok((tool_call.id, error));
+        }) {
+            tracing::error!(error = %e2, "failed to broadcast SubAgentTurnEnd");
+        }
+        return error;
     }
 
-    let response = collect_subagent_response(&mut sub_stream).await;
-    if response.end_status == MessageEndStatus::Cancelled {
-        env.client.set_user_interrupted();
-    }
-    let result_text = Conversation::broadcast_subagent_turn_end(
+    let response = tokio::select! {
+        biased;
+        _ = cancel_token.cancelled() => {
+            subagent_client.cancel();
+            collect_subagent_response(&mut sub_stream).await
+        }
+        resp = collect_subagent_response(&mut sub_stream) => resp
+    };
+
+    match Conversation::broadcast_subagent_turn_end(
         &env.client, &params.conversation_id, &response,
-    )?;
-    Ok((tool_call.id, result_text))
+    ) {
+        Ok(text) => text,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to broadcast SubAgentTurnEnd");
+            format_subagent_result(&params.conversation_id, &response.text, &response.end_status)
+        }
+    }
 }
 
 
@@ -1499,16 +1593,13 @@ async fn execute_continue_subagent_standalone(
 pub struct ConversationClient {
     msg_id_counter: AtomicI32,
     msgs: RwLock<Vec<Arc<Message>>>,
-    input_channel_tx: mpsc::Sender<String>,
+    input_channel_tx: mpsc::Sender<Message>,
     new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
     tool_cancel_tokens: std::sync::Mutex<HashMap<String, CancellationToken>>,
     /// Conversation-level cancellation token. Cancelling this cancels all child tool tokens.
     cancel_token: std::sync::Mutex<CancellationToken>,
     /// Child subagent clients, keyed by conversation_id. Used for cascading cancellation.
     children: std::sync::Mutex<HashMap<String, Arc<ConversationClient>>>,
-    /// Set when a child subagent is user-cancelled. Signals `call_llm` to break so the
-    /// conversation returns to waiting for user input instead of auto-continuing.
-    user_interrupted: AtomicBool,
 }
 
 impl ConversationClient {
@@ -1526,15 +1617,7 @@ impl ConversationClient {
     /// to all child tool tokens), recursively cancels all child subagent conversations,
     /// and broadcasts a system warning.
     pub fn cancel(&self) {
-        // Cancel our token (idempotent — safe to call multiple times)
-        self.cancel_token.lock().unwrap().cancel();
-
-        // Recursively cancel all child subagent conversations
-        let children = self.children.lock().unwrap();
-        for child in children.values() {
-            child.cancel();
-        }
-        drop(children);
+        self.cancel_silent();
 
         // Broadcast a system message so subscribers know
         log_and_broadcast_system_message(
@@ -1542,6 +1625,19 @@ impl ConversationClient {
             SystemMessageLevel::Warning,
             "Conversation cancelled".to_string(),
         );
+    }
+
+    /// Cancel the conversation token and all children, without broadcasting a system message.
+    /// Used internally when a user sends a new message while tools are running.
+    pub(crate) fn cancel_silent(&self) {
+        // Cancel our token (idempotent — safe to call multiple times)
+        self.cancel_token.lock().unwrap().cancel();
+
+        // Recursively cancel all child subagent conversations
+        let children = self.children.lock().unwrap();
+        for child in children.values() {
+            child.cancel_silent();
+        }
     }
 
     /// Register a child subagent client for cascading cancellation.
@@ -1558,17 +1654,6 @@ impl ConversationClient {
     /// Replace the cancel token with a fresh one so the conversation can accept new work.
     pub(crate) fn reset_cancel_token(&self) {
         *self.cancel_token.lock().unwrap() = CancellationToken::new();
-    }
-
-    /// Signal that a child subagent was user-cancelled. The parent's `call_llm` loop
-    /// checks this flag and breaks so the user can decide what to do next.
-    pub(crate) fn set_user_interrupted(&self) {
-        self.user_interrupted.store(true, std::sync::atomic::Ordering::SeqCst);
-    }
-
-    /// Check and clear the user-interrupted flag.
-    pub(crate) fn take_user_interrupted(&self) -> bool {
-        self.user_interrupted.swap(false, std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Cancel a specific tool call by its ID. Returns true if the tool was found and cancelled.
@@ -1599,7 +1684,11 @@ impl ConversationClient {
     /// Send a chat to the conversation. Returns after the message is queued. The message
     /// will be sent to the LLM in the background when the current LLM response finished.
     pub async fn send_chat(&self, content: &str) -> Result<()> {
-        self.input_channel_tx.send(content.to_string()).await?;
+        self.input_channel_tx.send(Message::UserMessage {
+            msg_id: self.next_msg_id(),
+            created_at: now_millis(),
+            content: Arc::new(content.to_string()),
+        }).await?;
         Ok(())
     }
 
@@ -1651,7 +1740,6 @@ impl ConversationClient {
             tool_cancel_tokens: std::sync::Mutex::new(HashMap::new()),
             cancel_token: std::sync::Mutex::new(CancellationToken::new()),
             children: std::sync::Mutex::new(HashMap::new()),
-            user_interrupted: AtomicBool::new(false),
         }
     }
 }

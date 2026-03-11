@@ -329,4 +329,46 @@ mod tests {
 
         assert!(tool.is_cancelled());
     }
+
+    // ======== cancel_silent ========
+
+    #[test]
+    fn cancel_silent_cancels_tools_without_system_message() {
+        let client = ConversationClient::new_for_test();
+
+        let tool_a = client.register_tool_token("a");
+        let tool_b = client.register_tool_token("b");
+
+        assert!(!tool_a.is_cancelled());
+        assert!(!tool_b.is_cancelled());
+
+        // cancel_silent cancels all tools
+        client.cancel_silent();
+
+        assert!(tool_a.is_cancelled());
+        assert!(tool_b.is_cancelled());
+        assert!(client.current_cancel_token().is_cancelled());
+
+        // No system message was broadcast (no subscribers would see one,
+        // but importantly it doesn't panic on the broadcast channel)
+    }
+
+    #[test]
+    fn cancel_silent_cascades_to_children() {
+        use std::sync::Arc;
+
+        let parent = ConversationClient::new_for_test();
+        let child = Arc::new(ConversationClient::new_for_test());
+
+        parent.register_child("child-1".to_string(), Arc::clone(&child));
+
+        let parent_tool = parent.register_tool_token("pt");
+        let child_tool = child.register_tool_token("ct");
+
+        parent.cancel_silent();
+
+        assert!(parent_tool.is_cancelled());
+        assert!(child.current_cancel_token().is_cancelled());
+        assert!(child_tool.is_cancelled());
+    }
 }
