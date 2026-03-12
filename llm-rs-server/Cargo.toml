@@ -1,0 +1,27 @@
+[package]
+name = "llm-rs-server"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+llm-rs = { path = "../llm-rs" }
+axum = "0.8"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tokio-stream = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+schemars = "1.2.0"
+clap = { version = "4", features = ["derive", "env"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+uuid = { version = "1", features = ["v4"] }
+futures = "0.3"
+anyhow = "1"
+tower-http = { version = "0.6", features = ["cors"] }
+async-stream = "0.3"
+reqwest = { version = "0.13", features = ["json"] }
+dirs = "6"
+
+[dev-dependencies]
+tower = { version = "0.5", features = ["util"] }
+http-body-util = "0.1"

@@ -1,3 +1,3 @@
 [workspace]
-members = ["llm-rs", "llm-rs-macros", "tcode", "tools"]
+members = ["llm-rs", "llm-rs-macros", "tcode", "tools", "llm-rs-server"]
 resolver = "3"
