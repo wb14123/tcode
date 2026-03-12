@@ -2,60 +2,8 @@ use std::sync::{Arc, LazyLock, Mutex};
 
 use headless_chrome::{Browser, LaunchOptions};
 
-/// The cleaning logic from extract-content.js, as a standalone JS function.
-/// Takes an HTML string argument and returns cleaned HTML.
-const CLEAN_JS: &str = r#"
-(function(html) {
-    var container = document.createElement('div');
-    container.innerHTML = html;
-
-    var INLINE_TAGS = ['A','ABBR','B','BDO','BR','CITE','CODE','DFN','EM','I',
-        'IMG','KBD','MARK','Q','S','SAMP','SMALL','SPAN','STRONG','SUB','SUP',
-        'TIME','U','VAR','WBR'];
-
-    function isInline(node) {
-        if (node.nodeType !== 1) return true;
-        return INLINE_TAGS.indexOf(node.tagName) !== -1;
-    }
-
-    function unwrap(el) {
-        var parent = el.parentNode;
-        while (el.firstChild) parent.insertBefore(el.firstChild, el);
-        parent.removeChild(el);
-    }
-
-    function clean(root) {
-        var children = Array.from(root.childNodes);
-        for (var i = 0; i < children.length; i++) {
-            if (children[i].nodeType === 1) clean(children[i]);
-        }
-        if (root.nodeType !== 1) return;
-        var tag = root.tagName;
-
-        if (tag === 'SPAN' && root.attributes.length === 0) {
-            unwrap(root);
-            return;
-        }
-
-        if (tag === 'DIV' && root.attributes.length === 0) {
-            var kids = Array.from(root.childNodes).filter(function(n) {
-                return !(n.nodeType === 3 && n.textContent.trim() === '');
-            });
-            if (kids.length === 1 && kids[0].nodeType === 1 && kids[0].tagName === 'DIV') {
-                unwrap(root);
-                return;
-            }
-            if (kids.length > 0 && kids.every(isInline)) {
-                unwrap(root);
-                return;
-            }
-        }
-    }
-
-    Array.from(container.children).forEach(clean);
-    return container.innerHTML;
-})
-"#;
+/// The shared cleaning JS from clean-html.js. Defines `cleanHtml(html)` in the page scope.
+const CLEAN_HTML_JS: &str = include_str!("clean-html.js");
 
 /// Shared browser launch result. `Err` stores the message when Chrome is not found.
 static BROWSER_RESULT: LazyLock<Result<Mutex<Browser>, String>> = LazyLock::new(|| {
@@ -77,13 +25,16 @@ fn new_tab() -> Arc<headless_chrome::Tab> {
     let tab = browser.new_tab().expect("failed to open tab");
     tab.navigate_to("about:blank").unwrap();
     tab.wait_until_navigated().unwrap();
+    // Define cleanHtml in the page scope so clean() can call it
+    tab.evaluate(CLEAN_HTML_JS, false)
+        .expect("failed to load clean-html.js");
     tab
 }
 
-/// Evaluate the cleaning function as a single self-contained IIFE.
+/// Call the real cleanHtml function from clean-html.js.
 fn clean(tab: &headless_chrome::Tab, html: &str) -> String {
     let escaped = serde_json::to_string(html).unwrap();
-    let js = format!("{CLEAN_JS}({escaped})");
+    let js = format!("cleanHtml({escaped})");
     let result = tab.evaluate(&js, false).expect("JS evaluation failed");
     match &result.value {
         Some(serde_json::Value::String(s)) => s.clone(),
@@ -98,10 +49,11 @@ fn bare_span_unwrapped() {
 }
 
 #[test]
-fn span_with_class_kept() {
+fn span_with_class_stripped_and_unwrapped() {
     let tab = new_tab();
     let input = r#"<span class="highlight">hello</span>"#;
-    assert_eq!(clean(&tab, input), input);
+    // class is stripped, then bare span is unwrapped
+    assert_eq!(clean(&tab, input), "hello");
 }
 
 #[test]
@@ -147,10 +99,11 @@ fn div_with_block_children_kept() {
 }
 
 #[test]
-fn div_with_class_kept() {
+fn div_with_class_stripped() {
     let tab = new_tab();
     let input = r#"<div class="container"><p>text</p></div>"#;
-    assert_eq!(clean(&tab, input), input);
+    // class is stripped; div with single block child stays (not single-div or all-inline)
+    assert_eq!(clean(&tab, input), "<div><p>text</p></div>");
 }
 
 #[test]
@@ -175,4 +128,88 @@ fn mixed_real_world_cleanup() {
     assert!(!result.contains("<span>"), "bare spans should be removed");
     assert!(result.contains("<p>Paragraph</p>"), "p should be preserved");
     assert!(result.contains("Hello"), "text content preserved");
+}
+
+#[test]
+fn data_uri_img_removed() {
+    let tab = new_tab();
+    let input = r#"<p>before<img src="data:image/png;base64,AAAA">after</p>"#;
+    assert_eq!(clean(&tab, input), "<p>beforeafter</p>");
+}
+
+#[test]
+fn svg_removed() {
+    let tab = new_tab();
+    let input = r#"<p>text<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M0 0h24v24H0z"></path></svg></p>"#;
+    assert_eq!(clean(&tab, input), "<p>text</p>");
+}
+
+#[test]
+fn style_and_class_stripped() {
+    let tab = new_tab();
+    let input = r#"<p class="intro" style="color:red" id="p1">text</p>"#;
+    assert_eq!(clean(&tab, input), "<p>text</p>");
+}
+
+#[test]
+fn data_attributes_stripped() {
+    let tab = new_tab();
+    let input = r#"<p data-testid="foo" data-value="bar">text</p>"#;
+    assert_eq!(clean(&tab, input), "<p>text</p>");
+}
+
+#[test]
+fn srcset_stripped() {
+    let tab = new_tab();
+    let input = r#"<img src="photo.jpg" srcset="photo-2x.jpg 2x">"#;
+    assert_eq!(clean(&tab, input), r#"<img src="photo.jpg">"#);
+}
+
+#[test]
+fn link_keeps_href_strips_rel() {
+    let tab = new_tab();
+    let input = r#"<a href="https://example.com" rel="noopener" target="_blank">link</a>"#;
+    assert_eq!(clean(&tab, input), r#"<a href="https://example.com">link</a>"#);
+}
+
+#[test]
+fn noscript_removed() {
+    let tab = new_tab();
+    let input = "<p>text</p><noscript><p>fallback</p></noscript>";
+    assert_eq!(clean(&tab, input), "<p>text</p>");
+}
+
+#[test]
+fn picture_keeps_img_fallback() {
+    let tab = new_tab();
+    let input = r#"<picture><source srcset="photo.webp" type="image/webp"><img src="photo.jpg"></picture>"#;
+    assert_eq!(clean(&tab, input), r#"<img src="photo.jpg">"#);
+}
+
+#[test]
+fn aria_and_role_stripped() {
+    let tab = new_tab();
+    let input = r#"<p aria-label="description" role="button">text</p>"#;
+    assert_eq!(clean(&tab, input), "<p>text</p>");
+}
+
+#[test]
+fn html_comments_removed() {
+    let tab = new_tab();
+    let input = "<p>text</p><!-- comment --><p>more</p>";
+    assert_eq!(clean(&tab, input), "<p>text</p><p>more</p>");
+}
+
+#[test]
+fn img_loading_attrs_stripped() {
+    let tab = new_tab();
+    let input = r#"<img src="photo.jpg" loading="lazy" decoding="async" fetchpriority="low" width="100" height="200">"#;
+    assert_eq!(clean(&tab, input), r#"<img src="photo.jpg">"#);
+}
+
+#[test]
+fn empty_src_img_removed() {
+    let tab = new_tab();
+    let input = r#"<p>before<img src="">after</p>"#;
+    assert_eq!(clean(&tab, input), "<p>beforeafter</p>");
 }
