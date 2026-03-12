@@ -594,37 +594,57 @@ impl TreeState {
         self.rebuild_visible();
     }
 
-    /// Cancel the selected subagent conversation via the cancel-conversation CLI command.
+    /// Cancel the selected subagent conversation or tool call via CLI subcommands.
     fn cancel_selected(&self) {
         let idx = match self.visible.get(self.selected) {
             Some(&i) => i,
             None => return,
         };
         let node = &self.arena[idx];
-        let conversation_id = match &node.kind {
+        let exe = match std::env::current_exe() {
+            Ok(e) => e.to_string_lossy().to_string(),
+            Err(e) => {
+                tracing::error!("Failed to determine current executable: {}", e);
+                return;
+            }
+        };
+        let args: Vec<String> = match &node.kind {
             NodeType::SubAgent { conversation_id, status, .. } => {
                 if matches!(status, NodeStatus::Running | NodeStatus::Idle) {
-                    conversation_id
+                    vec![
+                        format!("--session={}", self.session_id),
+                        "cancel-conversation".to_string(),
+                        conversation_id.clone(),
+                    ]
                 } else {
                     return; // Already finished
                 }
             }
-            _ => return, // Only subagents can be cancelled
+            NodeType::ToolCall { tool_call_id, status, .. } => {
+                if matches!(status, NodeStatus::Running) {
+                    vec![
+                        format!("--session={}", self.session_id),
+                        "cancel-tool".to_string(),
+                        tool_call_id.clone(),
+                    ]
+                } else {
+                    return; // Not running
+                }
+            }
+            _ => return,
         };
-        let exe = match std::env::current_exe() {
-            Ok(e) => e.to_string_lossy().to_string(),
-            Err(_) => return,
-        };
-        let _ = std::process::Command::new(&exe)
-            .args([
-                &format!("--session={}", self.session_id),
-                "cancel-conversation",
-                conversation_id,
-            ])
-            .output();
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        match std::process::Command::new(&exe).args(&args_ref).output() {
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::error!("Cancel command failed: {}", stderr);
+            }
+            Err(e) => tracing::error!("Failed to run cancel command: {}", e),
+            _ => {}
+        }
     }
 
-    /// Open detail view for the selected node in a new tmux window.
+    /// Open detail view for the selected node via CLI subcommands.
     fn open_detail(&self) {
         let idx = match self.visible.get(self.selected) {
             Some(&i) => i,
@@ -633,29 +653,37 @@ impl TreeState {
         let node = &self.arena[idx];
         let exe = match std::env::current_exe() {
             Ok(e) => e.to_string_lossy().to_string(),
-            Err(_) => return,
-        };
-        let cmd = match &node.kind {
-            NodeType::ToolCall { tool_call_id, .. } => {
-                format!(
-                    "{} --session={} tool-call {}",
-                    exe, self.session_id, tool_call_id
-                )
+            Err(e) => {
+                tracing::error!("Failed to determine current executable: {}", e);
+                return;
             }
-            NodeType::SubAgent {
-                conversation_id, ..
-            } => {
-                // Open the subagent's display
-                format!(
-                    "{} --session={}/subagent-{} display",
-                    exe, self.session_id, conversation_id
-                )
+        };
+        let args: Vec<String> = match &node.kind {
+            NodeType::ToolCall { tool_call_id, .. } => {
+                vec![
+                    format!("--session={}", self.session_id),
+                    "open-tool-call".to_string(),
+                    tool_call_id.clone(),
+                ]
+            }
+            NodeType::SubAgent { conversation_id, .. } => {
+                vec![
+                    format!("--session={}", self.session_id),
+                    "open-subagent".to_string(),
+                    conversation_id.clone(),
+                ]
             }
             NodeType::Root { .. } => return,
         };
-        let _ = std::process::Command::new("tmux")
-            .args(["new-window", &cmd])
-            .output();
+        let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+        match std::process::Command::new(&exe).args(&args_ref).output() {
+            Ok(output) if !output.status.success() => {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                tracing::error!("Failed to open detail view: {}", stderr);
+            }
+            Err(e) => tracing::error!("Failed to run open detail command: {}", e),
+            _ => {}
+        }
     }
 }
 

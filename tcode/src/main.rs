@@ -211,6 +211,16 @@ enum Commands {
     Sessions,
     /// Show tree view of subagents and tool calls
     Tree,
+    /// Open a tool-call detail view in a new tmux window
+    OpenToolCall {
+        /// The tool call ID to display
+        tool_call_id: String,
+    },
+    /// Open a subagent display+edit split in a new tmux window
+    OpenSubagent {
+        /// The conversation ID of the subagent
+        conversation_id: String,
+    },
 }
 
 fn get_lua_path() -> PathBuf {
@@ -411,6 +421,55 @@ async fn main() -> Result<()> {
             };
             let session = Session::new(session_id)?;
             tree::run_tree(session)
+        }
+        Some(Commands::OpenToolCall { tool_call_id }) => {
+            let session_id = require_session(cli.session)?;
+            let exe = std::env::current_exe().context("Failed to determine current executable")?;
+            let exe_str = exe.to_string_lossy();
+            let inner_cmd = format!(
+                "{} --session={} tool-call {}",
+                exe_str, session_id, tool_call_id
+            );
+            let tmux_cmd = format!(
+                "tmux new-window -n \"tool-detail\" \"{}\"",
+                inner_cmd
+            );
+            let output = Command::new("sh")
+                .args(["-c", &tmux_cmd])
+                .output()
+                .context("Failed to run tmux new-window for tool-call detail")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("tmux new-window failed: {}", stderr);
+            }
+            Ok(())
+        }
+        Some(Commands::OpenSubagent { conversation_id }) => {
+            let session_id = require_session(cli.session)?;
+            let exe = std::env::current_exe().context("Failed to determine current executable")?;
+            let exe_str = exe.to_string_lossy();
+            let sa_session = format!("{}/subagent-{}", session_id, conversation_id);
+            let display_cmd = format!(
+                "{} --session={} display; tmux kill-window -t \\$TMUX_PANE",
+                exe_str, sa_session
+            );
+            let edit_cmd = format!(
+                "{} --session={} edit --conversation-id={}",
+                exe_str, sa_session, conversation_id
+            );
+            let tmux_cmd = format!(
+                "tmux new-window -n \"subagent\" \"{}\" \\; split-window -v -p 30 \"{}\"",
+                display_cmd, edit_cmd
+            );
+            let output = Command::new("sh")
+                .args(["-c", &tmux_cmd])
+                .output()
+                .context("Failed to run tmux new-window for subagent")?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                anyhow::bail!("tmux new-window failed: {}", stderr);
+            }
+            Ok(())
         }
         Some(Commands::Browser) => run_browser().await,
         Some(Commands::ClaudeAuth) => claude_auth::run().await,

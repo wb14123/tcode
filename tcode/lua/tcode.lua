@@ -893,14 +893,8 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
         local end_row = details.end_row or start_row
         if cursor_line >= start_row and cursor_line <= end_row and sa_extmark_ids[mark[1]] then
           local conv_id = sa_extmark_ids[mark[1]]
-          local sa_session = M.session_id .. '/subagent-' .. conv_id
-          local display_cmd = string.format('%s --session=%s display; tmux kill-window -t \\$TMUX_PANE',
-            M.exe_path, sa_session)
-          local edit_cmd = string.format('%s --session=%s edit --conversation-id=%s',
-            M.exe_path, sa_session, conv_id)
-          vim.fn.system(string.format(
-            'tmux new-window -n "subagent" "%s" \\; split-window -v -p 30 "%s"',
-            display_cmd, edit_cmd))
+          vim.fn.system(string.format('%s --session=%s open-subagent %s',
+            M.exe_path, M.session_id, conv_id))
           return
         end
       end
@@ -925,8 +919,7 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
     if not tool_call_id then
       return
     end
-    local cmd = string.format('%s --session=%s tool-call %s', M.exe_path, M.session_id, tool_call_id)
-    vim.fn.system(string.format('tmux new-window -n "%s" "%s"', 'tool-detail', cmd))
+    vim.fn.system(string.format('%s --session=%s open-tool-call %s', M.exe_path, M.session_id, tool_call_id))
   end, { buffer = true, silent = true, desc = 'Open tool call detail' })
 
   -- Cancel tool or subagent with confirmation popup (Ctrl-k)
