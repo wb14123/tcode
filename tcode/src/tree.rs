@@ -928,7 +928,10 @@ fn render_node_line(state: &TreeState, node_idx: usize, _vi: usize, width: usize
     let fixed_overhead = prefix.len() + collapse_len + right_len + 3;
     let max_label_width = width.saturating_sub(fixed_overhead);
     let label = if label.len() > max_label_width && max_label_width > 3 {
-        format!("{}...", &label[..max_label_width - 3])
+        let truncate_at = max_label_width - 3;
+        // Find a valid char boundary at or before the target byte position
+        let boundary = label.floor_char_boundary(truncate_at);
+        format!("{}...", &label[..boundary])
     } else {
         label
     };
