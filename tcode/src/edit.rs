@@ -18,23 +18,46 @@ use crate::tty_stdio;
 pub struct EditClient {
     session: Session,
     lua_path: PathBuf,
+    /// When set, messages are routed to a specific subagent conversation.
+    /// `/done` sends `UserRequestEnd` instead of `SendMessage`.
+    conversation_id: Option<String>,
 }
 
 impl EditClient {
-    pub fn new(session: Session, lua_path: PathBuf) -> Self {
-        Self { session, lua_path }
+    pub fn new(session: Session, lua_path: PathBuf, conversation_id: Option<String>) -> Self {
+        Self { session, lua_path, conversation_id }
+    }
+
+    /// Determine the socket path. When targeting a subagent, walk up to the root
+    /// session directory to find `server.sock`.
+    fn socket_path(&self) -> PathBuf {
+        if self.conversation_id.is_some() {
+            // Walk up past subagent-* components to find root session dir
+            let mut dir = self.session.session_dir().clone();
+            while dir.file_name().map_or(false, |n| n.to_string_lossy().starts_with("subagent-")) {
+                if let Some(parent) = dir.parent() {
+                    dir = parent.to_path_buf();
+                } else {
+                    break;
+                }
+            }
+            dir.join("server.sock")
+        } else {
+            self.session.socket_path()
+        }
     }
 
     pub async fn run(&self) -> Result<()> {
         let msg_file = self.session.msg_file();
         let _ = fs::remove_file(&msg_file).await;
 
-        let stream = UnixStream::connect(self.session.socket_path())
+        let socket_path = self.socket_path();
+        let stream = UnixStream::connect(&socket_path)
             .await
             .map_err(|e| {
                 anyhow::anyhow!(
                     "Failed to connect to socket {:?}: {}. Is the server running?",
-                    self.session.socket_path(),
+                    socket_path,
                     e
                 )
             })?;
@@ -42,7 +65,8 @@ impl EditClient {
         let framed = Framed::new(stream, LengthDelimitedCodec::new());
         let (mut sink, mut server_stream) = framed.split();
 
-        let mut nvim = spawn_nvim(&self.lua_path, &msg_file)?;
+        let is_subagent = self.conversation_id.is_some();
+        let mut nvim = spawn_nvim(&self.lua_path, &msg_file, is_subagent)?;
 
         // Set up file watcher using inotify
         let (tx, rx) = mpsc::channel();
@@ -70,8 +94,10 @@ impl EditClient {
             tokio::select! {
                 biased;
                 _ = nvim.wait() => {
-                    let json = serde_json::to_vec(&ClientMessage::Shutdown)?;
-                    let _ = sink.send(Bytes::from(json)).await;
+                    if self.conversation_id.is_none() {
+                        let json = serde_json::to_vec(&ClientMessage::Shutdown)?;
+                        let _ = sink.send(Bytes::from(json)).await;
+                    }
                     break;
                 }
                 msg = server_stream.next() => {
@@ -86,7 +112,8 @@ impl EditClient {
                 Some(event) = file_events.recv() => {
                     if is_msg_file_event(&event, &msg_file) {
                         if let Some(content) = read_message_file(&msg_file).await {
-                            let json = serde_json::to_vec(&ClientMessage::SendMessage { content })?;
+                            let msg = self.build_client_message(&content);
+                            let json = serde_json::to_vec(&msg)?;
                             sink.send(Bytes::from(json)).await?;
                         }
                     }
@@ -95,6 +122,29 @@ impl EditClient {
         }
 
         Ok(())
+    }
+
+    /// Build the appropriate `ClientMessage` based on conversation_id and content.
+    fn build_client_message(&self, content: &str) -> ClientMessage {
+        match &self.conversation_id {
+            Some(conv_id) if content.trim() == "/done" => {
+                ClientMessage::UserRequestEnd {
+                    conversation_id: conv_id.clone(),
+                }
+            }
+            Some(conv_id) => {
+                ClientMessage::SendMessage {
+                    conversation_id: Some(conv_id.clone()),
+                    content: content.to_string(),
+                }
+            }
+            None => {
+                ClientMessage::SendMessage {
+                    conversation_id: None,
+                    content: content.to_string(),
+                }
+            }
+        }
     }
 }
 
@@ -106,11 +156,12 @@ fn is_msg_file_event(event: &Event, msg_file: &PathBuf) -> bool {
     ) && event.paths.iter().any(|p| p == msg_file)
 }
 
-fn spawn_nvim(lua_path: &PathBuf, msg_file: &PathBuf) -> Result<Child> {
+fn spawn_nvim(lua_path: &PathBuf, msg_file: &PathBuf, is_subagent: bool) -> Result<Child> {
     let lua_cmd = format!(
-        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_edit('{}')",
+        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_edit('{}', {})",
         lua_path.display(),
-        msg_file.display()
+        msg_file.display(),
+        is_subagent,
     );
 
     let (stdin, stdout, stderr) = tty_stdio::get_tty_stdio();

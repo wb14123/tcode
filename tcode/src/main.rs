@@ -179,7 +179,11 @@ enum Commands {
     /// Start the server only (for standalone mode)
     Serve,
     /// Open edit window to compose messages
-    Edit,
+    Edit {
+        /// Target a specific subagent conversation (for interactive recovery)
+        #[arg(long)]
+        conversation_id: Option<String>,
+    },
     /// Open display window to view conversation
     Display,
     /// Show details of a specific tool call
@@ -272,11 +276,11 @@ async fn main() -> Result<()> {
             );
             server.run().await
         }
-        Some(Commands::Edit) => {
+        Some(Commands::Edit { conversation_id }) => {
             let session_id = require_session(cli.session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
-            let client = EditClient::new(session, lua_path);
+            let client = EditClient::new(session, lua_path, conversation_id);
             client.run().await
         }
         Some(Commands::Display) => {

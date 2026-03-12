@@ -202,5 +202,11 @@ fn print_message(msg: &Message) {
         Message::SystemMessage { message, .. } => {
             println!("    [System: {}]", message);
         }
+        Message::UserRequestEnd { conversation_id, .. } => {
+            println!("    [UserRequestEnd: {}]", conversation_id);
+        }
+        Message::ToolCallResolved { tool_call_id, .. } => {
+            println!("    [ToolCallResolved: {}]", tool_call_id);
+        }
     }
 }

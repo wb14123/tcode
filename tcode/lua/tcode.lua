@@ -894,8 +894,13 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
         if cursor_line >= start_row and cursor_line <= end_row and sa_extmark_ids[mark[1]] then
           local conv_id = sa_extmark_ids[mark[1]]
           local sa_session = M.session_id .. '/subagent-' .. conv_id
-          local cmd = string.format('%s --session=%s display', M.exe_path, sa_session)
-          vim.fn.system(string.format('tmux new-window -n "%s" "%s"', 'subagent', cmd))
+          local display_cmd = string.format('%s --session=%s display; tmux kill-window -t \\$TMUX_PANE',
+            M.exe_path, sa_session)
+          local edit_cmd = string.format('%s --session=%s edit --conversation-id=%s',
+            M.exe_path, sa_session, conv_id)
+          vim.fn.system(string.format(
+            'tmux new-window -n "subagent" "%s" \\; split-window -v -p 30 "%s"',
+            display_cmd, edit_cmd))
           return
         end
       end
@@ -1062,7 +1067,7 @@ end
 
 -- Setup edit window for composing messages
 -- @param msg_file: Path to file where messages should be written
-function M.setup_edit(msg_file)
+function M.setup_edit(msg_file, is_subagent)
   M.msg_file = msg_file or '/tmp/tcode-edit-msg.txt'
 
   vim.cmd('enew')
@@ -1076,7 +1081,11 @@ function M.setup_edit(msg_file)
   vim.wo.wrap = true
   vim.wo.linebreak = true
 
-  vim.wo.statusline = '%#TCodeEditStatus# TCode Edit - Enter to send, o for new line %='
+  if is_subagent then
+    vim.wo.statusline = '%#TCodeEditStatus# Subagent Edit - Enter to send, /done to finish %='
+  else
+    vim.wo.statusline = '%#TCodeEditStatus# TCode Edit - Enter to send, o for new line %='
+  end
 
   -- Create autocmd to send content on save
   vim.api.nvim_create_autocmd('BufWriteCmd', {

@@ -7,7 +7,7 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
-use llm_rs::conversation::{ConversationManager, ConversationState, Message, MessageEndStatus, create_subagent_tool, create_continue_subagent_tool};
+use llm_rs::conversation::{ConversationManager, ConversationState, Message, MessageEndStatus, create_subagent_tool, create_continue_subagent_tool, format_subagent_result};
 use llm_rs::llm::{ChatOptions, LLM};
 use llm_rs::tool::Tool;
 use tokio::fs::OpenOptions;
@@ -559,13 +559,63 @@ async fn handle_client_inner(
                 let Ok(msg) = serde_json::from_slice::<ClientMessage>(&bytes) else { continue };
 
                 match msg {
-                    ClientMessage::SendMessage { content } => {
-                        if let Err(e) = conv_client.send_chat(&content).await {
-                            send_msg(&mut sink, &ServerMessage::Error {
-                                message: format!("Chat error: {}", e),
-                            }).await?;
+                    ClientMessage::SendMessage { conversation_id, content } => {
+                        let result = if let Some(conv_id) = conversation_id {
+                            match manager.get_conversation(&conv_id) {
+                                Ok(Some(client)) => client.send_chat(&content).await.map_err(|e| e.to_string()),
+                                Ok(None) => Err(format!("Conversation '{}' not found", conv_id)),
+                                Err(e) => Err(e.to_string()),
+                            }
                         } else {
-                            send_msg(&mut sink, &ServerMessage::Ack).await?;
+                            conv_client.send_chat(&content).await.map_err(|e| e.to_string())
+                        };
+                        match result {
+                            Ok(()) => send_msg(&mut sink, &ServerMessage::Ack).await?,
+                            Err(e) => send_msg(&mut sink, &ServerMessage::Error {
+                                message: format!("Chat error: {}", e),
+                            }).await?,
+                        }
+                    }
+                    ClientMessage::UserRequestEnd { conversation_id } => {
+                        match manager.get_conversation(&conversation_id) {
+                            Ok(Some(client)) => {
+                                // Broadcast UserRequestEnd on the subagent's channel (for UI)
+                                let msg = llm_rs::conversation::Message::UserRequestEnd {
+                                    msg_id: client.next_msg_id(),
+                                    conversation_id: conversation_id.clone(),
+                                };
+                                if let Err(e) = client.notify_msg(msg) {
+                                    tracing::error!(error = %e, "failed to broadcast UserRequestEnd");
+                                }
+
+                                // Resolve: extract response and send ToolCallResolved to parent
+                                if let Some((parent_conv_id, tool_call_id)) = manager.get_subagent_parent(&conversation_id) {
+                                    if let Ok(Some(parent_client)) = manager.get_conversation(&parent_conv_id) {
+                                        if let Some(response) = client.extract_latest_response() {
+                                            let formatted = format_subagent_result(
+                                                &conversation_id, &response, &MessageEndStatus::Succeeded,
+                                            );
+                                            if let Err(e) = parent_client.send_tool_call_resolved(
+                                                tool_call_id, Arc::new(formatted),
+                                            ).await {
+                                                tracing::error!(error = %e, "failed to send ToolCallResolved to parent");
+                                            }
+                                        }
+                                    }
+                                }
+
+                                send_msg(&mut sink, &ServerMessage::Ack).await?;
+                            }
+                            Ok(None) => {
+                                send_msg(&mut sink, &ServerMessage::Error {
+                                    message: format!("Conversation '{}' not found", conversation_id),
+                                }).await?;
+                            }
+                            Err(e) => {
+                                send_msg(&mut sink, &ServerMessage::Error {
+                                    message: format!("Error looking up conversation: {}", e),
+                                }).await?;
+                            }
                         }
                     }
                     ClientMessage::CancelTool { tool_call_id } => {
