@@ -2,39 +2,7 @@ use anyhow::{anyhow, Result};
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 
-use crate::browser;
-
-const READABILITY_JS: &str = include_str!("vendor/readability-0.6.0.js");
-const CLEAN_HTML_JS: &str = include_str!("clean-html.js");
-const EXTRACT_CONTENT_JS: &str = include_str!("extract-content.js");
-
-/// Fetch a web page using headless Chrome and extract clean HTML using Readability.js.
-fn fetch_and_extract(url: &str) -> Result<String> {
-    match fetch_and_extract_inner(url) {
-        Ok(result) => Ok(result),
-        Err(e) if e.to_string().contains("connection is closed") => {
-            tracing::warn!("Browser connection lost during web_fetch, restarting: {e}");
-            browser::shutdown_browser();
-            fetch_and_extract_inner(url)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-fn fetch_and_extract_inner(url: &str) -> Result<String> {
-    let tab = browser::open_tab(url)?;
-    tab.evaluate(READABILITY_JS, false)?;
-    tab.evaluate(CLEAN_HTML_JS, false)?;
-    let result = tab.evaluate(EXTRACT_CONTENT_JS, false)?;
-
-    match result.value {
-        Some(serde_json::Value::String(content)) => Ok(content),
-        Some(serde_json::Value::Null) | None => {
-            Err(anyhow!("Readability could not extract content from this page"))
-        }
-        Some(other) => Err(anyhow!("Unexpected result type: {:?}", other)),
-    }
-}
+use crate::browser_client;
 
 /// Returns true if the Content-Type indicates HTML content.
 fn is_html_content_type(content_type: &str) -> bool {
@@ -84,11 +52,17 @@ pub fn web_fetch(
         };
 
         if use_browser {
-            let url_clone = url.clone();
-            let handle = tokio::task::spawn_blocking(move || fetch_and_extract(&url_clone));
+            let client = match browser_client::get_global_client() {
+                Some(c) => c,
+                None => {
+                    yield Err(anyhow!("Browser client not initialized. Is the browser-server running?"));
+                    return;
+                }
+            };
+
             tokio::select! {
-                result = handle => {
-                    yield result.map_err(anyhow::Error::from).flatten();
+                result = client.web_fetch(&url) => {
+                    yield result;
                 }
                 _ = ctx.cancel_token.cancelled() => {
                     yield Err(anyhow!("Cancelled"));
@@ -106,6 +80,3 @@ pub fn web_fetch(
         }
     }
 }
-
-#[cfg(test)]
-mod tests;

@@ -226,9 +226,6 @@ impl Server {
             }
         }
 
-        // Kill any Chrome browser before exiting
-        tools::browser::shutdown_browser();
-
         // Signal display nvim to quit via status file
         tokio::fs::write(&self.status_file, "Shutdown").await
             .with_context(|| format!("Failed to write shutdown status to {:?}", self.status_file))?;

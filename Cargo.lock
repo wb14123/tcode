@@ -292,6 +292,28 @@ dependencies = [
 ]
 
 [[package]]
+name = "browser-server"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "axum",
+ "clap",
+ "dirs",
+ "headless_chrome",
+ "hyper",
+ "hyper-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tokio-util",
+ "tower",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2719,6 +2741,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "base64",
+ "browser-server",
  "bytes",
  "clap",
  "crossterm",
@@ -2940,9 +2963,8 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-stream",
+ "browser-server",
  "chrono",
- "dirs",
- "headless_chrome",
  "llm-rs",
  "llm-rs-macros",
  "reqwest 0.12.28",
@@ -2952,7 +2974,6 @@ dependencies = [
  "tokio",
  "tokio-stream",
  "tracing",
- "urlencoding",
 ]
 
 [[package]]

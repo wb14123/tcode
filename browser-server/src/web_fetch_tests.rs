@@ -1,9 +1,10 @@
+use crate::web_fetch::validate_url;
 use std::sync::{Arc, LazyLock, Mutex};
 
 use headless_chrome::{Browser, LaunchOptions};
 
 /// The shared cleaning JS from clean-html.js. Defines `cleanHtml(html)` in the page scope.
-const CLEAN_HTML_JS: &str = include_str!("clean-html.js");
+const CLEAN_HTML_JS: &str = include_str!("web_fetch/clean-html.js");
 
 /// Shared browser launch result. `Err` stores the message when Chrome is not found.
 static BROWSER_RESULT: LazyLock<Result<Mutex<Browser>, String>> = LazyLock::new(|| {
@@ -212,4 +213,100 @@ fn empty_src_img_removed() {
     let tab = new_tab();
     let input = r#"<p>before<img src="">after</p>"#;
     assert_eq!(clean(&tab, input), "<p>beforeafter</p>");
+}
+
+// --- URL validation tests ---
+
+#[test]
+fn validate_url_allows_https() {
+    assert!(validate_url("https://example.com").is_ok());
+}
+
+#[test]
+fn validate_url_allows_http_with_path() {
+    assert!(validate_url("http://example.com/path?q=1").is_ok());
+}
+
+#[test]
+fn validate_url_blocks_file_scheme() {
+    let err = validate_url("file:///etc/passwd").unwrap_err();
+    assert!(err.to_string().contains("Blocked URL scheme"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_chrome_scheme() {
+    let err = validate_url("chrome://settings").unwrap_err();
+    assert!(err.to_string().contains("Blocked URL scheme"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_data_scheme() {
+    let err = validate_url("data:text/html,<h1>hi</h1>").unwrap_err();
+    assert!(err.to_string().contains("Blocked URL scheme"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_javascript_scheme() {
+    let err = validate_url("javascript:alert(1)").unwrap_err();
+    assert!(err.to_string().contains("Blocked URL scheme"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_localhost() {
+    let err = validate_url("http://localhost").unwrap_err();
+    assert!(err.to_string().contains("Blocked host"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_localhost_with_port() {
+    let err = validate_url("http://localhost:8080").unwrap_err();
+    assert!(err.to_string().contains("Blocked host"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_127_0_0_1() {
+    let err = validate_url("http://127.0.0.1").unwrap_err();
+    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_ipv6_loopback() {
+    let err = validate_url("http://[::1]").unwrap_err();
+    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_link_local() {
+    let err = validate_url("http://169.254.169.254").unwrap_err();
+    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_10_network() {
+    let err = validate_url("http://10.0.0.1").unwrap_err();
+    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_192_168_network() {
+    let err = validate_url("http://192.168.1.1").unwrap_err();
+    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_172_16_network() {
+    let err = validate_url("http://172.16.0.1").unwrap_err();
+    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_unspecified() {
+    let err = validate_url("http://0.0.0.0").unwrap_err();
+    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+}
+
+#[test]
+fn validate_url_blocks_cgnat() {
+    let err = validate_url("http://100.64.0.1").unwrap_err();
+    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
 }

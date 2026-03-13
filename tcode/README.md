@@ -50,10 +50,21 @@ Each provider has its own default model, base URL, and environment variable for 
 ### Other Options
 
 ```bash
---api-key <key>     # Override API key (otherwise uses provider's env var)
---model <model>     # Override default model
---base-url <url>    # Override default base URL
---session <id>      # Session ID (required for subcommands, auto-generated for main command)
+--api-key <key>                    # Override API key (otherwise uses provider's env var)
+--model <model>                    # Override default model
+--base-url <url>                   # Override default base URL
+--session <id>                     # Session ID (required for subcommands, auto-generated for main command)
+--browser-server-url <url>         # Connect to a remote browser-server (TCP mode)
+--browser-server-token <token>     # Bearer token for remote browser-server
+```
+
+### Browser Server
+
+By default, tcode automatically manages a local `browser-server` process via Unix socket at `~/.tcode/browser-server.sock`. Multiple tcode sessions share the same server, and it exits on its own after 5 minutes of inactivity.
+
+To use a remote browser-server instead:
+```bash
+tcode --browser-server-url http://host:8090 --browser-server-token my-token
 ```
 
 ## Commands
@@ -111,7 +122,7 @@ Opens a TUI tree view of the conversation's subagents and tool calls. Displays s
 
 ### `tcode browser`
 
-Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) that the headless browser tools need.
+Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) that the browser-server needs. This is a standalone command that opens a visible Chrome window — it does not interact with the browser-server process.
 
 ### `tcode claude-auth`
 

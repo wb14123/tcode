@@ -1,86 +1,32 @@
 use std::fmt::Write;
 
 use anyhow::{anyhow, Result};
+use browser_server::SearchResult;
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
-use serde::Deserialize;
 
-use crate::browser;
+use crate::browser_client;
 
-const EXTRACT_SEARCH_RESULTS_JS: &str = include_str!("extract-search-results.js");
-
-#[derive(Deserialize)]
-struct SubResult {
-    title: String,
-    url: String,
-    snippet: String,
-}
-
-#[derive(Deserialize)]
-struct SearchResult {
-    title: String,
-    url: String,
-    snippet: String,
-    sub_results: Vec<SubResult>,
-}
-
-fn format_results(results: &[SearchResult]) -> String {
+fn format_results(results: &[SearchResult]) -> Result<String> {
     let mut out = String::new();
     for (i, r) in results.iter().enumerate() {
-        let _ = writeln!(out, "{}. {}", i + 1, r.title);
-        let _ = writeln!(out, "   {}", r.url);
+        writeln!(out, "{}. {}", i + 1, r.title)?;
+        writeln!(out, "   {}", r.url)?;
         if !r.snippet.is_empty() {
-            let _ = writeln!(out, "   {}", r.snippet);
+            writeln!(out, "   {}", r.snippet)?;
         }
         for sub in &r.sub_results {
-            let _ = writeln!(out, "   - {}", sub.title);
-            let _ = writeln!(out, "     {}", sub.url);
+            writeln!(out, "   - {}", sub.title)?;
+            writeln!(out, "     {}", sub.url)?;
             if !sub.snippet.is_empty() {
-                let _ = writeln!(out, "     {}", sub.snippet);
+                writeln!(out, "     {}", sub.snippet)?;
             }
         }
         if i + 1 < results.len() {
-            let _ = writeln!(out);
+            writeln!(out)?;
         }
     }
-    out
-}
-
-fn search_and_extract(query: &str) -> Result<String> {
-    match search_and_extract_inner(query) {
-        Ok(result) => Ok(result),
-        Err(e) if e.to_string().contains("connection is closed") => {
-            tracing::warn!("Browser connection lost during web_search, restarting: {e}");
-            browser::shutdown_browser();
-            search_and_extract_inner(query)
-        }
-        Err(e) => Err(e),
-    }
-}
-
-fn search_and_extract_inner(query: &str) -> Result<String> {
-    let encoded = urlencoding::encode(query);
-    let url = format!("https://kagi.com/search?q={encoded}");
-
-    let tab = browser::open_tab(&url)?;
-
-    let result = tab.evaluate(EXTRACT_SEARCH_RESULTS_JS, false)?;
-
-    match result.value {
-        Some(serde_json::Value::String(json_str)) => {
-            let results: Vec<SearchResult> = serde_json::from_str(&json_str)
-                .map_err(|e| anyhow!("Failed to parse search results: {e}"))?;
-            if results.is_empty() {
-                Ok("No search results found.".to_string())
-            } else {
-                Ok(format_results(&results))
-            }
-        }
-        Some(serde_json::Value::Null) | None => {
-            Err(anyhow!("Could not extract search results from the page"))
-        }
-        Some(other) => Err(anyhow!("Unexpected result type: {:?}", other)),
-    }
+    Ok(out)
 }
 
 /// Search the web using Kagi and return structured search results
@@ -91,10 +37,26 @@ pub fn web_search(
     query: String,
 ) -> impl tokio_stream::Stream<Item = Result<String>> {
     async_stream::stream! {
-        let handle = tokio::task::spawn_blocking(move || search_and_extract(&query));
+        let client = match browser_client::get_global_client() {
+            Some(c) => c,
+            None => {
+                yield Err(anyhow!("Browser client not initialized. Is the browser-server running?"));
+                return;
+            }
+        };
+
         tokio::select! {
-            result = handle => {
-                yield result.map_err(anyhow::Error::from).flatten();
+            result = client.web_search(&query) => {
+                match result {
+                    Ok(results) => {
+                        if results.is_empty() {
+                            yield Ok("No search results found.".to_string());
+                        } else {
+                            yield Ok(format_results(&results)?);
+                        }
+                    }
+                    Err(e) => yield Err(e),
+                }
             }
             _ = ctx.cancel_token.cancelled() => {
                 yield Err(anyhow!("Cancelled"));

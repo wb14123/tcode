@@ -7,8 +7,7 @@ edition = "2024"
 anyhow = "1"
 chrono = "0.4"
 async-stream = "0.3"
-dirs = "6"
-headless_chrome = "1.0"
+browser-server = { path = "../browser-server" }
 tracing = "0.1"
 llm-rs = { path = "../llm-rs" }
 llm-rs-macros = { path = "../llm-rs-macros" }
@@ -18,7 +17,6 @@ schemars = "1.2.0"
 tokio = { version = "1", features = ["rt", "time"] }
 tokio-stream = "0.1"
 reqwest = { version = "0.12", features = ["json"] }
-urlencoding = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }

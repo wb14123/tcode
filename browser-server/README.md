@@ -1,0 +1,150 @@
+# browser-server
+
+A standalone headless Chrome server that exposes `web_search` and `web_fetch` as REST APIs over a Unix socket or TCP.
+
+## Architecture
+
+```
+tcode instance 1 ──┐
+tcode instance 2 ──┤──▶ browser-server (Unix socket or TCP) ──▶ headless Chrome
+other programs   ──┘                                              ~/.tcode/chrome/
+```
+
+Multiple clients share a single browser-server process. The server manages Chrome lifecycle, tab pooling, and idle shutdown automatically.
+
+## Endpoints
+
+### POST /web_search
+
+Search the web via Kagi and return structured results.
+
+**Request:**
+```json
+{ "query": "rust async patterns" }
+```
+
+**Response:**
+```json
+{
+  "results": [
+    {
+      "title": "Async in Rust",
+      "url": "https://example.com/async",
+      "snippet": "A guide to async patterns...",
+      "sub_results": []
+    }
+  ]
+}
+```
+
+### POST /web_fetch
+
+Fetch a web page and extract clean HTML content using Readability.js.
+
+**Request:**
+```json
+{ "url": "https://example.com/article" }
+```
+
+**Response:**
+```json
+{ "content": "<h1>Article Title</h1><p>Clean content...</p>" }
+```
+
+### GET /health
+
+Health check endpoint.
+
+**Response:**
+```json
+{ "status": "ok" }
+```
+
+### Error format
+
+All endpoints return errors as:
+```json
+{
+  "error": {
+    "message": "description of what went wrong",
+    "type": "browser_error"
+  }
+}
+```
+
+## CLI Usage
+
+```bash
+# Unix socket mode (default, no auth)
+browser-server
+browser-server --socket /tmp/my-browser.sock
+
+# TCP mode (bearer token auth required)
+browser-server --bind 0.0.0.0:8090 --token-file tokens.json
+
+# With idle timeout (auto-exit after 5 minutes of inactivity)
+browser-server --idle-timeout 300
+```
+
+### Options
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--socket <path>` | `~/.tcode/browser-server.sock` | Unix socket path |
+| `--bind <addr>` | (none) | TCP bind address; enables bearer token auth |
+| `--token-file <path>` | `~/.config/browser-server/tokens.json` | Token file for TCP auth |
+| `--idle-timeout <secs>` | (none) | Exit after N seconds with no requests |
+
+### Token file format
+
+When using `--bind` for TCP mode, create a JSON file with an array of valid bearer tokens:
+
+```json
+["token-abc-123", "token-def-456"]
+```
+
+## Logging
+
+When run standalone, logs go to stderr.
+
+When auto-started by tcode, logs are written to `~/.tcode/browser-server.log`.
+
+## How tcode uses it
+
+When tcode starts, it automatically manages a browser-server instance:
+
+1. Checks if `~/.tcode/browser-server.sock` has a healthy server
+2. If yes, reuses it (multiple tcode sessions share one server)
+3. If no, spawns `browser-server --socket ... --idle-timeout 300`
+4. The server exits on its own after 5 minutes of inactivity
+
+Logs are at `~/.tcode/browser-server.log`.
+
+For remote browser-server access:
+```bash
+tcode --browser-server-url http://host:8090 --browser-server-token xxx
+```
+
+## Internal Modules
+
+### `browser`
+
+Shared headless Chrome management with tab pooling. Launches Chrome with a persistent profile at `~/.tcode/chrome/`, handles navigation and page load waiting via `wait-for-idle.js`. Features automatic crash recovery and idle browser shutdown.
+
+### `web_search`
+
+Kagi search extraction. Navigates to Kagi, runs `extract-search-results.js` to parse the results page into structured data.
+
+### `web_fetch`
+
+Page content extraction. Loads pages in Chrome, applies Readability.js for article extraction, then cleans HTML with `clean-html.js` to strip LLM-irrelevant attributes and elements.
+
+## Shared Types
+
+The crate exports request/response types via `lib.rs` that are used by both the server handlers and the `tools` crate's HTTP client:
+
+- `WebSearchRequest` / `WebSearchResponse`
+- `WebFetchRequest` / `WebFetchResponse`
+- `SearchResult` / `SubResult`
+- `ErrorResponse` / `ErrorDetail`
+- `HealthResponse`

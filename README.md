@@ -8,7 +8,8 @@ A Rust workspace for building LLM-powered coding agents. The primary application
 llm-rs/               Root workspace
 ├── llm-rs/            Core LLM library (provider abstraction, conversations, tool system)
 ├── llm-rs-macros/     Proc macros for tool definition (#[tool] attribute)
-├── tools/             Built-in tools (web fetch, web search via headless Chrome)
+├── browser-server/    Headless Chrome server (web_search/web_fetch REST APIs)
+├── tools/             Built-in tools (thin API clients for browser-server)
 └── tcode/             Terminal coding agent application (server + neovim/tmux clients)
 ```
 
@@ -41,8 +42,13 @@ llm-rs/               Root workspace
 │  └─ Tool system (streaming execution with timeouts)  │
 │                                                      │
 │  tools (Built-in Tools)                              │
-│  ├─ web_fetch (page content extraction)              │
-│  └─ web_search (Kagi search)                         │
+│  ├─ web_fetch (API client → browser-server)          │
+│  └─ web_search (API client → browser-server)         │
+│                                                      │
+│  browser-server (Shared Browser Process)             │
+│  ├─ Headless Chrome management + tab pooling         │
+│  ├─ REST API (Unix socket or TCP)                    │
+│  └─ Auto-started by tcode, shared across instances   │
 │                                                      │
 │  llm-rs-macros                                       │
 │  └─ #[tool] proc macro for tool definitions          │
@@ -89,5 +95,6 @@ See each crate's README for more details:
 
 - [llm-rs/](llm-rs/) - Core LLM library
 - [llm-rs-macros/](llm-rs-macros/) - Procedural macros
+- [browser-server/](browser-server/) - Headless Chrome browser server
 - [tools/](tools/) - Built-in tools
 - [tcode/](tcode/) - Terminal application

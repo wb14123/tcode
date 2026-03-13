@@ -172,6 +172,14 @@ struct Cli {
     /// Maximum nesting depth for subagents (0 = no subagents, 1 = one level, etc.)
     #[arg(long, default_value_t = 10)]
     max_subagent_depth: usize,
+
+    /// Connect to an existing remote browser-server (TCP mode)
+    #[arg(long)]
+    browser_server_url: Option<String>,
+
+    /// Bearer token for remote browser-server (required with --browser-server-url)
+    #[arg(long)]
+    browser_server_token: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -269,6 +277,7 @@ async fn main() -> Result<()> {
         Some(Commands::Serve) => {
             let session_id = require_session(cli.session.clone())?;
             init_tracing(&session_id);
+            init_browser_client(cli.browser_server_url.clone(), cli.browser_server_token.clone()).await?;
             let (llm, model) = create_llm(&cli)?;
             let chat_options = build_chat_options(&cli);
             let session = Session::new(session_id)?;
@@ -368,6 +377,7 @@ async fn main() -> Result<()> {
                 session, session_id,
                 llm, model, chat_options,
                 cli.subagent_max_iterations, cli.max_subagent_depth,
+                cli.browser_server_url, cli.browser_server_token,
                 "Attaching to session",
             ).await
         }
@@ -498,7 +508,7 @@ fn init_tracing(session_id: &str) {
 async fn run_browser() -> Result<()> {
     use headless_chrome::{Browser, LaunchOptions};
 
-    let data_dir = tools::browser::chrome_data_dir();
+    let data_dir = browser_server::browser::chrome_data_dir();
     fs::create_dir_all(&data_dir)?;
 
     println!("Launching Chrome with persistent profile at: {}", data_dir.display());
@@ -544,6 +554,7 @@ async fn run_unified(cli: Cli, _lua_path: PathBuf) -> Result<()> {
         session, session_id,
         llm, model, chat_options,
         cli.subagent_max_iterations, cli.max_subagent_depth,
+        cli.browser_server_url, cli.browser_server_token,
         "Session",
     ).await
 }
@@ -558,6 +569,8 @@ async fn run_unified_with_session(
     chat_options: ChatOptions,
     subagent_max_iterations: usize,
     max_subagent_depth: usize,
+    browser_server_url: Option<String>,
+    browser_server_token: Option<String>,
     label: &str,
 ) -> Result<()> {
     let original_stdout = tty_stdio::redirect_output_to_files(
@@ -567,6 +580,9 @@ async fn run_unified_with_session(
     tty_stdio::write_to_terminal(original_stdout, &format!("{}: {}\n", label, session_id));
 
     init_tracing(&session_id);
+
+    // Initialize browser client (before tool registration)
+    init_browser_client(browser_server_url, browser_server_token).await?;
 
     let socket_path = session.socket_path();
 
@@ -670,9 +686,7 @@ async fn run_unified_with_session(
         }
     };
 
-    // Always clean up: kill Chrome, tmux panes, and server — regardless of how we exited
-    tools::browser::shutdown_browser();
-
+    // Clean up: tmux panes and server — browser-server handles its own lifecycle
     let _ = Command::new("tmux")
         .args(["kill-pane", "-t", &edit_pane_id])
         .output();
@@ -693,4 +707,47 @@ async fn run_unified_with_session(
             Err(anyhow::anyhow!(e).context("Display process failed"))
         }
     }
+}
+
+/// Default browser-server Unix socket path.
+fn browser_server_socket_path() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".tcode")
+        .join("browser-server.sock")
+}
+
+/// Initialize the global browser client.
+/// If `browser_server_url` is provided, connect to a remote TCP server.
+/// Otherwise, auto-start a local browser-server via Unix socket with auto-restart on idle timeout.
+async fn init_browser_client(
+    browser_server_url: Option<String>,
+    browser_server_token: Option<String>,
+) -> Result<()> {
+    use tools::browser_client::{BrowserClient, set_global_client};
+
+    if let Some(url) = browser_server_url {
+        let token = browser_server_token.unwrap_or_default();
+        set_global_client(BrowserClient::tcp(url, token));
+        return Ok(());
+    }
+
+    // Auto-start local browser-server via Unix socket
+    let socket_path = browser_server_socket_path();
+    let browser_server_exe = std::env::current_exe()
+        .context("Failed to determine current executable")?
+        .parent()
+        .ok_or_else(|| anyhow!("No parent directory for executable"))?
+        .join("browser-server");
+
+    // Create client with auto-restart: if the browser-server exits after idle timeout,
+    // the client will automatically respawn it on the next request.
+    let client = BrowserClient::unix(socket_path.clone())
+        .with_auto_restart(socket_path, browser_server_exe);
+
+    // Eagerly start the server (or reuse an existing one) so the first request is fast.
+    client.ensure_server_running().await;
+
+    set_global_client(client);
+    Ok(())
 }

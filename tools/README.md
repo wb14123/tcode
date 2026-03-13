@@ -1,31 +1,44 @@
 # tools
 
-Built-in tool implementations for the LLM agent. All tools use headless Chrome for web interaction.
+Built-in tool implementations for the LLM agent. Tools communicate with a separate `browser-server` process for web interaction.
 
 ## Tools
 
 ### `web_fetch`
 
-Fetches a web page and extracts its main content using Mozilla's Readability.js algorithm. Returns clean, readable text suitable for LLM consumption.
+Fetches a web page and extracts its main content. Returns clean, readable HTML suitable for LLM consumption.
 
-- Uses headless Chrome to render JavaScript-heavy pages
-- Applies Readability.js for content extraction (strips navigation, ads, etc.)
+- Smart content-type detection: HTML pages go through browser-server (Readability.js extraction), plaintext is fetched directly via reqwest
 - 300 second timeout
 
 ### `web_search`
 
 Performs a web search via Kagi and returns formatted results with titles, URLs, and snippets.
 
-- Uses headless Chrome to query Kagi search
+- Delegates to browser-server for Kagi search extraction
 - Parses results including sub-results
 - 300 second timeout
 - Requires Kagi session (use `tcode browser` to log in)
 
-## Internal Modules
+### `current_time`
 
-### `browser`
+Returns the current date and time.
 
-Shared headless Chrome management. Launches Chrome with a persistent profile at `~/.tcode/chrome/`, handles navigation and page load waiting. Strips `LD_PRELOAD` to avoid proxy issues with Chrome subprocesses.
+## Browser Client
+
+The `browser_client` module provides an HTTP client for communicating with `browser-server`:
+
+```rust
+use tools::browser_client::{BrowserClient, set_global_client};
+
+// Unix socket mode (used by tcode auto-start)
+set_global_client(BrowserClient::unix(socket_path));
+
+// TCP mode (for remote browser-server)
+set_global_client(BrowserClient::tcp(url, token));
+```
+
+The global client must be initialized before `web_fetch` or `web_search` tools are used. tcode handles this automatically.
 
 ## Adding New Tools
 
