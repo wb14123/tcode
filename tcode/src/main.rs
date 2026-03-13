@@ -448,8 +448,7 @@ async fn main() -> Result<()> {
             let session_id = require_session(cli.session)?;
             let exe = std::env::current_exe().context("Failed to determine current executable")?;
             let exe_str = exe.to_string_lossy();
-            // session_id already contains the full subagent path
-            let sa_session = &session_id;
+            let sa_session = format!("{}/subagent-{}", session_id, conversation_id);
             let display_cmd = format!(
                 "{} --session={} display; tmux kill-window -t \\$TMUX_PANE",
                 exe_str, sa_session

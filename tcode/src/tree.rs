@@ -214,25 +214,33 @@ impl TreeState {
             }
             let conversation_id = name.strip_prefix("subagent-").unwrap().to_string();
 
-            // Only create node if not already tracked
+            // Only create/register node if directory not already tracked
             if !self.dir_to_node.contains_key(&path) {
-                let node_idx = self.arena.len();
-                self.arena.push(TreeNode {
-                    kind: NodeType::SubAgent {
-                        conversation_id: conversation_id.clone(),
-                        description: String::new(),
-                        status: NodeStatus::Running,
-                        input_tokens: 0,
-                        output_tokens: 0,
-                    },
-                    depth,
-                    children: Vec::new(),
-                    collapsed: false,
-                });
-                self.arena[parent_node].children.push(node_idx);
+                // If a node already exists (from SubAgentStart message), reuse it;
+                // otherwise create a new one.
+                let node_idx =
+                    if let Some(&existing_idx) = self.conversation_idx.get(&conversation_id) {
+                        existing_idx
+                    } else {
+                        let idx = self.arena.len();
+                        self.arena.push(TreeNode {
+                            kind: NodeType::SubAgent {
+                                conversation_id: conversation_id.clone(),
+                                description: String::new(),
+                                status: NodeStatus::Running,
+                                input_tokens: 0,
+                                output_tokens: 0,
+                            },
+                            depth,
+                            children: Vec::new(),
+                            collapsed: false,
+                        });
+                        self.arena[parent_node].children.push(idx);
+                        self.conversation_idx
+                            .insert(conversation_id.clone(), idx);
+                        idx
+                    };
                 self.dir_to_node.insert(path.clone(), node_idx);
-                self.conversation_idx
-                    .insert(conversation_id.clone(), node_idx);
 
                 let display_file = path.join("display.jsonl");
                 if !self.file_trackers.contains_key(&display_file) {
@@ -644,22 +652,12 @@ impl TreeState {
         }
     }
 
-    /// Get the session path for the directory that owns a node's data.
-    /// For ToolCall nodes, this is the parent conversation's session.
-    /// For SubAgent/Root nodes, this is the node's own session.
-    fn node_session(&self, idx: usize) -> String {
-        let dir_node_idx = match &self.arena[idx].kind {
-            NodeType::ToolCall { .. } => self
-                .arena
-                .iter()
-                .position(|n| n.children.contains(&idx))
-                .unwrap_or(0),
-            _ => idx,
-        };
+    /// Look up the session string for a node that has a `dir_to_node` entry.
+    fn dir_node_to_session(&self, node_idx: usize) -> Option<String> {
         self.dir_to_node
             .iter()
             .find_map(|(dir, &nidx)| {
-                if nidx == dir_node_idx {
+                if nidx == node_idx {
                     Some(dir.clone())
                 } else {
                     None
@@ -674,6 +672,16 @@ impl TreeState {
                     }
                 })
             })
+    }
+
+    /// Get the session path for the parent conversation that owns a node.
+    fn parent_session(&self, idx: usize) -> String {
+        let parent_idx = self
+            .arena
+            .iter()
+            .position(|n| n.children.contains(&idx))
+            .unwrap_or(0);
+        self.dir_node_to_session(parent_idx)
             .unwrap_or_else(|| self.session_id.clone())
     }
 
@@ -691,17 +699,18 @@ impl TreeState {
                 return;
             }
         };
+        let parent_session = self.parent_session(idx);
         let args: Vec<String> = match &node.kind {
             NodeType::ToolCall { tool_call_id, .. } => {
                 vec![
-                    format!("--session={}", self.node_session(idx)),
+                    format!("--session={}", parent_session),
                     "open-tool-call".to_string(),
                     tool_call_id.clone(),
                 ]
             }
             NodeType::SubAgent { conversation_id, .. } => {
                 vec![
-                    format!("--session={}", self.node_session(idx)),
+                    format!("--session={}", parent_session),
                     "open-subagent".to_string(),
                     conversation_id.clone(),
                 ]
