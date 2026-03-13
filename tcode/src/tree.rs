@@ -525,6 +525,23 @@ impl TreeState {
         }
     }
 
+    /// Check if a node is currently running.
+    fn is_running(&self, idx: usize) -> bool {
+        match &self.arena[idx].kind {
+            NodeType::Root { .. } => false,
+            NodeType::ToolCall { status, .. } | NodeType::SubAgent { status, .. } => {
+                matches!(status, NodeStatus::Running)
+            }
+        }
+    }
+
+    /// Sort children: running first, then by arena index (creation time).
+    fn sorted_children(&self, children: &[usize]) -> Vec<usize> {
+        let mut sorted = children.to_vec();
+        sorted.sort_by_key(|&child_idx| (!self.is_running(child_idx), child_idx));
+        sorted
+    }
+
     /// Rebuild the visible list from the arena using DFS.
     fn rebuild_visible(&mut self) {
         self.visible.clear();
@@ -532,7 +549,8 @@ impl TreeState {
             return;
         }
         // Start DFS from root's children (root itself is not shown)
-        let root_children: Vec<usize> = self.arena[0].children.clone();
+        // Sort: running first, then by creation order
+        let root_children = self.sorted_children(&self.arena[0].children.clone());
         for &child_idx in &root_children {
             self.dfs_collect(child_idx);
         }
@@ -549,7 +567,7 @@ impl TreeState {
         }
         self.visible.push(idx);
         if !self.arena[idx].collapsed {
-            let children: Vec<usize> = self.arena[idx].children.clone();
+            let children = self.sorted_children(&self.arena[idx].children.clone());
             for &child_idx in &children {
                 self.dfs_collect(child_idx);
             }
