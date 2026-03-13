@@ -129,6 +129,10 @@ impl Server {
                 self.session_dir.clone(),
             )?;
 
+            // Close stale "running" tool calls and subagents in display files
+            close_stale_running_items(&self.session_dir).await
+                .with_context(|| "Failed to close stale running items on resume")?;
+
             // Spawn event writers for resumed subagents (appending to existing files)
             for sa in &resumed_subagents {
                 tracing::info!(conversation_id = %sa.conversation_id, "Resumed subagent conversation");
@@ -677,4 +681,140 @@ async fn append_event(file: &PathBuf, event: &Message) -> Result<()> {
     f.write_all(line.as_bytes()).await?;
     f.flush().await?;
     Ok(())
+}
+
+/// On resume, close any tool calls or subagents that were still "running"
+/// when the previous session exited. Appends synthetic Cancelled end events
+/// to display.jsonl files and updates status files.
+async fn close_stale_running_items(session_dir: &PathBuf) -> Result<()> {
+    close_stale_in_dir(session_dir).await
+}
+
+/// Process a single directory's display.jsonl, close stale items, and recurse into subagent dirs.
+fn close_stale_in_dir(dir: &PathBuf) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
+    Box::pin(async move {
+    let display_file = dir.join("display.jsonl");
+    if !display_file.exists() {
+        return Ok(());
+    }
+
+    let content = tokio::fs::read_to_string(&display_file).await
+        .with_context(|| format!("Failed to read {:?}", display_file))?;
+
+    // Track open tool calls: tool_call_id -> tool_name
+    let mut open_tools: HashMap<String, String> = HashMap::new();
+
+    // Track subagent states: conversation_id -> is_running
+    // true = Running (needs closing), false = Idle (already has turn end)
+    let mut subagent_running: HashMap<String, bool> = HashMap::new();
+
+    for line in content.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let msg: Message = match serde_json::from_str(line) {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::warn!(error = %e, "Skipping unparseable line in display.jsonl");
+                continue;
+            }
+        };
+        match &msg {
+            Message::ToolMessageStart { tool_call_id, tool_name, .. } => {
+                open_tools.insert(tool_call_id.clone(), tool_name.clone());
+            }
+            Message::ToolMessageEnd { tool_call_id, .. } => {
+                open_tools.remove(tool_call_id);
+            }
+            Message::SubAgentStart { conversation_id, .. } => {
+                subagent_running.insert(conversation_id.clone(), true);
+            }
+            Message::SubAgentTurnEnd { conversation_id, .. } => {
+                if let Some(running) = subagent_running.get_mut(conversation_id) {
+                    *running = false;
+                }
+            }
+            Message::SubAgentContinue { conversation_id, .. } => {
+                if let Some(running) = subagent_running.get_mut(conversation_id) {
+                    *running = true;
+                }
+            }
+            Message::SubAgentEnd { conversation_id, .. } => {
+                subagent_running.remove(conversation_id);
+            }
+            _ => {}
+        }
+    }
+
+    // Close stale tool calls
+    for (tool_call_id, _tool_name) in &open_tools {
+        tracing::info!(tool_call_id, dir = ?dir, "Closing stale running tool call");
+
+        let end_event = Message::ToolMessageEnd {
+            msg_id: 0,
+            tool_call_id: tool_call_id.clone(),
+            end_status: MessageEndStatus::Cancelled,
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+
+        append_event(&display_file, &end_event).await
+            .with_context(|| format!("Failed to append synthetic ToolMessageEnd for {}", tool_call_id))?;
+
+        // Also append to per-tool-call file
+        let tc_file = dir.join(format!("tool-call-{}.jsonl", tool_call_id));
+        if tc_file.exists() {
+            append_event(&tc_file, &end_event).await
+                .with_context(|| format!("Failed to append synthetic ToolMessageEnd to {:?}", tc_file))?;
+        }
+
+        // Update status file
+        let tc_status = dir.join(format!("tool-call-{}-status.txt", tool_call_id));
+        tokio::fs::write(&tc_status, "Done").await
+            .with_context(|| format!("Failed to write tool call status {:?}", tc_status))?;
+    }
+
+    // Close stale running subagents (only those still in Running state)
+    for (conversation_id, is_running) in &subagent_running {
+        if !*is_running {
+            continue;
+        }
+
+        tracing::info!(conversation_id, dir = ?dir, "Closing stale running subagent");
+
+        let end_event = Message::SubAgentTurnEnd {
+            msg_id: 0,
+            conversation_id: conversation_id.clone(),
+            end_status: MessageEndStatus::Cancelled,
+            response: Arc::new(String::new()),
+            input_tokens: 0,
+            output_tokens: 0,
+        };
+
+        append_event(&display_file, &end_event).await
+            .with_context(|| format!("Failed to append synthetic SubAgentTurnEnd for {}", conversation_id))?;
+
+        // Update subagent status file
+        let sa_status = dir.join(format!("subagent-{}", conversation_id)).join("status.txt");
+        if sa_status.exists() {
+            tokio::fs::write(&sa_status, "Cancelled").await
+                .with_context(|| format!("Failed to write subagent status {:?}", sa_status))?;
+        }
+    }
+
+    // Recurse into subagent directories
+    let mut read_dir = tokio::fs::read_dir(dir).await
+        .with_context(|| format!("Failed to read directory {:?}", dir))?;
+    while let Some(entry) = read_dir.next_entry().await? {
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
+        if name_str.starts_with("subagent-") && entry.file_type().await?.is_dir() {
+            let subdir = entry.path();
+            close_stale_in_dir(&subdir).await
+                .with_context(|| format!("Failed to close stale items in {:?}", subdir))?;
+        }
+    }
+
+    Ok(())
+    }) // Box::pin
 }
