@@ -9,6 +9,7 @@ chrono = "0.4"
 async-stream = "0.3"
 dirs = "6"
 headless_chrome = "1.0"
+tracing = "0.1"
 llm-rs = { path = "../llm-rs" }
 llm-rs-macros = { path = "../llm-rs-macros" }
 serde = { version = "1.0", features = ["derive"] }

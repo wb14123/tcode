@@ -47,6 +47,18 @@ fn format_results(results: &[SearchResult]) -> String {
 }
 
 fn search_and_extract(query: &str) -> Result<String> {
+    match search_and_extract_inner(query) {
+        Ok(result) => Ok(result),
+        Err(e) if e.to_string().contains("connection is closed") => {
+            tracing::warn!("Browser connection lost during web_search, restarting: {e}");
+            browser::shutdown_browser();
+            search_and_extract_inner(query)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn search_and_extract_inner(query: &str) -> Result<String> {
     let encoded = urlencoding::encode(query);
     let url = format!("https://kagi.com/search?q={encoded}");
 

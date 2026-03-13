@@ -10,6 +10,18 @@ const EXTRACT_CONTENT_JS: &str = include_str!("extract-content.js");
 
 /// Fetch a web page using headless Chrome and extract clean HTML using Readability.js.
 fn fetch_and_extract(url: &str) -> Result<String> {
+    match fetch_and_extract_inner(url) {
+        Ok(result) => Ok(result),
+        Err(e) if e.to_string().contains("connection is closed") => {
+            tracing::warn!("Browser connection lost during web_fetch, restarting: {e}");
+            browser::shutdown_browser();
+            fetch_and_extract_inner(url)
+        }
+        Err(e) => Err(e),
+    }
+}
+
+fn fetch_and_extract_inner(url: &str) -> Result<String> {
     let tab = browser::open_tab(url)?;
 
     tab.evaluate(READABILITY_JS, false)?;

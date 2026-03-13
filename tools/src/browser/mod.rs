@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use headless_chrome::{Browser, LaunchOptions, Tab};
+use tracing::warn;
 
 const WAIT_FOR_IDLE_JS: &str = include_str!("wait-for-idle.js");
 const DEFAULT_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
@@ -58,7 +59,9 @@ impl Deref for TabGuard {
 
 impl Drop for TabGuard {
     fn drop(&mut self) {
-        let _ = self.tab.close(false);
+        if let Err(e) = self.tab.close(false) {
+            warn!("Failed to close tab: {e}");
+        }
         let mut state = BROWSER_STATE.lock().unwrap();
         state.active_tabs = state.active_tabs.saturating_sub(1);
         state.last_activity = Instant::now();
@@ -148,8 +151,12 @@ pub fn open_tab(url: &str) -> Result<TabGuard> {
 
     // Navigation happens outside the lock so parallel tabs can be created
     tab.navigate_to(url)?;
-    let _ = tab.wait_until_navigated();
-    let _ = tab.evaluate(WAIT_FOR_IDLE_JS, true);
+    if let Err(e) = tab.wait_until_navigated() {
+        warn!("wait_until_navigated failed: {e}");
+    }
+    if let Err(e) = tab.evaluate(WAIT_FOR_IDLE_JS, true) {
+        warn!("wait-for-idle evaluation failed: {e}");
+    }
 
     Ok(TabGuard { tab })
 }
