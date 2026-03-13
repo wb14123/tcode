@@ -84,7 +84,16 @@ browser-server --bind 0.0.0.0:8090 --token-file tokens.json
 
 # With idle timeout (auto-exit after 5 minutes of inactivity)
 browser-server --idle-timeout 300
+
+# Launch visible Chrome to log in to services (e.g., Kagi for web search)
+browser-server browser
 ```
+
+### Subcommands
+
+#### `browser-server browser`
+
+Launches a visible (non-headless) Chrome window with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) before running the server. The command blocks until the browser window is closed. Fails with an error if the profile is already locked by a running browser-server instance.
 
 ### Options
 

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
 use axum::middleware;
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use tokio::net::{TcpListener, UnixListener};
 use tracing_subscriber::EnvFilter;
 
@@ -17,6 +17,9 @@ use browser_server::handler::{build_app, AppState};
 #[command(name = "browser-server")]
 #[command(about = "Headless Chrome browser server exposing web_search and web_fetch as REST APIs")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+
     /// Unix socket path (default: ~/.tcode/browser-server.sock)
     #[arg(long)]
     socket: Option<PathBuf>,
@@ -32,6 +35,12 @@ struct Cli {
     /// Exit after N seconds with no requests. Used by tcode for auto-started instances.
     #[arg(long)]
     idle_timeout: Option<u64>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Launch Chrome with persistent profile for login setup
+    Browser,
 }
 
 fn default_socket_path() -> PathBuf {
@@ -57,6 +66,11 @@ async fn main() -> Result<()> {
         .init();
 
     let cli = Cli::parse();
+
+    if let Some(Commands::Browser) = cli.command {
+        return run_browser().await;
+    }
+
     let state = Arc::new(AppState::new());
 
     // Set up idle timeout shutdown task
@@ -190,4 +204,8 @@ impl axum::serve::Listener for TokioUnixListener {
     fn local_addr(&self) -> std::io::Result<Self::Addr> {
         self.0.local_addr().map(std::sync::Arc::new)
     }
+}
+
+async fn run_browser() -> Result<()> {
+    browser::launch_interactive().await
 }

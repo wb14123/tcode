@@ -117,6 +117,49 @@ pub fn shutdown_browser() {
     }
 }
 
+/// Launch a visible (non-headless) Chrome with the persistent profile for the user
+/// to log in to accounts. Blocks until the browser window is closed.
+pub async fn launch_interactive() -> Result<()> {
+    let data_dir = chrome_data_dir();
+    std::fs::create_dir_all(&data_dir)?;
+
+    let lock_file = data_dir.join("SingletonLock");
+    if lock_file.exists() {
+        anyhow::bail!(
+            "Chrome profile is already locked ({}). \
+             Stop the running browser-server first, then retry.",
+            lock_file.display()
+        );
+    }
+
+    println!(
+        "Launching Chrome with persistent profile at: {}",
+        data_dir.display()
+    );
+    println!("Log in to your accounts, then close the browser window to save the session.");
+    println!();
+
+    let launch_options = LaunchOptions {
+        headless: false,
+        user_data_dir: Some(data_dir),
+        ..LaunchOptions::default()
+    };
+
+    let browser = Browser::new(launch_options)?;
+
+    if let Some(pid) = browser.get_process_id() {
+        loop {
+            if !std::path::Path::new(&format!("/proc/{}", pid)).exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
+    println!("Browser closed. Your session data has been saved.");
+    Ok(())
+}
+
 /// Open a new tab in the shared browser, navigate to the URL, and wait for load.
 ///
 /// Returns a `TabGuard` that derefs to `Tab`. When the guard is dropped, the tab

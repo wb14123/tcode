@@ -2747,7 +2747,6 @@ dependencies = [
  "crossterm",
  "dirs",
  "futures",
- "headless_chrome",
  "llm-rs",
  "nix",
  "notify",

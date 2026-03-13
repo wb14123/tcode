@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 browser-server = { path = "../browser-server" }
 dirs = "6"
-headless_chrome = "1.0"
 llm-rs = { path = "../llm-rs" }
 tools = { path = "../tools" }
 tokio = { version = "1", features = ["full"] }
