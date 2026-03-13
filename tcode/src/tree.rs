@@ -644,6 +644,39 @@ impl TreeState {
         }
     }
 
+    /// Get the session path for the directory that owns a node's data.
+    /// For ToolCall nodes, this is the parent conversation's session.
+    /// For SubAgent/Root nodes, this is the node's own session.
+    fn node_session(&self, idx: usize) -> String {
+        let dir_node_idx = match &self.arena[idx].kind {
+            NodeType::ToolCall { .. } => self
+                .arena
+                .iter()
+                .position(|n| n.children.contains(&idx))
+                .unwrap_or(0),
+            _ => idx,
+        };
+        self.dir_to_node
+            .iter()
+            .find_map(|(dir, &nidx)| {
+                if nidx == dir_node_idx {
+                    Some(dir.clone())
+                } else {
+                    None
+                }
+            })
+            .and_then(|dir| {
+                dir.strip_prefix(&self.session_dir).ok().map(|rel| {
+                    if rel.as_os_str().is_empty() {
+                        self.session_id.clone()
+                    } else {
+                        format!("{}/{}", self.session_id, rel.display())
+                    }
+                })
+            })
+            .unwrap_or_else(|| self.session_id.clone())
+    }
+
     /// Open detail view for the selected node via CLI subcommands.
     fn open_detail(&self) {
         let idx = match self.visible.get(self.selected) {
@@ -661,14 +694,14 @@ impl TreeState {
         let args: Vec<String> = match &node.kind {
             NodeType::ToolCall { tool_call_id, .. } => {
                 vec![
-                    format!("--session={}", self.session_id),
+                    format!("--session={}", self.node_session(idx)),
                     "open-tool-call".to_string(),
                     tool_call_id.clone(),
                 ]
             }
             NodeType::SubAgent { conversation_id, .. } => {
                 vec![
-                    format!("--session={}", self.session_id),
+                    format!("--session={}", self.node_session(idx)),
                     "open-subagent".to_string(),
                     conversation_id.clone(),
                 ]
