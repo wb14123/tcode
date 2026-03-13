@@ -529,18 +529,35 @@ impl LLM for Claude {
                 thinking,
             };
 
-            // OAuth requires ?beta=true query param and additional beta headers
-            let url = format!("{}/v1/messages?beta=true", base_url);
-            let response = client
+            // Detect whether this is a raw API key or an OAuth token.
+            // API keys start with "sk-ant-" and use the x-api-key header.
+            // OAuth tokens use Authorization: Bearer and require extra beta params.
+            let is_api_key = access_token.starts_with("sk-ant-");
+
+            let url = if is_api_key {
+                format!("{}/v1/messages", base_url)
+            } else {
+                // OAuth requires ?beta=true query param
+                format!("{}/v1/messages?beta=true", base_url)
+            };
+
+            let mut req = client
                 .post(&url)
-                .header("Authorization", format!("Bearer {}", access_token))
-                .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
                 .header("anthropic-version", "2023-06-01")
-                .header("Content-Type", "application/json")
-                .header("User-Agent", "claude-cli/2.1.2 (external, cli)")
-                // Additional headers required for Claude Code OAuth
-                .header("x-app", "cli")
-                .header("anthropic-dangerous-direct-browser-access", "true")
+                .header("Content-Type", "application/json");
+
+            if is_api_key {
+                req = req.header("x-api-key", &access_token);
+            } else {
+                req = req
+                    .header("Authorization", format!("Bearer {}", access_token))
+                    .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
+                    .header("User-Agent", "claude-cli/2.1.2 (external, cli)")
+                    .header("x-app", "cli")
+                    .header("anthropic-dangerous-direct-browser-access", "true");
+            }
+
+            let response = req
                 .json(&request_body)
                 .send()
                 .await;
