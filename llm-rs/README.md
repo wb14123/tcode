@@ -14,7 +14,7 @@ The `LLM` trait defines a provider-agnostic interface for chat completions with 
 - **`ChatOptions`**: Reasoning effort/budget controls.
 - **OpenAI implementation** (`openai.rs`): Uses the Responses API (`/v1/responses`). Handles SSE streaming, function calling, and reasoning tokens.
 - **OpenRouter implementation** (`openrouter.rs`): Uses Chat Completions API for OpenRouter and compatible providers.
-- **Claude implementation** (`claude.rs`): Uses Anthropic Messages API with OAuth authentication. See [Claude OAuth Authentication](#claude-oauth-authentication) below.
+- **Claude implementation** (`claude.rs`): Uses Anthropic Messages API with API key or OAuth authentication. See [Claude Authentication](#claude-authentication) below.
 
 ### `conversation` - Conversation Manager
 
@@ -175,9 +175,35 @@ The tcode CLI exposes `--max-subagent-depth` (default: 3) to control this.
 - `examples/openrouter_reasoning.rs` - Reasoning with OpenRouter
 - `examples/claude_tools.rs` - Claude with tool calling via OAuth
 
-## Claude OAuth Authentication
+## Claude Authentication
 
-The Claude implementation uses OAuth tokens from Claude Pro/Max subscriptions (not API keys). These tokens have special requirements enforced by Anthropic.
+The Claude client supports two authentication modes, determined by which constructor is used:
+
+### API Key Mode (`Claude::new` / `Claude::with_base_url`)
+
+Uses a static Anthropic API key (typically starting with `sk-ant-api03-...`). The key is sent via the `x-api-key` header with standard Anthropic API requests.
+
+```rust
+use llm_rs::llm::{Claude, LLM, LLMMessage, ChatOptions};
+
+let claude = Claude::new("sk-ant-api03-...");
+let messages = vec![LLMMessage::User("Hello!".to_string())];
+let stream = claude.chat("claude-sonnet-4-20250514", &messages, &ChatOptions::default());
+```
+
+### OAuth Mode (`Claude::with_get_token`)
+
+Uses OAuth tokens from Claude Pro/Max subscriptions. The token is sent via `Authorization: Bearer` with additional beta headers. Tokens are obtained via the `tcode claude-auth` PKCE flow and auto-refreshed when expired.
+
+```rust
+use llm_rs::llm::{Claude, GetTokenFn};
+
+let get_token: GetTokenFn = Arc::new(move || {
+    let m = manager.clone();
+    Box::pin(async move { m.get_access_token().await.map_err(|e| e.to_string()) })
+});
+let claude = Claude::with_get_token(get_token, "https://api.anthropic.com");
+```
 
 ### Obtaining an OAuth Token
 
@@ -217,19 +243,6 @@ Claude Code OAuth tokens require specific request signatures to work. The implem
    ```json
    "system": [{"type": "text", "text": "..."}]
    ```
-
-### Usage Example
-
-```rust
-use llm_rs::llm::{Claude, LLM, LLMMessage, ChatOptions};
-
-let claude = Claude::new(access_token);
-let messages = vec![
-    LLMMessage::User("Hello!".to_string()),
-];
-
-let stream = claude.chat("claude-sonnet-4-20250514", &messages, &ChatOptions::default());
-```
 
 ### References
 

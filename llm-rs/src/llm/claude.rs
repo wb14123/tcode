@@ -32,6 +32,9 @@ pub struct Claude {
     client: Client,
     get_token: GetTokenFn,
     base_url: String,
+    /// When true, use OAuth Bearer auth with beta headers.
+    /// When false, use x-api-key header.
+    use_oauth: bool,
     cached_tool_defs: Option<Vec<ClaudeToolDefinition>>,
 }
 
@@ -51,6 +54,7 @@ impl Claude {
                 Box::pin(async move { Ok(t) })
             }),
             base_url: base_url.into(),
+            use_oauth: false,
             cached_tool_defs: None,
         }
     }
@@ -72,6 +76,7 @@ impl Claude {
             client: Client::new(),
             get_token,
             base_url: base_url.into(),
+            use_oauth: true,
             cached_tool_defs: None,
         }
     }
@@ -442,6 +447,7 @@ impl LLM for Claude {
             client: self.client.clone(),
             get_token: self.get_token.clone(),
             base_url: self.base_url.clone(),
+            use_oauth: self.use_oauth,
             cached_tool_defs: None,
         })
     }
@@ -463,6 +469,7 @@ impl LLM for Claude {
         let client = self.client.clone();
         let get_token = self.get_token.clone();
         let base_url = self.base_url.clone();
+        let use_oauth = self.use_oauth;
         let model = model.to_string();
         let tool_defs = self.cached_tool_defs.clone();
 
@@ -529,16 +536,11 @@ impl LLM for Claude {
                 thinking,
             };
 
-            // Detect whether this is a raw API key or an OAuth token.
-            // API keys start with "sk-ant-" and use the x-api-key header.
-            // OAuth tokens use Authorization: Bearer and require extra beta params.
-            let is_api_key = access_token.starts_with("sk-ant-");
-
-            let url = if is_api_key {
-                format!("{}/v1/messages", base_url)
-            } else {
+            let url = if use_oauth {
                 // OAuth requires ?beta=true query param
                 format!("{}/v1/messages?beta=true", base_url)
+            } else {
+                format!("{}/v1/messages", base_url)
             };
 
             let mut req = client
@@ -546,15 +548,15 @@ impl LLM for Claude {
                 .header("anthropic-version", "2023-06-01")
                 .header("Content-Type", "application/json");
 
-            if is_api_key {
-                req = req.header("x-api-key", &access_token);
-            } else {
+            if use_oauth {
                 req = req
                     .header("Authorization", format!("Bearer {}", access_token))
                     .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
                     .header("User-Agent", "claude-cli/2.1.2 (external, cli)")
                     .header("x-app", "cli")
                     .header("anthropic-dangerous-direct-browser-access", "true");
+            } else {
+                req = req.header("x-api-key", &access_token);
             }
 
             let response = req
