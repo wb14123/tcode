@@ -120,6 +120,8 @@ struct TreeState {
     session_dir: PathBuf,
     /// Session ID (for display).
     session_id: String,
+    /// Transient status/error message shown in the title bar.
+    status_message: Option<String>,
 }
 
 impl TreeState {
@@ -135,6 +137,7 @@ impl TreeState {
             conversation_idx: HashMap::new(),
             session_dir: session_dir.clone(),
             session_id: session_id.clone(),
+            status_message: None,
         };
         // Create root node
         let root_idx = state.arena.len();
@@ -621,16 +624,17 @@ impl TreeState {
     }
 
     /// Cancel the selected subagent conversation or tool call via CLI subcommands.
-    fn cancel_selected(&self) {
+    fn cancel_selected(&mut self) {
         let idx = match self.visible.get(self.selected) {
             Some(&i) => i,
             None => return,
         };
         let node = &self.arena[idx];
-        let exe = match std::env::current_exe() {
-            Ok(e) => e.to_string_lossy().to_string(),
+        let exe = match self.resolve_exe() {
+            Ok(e) => e,
             Err(e) => {
-                tracing::error!("Failed to determine current executable: {}", e);
+                tracing::error!("{}", e);
+                self.status_message = Some(e);
                 return;
             }
         };
@@ -662,12 +666,45 @@ impl TreeState {
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         match std::process::Command::new(&exe).args(&args_ref).output() {
             Ok(output) if !output.status.success() => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 tracing::error!("Cancel command failed: {}", stderr);
+                self.status_message = Some(format!("Cancel failed: {}", stderr));
             }
-            Err(e) => tracing::error!("Failed to run cancel command: {}", e),
-            _ => {}
+            Err(e) => {
+                tracing::error!("Failed to run cancel command: {}", e);
+                self.status_message = Some(format!("Cancel failed: {}", e));
+            }
+            _ => {
+                self.status_message = None;
+            }
         }
+    }
+
+    /// Resolve the current executable path, stripping the " (deleted)" suffix
+    /// that Linux appends to `/proc/self/exe` when the binary was replaced.
+    fn resolve_exe(&self) -> Result<String, String> {
+        let exe = std::env::current_exe().map_err(|e| {
+            format!("Failed to determine current executable: {}", e)
+        })?;
+        let exe_str = exe.to_string_lossy().to_string();
+
+        // On Linux, /proc/self/exe gets " (deleted)" appended after a rebuild
+        if exe_str.ends_with(" (deleted)") {
+            let stripped = &exe_str[..exe_str.len() - " (deleted)".len()];
+            if Path::new(stripped).exists() {
+                return Ok(stripped.to_string());
+            }
+            return Err(format!(
+                "Executable was replaced and original not found: {}",
+                stripped
+            ));
+        }
+
+        if !exe.exists() {
+            return Err(format!("Executable not found: {}", exe_str));
+        }
+
+        Ok(exe_str)
     }
 
     /// Look up the session string for a node that has a `dir_to_node` entry.
@@ -699,21 +736,33 @@ impl TreeState {
             .iter()
             .position(|n| n.children.contains(&idx))
             .unwrap_or(0);
-        self.dir_node_to_session(parent_idx)
-            .unwrap_or_else(|| self.session_id.clone())
+        match self.dir_node_to_session(parent_idx) {
+            Some(session) => session,
+            None => {
+                if parent_idx != 0 {
+                    tracing::warn!(
+                        parent_idx,
+                        node_idx = idx,
+                        "dir_node_to_session returned None for non-root parent, falling back to root session"
+                    );
+                }
+                self.session_id.clone()
+            }
+        }
     }
 
     /// Open detail view for the selected node via CLI subcommands.
-    fn open_detail(&self) {
+    fn open_detail(&mut self) {
         let idx = match self.visible.get(self.selected) {
             Some(&i) => i,
             None => return,
         };
         let node = &self.arena[idx];
-        let exe = match std::env::current_exe() {
-            Ok(e) => e.to_string_lossy().to_string(),
+        let exe = match self.resolve_exe() {
+            Ok(e) => e,
             Err(e) => {
-                tracing::error!("Failed to determine current executable: {}", e);
+                tracing::error!("{}", e);
+                self.status_message = Some(e);
                 return;
             }
         };
@@ -738,11 +787,17 @@ impl TreeState {
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         match std::process::Command::new(&exe).args(&args_ref).output() {
             Ok(output) if !output.status.success() => {
-                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
                 tracing::error!("Failed to open detail view: {}", stderr);
+                self.status_message = Some(format!("Open failed: {}", stderr));
             }
-            Err(e) => tracing::error!("Failed to run open detail command: {}", e),
-            _ => {}
+            Err(e) => {
+                tracing::error!("Failed to run open detail command: {}", e);
+                self.status_message = Some(format!("Open failed: {}", e));
+            }
+            _ => {
+                self.status_message = None;
+            }
         }
     }
 }
@@ -765,26 +820,43 @@ fn render_tree(
         .split(f.area());
 
         // Title
-        let title = Line::from(vec![
-            Span::styled(
-                format!(" Tree: {} ", state.session_id),
-                Style::default()
-                    .fg(Color::Cyan)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                format!(
-                    "({} nodes) ",
-                    state.arena.len().saturating_sub(1) // exclude root
+        let title = if let Some(ref msg) = state.status_message {
+            Line::from(vec![
+                Span::styled(
+                    format!(" Tree: {} ", state.session_id),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
                 ),
-                Style::default().fg(Color::DarkGray),
-            ),
-            if state.filter_active_only {
-                Span::styled("[showing: running] ", Style::default().fg(Color::Yellow))
-            } else {
-                Span::styled("[showing: all] ", Style::default().fg(Color::DarkGray))
-            },
-        ]);
+                Span::styled(
+                    format!("| {} ", msg),
+                    Style::default()
+                        .fg(Color::Red)
+                        .add_modifier(Modifier::BOLD),
+                ),
+            ])
+        } else {
+            Line::from(vec![
+                Span::styled(
+                    format!(" Tree: {} ", state.session_id),
+                    Style::default()
+                        .fg(Color::Cyan)
+                        .add_modifier(Modifier::BOLD),
+                ),
+                Span::styled(
+                    format!(
+                        "({} nodes) ",
+                        state.arena.len().saturating_sub(1) // exclude root
+                    ),
+                    Style::default().fg(Color::DarkGray),
+                ),
+                if state.filter_active_only {
+                    Span::styled("[showing: running] ", Style::default().fg(Color::Yellow))
+                } else {
+                    Span::styled("[showing: all] ", Style::default().fg(Color::DarkGray))
+                },
+            ])
+        };
         f.render_widget(Paragraph::new(title), chunks[0]);
 
         // Tree list
@@ -1104,6 +1176,8 @@ pub fn run_tree(session: Session) -> Result<()> {
                 if key.kind != KeyEventKind::Press {
                     continue;
                 }
+                // Clear status message on any key press
+                state.status_message = None;
                 // Handle Ctrl-k before plain k (cancel vs move up)
                 if key.code == KeyCode::Char('k') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
                     state.cancel_selected();
