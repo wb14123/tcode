@@ -8,7 +8,7 @@ Built-in tool implementations for the LLM agent. Tools communicate with a separa
 
 Fetches a web page and extracts its main content. Returns clean, readable HTML suitable for LLM consumption.
 
-- Smart content-type detection: HTML pages go through browser-server (Readability.js extraction), plaintext is fetched directly via reqwest
+- Smart content-type detection: HTML pages go through browser-server (accessibility tree extraction), plaintext is fetched directly via reqwest
 - 300 second timeout
 
 ### `web_search`

@@ -39,7 +39,7 @@ Search the web via Kagi and return structured results.
 
 ### POST /web_fetch
 
-Fetch a web page and extract content as a compact accessibility tree. Uses Readability.js to isolate article content, then Chrome's CDP Accessibility API to produce a structured text representation that is much more token-efficient than HTML.
+Fetch a web page and extract content as a compact accessibility tree. Uses Chrome's CDP Accessibility API to produce a structured text representation that is much more token-efficient than HTML.
 
 **Request:**
 ```json
@@ -146,7 +146,7 @@ Kagi search extraction. Navigates to Kagi, runs `extract-search-results.js` to p
 
 ### `web_fetch`
 
-Page content extraction. Loads pages in Chrome, applies Readability.js for article extraction, then uses Chrome's CDP Accessibility Tree API to produce a compact, structured text representation. Falls back to the full page's accessibility tree if Readability fails.
+Page content extraction. Loads pages in Chrome and uses Chrome's CDP Accessibility Tree API to produce a compact, structured text representation.
 
 ## Shared Types
 

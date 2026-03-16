@@ -8,9 +8,6 @@ use url::Url;
 
 use crate::browser;
 
-const READABILITY_JS: &str = include_str!("vendor/readability-0.6.0.js");
-const EXTRACT_CONTENT_JS: &str = include_str!("extract-content.js");
-
 /// Roles that add no semantic value — skip them and emit their children directly.
 const SKIP_ROLES: &[&str] = &[
     "generic",
@@ -198,14 +195,7 @@ fn fetch_and_extract_inner(url: &str) -> Result<String> {
     let tab = browser::open_tab(url)?;
     tracing::info!("open_tab: done");
 
-    // Stage 1: Try Readability to extract article content into the body
-    tracing::info!("evaluating Readability.js");
-    tab.evaluate(READABILITY_JS, false)?;
-    tracing::info!("evaluating extract-content.js");
-    let result = tab.evaluate(EXTRACT_CONTENT_JS, false)?;
-    tracing::info!("extract-content result: {:?}", result.value);
-
-    // Stage 2: Get accessibility tree (of article content, or full page as fallback)
+    // Extract content via Chrome's accessibility tree
     tracing::info!("enabling Accessibility domain");
     tab.call_method(Accessibility::Enable(None))?;
     tracing::info!("calling GetFullAXTree");
