@@ -76,6 +76,15 @@ fn create_browser() -> Result<Browser> {
     let data_dir = chrome_data_dir();
     std::fs::create_dir_all(&data_dir)?;
 
+    let lock_file = data_dir.join("SingletonLock");
+    if lock_file.exists() {
+        anyhow::bail!(
+            "Chrome profile is already locked by another process ({}). \
+             Stop the other browser-server instance or remove the lock file, then retry.",
+            lock_file.display()
+        );
+    }
+
     let launch_options = LaunchOptions {
         user_data_dir: Some(data_dir),
         headless: true,
@@ -192,14 +201,22 @@ pub fn open_tab(url: &str) -> Result<TabGuard> {
         // Lock released here
     };
 
+    // Override user-agent to avoid being blocked by sites that reject HeadlessChrome
+    tracing::info!("open_tab: setting user-agent");
+    tab.set_user_agent(
+        "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        None,
+        None,
+    )?;
+
     // Navigation happens outside the lock so parallel tabs can be created
+    tracing::info!("open_tab: calling navigate_to");
     tab.navigate_to(url)?;
-    if let Err(e) = tab.wait_until_navigated() {
-        warn!("wait_until_navigated failed: {e}");
-    }
-    if let Err(e) = tab.evaluate(WAIT_FOR_IDLE_JS, true) {
-        warn!("wait-for-idle evaluation failed: {e}");
-    }
+    tracing::info!("open_tab: calling wait_until_navigated");
+    tab.wait_until_navigated()?;
+    tracing::info!("open_tab: calling wait-for-idle");
+    tab.evaluate(WAIT_FOR_IDLE_JS, true)?;
+    tracing::info!("open_tab: navigation complete");
 
     Ok(TabGuard { tab })
 }
