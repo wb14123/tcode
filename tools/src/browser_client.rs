@@ -68,12 +68,21 @@ impl BrowserClient {
     }
 
     /// Fetch a web page via the browser-server.
-    pub async fn web_fetch(&self, url: &str) -> Result<String> {
+    ///
+    /// Returns `(content, total_length, is_truncated)`.
+    pub async fn web_fetch(
+        &self,
+        url: &str,
+        max_length: Option<u32>,
+        skip_chars: Option<u32>,
+    ) -> Result<(String, u32, bool)> {
         let body = WebFetchRequest {
             url: url.to_string(),
+            max_length,
+            skip_chars,
         };
         let resp: WebFetchResponse = self.post("/web_fetch", &body).await?;
-        Ok(resp.content)
+        Ok((resp.content, resp.total_length, resp.is_truncated))
     }
 
     /// Check if the browser-server is healthy.

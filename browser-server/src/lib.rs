@@ -44,12 +44,22 @@ pub struct WebSearchResponse {
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WebFetchRequest {
     pub url: String,
+    /// Maximum number of characters to return (default: 20000).
+    #[serde(default)]
+    pub max_length: Option<u32>,
+    /// Number of characters to skip from the start of the content (default: 0).
+    #[serde(default)]
+    pub skip_chars: Option<u32>,
 }
 
 /// Response from the /web_fetch endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WebFetchResponse {
     pub content: String,
+    /// Total length of the full content before truncation.
+    pub total_length: u32,
+    /// Whether the content was truncated (by skip_chars or max_length).
+    pub is_truncated: bool,
 }
 
 /// Error response body.

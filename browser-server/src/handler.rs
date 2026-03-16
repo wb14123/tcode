@@ -67,14 +67,41 @@ async fn handle_web_fetch(
 ) -> Result<Json<WebFetchResponse>, AppError> {
     state.touch();
     let url = req.url;
-    let content = tokio::task::spawn_blocking(move || {
+    let max_length = req.max_length.unwrap_or(20_000) as usize;
+    let skip_chars = req.skip_chars.unwrap_or(0) as usize;
+
+    let full_content = tokio::task::spawn_blocking(move || {
         crate::web_fetch::fetch_and_extract(&url)
     })
     .await
     .map_err(|e| AppError(e.into()))??;
 
+    let total_length = full_content.len() as u32;
+
+    // Apply skip_chars (char-boundary-safe)
+    let skip_end = full_content
+        .char_indices()
+        .nth(skip_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(full_content.len());
+    let after_skip = &full_content[skip_end..];
+
+    // Apply max_length (char-boundary-safe)
+    let truncate_end = after_skip
+        .char_indices()
+        .nth(max_length)
+        .map(|(i, _)| i)
+        .unwrap_or(after_skip.len());
+    let content = after_skip[..truncate_end].to_string();
+
+    let is_truncated = skip_chars > 0 || truncate_end < after_skip.len();
+
     state.touch();
-    Ok(Json(WebFetchResponse { content }))
+    Ok(Json(WebFetchResponse {
+        content,
+        total_length,
+        is_truncated,
+    }))
 }
 
 async fn handle_health(
