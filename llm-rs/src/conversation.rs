@@ -7,7 +7,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::llm::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall, LLM};
 use crate::tool::{CancellationToken, Tool, ToolContext};
-use anyhow::Result;
+use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
@@ -823,7 +823,7 @@ async fn collect_subagent_response(
     subagent_conv_id: &str,
     tool_call_id: &str,
     loop_tx: &mpsc::Sender<Message>,
-) {
+) -> Result<()> {
     let mut resp = SubagentResponse {
         text: String::new(),
         input_tokens: 0,
@@ -880,23 +880,21 @@ async fn collect_subagent_response(
                 };
                 let cancelled = cancel_token.is_cancelled()
                     || resp.end_status == MessageEndStatus::Cancelled;
-                if let Err(e) = loop_tx.send(Message::ToolOutputChunk {
+                loop_tx.send(Message::ToolOutputChunk {
                     msg_id: 0,
                     tool_call_id: tool_call_id.to_string(),
                     tool_name: "subagent".to_string(),
                     content: Arc::new(text),
-                }).await {
-                    tracing::error!(error = %e, "failed to send ToolOutputChunk");
-                }
-                if let Err(e) = loop_tx.send(Message::ToolMessageEnd {
+                }).await
+                    .context("failed to send ToolOutputChunk")?;
+                loop_tx.send(Message::ToolMessageEnd {
                     msg_id: 0,
                     tool_call_id: tool_call_id.to_string(),
                     end_status: if cancelled { MessageEndStatus::Cancelled } else { MessageEndStatus::Succeeded },
                     input_tokens: 0,
                     output_tokens: 0,
-                }).await {
-                    tracing::error!(error = %e, "failed to send ToolMessageEnd");
-                }
+                }).await
+                    .context("failed to send ToolMessageEnd")?;
 
                 break; // First turn done — exit regardless of cancel status
             }
@@ -911,6 +909,7 @@ async fn collect_subagent_response(
             _ => {}
         }
     }
+    Ok(())
 }
 
 /// Format a subagent result with the conversation ID prefix.
@@ -1473,19 +1472,25 @@ async fn execute_regular_tool(
         &tool_call.name,
         Arc::clone(&env.permission_manager),
         Arc::new(move || {
-            let _ = client_clone.notify_msg(Message::ToolRequestPermission {
+            if let Err(e) = client_clone.notify_msg(Message::ToolRequestPermission {
                 msg_id: client_clone.next_msg_id(),
                 tool_call_id: tc_id.clone(),
-            });
-            let _ = client_clone.notify_msg(Message::PermissionUpdated {
+            }) {
+                tracing::error!(error = %e, "failed to send ToolRequestPermission");
+            }
+            if let Err(e) = client_clone.notify_msg(Message::PermissionUpdated {
                 msg_id: client_clone.next_msg_id(),
-            });
+            }) {
+                tracing::error!(error = %e, "failed to send PermissionUpdated");
+            }
         }),
         Arc::new(move || {
-            let _ = client_clone2.notify_msg(Message::ToolPermissionApproved {
+            if let Err(e) = client_clone2.notify_msg(Message::ToolPermissionApproved {
                 msg_id: client_clone2.next_msg_id(),
                 tool_call_id: tc_id2.clone(),
-            });
+            }) {
+                tracing::error!(error = %e, "failed to send ToolPermissionApproved");
+            }
         }),
     );
     let scoped_pm_ref = scoped_pm.clone();
@@ -1586,10 +1591,12 @@ fn spawn_subagent_stream_handler(
 ) {
     tokio::spawn(async move {
         let mut guard = ToolCompleteGuard::new(tool_call_id.clone(), loop_tx.clone());
-        collect_subagent_response(
+        if let Err(e) = collect_subagent_response(
             &mut sub_stream, &cancel_token, &subagent_client,
             &parent_client, &subagent_conv_id, &tool_call_id, &loop_tx,
-        ).await;
+        ).await {
+            tracing::error!(error = %e, "subagent stream handler failed");
+        }
         parent_client.unregister_tool_token(&tool_call_id);
         guard.defuse();
     });
@@ -1688,28 +1695,24 @@ async fn execute_subagent(
     );
 
     let task_preview = truncate_preview(&params.task, 100);
-    if let Err(e) = env.client.notify_msg(Message::SubAgentStart {
+    env.client.notify_msg(Message::SubAgentStart {
         msg_id: env.client.next_msg_id(),
         conversation_id: subagent_conv_id.clone(),
         description: task_preview,
-    }) {
-        tracing::error!(error = %e, "failed to broadcast SubAgentStart");
-    }
+    }).context("failed to broadcast SubAgentStart")?;
 
     let sub_stream = subagent_client.subscribe();
 
     if let Err(e) = subagent_client.send_chat(&params.task).await {
         let error = format!("Error: Failed to send task to subagent: {}", e);
-        if let Err(e2) = env.client.notify_msg(Message::SubAgentEnd {
+        env.client.notify_msg(Message::SubAgentEnd {
             msg_id: env.client.next_msg_id(),
             conversation_id: subagent_conv_id.clone(),
             end_status: MessageEndStatus::Failed,
             response: Arc::new(error.clone()),
             input_tokens: 0,
             output_tokens: 0,
-        }) {
-            tracing::error!(error = %e2, "failed to broadcast SubAgentEnd");
-        }
+        }).context("failed to broadcast SubAgentEnd")?;
         loop_tx.send(Message::ToolOutputChunk {
             msg_id: 0, tool_call_id: tool_call.id.clone(),
             tool_name: tool_call.name.clone(), content: Arc::new(error),
@@ -1790,28 +1793,24 @@ async fn execute_continue_subagent(
 
     let msg_preview = truncate_preview(&params.message, 100);
 
-    if let Err(e) = env.client.notify_msg(Message::SubAgentContinue {
+    env.client.notify_msg(Message::SubAgentContinue {
         msg_id: env.client.next_msg_id(),
         conversation_id: params.conversation_id.clone(),
         description: msg_preview,
-    }) {
-        tracing::error!(error = %e, "failed to broadcast SubAgentContinue");
-    }
+    }).context("failed to broadcast SubAgentContinue")?;
 
     let sub_stream = subagent_client.subscribe_new();
 
     if let Err(e) = subagent_client.send_chat(&params.message).await {
         let error = format!("Error: Failed to send follow-up to subagent: {}", e);
-        if let Err(e2) = env.client.notify_msg(Message::SubAgentTurnEnd {
+        env.client.notify_msg(Message::SubAgentTurnEnd {
             msg_id: env.client.next_msg_id(),
             conversation_id: params.conversation_id,
             end_status: MessageEndStatus::Failed,
             response: Arc::new(error.clone()),
             input_tokens: 0,
             output_tokens: 0,
-        }) {
-            tracing::error!(error = %e2, "failed to broadcast SubAgentTurnEnd");
-        }
+        }).context("failed to broadcast SubAgentTurnEnd")?;
         loop_tx.send(Message::ToolOutputChunk {
             msg_id: 0, tool_call_id: tool_call.id.clone(),
             tool_name: tool_call.name.clone(), content: Arc::new(error),
@@ -1966,7 +1965,13 @@ impl ConversationClient {
     /// Walks backward from the last `AssistantMessageEnd`, collecting `AssistantMessageChunk`s
     /// until `AssistantMessageStart` is found.
     pub fn extract_latest_response(&self) -> Option<String> {
-        let msgs = self.msgs.read().ok()?;
+        let msgs = match self.msgs.read() {
+            Ok(m) => m,
+            Err(e) => {
+                tracing::error!(error = %e, "msgs RwLock poisoned in extract_latest_response");
+                return None;
+            }
+        };
         let mut chunks = Vec::new();
         let mut found_end = false;
         for msg in msgs.iter().rev() {

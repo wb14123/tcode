@@ -533,12 +533,20 @@ async fn main() -> Result<()> {
 
 fn init_tracing(session_id: &str) {
     let log_dir = session::base_path().join(session_id);
-    fs::create_dir_all(&log_dir).ok();
-    let log_file = fs::OpenOptions::new()
+    if let Err(e) = fs::create_dir_all(&log_dir) {
+        eprintln!("Failed to create log directory {:?}: {}", log_dir, e);
+    }
+    let log_file = match fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_dir.join("debug.log"))
-        .ok();
+    {
+        Ok(f) => Some(f),
+        Err(e) => {
+            eprintln!("Failed to open debug.log in {:?}: {}", log_dir, e);
+            None
+        }
+    };
     if let Some(log_file) = log_file {
         tracing_subscriber::fmt()
             .with_writer(std::sync::Mutex::new(log_file))

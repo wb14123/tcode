@@ -49,7 +49,12 @@ impl EditClient {
 
     pub async fn run(&self) -> Result<()> {
         let msg_file = self.session.msg_file();
-        let _ = fs::remove_file(&msg_file).await;
+        if let Err(e) = fs::remove_file(&msg_file).await {
+            // File may not exist yet; only warn on unexpected errors
+            if e.kind() != std::io::ErrorKind::NotFound {
+                tracing::warn!(error = %e, path = %msg_file.display(), "failed to remove msg file");
+            }
+        }
 
         let socket_path = self.socket_path();
         let stream = UnixStream::connect(&socket_path)
@@ -192,6 +197,8 @@ async fn read_message_file(msg_file: &PathBuf) -> Option<String> {
     }
 
     // Remove file to avoid re-reading
-    let _ = fs::remove_file(msg_file).await;
+    if let Err(e) = fs::remove_file(msg_file).await {
+        tracing::warn!(error = %e, "failed to remove msg file after reading");
+    }
     Some(content.to_string())
 }

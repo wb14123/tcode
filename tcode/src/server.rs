@@ -614,9 +614,8 @@ async fn handle_client_inner(
                                     msg_id: client.next_msg_id(),
                                     conversation_id: conversation_id.clone(),
                                 };
-                                if let Err(e) = client.notify_msg(msg) {
-                                    tracing::error!(error = %e, "failed to broadcast UserRequestEnd");
-                                }
+                                client.notify_msg(msg)
+                                    .context("failed to broadcast UserRequestEnd")?;
 
                                 // Resolve: extract response and send ToolCallResolved to parent
                                 if let Some((parent_conv_id, tool_call_id)) = manager.get_subagent_parent(&conversation_id) {
@@ -625,11 +624,10 @@ async fn handle_client_inner(
                                             let formatted = format_subagent_result(
                                                 &conversation_id, &response, &MessageEndStatus::Succeeded,
                                             );
-                                            if let Err(e) = parent_client.send_tool_call_resolved(
+                                            parent_client.send_tool_call_resolved(
                                                 tool_call_id, Arc::new(formatted),
-                                            ).await {
-                                                tracing::error!(error = %e, "failed to send ToolCallResolved to parent");
-                                            }
+                                            ).await
+                                                .context("failed to send ToolCallResolved to parent")?;
                                         }
                                     }
                                 }
