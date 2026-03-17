@@ -5,6 +5,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
+use sha2::Digest;
 use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
 use llm_rs::conversation::{ConversationManager, ConversationState, Message, MessageEndStatus, create_subagent_tool, create_continue_subagent_tool, format_subagent_result};
@@ -93,7 +94,16 @@ impl Server {
             .with_context(|| format!("Failed to bind Unix socket at {:?}", self.socket_path))?;
 
         // Create conversation manager (creates permission manager internally)
-        let permissions_path = self.session_dir.join("permissions.json");
+        // Store project-level permissions under ~/.tcode/projects/<sha256(cwd)>/
+        // so they persist across sessions for the same working directory.
+        let cwd = std::env::current_dir().context("Failed to get current working directory")?;
+        let cwd_str = cwd.to_string_lossy();
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(cwd_str.as_bytes());
+        let hash = format!("{:x}", hasher.finalize());
+        let base = dirs::home_dir()
+            .ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
+        let permissions_path = base.join(".tcode").join("projects").join(&hash).join("permissions.json");
         let manager = ConversationManager::new(permissions_path);
 
         // Build tools list including subagent tools
