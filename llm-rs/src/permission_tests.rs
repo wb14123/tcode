@@ -29,9 +29,9 @@ mod tests {
     #[tokio::test]
     async fn register_and_resolve_allow_once() {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let rx = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
+        let (request_id, rx) = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
         let key = make_key("web_fetch", "hostname", "example.com");
-        pm.resolve(&key, &PermissionDecision::AllowOnce).unwrap();
+        pm.resolve(&key, &PermissionDecision::AllowOnce, Some(&request_id)).unwrap();
         assert!(rx.await.unwrap());
         // AllowOnce does NOT persist to session
         assert!(!pm.has_permission("web_fetch", "hostname", "example.com"));
@@ -40,9 +40,9 @@ mod tests {
     #[tokio::test]
     async fn register_and_resolve_allow_session() {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let rx = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
+        let (_request_id, rx) = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
         let key = make_key("web_fetch", "hostname", "example.com");
-        pm.resolve(&key, &PermissionDecision::AllowSession).unwrap();
+        pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
         assert!(rx.await.unwrap());
         // AllowSession persists in session
         assert!(pm.has_permission("web_fetch", "hostname", "example.com"));
@@ -51,9 +51,9 @@ mod tests {
     #[tokio::test]
     async fn register_and_resolve_deny() {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let rx = pm.register_request("web_fetch", "Allow?", "hostname", "evil.com");
+        let (_request_id, rx) = pm.register_request("web_fetch", "Allow?", "hostname", "evil.com");
         let key = make_key("web_fetch", "hostname", "evil.com");
-        pm.resolve(&key, &PermissionDecision::Deny).unwrap();
+        pm.resolve(&key, &PermissionDecision::Deny, None).unwrap();
         assert!(!rx.await.unwrap());
         // Deny does NOT persist
         assert!(!pm.has_permission("web_fetch", "hostname", "evil.com"));
@@ -62,20 +62,44 @@ mod tests {
     #[tokio::test]
     async fn dedup_multiple_waiters() {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let rx1 = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
-        let rx2 = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
+        let (_rid1, rx1) = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
+        let (_rid2, rx2) = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
         let key = make_key("web_fetch", "hostname", "example.com");
-        pm.resolve(&key, &PermissionDecision::AllowSession).unwrap();
+        pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
         assert!(rx1.await.unwrap());
         assert!(rx2.await.unwrap());
     }
 
     #[tokio::test]
+    async fn allow_once_targets_single_waiter() {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let (rid1, rx1) = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
+        let (_rid2, rx2) = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
+        let key = make_key("web_fetch", "hostname", "example.com");
+        // AllowOnce should only approve rid1, not rid2
+        pm.resolve(&key, &PermissionDecision::AllowOnce, Some(&rid1)).unwrap();
+        assert!(rx1.await.unwrap());
+        // rx2 should still be pending (not resolved yet)
+        // Resolve the remaining waiter with Deny
+        pm.resolve(&key, &PermissionDecision::Deny, None).unwrap();
+        assert!(!rx2.await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn allow_once_without_request_id_fails() {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let (_rid, _rx) = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
+        let key = make_key("web_fetch", "hostname", "example.com");
+        let result = pm.resolve(&key, &PermissionDecision::AllowOnce, None);
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
     async fn revoke_removes_permission() {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let rx = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
+        let (_request_id, rx) = pm.register_request("web_fetch", "Allow?", "hostname", "example.com");
         let key = make_key("web_fetch", "hostname", "example.com");
-        pm.resolve(&key, &PermissionDecision::AllowSession).unwrap();
+        pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
         assert!(rx.await.unwrap());
         assert!(pm.has_permission("web_fetch", "hostname", "example.com"));
         pm.revoke(&key).unwrap();
@@ -85,8 +109,8 @@ mod tests {
     #[tokio::test]
     async fn close_all_pending_sends_false() {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let rx1 = pm.register_request("web_fetch", "Allow?", "hostname", "a.com");
-        let rx2 = pm.register_request("bash", "Allow?", "command", "git");
+        let (_rid1, rx1) = pm.register_request("web_fetch", "Allow?", "hostname", "a.com");
+        let (_rid2, rx2) = pm.register_request("bash", "Allow?", "command", "git");
         pm.close_all_pending();
         assert!(!rx1.await.unwrap());
         assert!(!rx2.await.unwrap());
@@ -97,15 +121,16 @@ mod tests {
         let pm = PermissionManager::new(temp_path());
         // Add a session permission directly
         let key = make_key("web_fetch", "hostname", "allowed.com");
-        pm.resolve(&key, &PermissionDecision::AllowSession).unwrap();
+        pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
         // Register a pending request
-        let _rx = pm.register_request("bash", "Allow?", "command", "git");
+        let (_rid, _rx) = pm.register_request("bash", "Allow?", "command", "git");
         let state = pm.snapshot();
         assert_eq!(state.session.len(), 1);
         assert_eq!(state.pending.len(), 1);
         assert_eq!(state.pending[0].tool, "bash");
         assert_eq!(state.pending[0].key, "command");
         assert_eq!(state.pending[0].value, "git");
+        assert!(!state.pending[0].request_id.is_empty());
     }
 
     #[tokio::test]
@@ -116,7 +141,7 @@ mod tests {
         {
             let pm = PermissionManager::new(path.clone());
             let key = make_key("web_fetch", "hostname", "persisted.com");
-            pm.resolve(&key, &PermissionDecision::AllowProject).unwrap();
+            pm.resolve(&key, &PermissionDecision::AllowProject, None).unwrap();
             assert!(pm.has_permission("web_fetch", "hostname", "persisted.com"));
         }
 
@@ -149,7 +174,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         let key = make_key("web_fetch", "hostname", "evil.com");
-        pm_clone.resolve(&key, &PermissionDecision::Deny).unwrap();
+        pm_clone.resolve(&key, &PermissionDecision::Deny, None).unwrap();
         handle.await.unwrap();
 
         assert!(scoped.was_denied());
@@ -160,7 +185,7 @@ mod tests {
         let pm = Arc::new(PermissionManager::new(temp_path()));
         // Pre-approve
         let key = make_key("web_fetch", "hostname", "known.com");
-        pm.resolve(&key, &PermissionDecision::AllowSession).unwrap();
+        pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
 
         let scoped = ScopedPermissionManager::new(
             "web_fetch",
@@ -201,7 +226,9 @@ mod tests {
         tokio::task::yield_now().await;
 
         let key = make_key("web_fetch", "hostname", "example.com");
-        pm_clone.resolve(&key, &PermissionDecision::AllowOnce).unwrap();
+        // Use the request_id from the snapshot to do AllowOnce
+        let request_id = pm_clone.snapshot().pending[0].request_id.clone();
+        pm_clone.resolve(&key, &PermissionDecision::AllowOnce, Some(&request_id)).unwrap();
         handle.await.unwrap();
 
         assert_eq!(approved_count.load(Ordering::Relaxed), 1);
@@ -233,7 +260,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         let key = make_key("web_fetch", "hostname", "evil.com");
-        pm_clone.resolve(&key, &PermissionDecision::Deny).unwrap();
+        pm_clone.resolve(&key, &PermissionDecision::Deny, None).unwrap();
         handle.await.unwrap();
 
         assert_eq!(approved_count.load(Ordering::Relaxed), 0);

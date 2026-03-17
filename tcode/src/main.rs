@@ -247,6 +247,12 @@ enum Commands {
         /// Manage (revoke) mode instead of approve mode
         #[arg(long)]
         manage: bool,
+        /// Human-readable prompt describing what is being approved
+        #[arg(long, default_value = "")]
+        prompt: String,
+        /// Per-invocation request ID (UUID) for AllowOnce targeting
+        #[arg(long)]
+        request_id: Option<String>,
     },
 }
 
@@ -513,7 +519,7 @@ async fn main() -> Result<()> {
             let session = Session::new(session_id)?;
             permission_ui::run_permission_ui(session)
         }
-        Some(Commands::Approve { tool, key, value, manage }) => {
+        Some(Commands::Approve { tool, key, value, manage, prompt, request_id }) => {
             let session_id = require_session(cli.session)?;
             let root_session_id = session_id.split("/subagent-").next().unwrap_or(&session_id).to_string();
             let session = Session::new(root_session_id)?;
@@ -523,6 +529,8 @@ async fn main() -> Result<()> {
                 key,
                 value,
                 manage,
+                prompt,
+                request_id,
             };
             approve_ui::run_approve(args)
         }

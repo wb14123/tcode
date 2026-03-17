@@ -67,7 +67,7 @@ impl PermStatus {
 enum NodeKind {
     Tool { name: String },
     Key { key: String },
-    Value { value: String, status: PermStatus, prompt: Option<String> },
+    Value { value: String, status: PermStatus, prompt: Option<String>, request_id: Option<String> },
 }
 
 #[derive(Debug, Clone)]
@@ -103,8 +103,8 @@ impl PermissionTreeState {
     fn rebuild_from_state(&mut self, state: &PermissionState) {
         self.arena.clear();
 
-        // Group all entries by tool -> key -> Vec<(value, status, prompt)>
-        let mut groups: HashMap<String, HashMap<String, Vec<(String, PermStatus, Option<String>)>>> =
+        // Group all entries by tool -> key -> Vec<(value, status, prompt, request_id)>
+        let mut groups: HashMap<String, HashMap<String, Vec<(String, PermStatus, Option<String>, Option<String>)>>> =
             HashMap::new();
 
         for p in &state.pending {
@@ -113,7 +113,7 @@ impl PermissionTreeState {
                 .or_default()
                 .entry(p.key.clone())
                 .or_default()
-                .push((p.value.clone(), PermStatus::Pending, Some(p.prompt.clone())));
+                .push((p.value.clone(), PermStatus::Pending, Some(p.prompt.clone()), Some(p.request_id.clone())));
         }
         for k in &state.session {
             groups
@@ -121,7 +121,7 @@ impl PermissionTreeState {
                 .or_default()
                 .entry(k.key.clone())
                 .or_default()
-                .push((k.value.clone(), PermStatus::Session, None));
+                .push((k.value.clone(), PermStatus::Session, None, None));
         }
         for k in &state.project {
             groups
@@ -129,14 +129,14 @@ impl PermissionTreeState {
                 .or_default()
                 .entry(k.key.clone())
                 .or_default()
-                .push((k.value.clone(), PermStatus::Project, None));
+                .push((k.value.clone(), PermStatus::Project, None, None));
         }
 
         // Sort tools alphabetically, but put tools with pending items first
         let mut tool_names: Vec<String> = groups.keys().cloned().collect();
         tool_names.sort_by(|a, b| {
-            let a_pending = groups[a].values().any(|vals| vals.iter().any(|(_, s, _)| *s == PermStatus::Pending));
-            let b_pending = groups[b].values().any(|vals| vals.iter().any(|(_, s, _)| *s == PermStatus::Pending));
+            let a_pending = groups[a].values().any(|vals| vals.iter().any(|(_, s, _, _)| *s == PermStatus::Pending));
+            let b_pending = groups[b].values().any(|vals| vals.iter().any(|(_, s, _, _)| *s == PermStatus::Pending));
             b_pending.cmp(&a_pending).then(a.cmp(b))
         });
 
@@ -171,13 +171,13 @@ impl PermissionTreeState {
                     b_pending.cmp(&a_pending).then(a.0.cmp(&b.0))
                 });
 
-                for (value, status, prompt) in values {
+                for (value, status, prompt, request_id) in values {
                     if self.filter_pending_only && status != PermStatus::Pending {
                         continue;
                     }
                     let val_idx = self.arena.len();
                     self.arena.push(TreeNode {
-                        kind: NodeKind::Value { value, status, prompt },
+                        kind: NodeKind::Value { value, status, prompt, request_id },
                         depth: 2,
                         children: Vec::new(),
                         collapsed: false,
@@ -247,7 +247,7 @@ impl PermissionTreeState {
         let node = &self.arena[idx];
 
         match &node.kind {
-            NodeKind::Value { value, status, .. } => {
+            NodeKind::Value { value, status, prompt, request_id } => {
                 // Walk up to find tool and key
                 let (tool_name, key_name) = self.find_tool_key_for(idx);
                 let exe = match std::env::current_exe() {
@@ -257,10 +257,21 @@ impl PermissionTreeState {
 
                 let cmd = match status {
                     PermStatus::Pending => {
-                        format!(
+                        let mut cmd = format!(
                             "{} --session={} approve --tool {} --key {} --value {}",
                             exe, self.session_id, tool_name, key_name, value
-                        )
+                        );
+                        if let Some(p) = prompt {
+                            if !p.is_empty() {
+                                // Shell-escape single quotes in the prompt
+                                let escaped = p.replace('\'', "'\\''");
+                                cmd.push_str(&format!(" --prompt '{}'", escaped));
+                            }
+                        }
+                        if let Some(rid) = request_id {
+                            cmd.push_str(&format!(" --request-id {}", rid));
+                        }
+                        cmd
                     }
                     PermStatus::Session | PermStatus::Project => {
                         format!(
@@ -271,7 +282,7 @@ impl PermissionTreeState {
                 };
 
                 let popup_cmd = format!(
-                    "tmux display-popup -E -w 60 -h 12 \"{}\"",
+                    "tmux display-popup -E -w 60 -h 18 \"{}\"",
                     cmd.replace('"', "\\\"")
                 );
                 let _ = Command::new("sh").args(["-c", &popup_cmd]).output();

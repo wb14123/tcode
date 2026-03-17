@@ -702,8 +702,8 @@ async fn handle_client_inner(
                             }
                         }
                     }
-                    ClientMessage::ResolvePermission { key, decision } => {
-                        match manager.permission_manager().resolve(&key, &decision) {
+                    ClientMessage::ResolvePermission { key, decision, request_id } => {
+                        match manager.permission_manager().resolve(&key, &decision, request_id.as_deref()) {
                             Ok(()) => {
                                 if let Err(e) = conv_client.notify_msg(
                                     llm_rs::conversation::Message::PermissionUpdated {

@@ -5,6 +5,7 @@ use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use uuid::Uuid;
 
 /// Scope at which a permission was granted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -38,6 +39,7 @@ pub struct PendingPermissionInfo {
     pub prompt: String,
     pub key: String,
     pub value: String,
+    pub request_id: String,
 }
 
 /// Full snapshot of permission state, sent to UI on query.
@@ -51,7 +53,7 @@ pub struct PermissionState {
 /// Internal tracking for a pending permission request with multiple waiters.
 struct PendingRequest {
     prompt: String,
-    waiters: Vec<oneshot::Sender<bool>>,
+    waiters: HashMap<String, oneshot::Sender<bool>>,
 }
 
 /// On-disk format for project-level permissions.
@@ -94,41 +96,43 @@ impl PermissionManager {
     }
 
     /// Register a pending permission request. If the same key is already pending,
-    /// adds a new waiter to the existing entry (dedup). Returns a receiver that
-    /// will resolve to `true` (allowed) or `false` (denied).
+    /// adds a new waiter to the existing entry (dedup). Returns a (request_id, receiver)
+    /// pair. The request_id is a UUID identifying this specific invocation.
     pub fn register_request(
         &self,
         tool: &str,
         prompt: &str,
         key: &str,
         value: &str,
-    ) -> oneshot::Receiver<bool> {
+    ) -> (String, oneshot::Receiver<bool>) {
         let pk = PermissionKey {
             tool: tool.to_string(),
             key: key.to_string(),
             value: value.to_string(),
         };
+        let request_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
         let mut pending = self.pending_requests.lock().unwrap();
         if let Some(existing) = pending.get_mut(&pk) {
-            existing.waiters.push(tx);
+            existing.waiters.insert(request_id.clone(), tx);
         } else {
+            let mut waiters = HashMap::new();
+            waiters.insert(request_id.clone(), tx);
             pending.insert(pk, PendingRequest {
                 prompt: prompt.to_string(),
-                waiters: vec![tx],
+                waiters,
             });
         }
-        rx
+        (request_id, rx)
     }
 
-    /// Resolve a pending permission request. Sends the result to all waiters and
+    /// Resolve a pending permission request. Sends the result to waiters and
     /// persists the decision to the appropriate storage.
-    pub fn resolve(&self, key: &PermissionKey, decision: &PermissionDecision) -> anyhow::Result<()> {
-        let allowed = matches!(
-            decision,
-            PermissionDecision::AllowOnce | PermissionDecision::AllowSession | PermissionDecision::AllowProject
-        );
-
+    ///
+    /// For `AllowOnce`, `request_id` must be provided to target a specific invocation.
+    /// For `AllowSession`/`AllowProject`/`Deny`, all waiters are notified and
+    /// `request_id` is ignored.
+    pub fn resolve(&self, key: &PermissionKey, decision: &PermissionDecision, request_id: Option<&str>) -> anyhow::Result<()> {
         // Save to storage based on decision
         match decision {
             PermissionDecision::AllowSession => {
@@ -141,12 +145,31 @@ impl PermissionManager {
             PermissionDecision::AllowOnce | PermissionDecision::Deny => {}
         }
 
-        // Notify all waiters
+        // Notify waiters
         let mut pending = self.pending_requests.lock().unwrap();
-        if let Some(request) = pending.remove(key) {
-            for tx in request.waiters {
-                // Ignore send errors — receiver may have been dropped
-                let _ = tx.send(allowed);
+        if let Some(request) = pending.get_mut(key) {
+            match (decision, request_id) {
+                (PermissionDecision::AllowOnce, None) => {
+                    anyhow::bail!("AllowOnce requires a request_id to target a specific invocation");
+                }
+                (PermissionDecision::AllowOnce, Some(rid)) => {
+                    // AllowOnce: only approve the targeted waiter
+                    if let Some(tx) = request.waiters.remove(rid) {
+                        let _ = tx.send(true);
+                    }
+                    // Remove entry if no waiters left
+                    if request.waiters.is_empty() {
+                        pending.remove(key);
+                    }
+                }
+                _ => {
+                    // AllowSession/AllowProject/Deny: notify all and remove
+                    let request = pending.remove(key).unwrap();
+                    let allowed = !matches!(decision, PermissionDecision::Deny);
+                    for (_, tx) in request.waiters {
+                        let _ = tx.send(allowed);
+                    }
+                }
             }
         }
 
@@ -168,7 +191,7 @@ impl PermissionManager {
     pub fn close_all_pending(&self) {
         let mut pending = self.pending_requests.lock().unwrap();
         for (_key, request) in pending.drain() {
-            for tx in request.waiters {
+            for (_, tx) in request.waiters {
                 let _ = tx.send(false);
             }
         }
@@ -179,11 +202,18 @@ impl PermissionManager {
         let pending = self.pending_requests.lock().unwrap();
         let pending_infos: Vec<PendingPermissionInfo> = pending
             .iter()
-            .map(|(k, r)| PendingPermissionInfo {
-                tool: k.tool.clone(),
-                prompt: r.prompt.clone(),
-                key: k.key.clone(),
-                value: k.value.clone(),
+            .map(|(k, r)| {
+                // Use the first waiter's request_id (arbitrary but stable for display)
+                let request_id = r.waiters.keys().next()
+                    .cloned()
+                    .unwrap_or_default();
+                PendingPermissionInfo {
+                    tool: k.tool.clone(),
+                    prompt: r.prompt.clone(),
+                    key: k.key.clone(),
+                    value: k.value.clone(),
+                    request_id,
+                }
             })
             .collect();
 
@@ -290,7 +320,7 @@ impl ScopedPermissionManager {
             return true;
         }
 
-        let rx = self.manager.register_request(&self.tool_name, prompt, key, value);
+        let (_request_id, rx) = self.manager.register_request(&self.tool_name, prompt, key, value);
 
         // Notify UI that permission state changed (idempotent)
         (self.notify_fn)();

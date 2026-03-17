@@ -15,6 +15,7 @@ pub enum ClientMessage {
     ResolvePermission {
         key: llm_rs::permission::PermissionKey,
         decision: llm_rs::permission::PermissionDecision,
+        request_id: Option<String>,
     },
     /// Revoke a saved permission
     RevokePermission {
