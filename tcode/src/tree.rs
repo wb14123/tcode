@@ -60,6 +60,10 @@ impl NodeStatus {
         }
     }
 
+    fn is_terminal(&self) -> bool {
+        matches!(self, NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Cancelled)
+    }
+
     fn from_end_status(s: &MessageEndStatus) -> Self {
         match s {
             MessageEndStatus::Succeeded => NodeStatus::Succeeded,
@@ -540,6 +544,33 @@ impl TreeState {
                 if let Some(&idx) = self.tool_call_idx.get(tool_call_id) {
                     if let NodeType::ToolCall { status, .. } = &mut self.arena[idx].kind {
                         *status = NodeStatus::Running;
+                    }
+                }
+            }
+            Message::SubAgentWaitingPermission { conversation_id, .. } => {
+                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
+                    if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
+                        if !status.is_terminal() {
+                            *status = NodeStatus::Permission;
+                        }
+                    }
+                }
+            }
+            Message::SubAgentPermissionApproved { conversation_id, .. } => {
+                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
+                    if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
+                        if matches!(status, NodeStatus::Permission) {
+                            *status = NodeStatus::Running;
+                        }
+                    }
+                }
+            }
+            Message::SubAgentPermissionDenied { conversation_id, .. } => {
+                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
+                    if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
+                        if !status.is_terminal() {
+                            *status = NodeStatus::Denied;
+                        }
                     }
                 }
             }

@@ -219,5 +219,14 @@ fn print_message(msg: &Message) {
         Message::ToolPermissionApproved { tool_call_id, .. } => {
             println!("    [ToolPermissionApproved: {}]", tool_call_id);
         }
+        Message::SubAgentWaitingPermission { conversation_id, .. } => {
+            println!("    [SubAgentWaitingPermission: {}]", conversation_id);
+        }
+        Message::SubAgentPermissionApproved { conversation_id, .. } => {
+            println!("    [SubAgentPermissionApproved: {}]", conversation_id);
+        }
+        Message::SubAgentPermissionDenied { conversation_id, .. } => {
+            println!("    [SubAgentPermissionDenied: {}]", conversation_id);
+        }
     }
 }

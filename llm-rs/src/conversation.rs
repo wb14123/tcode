@@ -296,6 +296,24 @@ pub enum Message {
         msg_id: MessageID,
         tool_call_id: String,
     },
+
+    /// A subagent (or one of its descendants) is waiting for user permission.
+    SubAgentWaitingPermission {
+        msg_id: MessageID,
+        conversation_id: String,
+    },
+
+    /// A subagent's pending permission was approved.
+    SubAgentPermissionApproved {
+        msg_id: MessageID,
+        conversation_id: String,
+    },
+
+    /// A subagent's tool was denied by the user.
+    SubAgentPermissionDenied {
+        msg_id: MessageID,
+        conversation_id: String,
+    },
 }
 
 // ============================================================================
@@ -898,12 +916,70 @@ async fn collect_subagent_response(
 
                 break; // First turn done — exit regardless of cancel status
             }
+            // Tool in subagent requests permission → bubble SubAgent status to parent
+            Message::ToolRequestPermission { .. } => {
+                if let Err(e) = parent_client.notify_msg(Message::SubAgentWaitingPermission {
+                    msg_id: parent_client.next_msg_id(),
+                    conversation_id: subagent_conv_id.to_string(),
+                }) {
+                    tracing::error!(error = %e, "failed to send SubAgentWaitingPermission to parent");
+                }
+            }
+            // Tool permission approved → bubble up
+            Message::ToolPermissionApproved { .. } => {
+                if let Err(e) = parent_client.notify_msg(Message::SubAgentPermissionApproved {
+                    msg_id: parent_client.next_msg_id(),
+                    conversation_id: subagent_conv_id.to_string(),
+                }) {
+                    tracing::error!(error = %e, "failed to send SubAgentPermissionApproved to parent");
+                }
+            }
+            // Tool denied → bubble up
+            Message::ToolMessageEnd { end_status: MessageEndStatus::UserDenied, .. } => {
+                if let Err(e) = parent_client.notify_msg(Message::SubAgentPermissionDenied {
+                    msg_id: parent_client.next_msg_id(),
+                    conversation_id: subagent_conv_id.to_string(),
+                }) {
+                    tracing::error!(error = %e, "failed to send SubAgentPermissionDenied to parent");
+                }
+            }
             // Forward permission signals to parent so the UI sees them
             Message::PermissionUpdated { .. } => {
                 if let Err(e) = parent_client.notify_msg(Message::PermissionUpdated {
                     msg_id: parent_client.next_msg_id(),
                 }) {
                     tracing::error!(error = %e, "failed to forward PermissionUpdated to parent");
+                }
+            }
+            // Recursive bubble-up from nested subagents: re-emit with THIS subagent's conversation_id
+            Message::SubAgentWaitingPermission { .. } => {
+                // Also forward PermissionUpdated so the permission UI works at all ancestor levels
+                if let Err(e) = parent_client.notify_msg(Message::PermissionUpdated {
+                    msg_id: parent_client.next_msg_id(),
+                }) {
+                    tracing::error!(error = %e, "failed to forward PermissionUpdated to parent");
+                }
+                if let Err(e) = parent_client.notify_msg(Message::SubAgentWaitingPermission {
+                    msg_id: parent_client.next_msg_id(),
+                    conversation_id: subagent_conv_id.to_string(),
+                }) {
+                    tracing::error!(error = %e, "failed to re-emit SubAgentWaitingPermission to parent");
+                }
+            }
+            Message::SubAgentPermissionApproved { .. } => {
+                if let Err(e) = parent_client.notify_msg(Message::SubAgentPermissionApproved {
+                    msg_id: parent_client.next_msg_id(),
+                    conversation_id: subagent_conv_id.to_string(),
+                }) {
+                    tracing::error!(error = %e, "failed to re-emit SubAgentPermissionApproved to parent");
+                }
+            }
+            Message::SubAgentPermissionDenied { .. } => {
+                if let Err(e) = parent_client.notify_msg(Message::SubAgentPermissionDenied {
+                    msg_id: parent_client.next_msg_id(),
+                    conversation_id: subagent_conv_id.to_string(),
+                }) {
+                    tracing::error!(error = %e, "failed to re-emit SubAgentPermissionDenied to parent");
                 }
             }
             _ => {}

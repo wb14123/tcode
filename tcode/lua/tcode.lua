@@ -684,6 +684,60 @@ local function render_event(buf, ns, event)
       end
     end
 
+  elseif variant == 'SubAgentWaitingPermission' then
+    if data.conversation_id and sa_label_marks[data.conversation_id] then
+      local info = sa_label_marks[data.conversation_id]
+      local virt = {
+        { '>>> SUB-AGENT: ', 'TCodeTool' },
+        { '[permission]', 'TCodePermission' },
+        { ' ' .. info.description, 'TCodeTool' },
+      }
+      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
+      if mark_pos and mark_pos[1] then
+        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
+          id = info.extmark_id,
+          virt_text = virt,
+          virt_text_pos = 'overlay',
+        })
+      end
+    end
+
+  elseif variant == 'SubAgentPermissionApproved' then
+    if data.conversation_id and sa_label_marks[data.conversation_id] then
+      local info = sa_label_marks[data.conversation_id]
+      local virt = {
+        { '>>> SUB-AGENT: ', 'TCodeTool' },
+        { '[running]', 'TCodeTool' },
+        { ' ' .. info.description, 'TCodeTool' },
+      }
+      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
+      if mark_pos and mark_pos[1] then
+        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
+          id = info.extmark_id,
+          virt_text = virt,
+          virt_text_pos = 'overlay',
+        })
+      end
+    end
+
+  elseif variant == 'SubAgentPermissionDenied' then
+    if data.conversation_id and sa_label_marks[data.conversation_id] then
+      local info = sa_label_marks[data.conversation_id]
+      local virt = {
+        { '>>> SUB-AGENT: ', 'TCodeTool' },
+        { '[denied]', 'TCodeError' },
+        { ' ' .. info.description, 'TCodeTool' },
+      }
+      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
+      if mark_pos and mark_pos[1] then
+        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
+          id = info.extmark_id,
+          virt_text = virt,
+          virt_text_pos = 'overlay',
+        })
+      end
+    end
+
   elseif variant == 'AssistantRequestEnd' then
     append_lines(buf, { '', '' })
     local info_line = vim.api.nvim_buf_line_count(buf) - 1
@@ -707,6 +761,7 @@ local function setup_highlights(statusline_fg, statusline_ctermfg)
   vim.api.nvim_set_hl(0, 'TCodeThinking', { fg = '#7c8495', italic = true, ctermfg = 245 })
   vim.api.nvim_set_hl(0, 'TCodeTokens', { fg = '#5c6370', italic = true, ctermfg = 242 })
   vim.api.nvim_set_hl(0, 'TCodeError', { fg = '#e06c75', bold = true, ctermfg = 168 })
+  vim.api.nvim_set_hl(0, 'TCodePermission', { fg = '#c678dd', bold = true, ctermfg = 176 })
   vim.api.nvim_set_hl(0, 'TCodeSystemInfo', { fg = '#61afef', italic = true, ctermfg = 75 })
   vim.api.nvim_set_hl(0, 'TCodeSystemWarning', { fg = '#e5c07b', bold = true, ctermfg = 180 })
   vim.api.nvim_set_hl(0, 'TCodeSystemError', { fg = '#e06c75', bold = true, ctermfg = 168 })

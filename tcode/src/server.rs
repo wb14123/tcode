@@ -544,6 +544,33 @@ fn run_event_writer(
                     .context("Failed to append display event")?;
             }
 
+            Message::SubAgentWaitingPermission { conversation_id, .. } => {
+                if let Some(state) = subagents.get(conversation_id) {
+                    tokio::fs::write(&state.status_file_path, "Permission").await
+                        .context("Failed to write subagent permission status")?;
+                }
+                append_event(&display_file, &event).await
+                    .context("Failed to append subagent waiting permission to display")?;
+            }
+
+            Message::SubAgentPermissionApproved { conversation_id, .. } => {
+                if let Some(state) = subagents.get(conversation_id) {
+                    tokio::fs::write(&state.status_file_path, "Running").await
+                        .context("Failed to write subagent running status after approval")?;
+                }
+                append_event(&display_file, &event).await
+                    .context("Failed to append subagent permission approved to display")?;
+            }
+
+            Message::SubAgentPermissionDenied { conversation_id, .. } => {
+                if let Some(state) = subagents.get(conversation_id) {
+                    tokio::fs::write(&state.status_file_path, "Denied").await
+                        .context("Failed to write subagent denied status")?;
+                }
+                append_event(&display_file, &event).await
+                    .context("Failed to append subagent permission denied to display")?;
+            }
+
             _ => {
                 // All other events: write to main display only
                 append_event(&display_file, &event).await
