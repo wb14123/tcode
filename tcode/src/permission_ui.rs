@@ -85,6 +85,8 @@ struct PermissionTreeState {
     filter_pending_only: bool,
     session_id: String,
     status_message: Option<String>,
+    /// Frame counter for flash animation.
+    frame_count: u64,
 }
 
 impl PermissionTreeState {
@@ -96,6 +98,7 @@ impl PermissionTreeState {
             filter_pending_only: false,
             session_id,
             status_message: None,
+            frame_count: 0,
         }
     }
 
@@ -358,6 +361,14 @@ fn render_tree(
             Constraint::Length(1),
         ]).split(area);
 
+        // Flash: toggle every 3 frames (~600ms cycle at 200ms poll)
+        let flash_on = (state.frame_count / 3) % 2 == 0;
+
+        // Check if any pending permissions exist
+        let any_pending = state.arena.iter().any(|n| {
+            matches!(&n.kind, NodeKind::Value { status: PermStatus::Pending, .. })
+        });
+
         // Build list items
         let items: Vec<ListItem> = state.visible.iter().map(|&idx| {
             let node = &state.arena[idx];
@@ -382,16 +393,30 @@ fn render_tree(
                     ListItem::new(Line::from(Span::raw(format!("{}{} {}", indent, prefix, key))))
                 }
                 NodeKind::Value { value, status, .. } => {
+                    let (icon_style, text_style, label_style) = if matches!(status, PermStatus::Pending) {
+                        let s = if flash_on {
+                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                        } else {
+                            Style::default().fg(Color::DarkGray)
+                        };
+                        (s, s, s)
+                    } else {
+                        (
+                            Style::default().fg(status.color()),
+                            Style::default(),
+                            Style::default().fg(Color::DarkGray),
+                        )
+                    };
                     let line = Line::from(vec![
-                        Span::raw(format!("{}  ", indent)),
+                        Span::styled(format!("{}  ", indent), text_style),
                         Span::styled(
                             format!("[{}]", status.icon()),
-                            Style::default().fg(status.color()),
+                            icon_style,
                         ),
-                        Span::raw(format!(" {}", value)),
+                        Span::styled(format!(" {}", value), text_style),
                         Span::styled(
                             format!(" ({})", status.label()),
-                            Style::default().fg(Color::DarkGray),
+                            label_style,
                         ),
                     ]);
                     ListItem::new(line)
@@ -400,10 +425,24 @@ fn render_tree(
         }).collect();
 
         let filter_indicator = if state.filter_pending_only { " [pending only]" } else { "" };
-        let title = format!(" Permissions{} ", filter_indicator);
+        let title_text = format!(" Permissions{} ", filter_indicator);
+
+        let (border_style, title_style) = if any_pending && flash_on {
+            (
+                Style::default().fg(Color::Red),
+                Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
+            )
+        } else {
+            (Style::default(), Style::default())
+        };
 
         let list = List::new(items)
-            .block(Block::default().borders(Borders::ALL).title(title))
+            .block(
+                Block::default()
+                    .borders(Borders::ALL)
+                    .border_style(border_style)
+                    .title(Span::styled(title_text, title_style)),
+            )
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
 
         frame.render_stateful_widget(list, chunks[0], list_state);
@@ -549,6 +588,7 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
         }
 
         // Render
+        state.frame_count = state.frame_count.wrapping_add(1);
         render_tree(&mut terminal, &mut state, &mut list_state)?;
 
         // Handle keyboard input
