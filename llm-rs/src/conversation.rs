@@ -894,6 +894,14 @@ async fn collect_subagent_response(
 
                 break; // First turn done — exit regardless of cancel status
             }
+            // Forward permission signals to parent so the UI sees them
+            Message::PermissionUpdated { .. } | Message::ToolRequestPermission { .. } => {
+                if let Err(e) = parent_client.notify_msg(Message::PermissionUpdated {
+                    msg_id: parent_client.next_msg_id(),
+                }) {
+                    tracing::error!(error = %e, "failed to forward PermissionUpdated to parent");
+                }
+            }
             _ => {}
         }
     }
