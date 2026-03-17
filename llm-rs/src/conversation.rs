@@ -155,6 +155,7 @@ pub enum MessageEndStatus {
     Failed,
     Cancelled,
     Timeout,
+    UserDenied,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -282,6 +283,12 @@ pub enum Message {
     /// Signal that permission state has changed. UI should re-query for full state.
     PermissionUpdated {
         msg_id: MessageID,
+    },
+
+    /// Signal that a tool is waiting for user permission approval.
+    ToolRequestPermission {
+        msg_id: MessageID,
+        tool_call_id: String,
     },
 }
 
@@ -1445,15 +1452,21 @@ async fn execute_regular_tool(
     })?;
 
     let client_clone = Arc::clone(&env.client);
+    let tc_id = tool_call.id.clone();
     let scoped_pm = crate::permission::ScopedPermissionManager::new(
         &tool_call.name,
         Arc::clone(&env.permission_manager),
         Arc::new(move || {
+            let _ = client_clone.notify_msg(Message::ToolRequestPermission {
+                msg_id: client_clone.next_msg_id(),
+                tool_call_id: tc_id.clone(),
+            });
             let _ = client_clone.notify_msg(Message::PermissionUpdated {
                 msg_id: client_clone.next_msg_id(),
             });
         }),
     );
+    let scoped_pm_ref = scoped_pm.clone();
     let tool_ctx = ToolContext {
         cancel_token: cancel_token.clone(),
         permission: scoped_pm,
@@ -1483,6 +1496,8 @@ async fn execute_regular_tool(
         );
         let status = if cancel_token.is_cancelled() {
             MessageEndStatus::Cancelled
+        } else if scoped_pm_ref.was_denied() {
+            MessageEndStatus::UserDenied
         } else {
             MessageEndStatus::Succeeded
         };

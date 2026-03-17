@@ -23,7 +23,7 @@ Manages multi-round LLM conversations with automatic tool execution loops.
 - **`ConversationManager`**: Creates and manages multiple concurrent conversations.
 - **`Conversation`**: The core loop - sends messages to LLM, processes responses, executes tool calls, and continues until the LLM returns EndTurn.
 - **`ConversationClient`**: Public API handle for sending user messages (`send_chat()`) and subscribing to conversation events via broadcast channel.
-- **Message types**: UserMessage, AssistantMessageStart/End/Chunk, ToolMessageStart/Output/End, SubAgentStart/End/TurnEnd/Continue, AssistantRequestEnd, and PermissionUpdated (signal for UI refresh).
+- **Message types**: UserMessage, AssistantMessageStart/End/Chunk, ToolMessageStart/Output/End, SubAgentStart/End/TurnEnd/Continue, AssistantRequestEnd, PermissionUpdated (signal for UI refresh), and ToolRequestPermission (tool is awaiting user approval).
 
 ### `permission` - Tool Permission System
 

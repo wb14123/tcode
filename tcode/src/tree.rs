@@ -33,6 +33,8 @@ enum NodeStatus {
     Succeeded,
     Failed,
     Cancelled,
+    Permission,
+    Denied,
 }
 
 impl NodeStatus {
@@ -43,6 +45,8 @@ impl NodeStatus {
             NodeStatus::Succeeded => "done",
             NodeStatus::Failed => "failed",
             NodeStatus::Cancelled => "cancelled",
+            NodeStatus::Permission => "permission",
+            NodeStatus::Denied => "denied",
         }
     }
 
@@ -51,7 +55,8 @@ impl NodeStatus {
             NodeStatus::Running => Color::Yellow,
             NodeStatus::Idle => Color::DarkGray,
             NodeStatus::Succeeded => Color::Green,
-            NodeStatus::Failed | NodeStatus::Cancelled => Color::Red,
+            NodeStatus::Failed | NodeStatus::Cancelled | NodeStatus::Denied => Color::Red,
+            NodeStatus::Permission => Color::Magenta,
         }
     }
 
@@ -61,6 +66,7 @@ impl NodeStatus {
             MessageEndStatus::Failed => NodeStatus::Failed,
             MessageEndStatus::Cancelled => NodeStatus::Cancelled,
             MessageEndStatus::Timeout => NodeStatus::Failed,
+            MessageEndStatus::UserDenied => NodeStatus::Denied,
         }
     }
 }
@@ -523,17 +529,24 @@ impl TreeState {
                     }
                 }
             }
+            Message::ToolRequestPermission { tool_call_id, .. } => {
+                if let Some(&idx) = self.tool_call_idx.get(tool_call_id) {
+                    if let NodeType::ToolCall { status, .. } = &mut self.arena[idx].kind {
+                        *status = NodeStatus::Permission;
+                    }
+                }
+            }
             // All other message types are ignored
             _ => {}
         }
     }
 
-    /// Check if a node is currently running.
+    /// Check if a node is currently running (or waiting for permission).
     fn is_running(&self, idx: usize) -> bool {
         match &self.arena[idx].kind {
             NodeType::Root { .. } => false,
             NodeType::ToolCall { status, .. } | NodeType::SubAgent { status, .. } => {
-                matches!(status, NodeStatus::Running)
+                matches!(status, NodeStatus::Running | NodeStatus::Permission)
             }
         }
     }

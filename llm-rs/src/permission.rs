@@ -1,5 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
@@ -237,6 +238,8 @@ pub struct ScopedPermissionManager {
     /// Callback to notify the UI that permission state changed.
     /// The ConversationClient provides this via a closure.
     notify_fn: Arc<dyn Fn() + Send + Sync>,
+    /// Tracks whether the user denied permission during this tool execution.
+    denied: Arc<AtomicBool>,
 }
 
 impl ScopedPermissionManager {
@@ -250,6 +253,7 @@ impl ScopedPermissionManager {
             tool_name: tool_name.to_string(),
             manager,
             notify_fn,
+            denied: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -265,6 +269,7 @@ impl ScopedPermissionManager {
             tool_name: tool_name.to_string(),
             manager,
             notify_fn: Arc::new(|| {}),
+            denied: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -285,6 +290,15 @@ impl ScopedPermissionManager {
         // Notify UI that permission state changed (idempotent)
         (self.notify_fn)();
 
-        rx.await.unwrap_or(false)
+        let allowed = rx.await.unwrap_or(false);
+        if !allowed {
+            self.denied.store(true, Ordering::Relaxed);
+        }
+        allowed
+    }
+
+    /// Returns true if the user denied permission during this tool execution.
+    pub fn was_denied(&self) -> bool {
+        self.denied.load(Ordering::Relaxed)
     }
 }

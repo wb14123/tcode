@@ -230,7 +230,7 @@ All session data lives in `~/.tcode/sessions/{session_id}/`. Sessions persist af
 | `edit-msg.txt` | User message file (edit writes, server reads) |
 | `status.txt` | Server status |
 | `tool-call-{id}.jsonl` | Per-tool-call output stream |
-| `tool-call-{id}-status.txt` | Per-tool-call status |
+| `tool-call-{id}-status.txt` | Per-tool-call status (`Running`, `Permission`, `Done`, `Failed`, `Cancelled`, `Denied`, `Timeout`) |
 | `subagent-{conv_id}/` | Sub-session directory for a subagent (same file structure as parent) |
 | `permissions.json` | Project-level tool permissions (persisted across sessions) |
 | `debug.log` | Debug logging output |

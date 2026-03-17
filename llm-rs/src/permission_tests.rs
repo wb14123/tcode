@@ -128,6 +128,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_was_denied_tracks_denial() {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let scoped = ScopedPermissionManager::new(
+            "web_fetch",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+        );
+        assert!(!scoped.was_denied());
+
+        // Deny the permission in the background
+        let pm_clone = Arc::clone(&pm);
+        let scoped_clone = scoped.clone();
+        let handle = tokio::spawn(async move {
+            let result = scoped_clone.ask_permission("Allow?", "hostname", "evil.com").await;
+            assert!(!result);
+        });
+        // Give the task a moment to register the request
+        tokio::task::yield_now().await;
+
+        let key = make_key("web_fetch", "hostname", "evil.com");
+        pm_clone.resolve(&key, &PermissionDecision::Deny).unwrap();
+        handle.await.unwrap();
+
+        assert!(scoped.was_denied());
+    }
+
+    #[tokio::test]
     async fn scoped_ask_permission_checks_stored_first() {
         let pm = Arc::new(PermissionManager::new(temp_path()));
         // Pre-approve

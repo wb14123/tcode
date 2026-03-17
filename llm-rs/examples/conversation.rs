@@ -213,5 +213,8 @@ fn print_message(msg: &Message) {
         Message::PermissionUpdated { .. } => {
             println!("    [PermissionUpdated]");
         }
+        Message::ToolRequestPermission { tool_call_id, .. } => {
+            println!("    [ToolRequestPermission: {}]", tool_call_id);
+        }
     }
 }

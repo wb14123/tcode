@@ -385,10 +385,17 @@ fn run_event_writer(
                     append_event(&state.file_path, &event).await
                         .context("Failed to append tool call end")?;
 
-                    // Mark the tool call as done
-                    tokio::fs::write(&state.status_file_path, "Done").await
+                    // Mark the tool call with final status
+                    let status_text = match end_status {
+                        MessageEndStatus::Succeeded => "Done",
+                        MessageEndStatus::Failed => "Failed",
+                        MessageEndStatus::Cancelled => "Cancelled",
+                        MessageEndStatus::UserDenied => "Denied",
+                        MessageEndStatus::Timeout => "Timeout",
+                    };
+                    tokio::fs::write(&state.status_file_path, status_text).await
                         .context("Failed to write tool call status")?;
-                    tracing::debug!(tool_call_id, "wrote Done to status file");
+                    tracing::debug!(tool_call_id, status_text, "wrote status to status file");
                 } else {
                     tracing::warn!(
                         tool_call_id,
@@ -517,6 +524,15 @@ fn run_event_writer(
 
                 append_event(&display_file, &event).await
                     .context("Failed to append subagent continue to display")?;
+            }
+
+            Message::ToolRequestPermission { tool_call_id, .. } => {
+                if let Some(state) = tool_calls.get(tool_call_id) {
+                    tokio::fs::write(&state.status_file_path, "Permission").await
+                        .context("Failed to write tool call permission status")?;
+                }
+                append_event(&display_file, &event).await
+                    .context("Failed to append display event")?;
             }
 
             _ => {
