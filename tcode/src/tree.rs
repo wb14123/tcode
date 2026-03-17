@@ -56,7 +56,7 @@ impl NodeStatus {
             NodeStatus::Idle => Color::DarkGray,
             NodeStatus::Succeeded => Color::Green,
             NodeStatus::Failed | NodeStatus::Cancelled | NodeStatus::Denied => Color::Red,
-            NodeStatus::Permission => Color::Magenta,
+            NodeStatus::Permission => Color::LightYellow,
         }
     }
 
@@ -1130,7 +1130,7 @@ fn render_node_line(state: &TreeState, node_idx: usize, _vi: usize, width: usize
     let type_color = match &node.kind {
         NodeType::Root { .. } => Color::Cyan,
         NodeType::ToolCall { .. } => Color::Blue,
-        NodeType::SubAgent { .. } => Color::Magenta,
+        NodeType::SubAgent { .. } => Color::LightCyan,
     };
 
     ListItem::new(Line::from(vec![
