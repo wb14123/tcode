@@ -103,7 +103,7 @@ pub fn web_fetch(
             .unwrap_or_else(|| "unknown".to_string());
 
         if !ctx.permission.ask_permission(
-            &format!("Allow web_fetch to access {}?", hostname),
+            &format!("Allow web_fetch to access {}?", url),
             "hostname",
             &hostname,
         ).await {
