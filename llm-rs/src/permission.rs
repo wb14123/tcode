@@ -272,6 +272,9 @@ pub struct ScopedPermissionManager {
     on_approved_fn: Arc<dyn Fn() + Send + Sync>,
     /// Tracks whether the user denied permission during this tool execution.
     denied: Arc<AtomicBool>,
+    /// True while waiting for user approval. Used by `TimeoutStream` to
+    /// pause the deadline so approval wait time doesn't count as timeout.
+    approval_pending: Arc<AtomicBool>,
 }
 
 impl ScopedPermissionManager {
@@ -288,6 +291,7 @@ impl ScopedPermissionManager {
             notify_fn,
             on_approved_fn,
             denied: Arc::new(AtomicBool::new(false)),
+            approval_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -305,6 +309,7 @@ impl ScopedPermissionManager {
             notify_fn: Arc::new(|| {}),
             on_approved_fn: Arc::new(|| {}),
             denied: Arc::new(AtomicBool::new(false)),
+            approval_pending: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -325,7 +330,10 @@ impl ScopedPermissionManager {
         // Notify UI that permission state changed (idempotent)
         (self.notify_fn)();
 
+        self.approval_pending.store(true, Ordering::Release);
         let allowed = rx.await.unwrap_or(false);
+        self.approval_pending.store(false, Ordering::Release);
+
         if allowed {
             (self.on_approved_fn)();
         } else {
@@ -337,5 +345,11 @@ impl ScopedPermissionManager {
     /// Returns true if the user denied permission during this tool execution.
     pub fn was_denied(&self) -> bool {
         self.denied.load(Ordering::Relaxed)
+    }
+
+    /// Returns a shared handle to the approval-pending flag.
+    /// Used by `TimeoutStream` to pause the deadline while waiting for user approval.
+    pub fn approval_pending(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.approval_pending)
     }
 }

@@ -30,13 +30,15 @@
 //! ```
 
 use std::pin::Pin;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
 use pin_project_lite::pin_project;
 use schemars::Schema;
 use serde::de::DeserializeOwned;
-use tokio::time::Sleep;
+use tokio::time::{Instant, Sleep};
 use tokio_stream::{Stream, StreamExt};
 
 pub use tokio_util::sync::CancellationToken;
@@ -55,6 +57,9 @@ pub type ToolOutputStream = Pin<Box<dyn Stream<Item = String> + Send>>;
 
 pin_project! {
     /// A stream wrapper that enforces a total timeout across all items.
+    /// The deadline is dynamically extended by any time the tool spends
+    /// waiting for user permission approval, so approval wait time does
+    /// not count against the timeout.
     struct TimeoutStream<S> {
         #[pin]
         inner: S,
@@ -62,6 +67,7 @@ pin_project! {
         deadline: Sleep,
         timed_out: bool,
         timeout_duration: Duration,
+        approval_pending: Arc<AtomicBool>,
     }
 }
 
@@ -76,14 +82,31 @@ impl<S: Stream<Item = String>> Stream for TimeoutStream<S> {
             return Poll::Ready(None);
         }
 
+        // While approval is pending, keep resetting the deadline so the
+        // timeout only counts actual tool execution time.
+        if this.approval_pending.load(Ordering::Acquire) {
+            this.deadline
+                .as_mut()
+                .reset(Instant::now() + *this.timeout_duration);
+        }
+
         // Check if deadline has passed
         if this.deadline.as_mut().poll(cx).is_ready() {
-            *this.timed_out = true;
-            let msg = format!(
-                "Error: Tool execution timed out after {}ms",
-                this.timeout_duration.as_millis()
-            );
-            return Poll::Ready(Some(msg));
+            // Double-check: approval may have become pending between the
+            // check above and the deadline firing. If so, reset instead of
+            // timing out.
+            if this.approval_pending.load(Ordering::Acquire) {
+                this.deadline
+                    .as_mut()
+                    .reset(Instant::now() + *this.timeout_duration);
+            } else {
+                *this.timed_out = true;
+                let msg = format!(
+                    "Error: Tool execution timed out after {}ms",
+                    this.timeout_duration.as_millis()
+                );
+                return Poll::Ready(Some(msg));
+            }
         }
 
         // Poll the inner stream
@@ -265,15 +288,18 @@ impl Tool {
     /// stops output. If a timeout is set, `TimeoutStream` is also applied.
     pub fn execute(&self, ctx: ToolContext, arguments: String) -> ToolOutputStream {
         let cancel_token = ctx.cancel_token.clone();
+        let approval_pending = ctx.permission.approval_pending();
         let stream = (self.handler)(ctx, arguments);
 
-        // Apply timeout if configured
+        // Apply timeout if configured. The deadline is dynamically paused
+        // while the tool is waiting for user permission approval.
         let stream: ToolOutputStream = match self.timeout {
             Some(timeout) => Box::pin(TimeoutStream {
                 inner: stream,
                 deadline: tokio::time::sleep(timeout),
                 timed_out: false,
                 timeout_duration: timeout,
+                approval_pending,
             }),
             None => stream,
         };

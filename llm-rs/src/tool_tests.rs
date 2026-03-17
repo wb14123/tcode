@@ -277,6 +277,50 @@ mod tests {
         assert!(stream.next().await.is_none());
     }
 
+    /// Verifies that time spent waiting for user permission approval does not
+    /// count against the tool timeout. Simulates a 200ms approval wait with a
+    /// 100ms timeout — the tool should still succeed because the deadline is
+    /// paused while approval is pending.
+    #[tokio::test]
+    async fn test_timeout_pauses_during_approval_wait() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let tool = Tool::new(
+            "needs_approval",
+            "A tool that waits for approval",
+            Some(Duration::from_millis(100)),
+            |ctx: ToolContext, _: TestParams| {
+                async_stream::stream! {
+                    // Simulate the approval wait: set the pending flag, sleep
+                    // longer than the timeout, then clear the flag — mirroring
+                    // what ScopedPermissionManager::ask_permission does.
+                    let pending = ctx.permission.approval_pending();
+                    pending.store(true, Ordering::Release);
+                    tokio::time::sleep(Duration::from_millis(200)).await;
+                    pending.store(false, Ordering::Release);
+
+                    // After "approval", yield the result quickly
+                    yield Ok::<_, String>("done".to_string());
+                }
+            },
+        );
+
+        let json_args = r#"{"message": "test"}"#.to_string();
+        let mut stream = tool.execute(test_ctx(), json_args);
+
+        let mut results = Vec::new();
+        while let Some(item) = stream.next().await {
+            results.push(item);
+        }
+
+        // Without the fix this would be a timeout error.
+        // With the fix the deadline is paused during the 200ms approval wait,
+        // so the tool completes successfully.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0], "done");
+    }
+
     // Tests for #[tool] macro
     mod macro_tests {
         use crate::tool;
