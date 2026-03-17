@@ -7,7 +7,10 @@ mod tests {
     use tokio_stream::StreamExt;
 
     fn test_ctx() -> ToolContext {
-        ToolContext { cancel_token: CancellationToken::new() }
+        ToolContext {
+            cancel_token: CancellationToken::new(),
+            permission: crate::permission::ScopedPermissionManager::always_allow("test"),
+        }
     }
 
     #[derive(Deserialize, JsonSchema)]
@@ -251,7 +254,10 @@ mod tests {
         );
 
         let cancel_token = CancellationToken::new();
-        let ctx = ToolContext { cancel_token: cancel_token.clone() };
+        let ctx = ToolContext {
+            cancel_token: cancel_token.clone(),
+            permission: crate::permission::ScopedPermissionManager::always_allow("test"),
+        };
 
         let json_args = r#"{"message": "test"}"#.to_string();
         let mut stream = tool.execute(ctx, json_args);
@@ -278,7 +284,10 @@ mod tests {
         use tokio_stream::StreamExt;
 
         fn test_ctx() -> ToolContext {
-            ToolContext { cancel_token: CancellationToken::new() }
+            ToolContext {
+                cancel_token: CancellationToken::new(),
+                permission: crate::permission::ScopedPermissionManager::always_allow("test"),
+            }
         }
 
         /// Search the codebase for a pattern

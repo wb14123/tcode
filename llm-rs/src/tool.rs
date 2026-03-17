@@ -25,7 +25,7 @@
 //!
 //! // Execute with JSON string
 //! use tokio_util::sync::CancellationToken;
-//! let ctx = ToolContext { cancel_token: CancellationToken::new() };
+//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test") };
 //! let stream = tool.execute(ctx, r#"{"path": "/tmp/test.txt"}"#.to_string());
 //! ```
 
@@ -42,10 +42,12 @@ use tokio_stream::{Stream, StreamExt};
 pub use tokio_util::sync::CancellationToken;
 
 /// Context provided to every tool execution.
-/// Extensible — future additions (permissions, user info) go here.
+/// Extensible — future additions (user info, etc.) go here.
 #[derive(Clone)]
 pub struct ToolContext {
     pub cancel_token: CancellationToken,
+    /// Scoped permission manager for this tool.
+    pub permission: crate::permission::ScopedPermissionManager,
 }
 
 /// Type alias for the boxed stream returned by tool execution.
@@ -165,7 +167,7 @@ impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send
 ///
 /// // Execute with JSON string
 /// use tokio_util::sync::CancellationToken;
-/// let ctx = ToolContext { cancel_token: CancellationToken::new() };
+/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test") };
 /// let stream = tool.execute(ctx, r#"{"query": "foo"}"#.to_string());
 /// ```
 pub struct Tool {

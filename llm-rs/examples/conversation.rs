@@ -57,7 +57,9 @@ async fn main() -> anyhow::Result<()> {
     ];
 
     // Create conversation manager and start a conversation
-    let manager = ConversationManager::new();
+    let manager = ConversationManager::new(
+        std::env::temp_dir().join("llm-rs-example-permissions.json"),
+    );
     let llm = Box::new(OpenRouter::new(&api_key));
 
     let (_, client) = manager.new_conversation(
@@ -207,6 +209,9 @@ fn print_message(msg: &Message) {
         }
         Message::ToolCallResolved { tool_call_id, .. } => {
             println!("    [ToolCallResolved: {}]", tool_call_id);
+        }
+        Message::PermissionUpdated { .. } => {
+            println!("    [PermissionUpdated]");
         }
     }
 }

@@ -39,6 +39,7 @@ llm-rs/               Root workspace
 │  │   ├─ OpenAI impl (Responses API)                  │
 │  │   ├─ OpenRouter impl (Chat Completions API)       │
 │  │   └─ Claude impl (Messages API with OAuth)        │
+│  ├─ Permission system (tool access control)           │
 │  └─ Tool system (streaming execution with timeouts)  │
 │                                                      │
 │  tools (Built-in Tools)                              │
@@ -62,6 +63,7 @@ llm-rs/               Root workspace
 - **Streaming everywhere**: LLM responses and tool outputs stream incrementally through async Rust streams for low-latency feedback.
 - **Provider-agnostic LLM trait**: The `LLM` trait abstracts providers. Currently implemented for OpenAI (Responses API), OpenRouter (Chat Completions API), and Claude (Messages API with OAuth). Adding new providers means implementing one trait.
 - **Macro-based tool definitions**: The `#[tool]` proc macro generates JSON schema, deserialization, and `Tool` construction from a plain function signature.
+- **Tool permission system**: A centralized `PermissionManager` mediates tool access to sensitive resources (e.g., hostnames for `web_fetch`). Users approve/deny via a TUI pane with session and project-level persistence. Tools block individually — other tools run concurrently while one awaits approval.
 
 ## Building
 

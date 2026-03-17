@@ -23,13 +23,37 @@ Manages multi-round LLM conversations with automatic tool execution loops.
 - **`ConversationManager`**: Creates and manages multiple concurrent conversations.
 - **`Conversation`**: The core loop - sends messages to LLM, processes responses, executes tool calls, and continues until the LLM returns EndTurn.
 - **`ConversationClient`**: Public API handle for sending user messages (`send_chat()`) and subscribing to conversation events via broadcast channel.
-- **Message types**: UserMessage, AssistantMessageStart/End/Chunk, ToolMessageStart/Output/End, SubAgentStart/End/TurnEnd/Continue, and AssistantRequestEnd.
+- **Message types**: UserMessage, AssistantMessageStart/End/Chunk, ToolMessageStart/Output/End, SubAgentStart/End/TurnEnd/Continue, AssistantRequestEnd, and PermissionUpdated (signal for UI refresh).
+
+### `permission` - Tool Permission System
+
+Centralized permission management for controlling tool access to sensitive resources.
+
+- **`PermissionManager`**: Pure state manager holding session permissions (`HashSet<PermissionKey>`), project permissions (persisted to disk), and pending requests (`HashMap<PermissionKey, PendingRequest>`). Requests with the same `PermissionKey` are deduplicated — multiple waiters share a single prompt.
+- **`PermissionKey`**: Identifies a permission as `(tool, key, value)` — e.g., `("web_fetch", "hostname", "example.com")`.
+- **`PermissionDecision`**: AllowOnce, AllowSession, AllowProject, or Deny.
+- **`ScopedPermissionManager`**: Tool-scoped handle passed via `ToolContext`. Provides `ask_permission()` (async, blocks until user responds) and `has_permission()` (non-blocking check). A `noop()` constructor always returns true for contexts where permissions are disabled.
+- **`PermissionState`**: Snapshot of all pending, session, and project permissions for UI queries.
+
+Permission flow:
+```
+Tool calls ctx.permission.ask_permission("hostname", "example.com")
+  → PermissionManager checks session/project sets
+  → If not found: registers pending request, notifies UI via PermissionUpdated message
+  → Tool blocks on oneshot channel
+  → User approves/denies via TUI popup
+  → PermissionManager resolves all waiters for that key
+  → Tool proceeds or returns "Permission denied"
+```
+
+Project permissions persist across sessions in `.tcode/permissions.json`.
 
 ### `tool` - Tool System
 
 Streaming tool execution with timeout support.
 
 - **`Tool`**: Name, description, JSON schema (auto-generated), timeout, and an async handler function.
+- **`ToolContext`**: Passed to every tool invocation. Contains a `CancellationToken` for timeout/cancellation and a `ScopedPermissionManager` for requesting user approval before accessing sensitive resources.
 - **`ToolOutputStream`**: `Pin<Box<dyn Stream<Item = String>>>` - tools stream their output incrementally.
 - **`TimeoutStream`**: Wraps a tool's output stream to enforce a total execution timeout.
 

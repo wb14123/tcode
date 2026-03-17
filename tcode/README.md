@@ -7,24 +7,29 @@ A terminal-based coding agent that leverages neovim and tmux for its UI. Instead
 TCode uses a server-client architecture. The server manages the LLM conversation and writes events to files. Clients are separate neovim processes that read those files and render the UI.
 
 ```
-┌─────────────────────────────────────────────────┐
-│  tmux session                                   │
-│                                                 │
-│  ┌──────────────────┐  ┌────────────────────┐   │
-│  │  Display (nvim)  │  │  Edit (nvim)       │   │
-│  │  Reads JSONL     │  │  Writes messages   │   │
-│  │  Renders chat    │  │  via Unix socket   │   │
-│  └────────┬─────────┘  └────────┬───────────┘   │
-│           │ display.jsonl       │ server.sock    │
-│           └────────┬────────────┘                │
-│                    ▼                             │
-│           Server Process                         │
-│           ├─ ConversationManager                │
-│           ├─ JSONL event writer                  │
-│           └─ Unix socket listener               │
-│                                                 │
-│  Session dir: ~/.tcode/sessions/{id}/           │
-└─────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│  tmux session                                               │
+│                                                             │
+│  ┌──────────────────┐  ┌─────────────────┐                  │
+│  │  Display (nvim)  │  │  Tree (TUI)     │                  │
+│  │  Reads JSONL     │  │  Subagent/tool  │                  │
+│  │  Renders chat    │  │  hierarchy      │                  │
+│  ├──────────────────┤  ├─────────────────┤                  │
+│  │  Edit (nvim)     │  │  Permission     │                  │
+│  │  Writes messages │  │  (TUI)          │                  │
+│  │  via Unix socket │  │  Pending/granted│                  │
+│  └────────┬─────────┘  └────────┬────────┘                  │
+│           │ display.jsonl       │ server.sock                │
+│           └────────┬────────────┘                            │
+│                    ▼                                         │
+│           Server Process                                     │
+│           ├─ ConversationManager                            │
+│           ├─ PermissionManager                              │
+│           ├─ JSONL event writer                              │
+│           └─ Unix socket listener                           │
+│                                                             │
+│  Session dir: ~/.tcode/sessions/{id}/                       │
+└─────────────────────────────────────────────────────────────┘
 ```
 
 ## CLI Options
@@ -120,6 +125,43 @@ Opens a TUI tree view of the conversation's subagents and tool calls. Displays s
 | `R` | Full refresh |
 | `q` | Quit |
 
+### `tcode --session <id> permission`
+
+Opens a TUI pane showing all tool permissions — pending requests, session grants, and project grants — grouped by tool and key. Automatically shown as a bottom-right pane when starting a new session.
+
+The pane watches `display.jsonl` for `PermissionUpdated` signals and queries the server for the latest permission state over the Unix socket.
+
+| Key | Action |
+|-----|--------|
+| `j`/`↓` | Move down |
+| `k`/`↑` | Move up |
+| `Space` | Toggle collapse/expand |
+| `Enter`/`o` | Open approval/management popup for selected item |
+| `f` | Toggle filter (pending only / all) |
+| `R` | Full refresh |
+| `q` | Quit |
+
+Pressing Enter on a pending permission opens a `tmux display-popup` with approval options. Pressing Enter on a granted permission opens a management popup to revoke it.
+
+### `tcode --session <id> approve --tool <t> --key <k> --value <v> [--manage]`
+
+Opens a small approval dialog (designed for `tmux display-popup`). Shows the permission details and presents options:
+
+**Approval mode** (pending permissions):
+| Key | Action |
+|-----|--------|
+| `1` | Allow once |
+| `2` | Allow for session |
+| `3` | Allow for project (persisted) |
+| `4` | Deny |
+| `q`/`Esc` | Cancel |
+
+**Management mode** (`--manage`, granted permissions):
+| Key | Action |
+|-----|--------|
+| `r` | Revoke permission |
+| `q`/`Esc` | Cancel |
+
 ### `tcode browser`
 
 Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) that the browser-server needs. This is a standalone command that opens a visible Chrome window — it does not interact with the browser-server process.
@@ -190,6 +232,7 @@ All session data lives in `~/.tcode/sessions/{session_id}/`. Sessions persist af
 | `tool-call-{id}.jsonl` | Per-tool-call output stream |
 | `tool-call-{id}-status.txt` | Per-tool-call status |
 | `subagent-{conv_id}/` | Sub-session directory for a subagent (same file structure as parent) |
+| `permissions.json` | Project-level tool permissions (persisted across sessions) |
 | `debug.log` | Debug logging output |
 
 ## Subagent Display

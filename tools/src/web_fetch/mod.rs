@@ -96,6 +96,21 @@ pub fn web_fetch(
     skip_chars: Option<u32>,
 ) -> impl tokio_stream::Stream<Item = Result<String>> {
     async_stream::stream! {
+        // Extract hostname for permission check
+        let hostname = reqwest::Url::parse(&url)
+            .ok()
+            .and_then(|u| u.host_str().map(|s| s.to_string()))
+            .unwrap_or_else(|| "unknown".to_string());
+
+        if !ctx.permission.ask_permission(
+            &format!("Allow web_fetch to access {}?", hostname),
+            "hostname",
+            &hostname,
+        ).await {
+            yield Err(anyhow!("Permission denied: web_fetch access to {} was not allowed", hostname));
+            return;
+        }
+
         let max_len = max_length.unwrap_or(20_000) as usize;
         let skip = skip_chars.unwrap_or(0) as usize;
 

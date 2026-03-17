@@ -11,6 +11,17 @@ pub enum ClientMessage {
     CancelTool { tool_call_id: String },
     /// Cancel an entire conversation (cascades to all tools and child subagents)
     CancelConversation { conversation_id: String },
+    /// Resolve a pending permission request
+    ResolvePermission {
+        key: llm_rs::permission::PermissionKey,
+        decision: llm_rs::permission::PermissionDecision,
+    },
+    /// Revoke a saved permission
+    RevokePermission {
+        key: llm_rs::permission::PermissionKey,
+    },
+    /// Query the current permission state (pending, session, project)
+    GetPermissionState,
     /// Request server shutdown (broadcasts to all clients)
     Shutdown,
 }
@@ -22,4 +33,6 @@ pub enum ServerMessage {
     Ack,
     /// Error
     Error { message: String },
+    /// Full permission state snapshot
+    PermissionState(llm_rs::permission::PermissionState),
 }

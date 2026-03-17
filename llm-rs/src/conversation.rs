@@ -278,6 +278,11 @@ pub enum Message {
         level: SystemMessageLevel,
         message: String,
     },
+
+    /// Signal that permission state has changed. UI should re-query for full state.
+    PermissionUpdated {
+        msg_id: MessageID,
+    },
 }
 
 // ============================================================================
@@ -312,6 +317,8 @@ struct ConversationEnv {
     subagent_depth: usize,
     max_subagent_depth: usize,
     state_dir: Option<PathBuf>,
+    /// Permission manager shared across all conversations.
+    permission_manager: Arc<crate::permission::PermissionManager>,
 }
 
 /// Create the `subagent` tool with a dynamic description listing available models.
@@ -381,21 +388,24 @@ pub struct ConversationManager {
     /// Maps subagent_conv_id → (parent_conv_id, tool_call_id).
     /// Used by the server to route `/done` recovery to the correct parent.
     subagent_parents: std::sync::Mutex<HashMap<String, (String, String)>>,
-}
-
-impl Default for ConversationManager {
-    fn default() -> Self {
-        Self {
-            conversations: RwLock::new(HashMap::new()),
-            subagent_parents: std::sync::Mutex::new(HashMap::new()),
-        }
-    }
+    /// Permission manager shared across all conversations.
+    permission_manager: Arc<crate::permission::PermissionManager>,
 }
 
 /// Manages conversations so that any new client can attach to an existing conversation.
 impl ConversationManager {
-    pub fn new() -> Arc<Self> {
-        Arc::new(Self::default())
+    pub fn new(permissions_path: PathBuf) -> Arc<Self> {
+        let permission_manager = Arc::new(crate::permission::PermissionManager::new(permissions_path));
+        Arc::new(Self {
+            conversations: RwLock::new(HashMap::new()),
+            subagent_parents: std::sync::Mutex::new(HashMap::new()),
+            permission_manager,
+        })
+    }
+
+    /// Get the permission manager.
+    pub fn permission_manager(&self) -> &Arc<crate::permission::PermissionManager> {
+        &self.permission_manager
     }
 
     /// Create a new conversation. The new conversation will be kept in the manager's
@@ -476,6 +486,7 @@ impl ConversationManager {
                 subagent_depth,
                 max_subagent_depth,
                 state_dir,
+                permission_manager: Arc::clone(&self.permission_manager),
             },
         };
         self.spawn_conversation(conversation)
@@ -612,6 +623,7 @@ impl ConversationManager {
                 subagent_depth: state.subagent_depth,
                 max_subagent_depth,
                 state_dir,
+                permission_manager: Arc::clone(&self.permission_manager),
             },
         };
         self.spawn_conversation(conversation)
@@ -1432,7 +1444,20 @@ async fn execute_regular_tool(
         tool_args: tool_call.arguments.clone(),
     })?;
 
-    let tool_ctx = ToolContext { cancel_token: cancel_token.clone() };
+    let client_clone = Arc::clone(&env.client);
+    let scoped_pm = crate::permission::ScopedPermissionManager::new(
+        &tool_call.name,
+        Arc::clone(&env.permission_manager),
+        Arc::new(move || {
+            let _ = client_clone.notify_msg(Message::PermissionUpdated {
+                msg_id: client_clone.next_msg_id(),
+            });
+        }),
+    );
+    let tool_ctx = ToolContext {
+        cancel_token: cancel_token.clone(),
+        permission: scoped_pm,
+    };
     let (end_status, tool_result) = if let Some(tool) = tool_arc {
         tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");
         let mut output_stream = tool.execute(tool_ctx, tool_call.arguments.clone());

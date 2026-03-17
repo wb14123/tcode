@@ -99,7 +99,10 @@ async fn main() {
 
                         // Find and execute the tool
                         let result = if let Some(tool) = tools.get(&tool_call.name) {
-                            let ctx = ToolContext { cancel_token: CancellationToken::new() };
+                            let ctx = ToolContext {
+                                cancel_token: CancellationToken::new(),
+                                permission: llm_rs::permission::ScopedPermissionManager::always_allow(&tool_call.name),
+                            };
                             let mut result_stream = tool.execute(ctx, tool_call.arguments.clone());
                             let mut result = String::new();
                             while let Some(chunk) = result_stream.next().await {

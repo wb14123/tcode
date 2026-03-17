@@ -92,8 +92,9 @@ impl Server {
         let listener = UnixListener::bind(&self.socket_path)
             .with_context(|| format!("Failed to bind Unix socket at {:?}", self.socket_path))?;
 
-        // Create conversation manager
-        let manager = ConversationManager::new();
+        // Create conversation manager (creates permission manager internally)
+        let permissions_path = self.session_dir.join("permissions.json");
+        let manager = ConversationManager::new(permissions_path);
 
         // Build tools list including subagent tools
         let model_infos = self.llm.available_models();
@@ -128,6 +129,9 @@ impl Server {
                 self.max_subagent_depth,
                 self.session_dir.clone(),
             )?;
+
+            // Close stale pending permission requests from previous session
+            manager.permission_manager().close_all_pending();
 
             // Close stale "running" tool calls and subagents in display files
             close_stale_running_items(&self.session_dir).await
@@ -647,6 +651,44 @@ async fn handle_client_inner(
                                 }).await?;
                             }
                         }
+                    }
+                    ClientMessage::ResolvePermission { key, decision } => {
+                        match manager.permission_manager().resolve(&key, &decision) {
+                            Ok(()) => {
+                                if let Err(e) = conv_client.notify_msg(
+                                    llm_rs::conversation::Message::PermissionUpdated {
+                                        msg_id: conv_client.next_msg_id(),
+                                    },
+                                ) {
+                                    tracing::error!(error = %e, "failed to broadcast PermissionUpdated");
+                                }
+                                send_msg(&mut sink, &ServerMessage::Ack).await?;
+                            }
+                            Err(e) => send_msg(&mut sink, &ServerMessage::Error {
+                                message: format!("Failed to resolve permission: {}", e),
+                            }).await?,
+                        }
+                    }
+                    ClientMessage::RevokePermission { key } => {
+                        match manager.permission_manager().revoke(&key) {
+                            Ok(()) => {
+                                if let Err(e) = conv_client.notify_msg(
+                                    llm_rs::conversation::Message::PermissionUpdated {
+                                        msg_id: conv_client.next_msg_id(),
+                                    },
+                                ) {
+                                    tracing::error!(error = %e, "failed to broadcast PermissionUpdated");
+                                }
+                                send_msg(&mut sink, &ServerMessage::Ack).await?;
+                            }
+                            Err(e) => send_msg(&mut sink, &ServerMessage::Error {
+                                message: format!("Failed to revoke permission: {}", e),
+                            }).await?,
+                        }
+                    }
+                    ClientMessage::GetPermissionState => {
+                        let state = manager.permission_manager().snapshot();
+                        send_msg(&mut sink, &ServerMessage::PermissionState(state)).await?;
                     }
                     ClientMessage::Shutdown => {
                         let _ = shutdown_tx.send(());

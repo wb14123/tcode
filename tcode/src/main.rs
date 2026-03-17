@@ -1,6 +1,8 @@
+mod approve_ui;
 mod claude_auth;
 mod display;
 mod edit;
+mod permission_ui;
 mod protocol;
 mod server;
 mod session;
@@ -229,6 +231,23 @@ enum Commands {
         /// The conversation ID of the subagent
         conversation_id: String,
     },
+    /// Show the permission tree view
+    Permission,
+    /// Approve or manage a permission (used in tmux display-popup)
+    Approve {
+        /// Tool name
+        #[arg(long)]
+        tool: String,
+        /// Permission key
+        #[arg(long)]
+        key: String,
+        /// Permission value
+        #[arg(long)]
+        value: String,
+        /// Manage (revoke) mode instead of approve mode
+        #[arg(long)]
+        manage: bool,
+    },
 }
 
 fn get_lua_path() -> PathBuf {
@@ -333,6 +352,7 @@ async fn main() -> Result<()> {
                 match resp {
                     protocol::ServerMessage::Ack => println!("Tool cancelled"),
                     protocol::ServerMessage::Error { message } => eprintln!("Error: {}", message),
+                    _ => {}
                 }
             }
             Ok(())
@@ -352,6 +372,7 @@ async fn main() -> Result<()> {
                 match resp {
                     protocol::ServerMessage::Ack => println!("Conversation cancelled"),
                     protocol::ServerMessage::Error { message } => eprintln!("Error: {}", message),
+                    _ => {}
                 }
             }
             Ok(())
@@ -481,6 +502,30 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Some(Commands::Permission) => {
+            let session_id = match cli.session.clone() {
+                Some(id) => id,
+                None => match session_picker::pick_session()? {
+                    Some(id) => id,
+                    None => return Ok(()),
+                },
+            };
+            let session = Session::new(session_id)?;
+            permission_ui::run_permission_ui(session)
+        }
+        Some(Commands::Approve { tool, key, value, manage }) => {
+            let session_id = require_session(cli.session)?;
+            let root_session_id = session_id.split("/subagent-").next().unwrap_or(&session_id).to_string();
+            let session = Session::new(root_session_id)?;
+            let args = approve_ui::ApproveArgs {
+                socket_path: session.socket_path(),
+                tool,
+                key,
+                value,
+                manage,
+            };
+            approve_ui::run_approve(args)
+        }
         Some(Commands::Browser) => run_browser().await,
         Some(Commands::ClaudeAuth) => claude_auth::run().await,
     }
@@ -580,7 +625,7 @@ async fn run_unified_with_session(
 
     tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
 
-    // Capture current pane ID before splitting (for tree pane placement)
+    // Capture current pane ID before splitting (for layout placement)
     let current_pane_id = Command::new("tmux")
         .args(["display-message", "-p", "#{pane_id}"])
         .output()
@@ -588,8 +633,29 @@ async fn run_unified_with_session(
         .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
         .unwrap_or_default();
 
-    let edit_cmd = format!("{} {} edit", exe_str, session_arg);
+    // Layout: left-right split first (50/50), then split each column vertically.
+    // Left column:  Display (top 70%) + Edit (bottom 30%)
+    // Right column: Tree (top 50%) + Permission (bottom 50%)
 
+    // 1. Split right column for tree pane (50% width, don't steal focus)
+    let tree_cmd = format!("{} {} tree", exe_str, session_arg);
+    let tree_pane_id = if !current_pane_id.is_empty() {
+        Command::new("tmux")
+            .args([
+                "split-window", "-h", "-d", "-p", "30",
+                "-t", &current_pane_id,
+                "-P", "-F", "#{pane_id}",
+                &tree_cmd,
+            ])
+            .output()
+            .ok()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+    } else {
+        None
+    };
+
+    // 2. Split left column: edit below display (30% height)
+    let edit_cmd = format!("{} {} edit", exe_str, session_arg);
     let output = Command::new("tmux")
         .args(["split-window", "-v", "-p", "30", "-P", "-F", "#{pane_id}", &edit_cmd])
         .output()
@@ -603,15 +669,20 @@ async fn run_unified_with_session(
         }
     };
 
-    // Spawn tree pane to the right of the display pane (without stealing focus)
-    let tree_cmd = format!("{} {} tree", exe_str, session_arg);
-    let tree_pane_id = if !current_pane_id.is_empty() {
+    // 3. Split right column: permission below tree (50% height).
+    // Wrap command so the pane stays open on failure for debugging.
+    let perm_inner = format!("{} {} permission", exe_str, session_arg);
+    let perm_cmd = format!(
+        "bash -c '{} 2>&1; ret=$?; if [ $ret -ne 0 ]; then echo \"[permission pane exited with code $ret — press Enter to close]\"; read; fi'",
+        perm_inner.replace('\'', "'\\''")
+    );
+    let perm_pane_id = if let Some(ref tree_pane) = tree_pane_id {
         Command::new("tmux")
             .args([
-                "split-window", "-h", "-d", "-p", "25",
-                "-t", &current_pane_id,
+                "split-window", "-v", "-d", "-p", "50",
+                "-t", tree_pane,
                 "-P", "-F", "#{pane_id}",
-                &tree_cmd,
+                &perm_cmd,
             ])
             .output()
             .ok()
@@ -663,6 +734,12 @@ async fn run_unified_with_session(
     if let Some(ref tree_pane) = tree_pane_id {
         let _ = Command::new("tmux")
             .args(["kill-pane", "-t", tree_pane])
+            .output();
+    }
+
+    if let Some(ref perm_pane) = perm_pane_id {
+        let _ = Command::new("tmux")
+            .args(["kill-pane", "-t", perm_pane])
             .output();
     }
 
