@@ -238,6 +238,8 @@ pub struct ScopedPermissionManager {
     /// Callback to notify the UI that permission state changed.
     /// The ConversationClient provides this via a closure.
     notify_fn: Arc<dyn Fn() + Send + Sync>,
+    /// Callback invoked after a permission request is approved.
+    on_approved_fn: Arc<dyn Fn() + Send + Sync>,
     /// Tracks whether the user denied permission during this tool execution.
     denied: Arc<AtomicBool>,
 }
@@ -248,11 +250,13 @@ impl ScopedPermissionManager {
         tool_name: &str,
         manager: Arc<PermissionManager>,
         notify_fn: Arc<dyn Fn() + Send + Sync>,
+        on_approved_fn: Arc<dyn Fn() + Send + Sync>,
     ) -> Self {
         ScopedPermissionManager {
             tool_name: tool_name.to_string(),
             manager,
             notify_fn,
+            on_approved_fn,
             denied: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -269,6 +273,7 @@ impl ScopedPermissionManager {
             tool_name: tool_name.to_string(),
             manager,
             notify_fn: Arc::new(|| {}),
+            on_approved_fn: Arc::new(|| {}),
             denied: Arc::new(AtomicBool::new(false)),
         }
     }
@@ -291,7 +296,9 @@ impl ScopedPermissionManager {
         (self.notify_fn)();
 
         let allowed = rx.await.unwrap_or(false);
-        if !allowed {
+        if allowed {
+            (self.on_approved_fn)();
+        } else {
             self.denied.store(true, Ordering::Relaxed);
         }
         allowed

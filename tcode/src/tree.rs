@@ -536,6 +536,13 @@ impl TreeState {
                     }
                 }
             }
+            Message::ToolPermissionApproved { tool_call_id, .. } => {
+                if let Some(&idx) = self.tool_call_idx.get(tool_call_id) {
+                    if let NodeType::ToolCall { status, .. } = &mut self.arena[idx].kind {
+                        *status = NodeStatus::Running;
+                    }
+                }
+            }
             // All other message types are ignored
             _ => {}
         }

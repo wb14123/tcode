@@ -290,6 +290,12 @@ pub enum Message {
         msg_id: MessageID,
         tool_call_id: String,
     },
+
+    /// Signal that a previously requested permission was approved and the tool is resuming.
+    ToolPermissionApproved {
+        msg_id: MessageID,
+        tool_call_id: String,
+    },
 }
 
 // ============================================================================
@@ -895,7 +901,7 @@ async fn collect_subagent_response(
                 break; // First turn done — exit regardless of cancel status
             }
             // Forward permission signals to parent so the UI sees them
-            Message::PermissionUpdated { .. } | Message::ToolRequestPermission { .. } => {
+            Message::PermissionUpdated { .. } => {
                 if let Err(e) = parent_client.notify_msg(Message::PermissionUpdated {
                     msg_id: parent_client.next_msg_id(),
                 }) {
@@ -1461,6 +1467,8 @@ async fn execute_regular_tool(
 
     let client_clone = Arc::clone(&env.client);
     let tc_id = tool_call.id.clone();
+    let client_clone2 = Arc::clone(&env.client);
+    let tc_id2 = tool_call.id.clone();
     let scoped_pm = crate::permission::ScopedPermissionManager::new(
         &tool_call.name,
         Arc::clone(&env.permission_manager),
@@ -1471,6 +1479,12 @@ async fn execute_regular_tool(
             });
             let _ = client_clone.notify_msg(Message::PermissionUpdated {
                 msg_id: client_clone.next_msg_id(),
+            });
+        }),
+        Arc::new(move || {
+            let _ = client_clone2.notify_msg(Message::ToolPermissionApproved {
+                msg_id: client_clone2.next_msg_id(),
+                tool_call_id: tc_id2.clone(),
             });
         }),
     );

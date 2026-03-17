@@ -134,6 +134,7 @@ mod tests {
             "web_fetch",
             Arc::clone(&pm),
             Arc::new(|| {}),
+            Arc::new(|| {}),
         );
         assert!(!scoped.was_denied());
 
@@ -165,9 +166,76 @@ mod tests {
             "web_fetch",
             Arc::clone(&pm),
             Arc::new(|| {}),
+            Arc::new(|| {}),
         );
         // Should return true immediately without registering a pending request
         assert!(scoped.ask_permission("Allow?", "hostname", "known.com").await);
         assert!(pm.snapshot().pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn on_approved_fn_called_when_permission_granted() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let approved_count = Arc::new(AtomicUsize::new(0));
+        let approved_count_clone = Arc::clone(&approved_count);
+
+        let scoped = ScopedPermissionManager::new(
+            "web_fetch",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(move || {
+                approved_count_clone.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+
+        // Spawn ask_permission in the background
+        let pm_clone = Arc::clone(&pm);
+        let scoped_clone = scoped.clone();
+        let handle = tokio::spawn(async move {
+            let result = scoped_clone.ask_permission("Allow?", "hostname", "example.com").await;
+            assert!(result);
+        });
+        // Let the task register the request
+        tokio::task::yield_now().await;
+
+        let key = make_key("web_fetch", "hostname", "example.com");
+        pm_clone.resolve(&key, &PermissionDecision::AllowOnce).unwrap();
+        handle.await.unwrap();
+
+        assert_eq!(approved_count.load(Ordering::Relaxed), 1);
+    }
+
+    #[tokio::test]
+    async fn on_approved_fn_not_called_when_denied() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let approved_count = Arc::new(AtomicUsize::new(0));
+        let approved_count_clone = Arc::clone(&approved_count);
+
+        let scoped = ScopedPermissionManager::new(
+            "web_fetch",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(move || {
+                approved_count_clone.fetch_add(1, Ordering::Relaxed);
+            }),
+        );
+
+        let pm_clone = Arc::clone(&pm);
+        let scoped_clone = scoped.clone();
+        let handle = tokio::spawn(async move {
+            let result = scoped_clone.ask_permission("Allow?", "hostname", "evil.com").await;
+            assert!(!result);
+        });
+        tokio::task::yield_now().await;
+
+        let key = make_key("web_fetch", "hostname", "evil.com");
+        pm_clone.resolve(&key, &PermissionDecision::Deny).unwrap();
+        handle.await.unwrap();
+
+        assert_eq!(approved_count.load(Ordering::Relaxed), 0);
     }
 }

@@ -216,5 +216,8 @@ fn print_message(msg: &Message) {
         Message::ToolRequestPermission { tool_call_id, .. } => {
             println!("    [ToolRequestPermission: {}]", tool_call_id);
         }
+        Message::ToolPermissionApproved { tool_call_id, .. } => {
+            println!("    [ToolPermissionApproved: {}]", tool_call_id);
+        }
     }
 }

@@ -535,6 +535,15 @@ fn run_event_writer(
                     .context("Failed to append display event")?;
             }
 
+            Message::ToolPermissionApproved { tool_call_id, .. } => {
+                if let Some(state) = tool_calls.get(tool_call_id) {
+                    tokio::fs::write(&state.status_file_path, "Running").await
+                        .context("Failed to write tool call running status after approval")?;
+                }
+                append_event(&display_file, &event).await
+                    .context("Failed to append display event")?;
+            }
+
             _ => {
                 // All other events: write to main display only
                 append_event(&display_file, &event).await
