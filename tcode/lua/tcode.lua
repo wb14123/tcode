@@ -159,6 +159,26 @@ local function render_label(buf, ns, prefix, hl_group, data)
   return label_line, extmark_id
 end
 
+-- Update a tool call label extmark in-place with a status indicator.
+local function update_tc_label(buf, tool_call_id, status_text, status_hl, show_cancel)
+  local info = tc_label_marks[tool_call_id]
+  if not info then return end
+  local virt = {
+    { '>>> TOOL: ', 'TCodeTool' },
+    { '[' .. status_text .. ']', status_hl },
+    { ' ' .. info.tool_name, 'TCodeTool' },
+  }
+  local ts = format_time(info.created_at)
+  if ts then table.insert(virt, { '  ' .. ts, 'TCodeTokens' }) end
+  if show_cancel then table.insert(virt, { '  [Ctrl-k to cancel]', 'TCodeTokens' }) end
+  local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
+  if mark_pos and mark_pos[1] then
+    vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
+      id = info.extmark_id, virt_text = virt, virt_text_pos = 'overlay',
+    })
+  end
+end
+
 --- Insert lines at a specific row (pushing existing content down).
 --- Returns the row where insertion started.
 local function insert_lines_at(buf, row, lines)
@@ -464,22 +484,14 @@ local function render_event(buf, ns, event)
   elseif variant == 'ToolMessageStart' then
     local tool_name = data.tool_name or ''
     local label_line, label_extmark = render_label(buf, ns, '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
-    -- Store tool name and label extmark for cancel hint updates
+    -- Store tool name, created_at, and label extmark for status updates
     if data.tool_call_id then
       tc_tool_names[data.tool_call_id] = tool_name
-      tc_label_marks[data.tool_call_id] = { extmark_id = label_extmark, ns = ns, tool_name = tool_name }
-      -- Update label to include cancel hint
-      local virt = { { '>>> TOOL: ' .. tool_name, 'TCodeTool' } }
-      local ts = format_time(data.created_at)
-      if ts then
-        table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
-      end
-      table.insert(virt, { '  [Ctrl-k to cancel]', 'TCodeTokens' })
-      vim.api.nvim_buf_set_extmark(buf, ns, label_line, 0, {
-        id = label_extmark,
-        virt_text = virt,
-        virt_text_pos = 'overlay',
-      })
+      tc_label_marks[data.tool_call_id] = {
+        extmark_id = label_extmark, ns = ns,
+        tool_name = tool_name, created_at = data.created_at,
+      }
+      update_tc_label(buf, data.tool_call_id, 'running', 'TCodeTool', true)
     end
     if data.tool_args and data.tool_args ~= '' and data.tool_args ~= '{}' then
       append_lines(buf, { '' })
@@ -523,18 +535,17 @@ local function render_event(buf, ns, event)
       if end_row then
         insert_row = end_row
       end
-      -- Remove cancel hint from label
+      -- Update label with final status
       if tc_label_marks[data.tool_call_id] then
-        local info = tc_label_marks[data.tool_call_id]
-        local virt = { { '>>> TOOL: ' .. info.tool_name, 'TCodeTool' } }
-        local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
-        if mark_pos and mark_pos[1] then
-          vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
-            id = info.extmark_id,
-            virt_text = virt,
-            virt_text_pos = 'overlay',
-          })
-        end
+        local status_map = {
+          Succeeded = { text = 'done', hl = 'TCodeSuccess' },
+          Failed    = { text = 'failed', hl = 'TCodeError' },
+          Cancelled = { text = 'cancelled', hl = 'TCodeError' },
+          Timeout   = { text = 'failed', hl = 'TCodeError' },
+          UserDenied = { text = 'denied', hl = 'TCodeError' },
+        }
+        local s = status_map[data.end_status] or { text = 'done', hl = 'TCodeSuccess' }
+        update_tc_label(buf, data.tool_call_id, s.text, s.hl, false)
         tc_label_marks[data.tool_call_id] = nil
       end
     end
@@ -543,6 +554,16 @@ local function render_event(buf, ns, event)
     if data.tool_call_id and insert_row then
       local lines_added = vim.api.nvim_buf_line_count(buf) - lines_before
       extend_tc_extmark(buf, data.tool_call_id, insert_row + lines_added)
+    end
+
+  elseif variant == 'ToolRequestPermission' then
+    if data.tool_call_id then
+      update_tc_label(buf, data.tool_call_id, 'permission', 'TCodePermission', false)
+    end
+
+  elseif variant == 'ToolPermissionApproved' then
+    if data.tool_call_id then
+      update_tc_label(buf, data.tool_call_id, 'running', 'TCodeTool', true)
     end
 
   elseif variant == 'SystemMessage' then
@@ -589,7 +610,7 @@ local function render_event(buf, ns, event)
     if data.conversation_id and sa_label_marks[data.conversation_id] then
       local info = sa_label_marks[data.conversation_id]
       local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'done'
-      local status_hl = (data.end_status and data.end_status ~= 'Succeeded') and 'TCodeError' or 'TCodeTool'
+      local status_hl = (data.end_status and data.end_status ~= 'Succeeded') and 'TCodeError' or 'TCodeSuccess'
       local virt = {
         { '>>> SUB-AGENT: ', 'TCodeTool' },
         { '[' .. status_text .. ']', status_hl },
@@ -760,6 +781,7 @@ local function setup_highlights(statusline_fg, statusline_ctermfg)
   vim.api.nvim_set_hl(0, 'TCodeTool', { fg = '#e5c07b', bold = true, ctermfg = 180 })
   vim.api.nvim_set_hl(0, 'TCodeThinking', { fg = '#7c8495', italic = true, ctermfg = 245 })
   vim.api.nvim_set_hl(0, 'TCodeTokens', { fg = '#5c6370', italic = true, ctermfg = 242 })
+  vim.api.nvim_set_hl(0, 'TCodeSuccess', { fg = '#98c379', bold = true, ctermfg = 114 })
   vim.api.nvim_set_hl(0, 'TCodeError', { fg = '#e06c75', bold = true, ctermfg = 168 })
   vim.api.nvim_set_hl(0, 'TCodePermission', { fg = '#c678dd', bold = true, ctermfg = 176 })
   vim.api.nvim_set_hl(0, 'TCodeSystemInfo', { fg = '#61afef', italic = true, ctermfg = 75 })
