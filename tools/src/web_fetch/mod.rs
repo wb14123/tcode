@@ -107,7 +107,7 @@ pub fn web_fetch(
             "hostname",
             &hostname,
         ).await {
-            yield Err(anyhow!("Permission denied: web_fetch access to {} was not allowed", hostname));
+            yield Err(anyhow!("User denied web_fetch permission to access {}", hostname));
             return;
         }
 

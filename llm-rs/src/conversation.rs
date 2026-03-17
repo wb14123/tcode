@@ -1195,8 +1195,19 @@ impl Conversation {
                                 if end_status == MessageEndStatus::Cancelled {
                                     self.cancelled_tools.insert(tool_call_id.clone());
                                 }
-                                let content = self.accumulated_tool_content
+                                let raw_content = self.accumulated_tool_content
                                     .remove(&tool_call_id).unwrap_or_default();
+                                let content = if end_status == MessageEndStatus::UserDenied {
+                                    format!(
+                                        "The user denied permission for this tool call. This is not a technical error — \
+                                         the human operator chose not to allow this action. Do not retry this tool call. \
+                                         Instead, ask the user what they would like to do.\n\
+                                         Original tool output: {}",
+                                        raw_content
+                                    )
+                                } else {
+                                    raw_content
+                                };
                                 self.push_llm_msg(LLMMessage::ToolResult {
                                     tool_call_id,
                                     content,
