@@ -87,6 +87,8 @@ struct PermissionTreeState {
     status_message: Option<String>,
     /// Frame counter for flash animation.
     frame_count: u64,
+    /// Whether we've already sent a terminal bell for the current pending batch.
+    bell_sent: bool,
 }
 
 impl PermissionTreeState {
@@ -99,6 +101,7 @@ impl PermissionTreeState {
             session_id,
             status_message: None,
             frame_count: 0,
+            bell_sent: false,
         }
     }
 
@@ -585,6 +588,21 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
             list_state.select(None);
         } else {
             list_state.select(Some(state.selected));
+        }
+
+        // Send terminal bell when new pending permissions appear (triggers tmux window alert)
+        let any_pending = state.arena.iter().any(|n| {
+            matches!(&n.kind, NodeKind::Value { status: PermStatus::Pending, .. })
+        });
+        if any_pending && !state.bell_sent {
+            // BEL character: tmux monitor-bell (on by default) will highlight the window
+            print!("\x07");
+            if let Err(e) = io::Write::flush(&mut io::stdout()) {
+                tracing::warn!("failed to flush bell character: {}", e);
+            }
+            state.bell_sent = true;
+        } else if !any_pending {
+            state.bell_sent = false;
         }
 
         // Render
