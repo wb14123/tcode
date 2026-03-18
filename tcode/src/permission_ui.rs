@@ -287,11 +287,71 @@ impl PermissionTreeState {
                     }
                 };
 
+                // Query tmux window size for dynamic popup sizing
+                let (max_w, max_h) = Command::new("tmux")
+                    .args(["display-message", "-p", "#{window_width} #{window_height}"])
+                    .output()
+                    .ok()
+                    .and_then(|out| {
+                        let s = String::from_utf8_lossy(&out.stdout);
+                        let mut parts = s.trim().split_whitespace();
+                        let w: usize = parts.next()?.parse().ok()?;
+                        let h: usize = parts.next()?.parse().ok()?;
+                        Some((w * 80 / 100, h * 80 / 100))
+                    })
+                    .unwrap_or((60, 18));
+
+                // Dynamically size the tmux popup based on prompt length.
+                //
+                // Important: tmux display-popup draws a 1-char border on each
+                // side, so the usable area inside the popup is:
+                //   inner_width  = popup_width  - 2  (left + right border)
+                //   inner_height = popup_height - 2  (top + bottom border)
+                //
+                // Inside that inner area, the approve_ui layout uses:
+                //   - 16 fixed lines (title:3, blanks:3, options:10)
+                //   - remaining lines for the prompt text
+                //   - each prompt line has 2-char padding on each side, so
+                //     usable text width per line = inner_width - 4 = popup_width - 6
+                //
+                // So for N prompt lines: popup_height = 16 + N + 2 (border) = N + 18
+                //
+                // To grow width and height proportionally, we target ~25 chars
+                // of text per prompt line (a balanced rectangle):
+                //   inner_text_width = sqrt(25 * prompt_len)
+                //   popup_width = inner_text_width + 6  (+2 border, +2 indent, +2 right pad)
+                //
+                // Both dimensions are clamped to [60, max_w] and [20, max_h]
+                // (max = 80% of terminal). If the prompt still overflows,
+                // the user can scroll with j/k/arrows in the popup.
+                let prompt_len = prompt.as_ref().map(|p| p.len()).unwrap_or(0);
+                let (popup_width, popup_height) = if prompt_len > 0 {
+                    let chars_per_line = 25.0_f64;
+                    // +6 = 2 for tmux border + 2 for left indent + 2 for right padding
+                    let w = (prompt_len as f64 * chars_per_line).sqrt().ceil() as usize + 6;
+                    let w = w.clamp(60, max_w);
+
+                    // Usable text width inside popup (subtract border + indent + right pad)
+                    let usable = w.saturating_sub(6);
+                    let prompt_lines = if usable > 0 {
+                        (prompt_len + usable - 1) / usable
+                    } else {
+                        1
+                    };
+                    // +18 = 16 fixed UI lines + 2 for tmux border
+                    let h = (18 + prompt_lines).clamp(20, max_h);
+                    (w, h)
+                } else {
+                    (60, 20.min(max_h))
+                };
+
                 let popup_cmd = format!(
-                    "tmux display-popup -E -w 60 -h 18 \"{}\"",
-                    cmd.replace('"', "\\\"")
+                    "tmux display-popup -E -w {} -h {} \"{}\"",
+                    popup_width, popup_height, cmd.replace('"', "\\\"")
                 );
-                let _ = Command::new("sh").args(["-c", &popup_cmd]).output();
+                if let Err(e) = Command::new("sh").args(["-c", &popup_cmd]).output() {
+                    tracing::warn!("failed to launch approval popup: {}", e);
+                }
             }
             NodeKind::Tool { .. } | NodeKind::Key { .. } => {
                 // Toggle collapse for non-leaf

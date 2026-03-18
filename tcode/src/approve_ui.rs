@@ -98,30 +98,77 @@ pub fn run_approve(args: ApproveArgs) -> Result<()> {
     result
 }
 
+/// Break text into lines of at most `width` chars, with 2-char padding on each side.
+/// Returns the broken lines as styled `Line`s.
+fn break_prompt_into_lines<'a>(text: &'a str, width: u16) -> Vec<Line<'a>> {
+    let usable = (width as usize).saturating_sub(4); // 2 left indent + 2 right padding
+    if usable == 0 || text.is_empty() {
+        return vec![Line::from(vec![
+            Span::raw("  "),
+            Span::styled(text, Style::default().fg(Color::White)),
+        ])];
+    }
+
+    let mut lines = Vec::new();
+    let mut remaining = text;
+    while !remaining.is_empty() {
+        let end = remaining
+            .char_indices()
+            .nth(usable)
+            .map(|(i, _)| i)
+            .unwrap_or(remaining.len());
+        let (chunk, rest) = remaining.split_at(end);
+        lines.push(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(chunk, Style::default().fg(Color::White)),
+        ]));
+        remaining = rest;
+    }
+    lines
+}
+
 fn run_approve_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: &ApproveArgs,
 ) -> Result<()> {
     let has_prompt = !args.prompt.is_empty();
+    let mut scroll_offset: u16 = 0;
 
     loop {
+        // Compute broken lines and clamp scroll_offset before draw
+        let term_size = terminal.size()?;
+        let broken_lines = if has_prompt {
+            break_prompt_into_lines(&args.prompt, term_size.width)
+        } else {
+            Vec::new()
+        };
+
         terminal.draw(|frame| {
             let area = frame.area();
 
             if has_prompt {
-                // Layout with prompt displayed prominently
+                let total_lines = broken_lines.len() as u16;
+                // Fixed rows: title(3) + blank(1) + allow(2) + blank(1) + sep(2) + blank(1) + sess(3) + blank(1) + deny(2) = 16
+                let fixed_rows: u16 = 16;
+                let prompt_space_no_hints = area.height.saturating_sub(fixed_rows);
+                let needs_scroll = total_lines > prompt_space_no_hints;
+
+                // Only reserve hint rows when scrolling is needed
+                let (hint_up, hint_down) = if needs_scroll { (1u16, 1u16) } else { (0, 0) };
+
                 let chunks = Layout::vertical([
-                    Constraint::Length(3),  // Title
-                    Constraint::Length(2),  // Prompt
-                    Constraint::Length(1),  // Blank
-                    Constraint::Length(2),  // Allow once
-                    Constraint::Length(1),  // Blank
-                    Constraint::Length(2),  // Separator + key:value
-                    Constraint::Length(1),  // Blank
-                    Constraint::Length(3),  // Session/Project options
-                    Constraint::Length(1),  // Blank
-                    Constraint::Length(2),  // Deny/Cancel
-                    Constraint::Min(0),    // Spacer
+                    Constraint::Length(3),           // [0] Title
+                    Constraint::Length(hint_up),      // [1] Scroll-up hint (0 when not needed)
+                    Constraint::Min(1),              // [2] Prompt content
+                    Constraint::Length(hint_down),    // [3] Scroll-down hint (0 when not needed)
+                    Constraint::Length(1),            // [4] Blank
+                    Constraint::Length(2),            // [5] Allow once
+                    Constraint::Length(1),            // [6] Blank
+                    Constraint::Length(2),            // [7] Separator + key:value
+                    Constraint::Length(1),            // [8] Blank
+                    Constraint::Length(3),            // [9] Session/Project options
+                    Constraint::Length(1),            // [10] Blank
+                    Constraint::Length(2),            // [11] Deny/Cancel
                 ]).split(area);
 
                 let title = Paragraph::new(Line::from(vec![
@@ -131,18 +178,41 @@ fn run_approve_loop(
                 .block(Block::default().borders(Borders::BOTTOM));
                 frame.render_widget(title, chunks[0]);
 
-                let prompt_text = Paragraph::new(vec![
-                    Line::from(vec![
-                        Span::raw("  "),
-                        Span::styled(&args.prompt, Style::default().fg(Color::White)),
-                    ]),
-                ]);
-                frame.render_widget(prompt_text, chunks[1]);
+                let prompt_content_height = chunks[2].height;
+                let scrollable = total_lines.saturating_sub(prompt_content_height);
+
+                // Clamp scroll offset
+                if scroll_offset > scrollable {
+                    scroll_offset = scrollable;
+                }
+
+                // Render scroll-up hint (area is 0-height when not needed)
+                if scroll_offset > 0 {
+                    let hint = Paragraph::new(Line::from(Span::styled(
+                        "  \u{25b2} scroll up (k/\u{2191})",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    frame.render_widget(hint, chunks[1]);
+                }
+
+                // Render prompt content with scroll
+                let prompt_text = Paragraph::new(broken_lines.clone())
+                    .scroll((scroll_offset, 0));
+                frame.render_widget(prompt_text, chunks[2]);
+
+                // Render scroll-down hint (area is 0-height when not needed)
+                if scroll_offset < scrollable {
+                    let hint = Paragraph::new(Line::from(Span::styled(
+                        "  \u{25bc} scroll down (j/\u{2193})",
+                        Style::default().fg(Color::DarkGray),
+                    )));
+                    frame.render_widget(hint, chunks[3]);
+                }
 
                 let allow_once = Paragraph::new(vec![
                     Line::from(Span::styled("  [1] Allow once", Style::default().fg(Color::Green))),
                 ]);
-                frame.render_widget(allow_once, chunks[3]);
+                frame.render_widget(allow_once, chunks[5]);
 
                 let separator = Paragraph::new(vec![
                     Line::from(Span::styled("  -- Or allow all matching requests --", Style::default().fg(Color::DarkGray))),
@@ -153,19 +223,19 @@ fn run_approve_loop(
                         Span::styled(&args.value, Style::default().fg(Color::Cyan)),
                     ]),
                 ]);
-                frame.render_widget(separator, chunks[5]);
+                frame.render_widget(separator, chunks[7]);
 
                 let session_project = Paragraph::new(vec![
                     Line::from(Span::styled("  [2] Allow for session", Style::default().fg(Color::Cyan))),
                     Line::from(Span::styled("  [3] Allow for project", Style::default().fg(Color::Blue))),
                 ]);
-                frame.render_widget(session_project, chunks[7]);
+                frame.render_widget(session_project, chunks[9]);
 
                 let deny_cancel = Paragraph::new(vec![
                     Line::from(Span::styled("  [4] Deny", Style::default().fg(Color::Red))),
                     Line::from(Span::styled("  [q] Cancel", Style::default().fg(Color::DarkGray))),
                 ]);
-                frame.render_widget(deny_cancel, chunks[9]);
+                frame.render_widget(deny_cancel, chunks[11]);
             } else {
                 // Fallback layout without prompt (same as before but with key:value)
                 let chunks = Layout::vertical([
@@ -212,6 +282,19 @@ fn run_approve_loop(
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
+                }
+                if has_prompt {
+                    match key.code {
+                        KeyCode::Up | KeyCode::Char('k') => {
+                            scroll_offset = scroll_offset.saturating_sub(1);
+                            continue;
+                        }
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            scroll_offset = scroll_offset.saturating_add(1);
+                            continue;
+                        }
+                        _ => {}
+                    }
                 }
                 let decision = match key.code {
                     KeyCode::Char('1') => Some(PermissionDecision::AllowOnce),
