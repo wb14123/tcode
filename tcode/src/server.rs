@@ -192,23 +192,8 @@ impl Server {
             tokio::fs::write(&self.status_file, "Ready").await
                 .with_context(|| format!("Failed to initialize status file {:?}", self.status_file))?;
 
-            let cwd = std::env::current_dir()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|e| {
-                    tracing::warn!("Failed to get current directory: {}", e);
-                    "unknown".to_string()
-                });
-            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z").to_string();
-            let system_prompt = format!(
-                "You are a helpful assistant.\n\n{}\n\nCurrent directory: {}\nCurrent time: {}",
-                llm_rs::conversation::SUBAGENT_RULES,
-                cwd,
-                now,
-            );
-
             let (_, client) = manager.new_conversation(
                 self.llm,
-                &system_prompt,
                 &self.model,
                 tools_list,
                 self.chat_options.clone(),

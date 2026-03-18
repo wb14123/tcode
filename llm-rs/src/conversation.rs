@@ -14,7 +14,6 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::AbortHandle;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::{Stream, StreamExt};
-use chrono::Local;
 use uuid::Uuid;
 
 
@@ -67,6 +66,27 @@ The child subagent will process the content and return only the relevant informa
 This keeps your context window small and allows you to handle more steps effectively. \
 Never re-delegate: if your assigned task is already just needed a single tool call, just do it directly. \
 Otherwise it will create an infinite loop of subagent calls.";
+
+fn build_system_prompt(subagent_depth: usize) -> String {
+    let role = if subagent_depth == 0 {
+        "You are a helpful assistant."
+    } else {
+        "You are a subagent spawned to perform a specific task."
+    };
+    let cwd = std::env::current_dir()
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|e| {
+            tracing::warn!("Failed to get current directory: {}", e);
+            "unknown".to_string()
+        });
+    format!(
+        "{role}\n\n{rules}\n\nCurrent directory: {cwd}\n\
+         If you need the current date or time, use the `current_time` tool.",
+        role = role,
+        rules = SUBAGENT_RULES,
+        cwd = cwd,
+    )
+}
 
 /// Lightweight metadata written alongside conversation state for quick access
 /// (e.g. session listing) without loading the full state.
@@ -447,7 +467,6 @@ impl ConversationManager {
     pub fn new_conversation(
         self: &Arc<Self>,
         llm: Box<dyn LLM>,
-        system_prompt: &str,
         model: &str,
         tools: Vec<Arc<Tool>>,
         chat_options: ChatOptions,
@@ -461,7 +480,6 @@ impl ConversationManager {
         self.new_conversation_with_id(
             conversation_id,
             llm,
-            system_prompt,
             model,
             tools,
             chat_options,
@@ -477,7 +495,6 @@ impl ConversationManager {
         self: &Arc<Self>,
         conversation_id: String,
         mut llm: Box<dyn LLM>,
-        system_prompt: &str,
         model: &str,
         tools: Vec<Arc<Tool>>,
         chat_options: ChatOptions,
@@ -488,11 +505,8 @@ impl ConversationManager {
         state_dir: Option<PathBuf>,
     ) -> Result<(String, Arc<ConversationClient>)> {
         let (tools_map, input_rx, client) = prepare_conversation(&mut *llm, tools, 0);
-        let llm_msgs = if system_prompt.is_empty() {
-            vec![]
-        } else {
-            vec![LLMMessage::System(system_prompt.to_string())]
-        };
+        let system_prompt = build_system_prompt(subagent_depth);
+        let llm_msgs = vec![LLMMessage::System(system_prompt)];
         let conversation = Conversation {
             id: conversation_id.clone(),
             llm,
@@ -1749,15 +1763,6 @@ async fn execute_subagent(
     let (subagent_conv_id, subagent_client) = match env.conversation_manager.new_conversation_with_id(
         subagent_conv_id_pre,
         llm,
-        &format!(
-            "You are a subagent spawned to perform a specific task.\n\n{}\n\nCurrent directory: {}\nCurrent time: {}",
-            SUBAGENT_RULES,
-            std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|e| {
-                tracing::warn!("Failed to get current directory: {}", e);
-                "unknown".to_string()
-            }),
-            Local::now().format("%Y-%m-%d %H:%M:%S %Z"),
-        ),
         &params.model,
         subagent_tools,
         env.chat_options.clone(),

@@ -2752,7 +2752,6 @@ dependencies = [
  "base64",
  "browser-server",
  "bytes",
- "chrono",
  "clap",
  "crossterm",
  "dirs",

@@ -5,7 +5,6 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.100"
-chrono = "0.4"
 async-openai = { version = "0.32", features = ["responses"] }
 async-stream = "0.3"
 futures = "0.3"

@@ -64,7 +64,6 @@ async fn main() -> anyhow::Result<()> {
 
     let (_, client) = manager.new_conversation(
         llm,
-        "You are a helpful assistant. Use tools when needed to answer questions about weather and time.",
         model,
         tools,
         ChatOptions {
