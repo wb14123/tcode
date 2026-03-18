@@ -98,7 +98,7 @@ fn get_api_key(cli: &Cli, provider: Provider) -> Result<String> {
 /// Build ChatOptions from CLI args
 fn build_chat_options(_cli: &Cli) -> ChatOptions {
     ChatOptions {
-        reasoning_effort: Some(ReasoningEffort::Medium),
+        reasoning_effort: Some(ReasoningEffort::High),
         ..Default::default()
     }
 }
