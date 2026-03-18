@@ -315,17 +315,31 @@ impl ScopedPermissionManager {
 
     /// Check if a permission exists without prompting.
     pub fn has_permission(&self, key: &str, value: &str) -> bool {
-        self.manager.has_permission(&self.tool_name, key, value)
+        self.has_permission_for(&self.tool_name.clone(), key, value)
     }
 
     /// Check if the action is permitted. If no saved preference exists, registers
     /// a pending request, notifies the UI, and awaits the user's decision.
     pub async fn ask_permission(&self, prompt: &str, key: &str, value: &str) -> bool {
-        if self.manager.has_permission(&self.tool_name, key, value) {
+        self.ask_permission_for(&self.tool_name.clone(), prompt, key, value).await
+    }
+
+    /// Check if a permission exists without prompting, using a custom scope
+    /// instead of this manager's tool name. Useful for shared permission scopes
+    /// (e.g. `"file_read"`) that span multiple tools.
+    pub fn has_permission_for(&self, scope: &str, key: &str, value: &str) -> bool {
+        self.manager.has_permission(scope, key, value)
+    }
+
+    /// Check if the action is permitted using a custom scope instead of this
+    /// manager's tool name. If no saved preference exists, registers a pending
+    /// request, notifies the UI, and awaits the user's decision.
+    pub async fn ask_permission_for(&self, scope: &str, prompt: &str, key: &str, value: &str) -> bool {
+        if self.manager.has_permission(scope, key, value) {
             return true;
         }
 
-        let (_request_id, rx) = self.manager.register_request(&self.tool_name, prompt, key, value);
+        let (_request_id, rx) = self.manager.register_request(scope, prompt, key, value);
 
         // Notify UI that permission state changed (idempotent)
         (self.notify_fn)();

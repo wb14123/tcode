@@ -107,16 +107,11 @@ pub fn glob(
         }
 
         // Permission check for paths outside cwd
-        if !search_dir.starts_with(&cwd) {
-            let search_dir_str = search_dir.to_string_lossy().to_string();
-            if !ctx.permission.ask_permission(
-                &format!("Allow glob search in {}?", search_dir.display()),
-                "path",
-                &search_dir_str,
-            ).await {
-                yield Err(anyhow!("User denied glob permission for {}", search_dir.display()));
-                return;
-            }
+        if let Err(e) = crate::file_permission::check_file_read_permission(
+            &ctx.permission, &search_dir, true,
+        ).await {
+            yield Err(e);
+            return;
         }
 
         // Run the synchronous directory walk on a blocking thread

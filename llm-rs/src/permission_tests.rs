@@ -234,6 +234,73 @@ mod tests {
         assert_eq!(approved_count.load(Ordering::Relaxed), 1);
     }
 
+    #[test]
+    fn has_permission_for_uses_custom_scope() {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        // Grant permission under a custom scope
+        let key = make_key("file_read", "path", "/outside/dir");
+        pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
+
+        let scoped = ScopedPermissionManager::new(
+            "read",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+        );
+
+        // has_permission (tool_name = "read") should NOT find it
+        assert!(!scoped.has_permission("path", "/outside/dir"));
+        // has_permission_for with correct scope should find it
+        assert!(scoped.has_permission_for("file_read", "path", "/outside/dir"));
+    }
+
+    #[tokio::test]
+    async fn ask_permission_for_uses_custom_scope() {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        // Pre-approve under custom scope
+        let key = make_key("file_read", "path", "/data");
+        pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
+
+        let scoped = ScopedPermissionManager::new(
+            "glob",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+        );
+
+        // ask_permission_for with correct scope returns immediately
+        assert!(scoped.ask_permission_for("file_read", "Allow?", "path", "/data").await);
+        assert!(pm.snapshot().pending.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ask_permission_for_registers_under_custom_scope() {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let scoped = ScopedPermissionManager::new(
+            "read",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+        );
+
+        let pm_clone = Arc::clone(&pm);
+        let scoped_clone = scoped.clone();
+        let handle = tokio::spawn(async move {
+            scoped_clone.ask_permission_for("file_read", "Allow?", "path", "/secret").await
+        });
+        tokio::task::yield_now().await;
+
+        // Pending request should be under "file_read", not "read"
+        let state = pm_clone.snapshot();
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(state.pending[0].tool, "file_read");
+
+        // Resolve and clean up
+        let key = make_key("file_read", "path", "/secret");
+        pm_clone.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
+        assert!(handle.await.unwrap());
+    }
+
     #[tokio::test]
     async fn on_approved_fn_not_called_when_denied() {
         use std::sync::atomic::{AtomicUsize, Ordering};

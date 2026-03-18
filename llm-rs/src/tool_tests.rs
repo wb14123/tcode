@@ -283,8 +283,7 @@ mod tests {
     /// paused while approval is pending.
     #[tokio::test]
     async fn test_timeout_pauses_during_approval_wait() {
-        use std::sync::atomic::{AtomicBool, Ordering};
-        use std::sync::Arc;
+        use std::sync::atomic::Ordering;
 
         let tool = Tool::new(
             "needs_approval",

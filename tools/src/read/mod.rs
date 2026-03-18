@@ -282,25 +282,11 @@ pub fn read(
         };
 
         // Permission check for paths outside current working directory
-        if let Ok(cwd) = std::env::current_dir() {
-            if !path.starts_with(&cwd) {
-                let permission_path = if metadata.is_dir() {
-                    path.to_string_lossy().to_string()
-                } else {
-                    path.parent()
-                        .map(|p| p.to_string_lossy().to_string())
-                        .unwrap_or_else(|| file_path.clone())
-                };
-
-                if !ctx.permission.ask_permission(
-                    &format!("Allow read access to {}?", file_path),
-                    "path",
-                    &permission_path,
-                ).await {
-                    yield Err(anyhow!("User denied read permission for {}", file_path));
-                    return;
-                }
-            }
+        if let Err(e) = crate::file_permission::check_file_read_permission(
+            &ctx.permission, path, metadata.is_dir(),
+        ).await {
+            yield Err(e);
+            return;
         }
 
         // Handle directory
