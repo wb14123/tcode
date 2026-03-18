@@ -14,6 +14,7 @@ use tokio::sync::{broadcast, mpsc};
 use tokio::task::AbortHandle;
 use tokio_stream::wrappers::{errors::BroadcastStreamRecvError, BroadcastStream};
 use tokio_stream::{Stream, StreamExt};
+use chrono::Local;
 use uuid::Uuid;
 
 
@@ -1748,7 +1749,15 @@ async fn execute_subagent(
     let (subagent_conv_id, subagent_client) = match env.conversation_manager.new_conversation_with_id(
         subagent_conv_id_pre,
         llm,
-        &format!("You are a subagent spawned to perform a specific task.\n\n{}", SUBAGENT_RULES),
+        &format!(
+            "You are a subagent spawned to perform a specific task.\n\n{}\n\nCurrent directory: {}\nCurrent time: {}",
+            SUBAGENT_RULES,
+            std::env::current_dir().map(|p| p.to_string_lossy().to_string()).unwrap_or_else(|e| {
+                tracing::warn!("Failed to get current directory: {}", e);
+                "unknown".to_string()
+            }),
+            Local::now().format("%Y-%m-%d %H:%M:%S %Z"),
+        ),
         &params.model,
         subagent_tools,
         env.chat_options.clone(),

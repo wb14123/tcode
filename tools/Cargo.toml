@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 chrono = "0.4"
+quick-xml = "0.37"
 async-stream = "0.3"
 browser-server = { path = "../browser-server" }
 tracing = "0.1"
@@ -14,7 +15,7 @@ llm-rs-macros = { path = "../llm-rs-macros" }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 schemars = "1.2.0"
-tokio = { version = "1", features = ["rt", "time"] }
+tokio = { version = "1", features = ["rt", "time", "fs", "io-util"] }
 tokio-stream = "0.1"
 reqwest = { version = "0.12", features = ["json"] }
 
