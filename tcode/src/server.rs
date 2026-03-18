@@ -110,6 +110,7 @@ impl Server {
         let model_infos = self.llm.available_models();
         let mut tools_list: Vec<Arc<Tool>> = vec![
             Arc::new(tools::current_time_tool()),
+            Arc::new(tools::glob_tool()),
             Arc::new(tools::read_tool()),
             Arc::new(tools::web_fetch_tool()),
             Arc::new(tools::web_search_tool()),

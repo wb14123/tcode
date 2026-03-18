@@ -18,6 +18,7 @@ schemars = "1.2.0"
 tokio = { version = "1", features = ["rt", "time", "fs", "io-util"] }
 tokio-stream = "0.1"
 reqwest = { version = "0.12", features = ["json"] }
+ignore = "0.4"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
