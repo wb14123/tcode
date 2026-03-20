@@ -28,6 +28,15 @@ pub struct ApproveArgs {
     pub manage: bool,
     pub prompt: String,
     pub request_id: Option<String>,
+    pub preview_file_path: Option<PathBuf>,
+}
+
+/// Result of the approval UI interaction.
+pub enum ApproveResult {
+    /// User made a decision (approve/deny/cancel) — normal exit.
+    Done,
+    /// User wants to view the preview file in a maximized popup.
+    ViewPopup,
 }
 
 fn make_key(args: &ApproveArgs) -> PermissionKey {
@@ -80,7 +89,7 @@ fn send_revoke(socket_path: &PathBuf, key: PermissionKey) -> Result<()> {
     }
 }
 
-pub fn run_approve(args: ApproveArgs) -> Result<()> {
+pub fn run_approve(args: ApproveArgs) -> Result<ApproveResult> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -130,8 +139,9 @@ fn break_prompt_into_lines<'a>(text: &'a str, width: u16) -> Vec<Line<'a>> {
 fn run_approve_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: &ApproveArgs,
-) -> Result<()> {
+) -> Result<ApproveResult> {
     let has_prompt = !args.prompt.is_empty();
+    let has_preview = args.preview_file_path.is_some();
     let mut scroll_offset: u16 = 0;
 
     loop {
@@ -148,27 +158,30 @@ fn run_approve_loop(
 
             if has_prompt {
                 let total_lines = broken_lines.len() as u16;
-                // Fixed rows: title(3) + blank(1) + allow(2) + blank(1) + sep(2) + blank(1) + sess(3) + blank(1) + deny(2) = 16
-                let fixed_rows: u16 = 16;
+                let preview_extra: u16 = if has_preview { 1 } else { 0 };
+                // Fixed rows: title(3) + blank(1) + allow(2) + preview(0|1) + blank(1) + sep(2) + blank(1) + sess(3) + blank(1) + deny(2) = 16 or 17
+                let fixed_rows: u16 = 16 + preview_extra;
                 let prompt_space_no_hints = area.height.saturating_sub(fixed_rows);
                 let needs_scroll = total_lines > prompt_space_no_hints;
 
                 // Only reserve hint rows when scrolling is needed
                 let (hint_up, hint_down) = if needs_scroll { (1u16, 1u16) } else { (0, 0) };
 
+                let preview_row: u16 = if has_preview { 1 } else { 0 };
                 let chunks = Layout::vertical([
-                    Constraint::Length(3),           // [0] Title
-                    Constraint::Length(hint_up),      // [1] Scroll-up hint (0 when not needed)
-                    Constraint::Min(1),              // [2] Prompt content
-                    Constraint::Length(hint_down),    // [3] Scroll-down hint (0 when not needed)
-                    Constraint::Length(1),            // [4] Blank
-                    Constraint::Length(2),            // [5] Allow once
-                    Constraint::Length(1),            // [6] Blank
-                    Constraint::Length(2),            // [7] Separator + key:value
-                    Constraint::Length(1),            // [8] Blank
-                    Constraint::Length(3),            // [9] Session/Project options
-                    Constraint::Length(1),            // [10] Blank
-                    Constraint::Length(2),            // [11] Deny/Cancel
+                    Constraint::Length(3),             // [0] Title
+                    Constraint::Length(hint_up),        // [1] Scroll-up hint (0 when not needed)
+                    Constraint::Min(1),                // [2] Prompt content
+                    Constraint::Length(hint_down),      // [3] Scroll-down hint (0 when not needed)
+                    Constraint::Length(1),              // [4] Blank
+                    Constraint::Length(2),              // [5] Allow once
+                    Constraint::Length(preview_row),    // [6] View in nvim (0 when no preview)
+                    Constraint::Length(1),              // [7] Blank
+                    Constraint::Length(2),              // [8] Separator + key:value
+                    Constraint::Length(1),              // [9] Blank
+                    Constraint::Length(3),              // [10] Session/Project options
+                    Constraint::Length(1),              // [11] Blank
+                    Constraint::Length(2),              // [12] Deny/Cancel
                 ]).split(area);
 
                 let title = Paragraph::new(Line::from(vec![
@@ -214,6 +227,14 @@ fn run_approve_loop(
                 ]);
                 frame.render_widget(allow_once, chunks[5]);
 
+                // Render [v] View in nvim (area is 0-height when no preview)
+                if has_preview {
+                    let view_nvim = Paragraph::new(vec![
+                        Line::from(Span::styled("  [v] View in nvim", Style::default().fg(Color::Magenta))),
+                    ]);
+                    frame.render_widget(view_nvim, chunks[6]);
+                }
+
                 let separator = Paragraph::new(vec![
                     Line::from(Span::styled("  -- Or allow all matching requests --", Style::default().fg(Color::DarkGray))),
                     Line::from(vec![
@@ -223,19 +244,19 @@ fn run_approve_loop(
                         Span::styled(&args.value, Style::default().fg(Color::Cyan)),
                     ]),
                 ]);
-                frame.render_widget(separator, chunks[7]);
+                frame.render_widget(separator, chunks[8]);
 
                 let session_project = Paragraph::new(vec![
                     Line::from(Span::styled("  [2] Allow for session", Style::default().fg(Color::Cyan))),
                     Line::from(Span::styled("  [3] Allow for project", Style::default().fg(Color::Blue))),
                 ]);
-                frame.render_widget(session_project, chunks[9]);
+                frame.render_widget(session_project, chunks[10]);
 
                 let deny_cancel = Paragraph::new(vec![
                     Line::from(Span::styled("  [4] Deny", Style::default().fg(Color::Red))),
                     Line::from(Span::styled("  [q] Cancel", Style::default().fg(Color::DarkGray))),
                 ]);
-                frame.render_widget(deny_cancel, chunks[11]);
+                frame.render_widget(deny_cancel, chunks[12]);
             } else {
                 // Fallback layout without prompt (same as before but with key:value)
                 let chunks = Layout::vertical([
@@ -297,11 +318,12 @@ fn run_approve_loop(
                     }
                 }
                 let decision = match key.code {
+                    KeyCode::Char('v') if has_preview => return Ok(ApproveResult::ViewPopup),
                     KeyCode::Char('1') => Some(PermissionDecision::AllowOnce),
                     KeyCode::Char('2') => Some(PermissionDecision::AllowSession),
                     KeyCode::Char('3') => Some(PermissionDecision::AllowProject),
                     KeyCode::Char('4') => Some(PermissionDecision::Deny),
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Done),
                     _ => None,
                 };
                 if let Some(decision) = decision {
@@ -313,7 +335,7 @@ fn run_approve_loop(
                         None
                     };
                     send_resolve(&args.socket_path, pk, decision, rid)?;
-                    return Ok(());
+                    return Ok(ApproveResult::Done);
                 }
             }
         }
@@ -323,7 +345,7 @@ fn run_approve_loop(
 fn run_manage_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: &ApproveArgs,
-) -> Result<()> {
+) -> Result<ApproveResult> {
     loop {
         terminal.draw(|frame| {
             let area = frame.area();
@@ -373,9 +395,9 @@ fn run_manage_loop(
                     KeyCode::Char('r') => {
                         let pk = make_key(args);
                         send_revoke(&args.socket_path, pk)?;
-                        return Ok(());
+                        return Ok(ApproveResult::Done);
                     }
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(()),
+                    KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Done),
                     _ => {}
                 }
             }

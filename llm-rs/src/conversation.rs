@@ -1594,6 +1594,7 @@ async fn execute_regular_tool(
                 tracing::error!(error = %e, "failed to send ToolPermissionApproved");
             }
         }),
+        env.state_dir.clone(),
     );
     let scoped_pm_ref = scoped_pm.clone();
     let tool_ctx = ToolContext {

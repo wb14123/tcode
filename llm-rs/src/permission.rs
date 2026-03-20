@@ -40,6 +40,10 @@ pub struct PendingPermissionInfo {
     pub key: String,
     pub value: String,
     pub request_id: String,
+    /// Path to a preview file on disk (e.g. for reviewing file-write content).
+    /// The file extension is used for syntax highlighting.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub preview_file_path: Option<PathBuf>,
 }
 
 /// Full snapshot of permission state, sent to UI on query.
@@ -54,6 +58,7 @@ pub struct PermissionState {
 struct PendingRequest {
     prompt: String,
     waiters: HashMap<String, oneshot::Sender<bool>>,
+    preview_file_path: Option<PathBuf>,
 }
 
 /// On-disk format for project-level permissions.
@@ -104,6 +109,7 @@ impl PermissionManager {
         prompt: &str,
         key: &str,
         value: &str,
+        preview_file_path: Option<PathBuf>,
     ) -> (String, oneshot::Receiver<bool>) {
         let pk = PermissionKey {
             tool: tool.to_string(),
@@ -121,6 +127,7 @@ impl PermissionManager {
             pending.insert(pk, PendingRequest {
                 prompt: prompt.to_string(),
                 waiters,
+                preview_file_path,
             });
         }
         (request_id, rx)
@@ -213,6 +220,7 @@ impl PermissionManager {
                     key: k.key.clone(),
                     value: k.value.clone(),
                     request_id,
+                    preview_file_path: r.preview_file_path.clone(),
                 }
             })
             .collect();
@@ -275,6 +283,8 @@ pub struct ScopedPermissionManager {
     /// True while waiting for user approval. Used by `TimeoutStream` to
     /// pause the deadline so approval wait time doesn't count as timeout.
     approval_pending: Arc<AtomicBool>,
+    /// Session directory for writing preview files.
+    session_dir: Option<PathBuf>,
 }
 
 impl ScopedPermissionManager {
@@ -284,6 +294,7 @@ impl ScopedPermissionManager {
         manager: Arc<PermissionManager>,
         notify_fn: Arc<dyn Fn() + Send + Sync>,
         on_approved_fn: Arc<dyn Fn() + Send + Sync>,
+        session_dir: Option<PathBuf>,
     ) -> Self {
         ScopedPermissionManager {
             tool_name: tool_name.to_string(),
@@ -292,6 +303,7 @@ impl ScopedPermissionManager {
             on_approved_fn,
             denied: Arc::new(AtomicBool::new(false)),
             approval_pending: Arc::new(AtomicBool::new(false)),
+            session_dir,
         }
     }
 
@@ -310,6 +322,7 @@ impl ScopedPermissionManager {
             on_approved_fn: Arc::new(|| {}),
             denied: Arc::new(AtomicBool::new(false)),
             approval_pending: Arc::new(AtomicBool::new(false)),
+            session_dir: None,
         }
     }
 
@@ -335,11 +348,50 @@ impl ScopedPermissionManager {
     /// manager's tool name. If no saved preference exists, registers a pending
     /// request, notifies the UI, and awaits the user's decision.
     pub async fn ask_permission_for(&self, scope: &str, prompt: &str, key: &str, value: &str) -> bool {
+        self.ask_permission_inner(scope, prompt, key, value, None).await
+    }
+
+    /// Like `ask_permission_for`, but writes `content` to a preview file under
+    /// `session_dir/tool-file-preview/` so the UI can offer "[v] View in nvim".
+    /// `file_extension` is used for syntax highlighting (e.g. "rs", "py").
+    pub async fn ask_permission_with_preview(
+        &self,
+        scope: &str,
+        prompt: &str,
+        key: &str,
+        value: &str,
+        content: &str,
+        file_extension: &str,
+    ) -> bool {
+        let preview_path = match self.write_preview_file(content, file_extension) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                tracing::warn!("Failed to write preview file: {}", e);
+                None
+            }
+        };
+        self.ask_permission_inner(scope, prompt, key, value, preview_path).await
+    }
+
+    /// Core permission-request flow shared by `ask_permission_for` and
+    /// `ask_permission_with_preview`. Cleans up the preview file (if any)
+    /// after the decision is received.
+    async fn ask_permission_inner(
+        &self,
+        scope: &str,
+        prompt: &str,
+        key: &str,
+        value: &str,
+        preview_file_path: Option<PathBuf>,
+    ) -> bool {
         if self.manager.has_permission(scope, key, value) {
+            Self::cleanup_preview_file(&preview_file_path);
             return true;
         }
 
-        let (_request_id, rx) = self.manager.register_request(scope, prompt, key, value);
+        let (_request_id, rx) = self.manager.register_request(
+            scope, prompt, key, value, preview_file_path.clone(),
+        );
 
         // Notify UI that permission state changed (idempotent)
         (self.notify_fn)();
@@ -348,12 +400,35 @@ impl ScopedPermissionManager {
         let allowed = rx.await.unwrap_or(false);
         self.approval_pending.store(false, Ordering::Release);
 
+        Self::cleanup_preview_file(&preview_file_path);
+
         if allowed {
             (self.on_approved_fn)();
         } else {
             self.denied.store(true, Ordering::Relaxed);
         }
         allowed
+    }
+
+    /// Write content to a preview file under session_dir/tool-file-preview/.
+    fn write_preview_file(&self, content: &str, extension: &str) -> anyhow::Result<PathBuf> {
+        let session_dir = self.session_dir.as_ref()
+            .ok_or_else(|| anyhow::anyhow!("No session_dir configured for preview files"))?;
+        let preview_dir = session_dir.join("tool-file-preview");
+        std::fs::create_dir_all(&preview_dir)?;
+        let filename = format!("{}.{}", Uuid::new_v4(), extension);
+        let path = preview_dir.join(filename);
+        std::fs::write(&path, content)?;
+        Ok(path)
+    }
+
+    /// Remove a preview file if it exists.
+    fn cleanup_preview_file(path: &Option<PathBuf>) {
+        if let Some(p) = path {
+            if let Err(e) = std::fs::remove_file(p) {
+                tracing::warn!("Failed to clean up preview file {}: {}", p.display(), e);
+            }
+        }
     }
 
     /// Returns true if the user denied permission during this tool execution.

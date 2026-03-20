@@ -22,7 +22,7 @@ mod tests {
     }
 
     fn make_scoped(pm: Arc<PermissionManager>) -> ScopedPermissionManager {
-        ScopedPermissionManager::new("read", pm, Arc::new(|| {}), Arc::new(|| {}))
+        ScopedPermissionManager::new("read", pm, Arc::new(|| {}), Arc::new(|| {}), None)
     }
 
     fn make_key(tool: &str, key: &str, value: &str) -> PermissionKey {
@@ -105,13 +105,13 @@ mod tests {
         pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
 
         let read_scoped = ScopedPermissionManager::new(
-            "read", Arc::clone(&pm), Arc::new(|| {}), Arc::new(|| {}),
+            "read", Arc::clone(&pm), Arc::new(|| {}), Arc::new(|| {}), None,
         );
         let result = check_file_read_permission(&read_scoped, &dir, true).await;
         assert!(result.is_ok(), "read tool should see file_read approval");
 
         let glob_scoped = ScopedPermissionManager::new(
-            "glob", Arc::clone(&pm), Arc::new(|| {}), Arc::new(|| {}),
+            "glob", Arc::clone(&pm), Arc::new(|| {}), Arc::new(|| {}), None,
         );
         let result = check_file_read_permission(&glob_scoped, &dir, true).await;
         assert!(result.is_ok(), "glob tool should see file_read approval");

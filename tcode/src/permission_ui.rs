@@ -67,7 +67,13 @@ impl PermStatus {
 enum NodeKind {
     Tool { name: String },
     Key { key: String },
-    Value { value: String, status: PermStatus, prompt: Option<String>, request_id: Option<String> },
+    Value {
+        value: String,
+        status: PermStatus,
+        prompt: Option<String>,
+        request_id: Option<String>,
+        preview_file_path: Option<String>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -109,8 +115,9 @@ impl PermissionTreeState {
     fn rebuild_from_state(&mut self, state: &PermissionState) {
         self.arena.clear();
 
-        // Group all entries by tool -> key -> Vec<(value, status, prompt, request_id)>
-        let mut groups: HashMap<String, HashMap<String, Vec<(String, PermStatus, Option<String>, Option<String>)>>> =
+        // Group all entries by tool -> key -> Vec<(value, status, prompt, request_id, preview_file_path)>
+        type EntryTuple = (String, PermStatus, Option<String>, Option<String>, Option<String>);
+        let mut groups: HashMap<String, HashMap<String, Vec<EntryTuple>>> =
             HashMap::new();
 
         for p in &state.pending {
@@ -119,7 +126,13 @@ impl PermissionTreeState {
                 .or_default()
                 .entry(p.key.clone())
                 .or_default()
-                .push((p.value.clone(), PermStatus::Pending, Some(p.prompt.clone()), Some(p.request_id.clone())));
+                .push((
+                    p.value.clone(),
+                    PermStatus::Pending,
+                    Some(p.prompt.clone()),
+                    Some(p.request_id.clone()),
+                    p.preview_file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                ));
         }
         for k in &state.session {
             groups
@@ -127,7 +140,7 @@ impl PermissionTreeState {
                 .or_default()
                 .entry(k.key.clone())
                 .or_default()
-                .push((k.value.clone(), PermStatus::Session, None, None));
+                .push((k.value.clone(), PermStatus::Session, None, None, None));
         }
         for k in &state.project {
             groups
@@ -135,14 +148,14 @@ impl PermissionTreeState {
                 .or_default()
                 .entry(k.key.clone())
                 .or_default()
-                .push((k.value.clone(), PermStatus::Project, None, None));
+                .push((k.value.clone(), PermStatus::Project, None, None, None));
         }
 
         // Sort tools alphabetically, but put tools with pending items first
         let mut tool_names: Vec<String> = groups.keys().cloned().collect();
         tool_names.sort_by(|a, b| {
-            let a_pending = groups[a].values().any(|vals| vals.iter().any(|(_, s, _, _)| *s == PermStatus::Pending));
-            let b_pending = groups[b].values().any(|vals| vals.iter().any(|(_, s, _, _)| *s == PermStatus::Pending));
+            let a_pending = groups[a].values().any(|vals| vals.iter().any(|e| e.1 == PermStatus::Pending));
+            let b_pending = groups[b].values().any(|vals| vals.iter().any(|e| e.1 == PermStatus::Pending));
             b_pending.cmp(&a_pending).then(a.cmp(b))
         });
 
@@ -177,13 +190,13 @@ impl PermissionTreeState {
                     b_pending.cmp(&a_pending).then(a.0.cmp(&b.0))
                 });
 
-                for (value, status, prompt, request_id) in values {
+                for (value, status, prompt, request_id, preview_file_path) in values {
                     if self.filter_pending_only && status != PermStatus::Pending {
                         continue;
                     }
                     let val_idx = self.arena.len();
                     self.arena.push(TreeNode {
-                        kind: NodeKind::Value { value, status, prompt, request_id },
+                        kind: NodeKind::Value { value, status, prompt, request_id, preview_file_path },
                         depth: 2,
                         children: Vec::new(),
                         collapsed: false,
@@ -253,7 +266,7 @@ impl PermissionTreeState {
         let node = &self.arena[idx];
 
         match &node.kind {
-            NodeKind::Value { value, status, prompt, request_id } => {
+            NodeKind::Value { value, status, prompt, request_id, preview_file_path, .. } => {
                 // Walk up to find tool and key
                 let (tool_name, key_name) = self.find_tool_key_for(idx);
                 let exe = match std::env::current_exe() {
@@ -276,6 +289,10 @@ impl PermissionTreeState {
                         }
                         if let Some(rid) = request_id {
                             cmd.push_str(&format!(" --request-id {}", rid));
+                        }
+                        if let Some(pfp) = preview_file_path {
+                            let escaped = pfp.replace('\'', "'\\''");
+                            cmd.push_str(&format!(" --preview-file-path '{}'", escaped));
                         }
                         cmd
                     }
@@ -315,6 +332,8 @@ impl PermissionTreeState {
                 //     usable text width per line = inner_width - 4 = popup_width - 6
                 //
                 // So for N prompt lines: popup_height = 16 + N + 2 (border) = N + 18
+                // When preview_file_path is present, there is 1 extra row
+                // for [v] View in nvim.
                 //
                 // To grow width and height proportionally, we target ~25 chars
                 // of text per prompt line (a balanced rectangle):
@@ -325,6 +344,8 @@ impl PermissionTreeState {
                 // (max = 80% of terminal). If the prompt still overflows,
                 // the user can scroll with j/k/arrows in the popup.
                 let prompt_len = prompt.as_ref().map(|p| p.len()).unwrap_or(0);
+                let has_preview = preview_file_path.is_some();
+                let preview_extra: usize = if has_preview { 1 } else { 0 };
                 let (popup_width, popup_height) = if prompt_len > 0 {
                     let chars_per_line = 25.0_f64;
                     // +6 = 2 for tmux border + 2 for left indent + 2 for right padding
@@ -339,18 +360,45 @@ impl PermissionTreeState {
                         1
                     };
                     // +18 = 16 fixed UI lines + 2 for tmux border
-                    let h = (18 + prompt_lines).clamp(20, max_h);
+                    // +preview_extra = 1 when preview exists ([v] row)
+                    let h = (18 + preview_extra + prompt_lines).clamp(20, max_h);
                     (w, h)
                 } else {
-                    (60, 20.min(max_h))
+                    (60, (20 + preview_extra).min(max_h))
                 };
 
-                let popup_cmd = format!(
-                    "tmux display-popup -E -w {} -h {} \"{}\"",
-                    popup_width, popup_height, cmd.replace('"', "\\\"")
-                );
-                if let Err(e) = Command::new("sh").args(["-c", &popup_cmd]).output() {
-                    tracing::warn!("failed to launch approval popup: {}", e);
+                // Loop: show popup, and if the user requests a preview view
+                // (exit code 10 = maximized popup via [v]), show it then
+                // relaunch the approval popup.
+                loop {
+                    let popup_cmd = format!(
+                        "tmux display-popup -E -w {} -h {} \"{}\"",
+                        popup_width, popup_height, cmd.replace('"', "\\\"")
+                    );
+                    let exit_code = match Command::new("sh").args(["-c", &popup_cmd]).output() {
+                        Ok(out) => out.status.code().unwrap_or(0),
+                        Err(e) => {
+                            tracing::warn!("failed to launch approval popup: {}", e);
+                            break;
+                        }
+                    };
+                    match exit_code {
+                        10 => {
+                            // [v] View in maximized popup — open nvim in an 80% popup
+                            if let Some(pfp) = preview_file_path {
+                                let escaped = pfp.replace('\'', "'\\''");
+                                let nvim_popup = format!(
+                                    "tmux display-popup -E -w '80%' -h '80%' \"nvim -R '{}'\"",
+                                    escaped,
+                                );
+                                if let Err(e) = Command::new("sh").args(["-c", &nvim_popup]).output() {
+                                    tracing::warn!("failed to launch nvim popup: {}", e);
+                                }
+                            }
+                            // Loop: relaunch approval popup
+                        }
+                        _ => break, // Done (approved, denied, cancelled)
+                    }
                 }
             }
             NodeKind::Tool { .. } | NodeKind::Key { .. } => {

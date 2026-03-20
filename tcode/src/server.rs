@@ -113,6 +113,7 @@ impl Server {
             Arc::new(tools::glob_tool()),
             Arc::new(tools::grep_tool()),
             Arc::new(tools::read_tool()),
+            Arc::new(tools::write_tool()),
             Arc::new(tools::web_fetch_tool()),
             Arc::new(tools::web_search_tool()),
         ];
