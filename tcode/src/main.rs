@@ -9,6 +9,7 @@ mod session;
 mod session_picker;
 mod tool_call_display;
 mod tree;
+mod tree_nav;
 mod tty_stdio;
 
 use std::fs;

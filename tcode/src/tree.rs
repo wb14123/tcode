@@ -21,6 +21,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::session::Session;
+use crate::tree_nav::TreeNav;
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -596,24 +597,6 @@ impl TreeState {
         sorted
     }
 
-    /// Rebuild the visible list from the arena using DFS.
-    fn rebuild_visible(&mut self) {
-        self.visible.clear();
-        if self.arena.is_empty() {
-            return;
-        }
-        // Start DFS from root's children (root itself is not shown)
-        // Sort: running first, then by creation order
-        let root_children = self.sorted_children(&self.arena[0].children.clone());
-        for &child_idx in &root_children {
-            self.dfs_collect(child_idx);
-        }
-        // Clamp selected
-        if !self.visible.is_empty() && self.selected >= self.visible.len() {
-            self.selected = self.visible.len() - 1;
-        }
-    }
-
     fn dfs_collect(&mut self, idx: usize) {
         // If filtering active only, skip finished nodes without running children
         if self.filter_active_only && !self.has_active_descendant(idx) {
@@ -645,28 +628,6 @@ impl TreeState {
             }
         }
         false
-    }
-
-    /// Toggle collapse on the selected node.
-    fn toggle_collapse(&mut self) {
-        if let Some(&idx) = self.visible.get(self.selected) {
-            if !self.arena[idx].children.is_empty() {
-                self.arena[idx].collapsed = !self.arena[idx].collapsed;
-                self.rebuild_visible();
-            }
-        }
-    }
-
-    fn move_up(&mut self) {
-        if !self.visible.is_empty() && self.selected > 0 {
-            self.selected -= 1;
-        }
-    }
-
-    fn move_down(&mut self) {
-        if !self.visible.is_empty() && self.selected < self.visible.len() - 1 {
-            self.selected += 1;
-        }
     }
 
     fn toggle_filter(&mut self) {
@@ -850,6 +811,27 @@ impl TreeState {
                 self.status_message = None;
             }
         }
+    }
+}
+
+impl TreeNav for TreeState {
+    fn node_children(&self, idx: usize) -> &[usize] { &self.arena[idx].children }
+    fn node_collapsed(&self, idx: usize) -> bool { self.arena[idx].collapsed }
+    fn set_node_collapsed(&mut self, idx: usize, collapsed: bool) { self.arena[idx].collapsed = collapsed; }
+    fn visible(&self) -> &[usize] { &self.visible }
+    fn selected(&self) -> usize { self.selected }
+    fn set_selected(&mut self, idx: usize) { self.selected = idx; }
+
+    fn rebuild_visible(&mut self) {
+        self.visible.clear();
+        if self.arena.is_empty() {
+            return;
+        }
+        let root_children = self.sorted_children(&self.arena[0].children.clone());
+        for &child_idx in &root_children {
+            self.dfs_collect(child_idx);
+        }
+        self.clamp_selection();
     }
 }
 
@@ -1205,18 +1187,10 @@ pub fn run_tree(session: Session) -> Result<()> {
         }
         if fs_changed {
             state.incremental_update();
-            // Keep selection in bounds
-            if !state.visible.is_empty() && state.selected >= state.visible.len() {
-                state.selected = state.visible.len() - 1;
-            }
         }
 
         // 2. Sync list_state with tree state
-        if state.visible.is_empty() {
-            list_state.select(None);
-        } else {
-            list_state.select(Some(state.selected));
-        }
+        state.sync_list_state(&mut list_state);
 
         // 3. Render
         render_tree(&mut terminal, &mut state, &mut list_state)?;

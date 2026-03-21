@@ -23,6 +23,16 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::protocol::{ClientMessage, ServerMessage};
 use crate::session::Session;
+use crate::tree_nav::TreeNav;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/// Escape a string for safe inclusion in single-quoted shell arguments.
+fn shell_escape(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -109,6 +119,20 @@ impl PermissionTreeState {
             frame_count: 0,
             bell_sent: false,
         }
+    }
+
+    /// Query the server and rebuild the tree.
+    fn refresh_from_server(&mut self, socket_path: &PathBuf) {
+        if let Some(perm_state) = query_permission_state_sync(socket_path) {
+            self.rebuild_from_state(&perm_state);
+        }
+    }
+
+    /// Check if any pending permissions exist in the tree.
+    fn has_pending(&self) -> bool {
+        self.arena.iter().any(|n| {
+            matches!(&n.kind, NodeKind::Value { status: PermStatus::Pending, .. })
+        })
     }
 
     /// Rebuild the tree from a PermissionState snapshot.
@@ -209,49 +233,12 @@ impl PermissionTreeState {
         self.rebuild_visible();
     }
 
-    fn rebuild_visible(&mut self) {
-        self.visible.clear();
-        // Top-level nodes are tools (depth 0)
-        let top_level: Vec<usize> = self.arena.iter().enumerate()
-            .filter(|(_, n)| n.depth == 0)
-            .map(|(i, _)| i)
-            .collect();
-        for idx in top_level {
-            self.collect_visible(idx);
-        }
-        // Clamp selection
-        if !self.visible.is_empty() && self.selected >= self.visible.len() {
-            self.selected = self.visible.len() - 1;
-        }
-    }
-
     fn collect_visible(&mut self, idx: usize) {
         self.visible.push(idx);
         if !self.arena[idx].collapsed {
             let children = self.arena[idx].children.clone();
             for child in children {
                 self.collect_visible(child);
-            }
-        }
-    }
-
-    fn move_down(&mut self) {
-        if !self.visible.is_empty() && self.selected < self.visible.len() - 1 {
-            self.selected += 1;
-        }
-    }
-
-    fn move_up(&mut self) {
-        if self.selected > 0 {
-            self.selected -= 1;
-        }
-    }
-
-    fn toggle_collapse(&mut self) {
-        if let Some(&idx) = self.visible.get(self.selected) {
-            if !self.arena[idx].children.is_empty() {
-                self.arena[idx].collapsed = !self.arena[idx].collapsed;
-                self.rebuild_visible();
             }
         }
     }
@@ -282,8 +269,7 @@ impl PermissionTreeState {
                         );
                         if let Some(p) = prompt {
                             if !p.is_empty() {
-                                // Shell-escape single quotes in the prompt
-                                let escaped = p.replace('\'', "'\\''");
+                                let escaped = shell_escape(p);
                                 cmd.push_str(&format!(" --prompt '{}'", escaped));
                             }
                         }
@@ -291,7 +277,7 @@ impl PermissionTreeState {
                             cmd.push_str(&format!(" --request-id {}", rid));
                         }
                         if let Some(pfp) = preview_file_path {
-                            let escaped = pfp.replace('\'', "'\\''");
+                            let escaped = shell_escape(pfp);
                             cmd.push_str(&format!(" --preview-file-path '{}'", escaped));
                         }
                         cmd
@@ -386,7 +372,7 @@ impl PermissionTreeState {
                         10 => {
                             // [v] View in maximized popup — open nvim in an 80% popup
                             if let Some(pfp) = preview_file_path {
-                                let escaped = pfp.replace('\'', "'\\''");
+                                let escaped = shell_escape(pfp);
                                 let nvim_popup = format!(
                                     "tmux display-popup -E -w '80%' -h '80%' \"nvim -R '{}'\"",
                                     escaped,
@@ -456,6 +442,27 @@ impl PermissionTreeState {
     }
 }
 
+impl TreeNav for PermissionTreeState {
+    fn node_children(&self, idx: usize) -> &[usize] { &self.arena[idx].children }
+    fn node_collapsed(&self, idx: usize) -> bool { self.arena[idx].collapsed }
+    fn set_node_collapsed(&mut self, idx: usize, collapsed: bool) { self.arena[idx].collapsed = collapsed; }
+    fn visible(&self) -> &[usize] { &self.visible }
+    fn selected(&self) -> usize { self.selected }
+    fn set_selected(&mut self, idx: usize) { self.selected = idx; }
+
+    fn rebuild_visible(&mut self) {
+        self.visible.clear();
+        let top_level: Vec<usize> = self.arena.iter().enumerate()
+            .filter(|(_, n)| n.depth == 0)
+            .map(|(i, _)| i)
+            .collect();
+        for idx in top_level {
+            self.collect_visible(idx);
+        }
+        self.clamp_selection();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -475,10 +482,7 @@ fn render_tree(
         // Flash: toggle every 3 frames (~600ms cycle at 200ms poll)
         let flash_on = (state.frame_count / 3) % 2 == 0;
 
-        // Check if any pending permissions exist
-        let any_pending = state.arena.iter().any(|n| {
-            matches!(&n.kind, NodeKind::Value { status: PermStatus::Pending, .. })
-        });
+        let any_pending = state.has_pending();
 
         // Build list items
         let items: Vec<ListItem> = state.visible.iter().map(|&idx| {
@@ -662,9 +666,7 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
 
     // Initial query
     let mut file_offset: u64 = 0;
-    if let Some(perm_state) = query_permission_state_sync(&socket_path) {
-        state.rebuild_from_state(&perm_state);
-    }
+    state.refresh_from_server(&socket_path);
     // Advance offset past existing content
     if let Ok(metadata) = std::fs::metadata(&display_path) {
         file_offset = metadata.len();
@@ -686,22 +688,13 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
         }
 
         if need_refresh {
-            if let Some(perm_state) = query_permission_state_sync(&socket_path) {
-                state.rebuild_from_state(&perm_state);
-            }
+            state.refresh_from_server(&socket_path);
         }
 
-        // Sync list state
-        if state.visible.is_empty() {
-            list_state.select(None);
-        } else {
-            list_state.select(Some(state.selected));
-        }
+        state.sync_list_state(&mut list_state);
 
         // Send terminal bell when new pending permissions appear (triggers tmux window alert)
-        let any_pending = state.arena.iter().any(|n| {
-            matches!(&n.kind, NodeKind::Value { status: PermStatus::Pending, .. })
-        });
+        let any_pending = state.has_pending();
         if any_pending && !state.bell_sent {
             // BEL character: tmux monitor-bell (on by default) will highlight the window
             print!("\x07");
@@ -731,22 +724,14 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
                     KeyCode::Char(' ') => state.toggle_collapse(),
                     KeyCode::Enter | KeyCode::Char('o') => {
                         state.open_popup();
-                        // Refresh after popup closes (user may have approved)
-                        if let Some(perm_state) = query_permission_state_sync(&socket_path) {
-                            state.rebuild_from_state(&perm_state);
-                        }
+                        state.refresh_from_server(&socket_path);
                     }
                     KeyCode::Char('f') => {
                         state.toggle_filter();
-                        // Re-query and rebuild with new filter
-                        if let Some(perm_state) = query_permission_state_sync(&socket_path) {
-                            state.rebuild_from_state(&perm_state);
-                        }
+                        state.refresh_from_server(&socket_path);
                     }
                     KeyCode::Char('R') => {
-                        if let Some(perm_state) = query_permission_state_sync(&socket_path) {
-                            state.rebuild_from_state(&perm_state);
-                        }
+                        state.refresh_from_server(&socket_path);
                     }
                     _ => {}
                 }
