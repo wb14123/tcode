@@ -460,6 +460,11 @@ impl ScopedPermissionManager {
         }
     }
 
+    /// Returns the session directory, if configured.
+    pub fn session_dir(&self) -> Option<&std::path::Path> {
+        self.session_dir.as_deref()
+    }
+
     /// Returns true if the user denied permission during this tool execution.
     pub fn was_denied(&self) -> bool {
         self.denied.load(Ordering::Relaxed)

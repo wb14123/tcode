@@ -7,7 +7,7 @@ use llm_rs::permission::ScopedPermissionManager;
 const FILE_READ_SCOPE: &str = "file_read";
 
 /// Shared permission scope for file write operations.
-const FILE_WRITE_SCOPE: &str = "file_write";
+pub const FILE_WRITE_SCOPE: &str = "file_write";
 
 /// Determine the directory to use for permission checks.
 ///

@@ -677,13 +677,38 @@ pub fn launch_approval_popup(
         match exit_code {
             10 => {
                 if let Some(pfp) = preview_file_path {
-                    let escaped = shell_escape(pfp);
-                    let nvim_popup = format!(
-                        "tmux display-popup -E -w '80%' -h '80%' \"nvim -R '{}'\"",
-                        escaped,
-                    );
-                    if let Err(e) = Command::new("sh").args(["-c", &nvim_popup]).output() {
-                        tracing::warn!("failed to launch nvim popup: {}", e);
+                    if pfp.ends_with(".tcodediff") {
+                        // Read tcodediff: line 1 = original path, line 2 = new content tmp path
+                        match std::fs::read_to_string(pfp) {
+                            Ok(diff_content) => {
+                                let mut lines = diff_content.lines();
+                                if let (Some(original), Some(tmp)) = (lines.next(), lines.next()) {
+                                    let esc_orig = shell_escape(original);
+                                    let esc_tmp = shell_escape(tmp);
+                                    let nvim_popup = format!(
+                                        "tmux display-popup -E -w '80%' -h '80%' \"nvim -R -d '{}' '{}'\"",
+                                        esc_orig, esc_tmp,
+                                    );
+                                    if let Err(e) =
+                                        Command::new("sh").args(["-c", &nvim_popup]).output()
+                                    {
+                                        tracing::warn!("failed to launch nvim diff popup: {}", e);
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!("failed to read tcodediff file {}: {}", pfp, e);
+                            }
+                        }
+                    } else {
+                        let escaped = shell_escape(pfp);
+                        let nvim_popup = format!(
+                            "tmux display-popup -E -w '80%' -h '80%' \"nvim -R '{}'\"",
+                            escaped,
+                        );
+                        if let Err(e) = Command::new("sh").args(["-c", &nvim_popup]).output() {
+                            tracing::warn!("failed to launch nvim popup: {}", e);
+                        }
                     }
                 }
             }

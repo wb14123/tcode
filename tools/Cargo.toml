@@ -21,7 +21,7 @@ reqwest = { version = "0.13", features = ["json"] }
 ignore = "0.4"
 grep = "0.4"
 fs2 = "0.4"
+uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
-uuid = { version = "1", features = ["v4"] }

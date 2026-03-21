@@ -1,5 +1,6 @@
 pub mod browser_client;
 pub mod current_time;
+pub mod edit;
 pub mod file_permission;
 pub mod file_write_util;
 pub mod glob_tool;
@@ -13,6 +14,7 @@ pub mod write;
 mod file_permission_tests;
 
 pub use current_time::current_time_tool;
+pub use edit::edit_tool;
 pub use glob_tool::glob_tool;
 pub use grep_tool::grep_tool;
 pub use read::read_tool;

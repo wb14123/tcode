@@ -543,7 +543,8 @@ async fn main() -> Result<()> {
         Some(Commands::ApproveNext) => {
             let session_id = require_session(cli.session)?;
             let session = Session::new(root_session_id(&session_id))?;
-            if let Some(0) = permission_ui::approve_all_pending(&session_id, &session.socket_path()) {
+            if let Some(0) = permission_ui::approve_all_pending(&session_id, &session.socket_path())
+            {
                 println!("No pending approvals");
             }
             Ok(())
