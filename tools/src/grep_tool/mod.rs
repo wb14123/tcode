@@ -4,12 +4,12 @@ mod grep_tool_tests;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use grep::regex::RegexMatcherBuilder;
 use grep::searcher::sinks::UTF8;
 use grep::searcher::{BinaryDetection, SearcherBuilder};
-use ignore::overrides::OverrideBuilder;
 use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 

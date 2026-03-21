@@ -7,7 +7,7 @@ use tower::ServiceExt;
 
 use llm_rs::llm::{LLMEvent, StopReason, ToolCall};
 
-use crate::handler::{create_router, AppState};
+use crate::handler::{AppState, create_router};
 use crate::test_helpers::MockLLM;
 use crate::types::ChatCompletionResponse;
 
@@ -57,7 +57,10 @@ async fn test_non_streaming_text_response() {
 
     let body = response.into_body().collect().await.unwrap().to_bytes();
     let resp: ChatCompletionResponse = serde_json::from_slice(&body).unwrap();
-    assert_eq!(resp.choices[0].message.content.as_deref(), Some("Hello, world!"));
+    assert_eq!(
+        resp.choices[0].message.content.as_deref(),
+        Some("Hello, world!")
+    );
     assert_eq!(resp.choices[0].finish_reason, "stop");
     assert_eq!(resp.usage.as_ref().unwrap().prompt_tokens, 10);
     assert_eq!(resp.usage.as_ref().unwrap().completion_tokens, 5);

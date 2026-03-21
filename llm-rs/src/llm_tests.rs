@@ -50,7 +50,11 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let deserialized: LLMMessage = serde_json::from_str(&json).unwrap();
         match deserialized {
-            LLMMessage::Assistant { content, tool_calls, raw: r } => {
+            LLMMessage::Assistant {
+                content,
+                tool_calls,
+                raw: r,
+            } => {
                 assert_eq!(content, "Hello!");
                 assert_eq!(tool_calls.len(), 1);
                 assert_eq!(tool_calls[0].id, "tc1");
@@ -70,7 +74,10 @@ mod tests {
         let json = serde_json::to_string(&msg).unwrap();
         let deserialized: LLMMessage = serde_json::from_str(&json).unwrap();
         match deserialized {
-            LLMMessage::ToolResult { tool_call_id, content } => {
+            LLMMessage::ToolResult {
+                tool_call_id,
+                content,
+            } => {
                 assert_eq!(tool_call_id, "tc1");
                 assert_eq!(content, "result data");
             }

@@ -3,8 +3,7 @@ use std::path::Path;
 use super::search_grep;
 
 fn test_root() -> std::path::PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../target/test-tmp/grep_tool")
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/grep_tool")
 }
 
 fn temp_dir() -> std::path::PathBuf {
@@ -141,7 +140,11 @@ fn multiple_matches_in_single_file() {
 #[test]
 fn regex_pattern_works() {
     let dir = temp_dir();
-    std::fs::write(dir.join("code.rs"), "fn hello_world() {}\nfn goodbye() {}\n").unwrap();
+    std::fs::write(
+        dir.join("code.rs"),
+        "fn hello_world() {}\nfn goodbye() {}\n",
+    )
+    .unwrap();
 
     let (results, total) = search_grep(&dir, r"fn\s+\w+_\w+", None).unwrap();
     assert_eq!(total, 1);

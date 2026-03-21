@@ -62,7 +62,10 @@ impl NodeStatus {
     }
 
     fn is_terminal(&self) -> bool {
-        matches!(self, NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Cancelled)
+        matches!(
+            self,
+            NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Cancelled
+        )
     }
 
     fn from_end_status(s: &MessageEndStatus) -> Self {
@@ -250,8 +253,7 @@ impl TreeState {
                             collapsed: false,
                         });
                         self.arena[parent_node].children.push(idx);
-                        self.conversation_idx
-                            .insert(conversation_id.clone(), idx);
+                        self.conversation_idx.insert(conversation_id.clone(), idx);
                         idx
                     };
                 self.dir_to_node.insert(path.clone(), node_idx);
@@ -335,10 +337,7 @@ impl TreeState {
         };
 
         // Determine the directory that owns this file
-        let dir = path
-            .parent()
-            .unwrap_or(Path::new(""))
-            .to_path_buf();
+        let dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
 
         for line in &lines {
             let line = line.trim();
@@ -548,7 +547,9 @@ impl TreeState {
                     }
                 }
             }
-            Message::SubAgentWaitingPermission { conversation_id, .. } => {
+            Message::SubAgentWaitingPermission {
+                conversation_id, ..
+            } => {
                 if let Some(&idx) = self.conversation_idx.get(conversation_id) {
                     if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
                         if !status.is_terminal() {
@@ -557,7 +558,9 @@ impl TreeState {
                     }
                 }
             }
-            Message::SubAgentPermissionApproved { conversation_id, .. } => {
+            Message::SubAgentPermissionApproved {
+                conversation_id, ..
+            } => {
                 if let Some(&idx) = self.conversation_idx.get(conversation_id) {
                     if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
                         if matches!(status, NodeStatus::Permission) {
@@ -566,7 +569,9 @@ impl TreeState {
                     }
                 }
             }
-            Message::SubAgentPermissionDenied { conversation_id, .. } => {
+            Message::SubAgentPermissionDenied {
+                conversation_id, ..
+            } => {
                 if let Some(&idx) = self.conversation_idx.get(conversation_id) {
                     if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
                         if !status.is_terminal() {
@@ -651,7 +656,11 @@ impl TreeState {
             }
         };
         let args: Vec<String> = match &node.kind {
-            NodeType::SubAgent { conversation_id, status, .. } => {
+            NodeType::SubAgent {
+                conversation_id,
+                status,
+                ..
+            } => {
                 if matches!(status, NodeStatus::Running | NodeStatus::Idle) {
                     vec![
                         format!("--session={}", self.session_id),
@@ -662,7 +671,11 @@ impl TreeState {
                     return; // Already finished
                 }
             }
-            NodeType::ToolCall { tool_call_id, status, .. } => {
+            NodeType::ToolCall {
+                tool_call_id,
+                status,
+                ..
+            } => {
                 if matches!(status, NodeStatus::Running) {
                     vec![
                         format!("--session={}", self.session_id),
@@ -695,9 +708,8 @@ impl TreeState {
     /// Resolve the current executable path, stripping the " (deleted)" suffix
     /// that Linux appends to `/proc/self/exe` when the binary was replaced.
     fn resolve_exe(&self) -> Result<String, String> {
-        let exe = std::env::current_exe().map_err(|e| {
-            format!("Failed to determine current executable: {}", e)
-        })?;
+        let exe = std::env::current_exe()
+            .map_err(|e| format!("Failed to determine current executable: {}", e))?;
         let exe_str = exe.to_string_lossy().to_string();
 
         // On Linux, /proc/self/exe gets " (deleted)" appended after a rebuild
@@ -787,7 +799,9 @@ impl TreeState {
                     tool_call_id.clone(),
                 ]
             }
-            NodeType::SubAgent { conversation_id, .. } => {
+            NodeType::SubAgent {
+                conversation_id, ..
+            } => {
                 vec![
                     format!("--session={}", parent_session),
                     "open-subagent".to_string(),
@@ -815,12 +829,24 @@ impl TreeState {
 }
 
 impl TreeNav for TreeState {
-    fn node_children(&self, idx: usize) -> &[usize] { &self.arena[idx].children }
-    fn node_collapsed(&self, idx: usize) -> bool { self.arena[idx].collapsed }
-    fn set_node_collapsed(&mut self, idx: usize, collapsed: bool) { self.arena[idx].collapsed = collapsed; }
-    fn visible(&self) -> &[usize] { &self.visible }
-    fn selected(&self) -> usize { self.selected }
-    fn set_selected(&mut self, idx: usize) { self.selected = idx; }
+    fn node_children(&self, idx: usize) -> &[usize] {
+        &self.arena[idx].children
+    }
+    fn node_collapsed(&self, idx: usize) -> bool {
+        self.arena[idx].collapsed
+    }
+    fn set_node_collapsed(&mut self, idx: usize, collapsed: bool) {
+        self.arena[idx].collapsed = collapsed;
+    }
+    fn visible(&self) -> &[usize] {
+        &self.visible
+    }
+    fn selected(&self) -> usize {
+        self.selected
+    }
+    fn set_selected(&mut self, idx: usize) {
+        self.selected = idx;
+    }
 
     fn rebuild_visible(&mut self) {
         self.visible.clear();
@@ -846,7 +872,7 @@ fn render_tree(
 ) -> Result<()> {
     terminal.draw(|f| {
         let chunks = Layout::vertical([
-            Constraint::Length(1),  // Title
+            Constraint::Length(1), // Title
             Constraint::Min(3),    // Tree
             Constraint::Length(2), // Help
         ])
@@ -863,9 +889,7 @@ fn render_tree(
                 ),
                 Span::styled(
                     format!("| {} ", msg),
-                    Style::default()
-                        .fg(Color::Red)
-                        .add_modifier(Modifier::BOLD),
+                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD),
                 ),
             ])
         } else {
@@ -989,7 +1013,12 @@ fn strip_subagent_prefix(desc: &str) -> String {
     s.trim().to_string()
 }
 
-fn render_node_line(state: &TreeState, node_idx: usize, _vi: usize, width: usize) -> ListItem<'static> {
+fn render_node_line(
+    state: &TreeState,
+    node_idx: usize,
+    _vi: usize,
+    width: usize,
+) -> ListItem<'static> {
     let node = &state.arena[node_idx];
     let depth = node.depth;
 
@@ -1204,7 +1233,11 @@ pub fn run_tree(session: Session) -> Result<()> {
                 // Clear status message on any key press
                 state.status_message = None;
                 // Handle Ctrl-k before plain k (cancel vs move up)
-                if key.code == KeyCode::Char('k') && key.modifiers.contains(crossterm::event::KeyModifiers::CONTROL) {
+                if key.code == KeyCode::Char('k')
+                    && key
+                        .modifiers
+                        .contains(crossterm::event::KeyModifiers::CONTROL)
+                {
                     state.cancel_selected();
                 } else {
                     match key.code {

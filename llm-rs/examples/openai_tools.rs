@@ -8,7 +8,7 @@ use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use llm_rs::llm::{ChatOptions, LLMEvent, LLMMessage, OpenAI, StopReason, LLM};
+use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, OpenAI, StopReason};
 use llm_rs::tool;
 use llm_rs::tool::{CancellationToken, Tool, ToolContext};
 use tokio_stream::StreamExt;
@@ -24,10 +24,7 @@ fn get_weather(
     /// The city name to get weather for
     city: String,
 ) -> impl tokio_stream::Stream<Item = Result<String, String>> {
-    let result = format!(
-        "Weather in {}: 22°C, partly cloudy, humidity 65%",
-        city
-    );
+    let result = format!("Weather in {}: 22°C, partly cloudy, humidity 65%", city);
     tokio_stream::once(Ok(result))
 }
 
@@ -101,7 +98,10 @@ async fn main() {
                         let result = if let Some(tool) = tools.get(&tool_call.name) {
                             let ctx = ToolContext {
                                 cancel_token: CancellationToken::new(),
-                                permission: llm_rs::permission::ScopedPermissionManager::always_allow(&tool_call.name),
+                                permission:
+                                    llm_rs::permission::ScopedPermissionManager::always_allow(
+                                        &tool_call.name,
+                                    ),
                             };
                             let mut result_stream = tool.execute(ctx, tool_call.arguments.clone());
                             let mut result = String::new();

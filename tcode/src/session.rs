@@ -96,12 +96,14 @@ impl Session {
 
     /// Path for a per-tool-call JSONL file (written by server, read by tool-call display)
     pub fn tool_call_file(&self, tool_call_id: &str) -> PathBuf {
-        self.session_dir.join(format!("tool-call-{}.jsonl", tool_call_id))
+        self.session_dir
+            .join(format!("tool-call-{}.jsonl", tool_call_id))
     }
 
     /// Path for a per-tool-call status file (written by server, read by tool-call display)
     pub fn tool_call_status_file(&self, tool_call_id: &str) -> PathBuf {
-        self.session_dir.join(format!("tool-call-{}-status.txt", tool_call_id))
+        self.session_dir
+            .join(format!("tool-call-{}-status.txt", tool_call_id))
     }
 
     /// Path for the conversation state file (persisted LLM conversation)
@@ -124,4 +126,3 @@ impl Session {
         self.session_dir.join("stderr.log")
     }
 }
-

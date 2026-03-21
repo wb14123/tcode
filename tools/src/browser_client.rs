@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use browser_server::{
     ErrorResponse, HealthResponse, SearchResult, WebFetchRequest, WebFetchResponse,
     WebSearchRequest, WebSearchResponse,
@@ -124,8 +124,9 @@ impl BrowserClient {
                 // Connection failed — try restarting the server if configured, then retry once
                 if let Some(ref config) = self.restart_config {
                     self.restart_server(config).await;
-                    build_request().send().await
-                        .map_err(|e| anyhow!("browser-server unreachable after restart attempt: {e}"))?
+                    build_request().send().await.map_err(|e| {
+                        anyhow!("browser-server unreachable after restart attempt: {e}")
+                    })?
                 } else {
                     return Err(first_err.into());
                 }
@@ -136,15 +137,12 @@ impl BrowserClient {
         if status.is_success() {
             Ok(response.json().await?)
         } else {
-            let error: ErrorResponse = response
-                .json()
-                .await
-                .unwrap_or_else(|_| ErrorResponse {
-                    error: browser_server::ErrorDetail {
-                        message: format!("HTTP {status}"),
-                        error_type: "http_error".to_string(),
-                    },
-                });
+            let error: ErrorResponse = response.json().await.unwrap_or_else(|_| ErrorResponse {
+                error: browser_server::ErrorDetail {
+                    message: format!("HTTP {status}"),
+                    error_type: "http_error".to_string(),
+                },
+            });
             Err(anyhow!("{}", error.error.message))
         }
     }
@@ -195,15 +193,20 @@ impl BrowserClient {
         {
             Ok(f) => std::process::Stdio::from(f),
             Err(e) => {
-                tracing::warn!("Failed to open browser-server log {}: {e}", log_path.display());
+                tracing::warn!(
+                    "Failed to open browser-server log {}: {e}",
+                    log_path.display()
+                );
                 std::process::Stdio::null()
             }
         };
 
         match std::process::Command::new(&config.server_exe)
             .args([
-                "--socket", &config.socket_path.to_string_lossy(),
-                "--idle-timeout", "300",
+                "--socket",
+                &config.socket_path.to_string_lossy(),
+                "--idle-timeout",
+                "300",
             ])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())

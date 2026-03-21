@@ -1,11 +1,11 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use axum::Json;
 use axum::extract::Request;
 use axum::http::StatusCode;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
 use crate::{ErrorDetail, ErrorResponse};
 
@@ -28,10 +28,7 @@ impl TokenSet {
 }
 
 /// Axum middleware that validates bearer tokens for TCP mode.
-pub async fn bearer_auth(
-    request: Request,
-    next: Next,
-) -> Response {
+pub async fn bearer_auth(request: Request, next: Next) -> Response {
     let token_set = request.extensions().get::<Arc<TokenSet>>();
     let token_set = match token_set {
         Some(ts) => ts.clone(),

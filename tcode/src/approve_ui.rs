@@ -79,8 +79,17 @@ fn send_and_expect_ack(socket_path: &PathBuf, msg: &ClientMessage) -> Result<()>
     }
 }
 
-fn send_resolve(socket_path: &PathBuf, key: PermissionKey, decision: PermissionDecision, request_id: Option<String>) -> Result<()> {
-    let msg = ClientMessage::ResolvePermission { key, decision, request_id };
+fn send_resolve(
+    socket_path: &PathBuf,
+    key: PermissionKey,
+    decision: PermissionDecision,
+    request_id: Option<String>,
+) -> Result<()> {
+    let msg = ClientMessage::ResolvePermission {
+        key,
+        decision,
+        request_id,
+    };
     send_and_expect_ack(socket_path, &msg)
 }
 
@@ -108,9 +117,10 @@ pub fn run_approve(args: ApproveArgs) -> Result<ApproveResult> {
 }
 
 fn render_title<'a>(text: &'a str, color: Color) -> Paragraph<'a> {
-    Paragraph::new(Line::from(vec![
-        Span::styled(text, Style::default().fg(color)),
-    ]))
+    Paragraph::new(Line::from(vec![Span::styled(
+        text,
+        Style::default().fg(color),
+    )]))
     .alignment(Alignment::Center)
     .block(Block::default().borders(Borders::BOTTOM))
 }
@@ -192,20 +202,21 @@ fn run_approve_loop(
 
                 let preview_row: u16 = if has_preview { 1 } else { 0 };
                 let chunks = Layout::vertical([
-                    Constraint::Length(3),             // [0] Title
-                    Constraint::Length(hint_up),        // [1] Scroll-up hint (0 when not needed)
-                    Constraint::Min(1),                // [2] Prompt content
-                    Constraint::Length(hint_down),      // [3] Scroll-down hint (0 when not needed)
-                    Constraint::Length(1),              // [4] Blank
-                    Constraint::Length(2),              // [5] Allow once
-                    Constraint::Length(preview_row),    // [6] View in nvim (0 when no preview)
-                    Constraint::Length(1),              // [7] Blank
-                    Constraint::Length(2),              // [8] Separator + key:value
-                    Constraint::Length(1),              // [9] Blank
-                    Constraint::Length(3),              // [10] Session/Project options
-                    Constraint::Length(1),              // [11] Blank
-                    Constraint::Length(2),              // [12] Deny/Cancel
-                ]).split(area);
+                    Constraint::Length(3),           // [0] Title
+                    Constraint::Length(hint_up),     // [1] Scroll-up hint (0 when not needed)
+                    Constraint::Min(1),              // [2] Prompt content
+                    Constraint::Length(hint_down),   // [3] Scroll-down hint (0 when not needed)
+                    Constraint::Length(1),           // [4] Blank
+                    Constraint::Length(2),           // [5] Allow once
+                    Constraint::Length(preview_row), // [6] View in nvim (0 when no preview)
+                    Constraint::Length(1),           // [7] Blank
+                    Constraint::Length(2),           // [8] Separator + key:value
+                    Constraint::Length(1),           // [9] Blank
+                    Constraint::Length(3),           // [10] Session/Project options
+                    Constraint::Length(1),           // [11] Blank
+                    Constraint::Length(2),           // [12] Deny/Cancel
+                ])
+                .split(area);
 
                 frame.render_widget(render_title("Permission Request", Color::Yellow), chunks[0]);
 
@@ -227,8 +238,7 @@ fn run_approve_loop(
                 }
 
                 // Render prompt content with scroll
-                let prompt_text = Paragraph::new(broken_lines.clone())
-                    .scroll((scroll_offset, 0));
+                let prompt_text = Paragraph::new(broken_lines.clone()).scroll((scroll_offset, 0));
                 frame.render_widget(prompt_text, chunks[2]);
 
                 // Render scroll-down hint (area is 0-height when not needed)
@@ -240,21 +250,26 @@ fn run_approve_loop(
                     frame.render_widget(hint, chunks[3]);
                 }
 
-                let allow_once = Paragraph::new(vec![
-                    Line::from(Span::styled("  [1] Allow once", Style::default().fg(Color::Green))),
-                ]);
+                let allow_once = Paragraph::new(vec![Line::from(Span::styled(
+                    "  [1] Allow once",
+                    Style::default().fg(Color::Green),
+                ))]);
                 frame.render_widget(allow_once, chunks[5]);
 
                 // Render [v] View in nvim (area is 0-height when no preview)
                 if has_preview {
-                    let view_nvim = Paragraph::new(vec![
-                        Line::from(Span::styled("  [v] View in nvim", Style::default().fg(Color::Magenta))),
-                    ]);
+                    let view_nvim = Paragraph::new(vec![Line::from(Span::styled(
+                        "  [v] View in nvim",
+                        Style::default().fg(Color::Magenta),
+                    ))]);
                     frame.render_widget(view_nvim, chunks[6]);
                 }
 
                 let separator = Paragraph::new(vec![
-                    Line::from(Span::styled("  -- Or allow all matching requests --", Style::default().fg(Color::DarkGray))),
+                    Line::from(Span::styled(
+                        "  -- Or allow all matching requests --",
+                        Style::default().fg(Color::DarkGray),
+                    )),
                     Line::from(vec![
                         Span::raw("  "),
                         Span::styled(&args.key, Style::default().fg(Color::DarkGray)),
@@ -265,14 +280,23 @@ fn run_approve_loop(
                 frame.render_widget(separator, chunks[8]);
 
                 let session_project = Paragraph::new(vec![
-                    Line::from(Span::styled("  [2] Allow for session", Style::default().fg(Color::Cyan))),
-                    Line::from(Span::styled("  [3] Allow for project", Style::default().fg(Color::Blue))),
+                    Line::from(Span::styled(
+                        "  [2] Allow for session",
+                        Style::default().fg(Color::Cyan),
+                    )),
+                    Line::from(Span::styled(
+                        "  [3] Allow for project",
+                        Style::default().fg(Color::Blue),
+                    )),
                 ]);
                 frame.render_widget(session_project, chunks[10]);
 
                 let deny_cancel = Paragraph::new(vec![
                     Line::from(Span::styled("  [4] Deny", Style::default().fg(Color::Red))),
-                    Line::from(Span::styled("  [q] Cancel", Style::default().fg(Color::DarkGray))),
+                    Line::from(Span::styled(
+                        "  [q] Cancel",
+                        Style::default().fg(Color::DarkGray),
+                    )),
                 ]);
                 frame.render_widget(deny_cancel, chunks[12]);
             } else {
@@ -282,18 +306,31 @@ fn run_approve_loop(
                     Constraint::Length(2), // Details
                     Constraint::Length(1), // Blank
                     Constraint::Length(5), // Options
-                    Constraint::Min(0),   // Spacer
-                ]).split(area);
+                    Constraint::Min(0),    // Spacer
+                ])
+                .split(area);
 
                 frame.render_widget(render_title("Permission Request", Color::Yellow), chunks[0]);
                 frame.render_widget(render_details(args), chunks[1]);
 
                 let options = Paragraph::new(vec![
-                    Line::from(Span::styled("  [1] Allow once", Style::default().fg(Color::Green))),
-                    Line::from(Span::styled("  [2] Allow for session", Style::default().fg(Color::Cyan))),
-                    Line::from(Span::styled("  [3] Allow for project", Style::default().fg(Color::Blue))),
+                    Line::from(Span::styled(
+                        "  [1] Allow once",
+                        Style::default().fg(Color::Green),
+                    )),
+                    Line::from(Span::styled(
+                        "  [2] Allow for session",
+                        Style::default().fg(Color::Cyan),
+                    )),
+                    Line::from(Span::styled(
+                        "  [3] Allow for project",
+                        Style::default().fg(Color::Blue),
+                    )),
                     Line::from(Span::styled("  [4] Deny", Style::default().fg(Color::Red))),
-                    Line::from(Span::styled("  [q] Cancel", Style::default().fg(Color::DarkGray))),
+                    Line::from(Span::styled(
+                        "  [q] Cancel",
+                        Style::default().fg(Color::DarkGray),
+                    )),
                 ]);
                 frame.render_widget(options, chunks[3]);
             }
@@ -355,15 +392,22 @@ fn run_manage_loop(
                 Constraint::Length(2), // Details
                 Constraint::Length(1), // Blank
                 Constraint::Length(2), // Options
-                Constraint::Min(0),   // Spacer
-            ]).split(area);
+                Constraint::Min(0),    // Spacer
+            ])
+            .split(area);
 
             frame.render_widget(render_title("Manage Permission", Color::Cyan), chunks[0]);
             frame.render_widget(render_details(args), chunks[1]);
 
             let options = Paragraph::new(vec![
-                Line::from(Span::styled("  [r] Revoke", Style::default().fg(Color::Red))),
-                Line::from(Span::styled("  [q] Cancel", Style::default().fg(Color::DarkGray))),
+                Line::from(Span::styled(
+                    "  [r] Revoke",
+                    Style::default().fg(Color::Red),
+                )),
+                Line::from(Span::styled(
+                    "  [q] Cancel",
+                    Style::default().fg(Color::DarkGray),
+                )),
             ]);
             frame.render_widget(options, chunks[3]);
         })?;

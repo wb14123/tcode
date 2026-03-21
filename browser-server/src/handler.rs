@@ -1,5 +1,5 @@
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::extract::State;
@@ -51,11 +51,10 @@ async fn handle_web_search(
 ) -> Result<Json<WebSearchResponse>, AppError> {
     state.touch();
     let query = req.query;
-    let results = tokio::task::spawn_blocking(move || {
-        crate::web_search::search_and_extract(&query)
-    })
-    .await
-    .map_err(|e| AppError(e.into()))??;
+    let results =
+        tokio::task::spawn_blocking(move || crate::web_search::search_and_extract(&query))
+            .await
+            .map_err(|e| AppError(e.into()))??;
 
     state.touch();
     Ok(Json(WebSearchResponse { results }))
@@ -70,11 +69,10 @@ async fn handle_web_fetch(
     let max_length = req.max_length.unwrap_or(20_000) as usize;
     let skip_chars = req.skip_chars.unwrap_or(0) as usize;
 
-    let full_content = tokio::task::spawn_blocking(move || {
-        crate::web_fetch::fetch_and_extract(&url)
-    })
-    .await
-    .map_err(|e| AppError(e.into()))??;
+    let full_content =
+        tokio::task::spawn_blocking(move || crate::web_fetch::fetch_and_extract(&url))
+            .await
+            .map_err(|e| AppError(e.into()))??;
 
     let total_length = full_content.len() as u32;
 
@@ -104,9 +102,7 @@ async fn handle_web_fetch(
     }))
 }
 
-async fn handle_health(
-    State(state): State<Arc<AppState>>,
-) -> Json<HealthResponse> {
+async fn handle_health(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
     state.touch();
     Json(HealthResponse {
         status: "ok".to_string(),

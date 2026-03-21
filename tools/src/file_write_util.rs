@@ -2,7 +2,7 @@ use std::io::Write;
 use std::path::Path;
 use std::time::SystemTime;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use fs2::FileExt;
 
 /// Record the modification time of a file before an approval flow.
@@ -31,7 +31,8 @@ pub fn locked_write(path: &Path, content: &[u8], pre_mtime: Option<SystemTime>) 
         .map_err(|e| anyhow!("Failed to lock {}: {}", path.display(), e))?;
 
     // Check existence and mtime after acquiring the lock to avoid TOCTOU races.
-    let metadata = file.metadata()
+    let metadata = file
+        .metadata()
         .map_err(|e| anyhow!("Failed to read metadata for {}: {}", path.display(), e))?;
     let current_mtime = metadata.modified().ok();
     let existed = metadata.len() > 0 || pre_mtime.is_some();
@@ -54,7 +55,8 @@ pub fn locked_write(path: &Path, content: &[u8], pre_mtime: Option<SystemTime>) 
     // Truncate and write
     file.set_len(0)
         .map_err(|e| anyhow!("Failed to truncate {}: {}", path.display(), e))?;
-    (&file).write_all(content)
+    (&file)
+        .write_all(content)
         .map_err(|e| anyhow!("Failed to write {}: {}", path.display(), e))?;
 
     // Lock released on drop

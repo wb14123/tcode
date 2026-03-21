@@ -24,10 +24,7 @@ fn get_weather(
     /// The city name to get weather for
     city: String,
 ) -> impl tokio_stream::Stream<Item = Result<String, String>> {
-    let result = format!(
-        "Weather in {}: 22°C, partly cloudy, humidity 65%",
-        city
-    );
+    let result = format!("Weather in {}: 22°C, partly cloudy, humidity 65%", city);
     tokio_stream::once(Ok(result))
 }
 
@@ -57,9 +54,8 @@ async fn main() -> anyhow::Result<()> {
     ];
 
     // Create conversation manager and start a conversation
-    let manager = ConversationManager::new(
-        std::env::temp_dir().join("llm-rs-example-permissions.json"),
-    );
+    let manager =
+        ConversationManager::new(std::env::temp_dir().join("llm-rs-example-permissions.json"));
     let llm = Box::new(OpenRouter::new(&api_key));
 
     let (_, client) = manager.new_conversation(
@@ -72,8 +68,8 @@ async fn main() -> anyhow::Result<()> {
         },
         false,
         20,
-        0, // subagent_depth (root)
-        3, // max_subagent_depth
+        0,    // subagent_depth (root)
+        3,    // max_subagent_depth
         None, // state_dir (no persistence for this example)
     )?;
 
@@ -182,11 +178,31 @@ fn print_message(msg: &Message) {
         Message::SubAgentStart { description, .. } => {
             println!("\n    [SubAgent started: {}]", description);
         }
-        Message::SubAgentEnd { response, input_tokens, output_tokens, .. } => {
-            println!("    [SubAgent ended: {} chars, {} in / {} out tokens]", response.len(), input_tokens, output_tokens);
+        Message::SubAgentEnd {
+            response,
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            println!(
+                "    [SubAgent ended: {} chars, {} in / {} out tokens]",
+                response.len(),
+                input_tokens,
+                output_tokens
+            );
         }
-        Message::SubAgentTurnEnd { response, input_tokens, output_tokens, .. } => {
-            println!("    [SubAgent turn ended: {} chars, {} in / {} out tokens]", response.len(), input_tokens, output_tokens);
+        Message::SubAgentTurnEnd {
+            response,
+            input_tokens,
+            output_tokens,
+            ..
+        } => {
+            println!(
+                "    [SubAgent turn ended: {} chars, {} in / {} out tokens]",
+                response.len(),
+                input_tokens,
+                output_tokens
+            );
         }
         Message::SubAgentContinue { description, .. } => {
             println!("    [SubAgent continued: {}]", description);
@@ -203,7 +219,9 @@ fn print_message(msg: &Message) {
         Message::SystemMessage { message, .. } => {
             println!("    [System: {}]", message);
         }
-        Message::UserRequestEnd { conversation_id, .. } => {
+        Message::UserRequestEnd {
+            conversation_id, ..
+        } => {
             println!("    [UserRequestEnd: {}]", conversation_id);
         }
         Message::ToolCallResolved { tool_call_id, .. } => {
@@ -218,13 +236,19 @@ fn print_message(msg: &Message) {
         Message::ToolPermissionApproved { tool_call_id, .. } => {
             println!("    [ToolPermissionApproved: {}]", tool_call_id);
         }
-        Message::SubAgentWaitingPermission { conversation_id, .. } => {
+        Message::SubAgentWaitingPermission {
+            conversation_id, ..
+        } => {
             println!("    [SubAgentWaitingPermission: {}]", conversation_id);
         }
-        Message::SubAgentPermissionApproved { conversation_id, .. } => {
+        Message::SubAgentPermissionApproved {
+            conversation_id, ..
+        } => {
             println!("    [SubAgentPermissionApproved: {}]", conversation_id);
         }
-        Message::SubAgentPermissionDenied { conversation_id, .. } => {
+        Message::SubAgentPermissionDenied {
+            conversation_id, ..
+        } => {
             println!("    [SubAgentPermissionDenied: {}]", conversation_id);
         }
     }

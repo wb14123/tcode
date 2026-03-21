@@ -1,9 +1,9 @@
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
 
-use anyhow::{anyhow, Result};
-use ignore::overrides::OverrideBuilder;
+use anyhow::{Result, anyhow};
 use ignore::WalkBuilder;
+use ignore::overrides::OverrideBuilder;
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 
@@ -11,14 +11,13 @@ const MAX_RESULTS: usize = 100;
 
 /// Perform the directory walk and collect matching files.
 /// This is all synchronous I/O, intended to run inside `spawn_blocking`.
-fn walk_glob(
-    search_dir: &Path,
-    pattern: &str,
-) -> Result<Vec<(PathBuf, SystemTime)>> {
+fn walk_glob(search_dir: &Path, pattern: &str) -> Result<Vec<(PathBuf, SystemTime)>> {
     let mut overrides = OverrideBuilder::new(search_dir);
-    overrides.add(pattern)
+    overrides
+        .add(pattern)
         .map_err(|e| anyhow!("Invalid glob pattern '{}': {}", pattern, e))?;
-    let overrides = overrides.build()
+    let overrides = overrides
+        .build()
         .map_err(|e| anyhow!("Failed to build glob matcher: {}", e))?;
 
     let walker = WalkBuilder::new(search_dir)
@@ -47,7 +46,11 @@ fn walk_glob(
                 }
             },
             Err(e) => {
-                tracing::warn!("failed to get metadata for {}: {}", entry.path().display(), e);
+                tracing::warn!(
+                    "failed to get metadata for {}: {}",
+                    entry.path().display(),
+                    e
+                );
                 SystemTime::UNIX_EPOCH
             }
         };

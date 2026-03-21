@@ -17,7 +17,7 @@ use std::path::PathBuf;
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use bytes::Bytes;
 use clap::{Parser, Subcommand, ValueEnum};
 use futures::{SinkExt, StreamExt};
@@ -82,17 +82,21 @@ pub(crate) async fn terminate_child(child: &mut Child) -> Result<()> {
 
 use display::DisplayClient;
 use edit::EditClient;
-use llm_rs::llm::{ChatOptions, Claude, OpenAI, OpenRouter, ReasoningEffort, LLM};
+use llm_rs::llm::{ChatOptions, Claude, LLM, OpenAI, OpenRouter, ReasoningEffort};
 use server::Server;
 use session::Session;
 use tool_call_display::ToolCallDisplayClient;
 
 /// Get API key from CLI or environment variable
 fn get_api_key(cli: &Cli, provider: Provider) -> Result<String> {
-    cli.api_key.clone()
+    cli.api_key
+        .clone()
         .or_else(|| std::env::var(provider.env_var_name()).ok())
         .ok_or_else(|| {
-            anyhow!("API key required. Set {} env or use --api-key", provider.env_var_name())
+            anyhow!(
+                "API key required. Set {} env or use --api-key",
+                provider.env_var_name()
+            )
         })
 }
 
@@ -107,8 +111,14 @@ fn build_chat_options(_cli: &Cli) -> ChatOptions {
 /// Create an LLM instance from CLI options
 fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String)> {
     let provider = cli.provider;
-    let model = cli.model.clone().unwrap_or_else(|| provider.default_model().to_string());
-    let base_url = cli.base_url.clone().unwrap_or_else(|| provider.default_base_url().to_string());
+    let model = cli
+        .model
+        .clone()
+        .unwrap_or_else(|| provider.default_model().to_string());
+    let base_url = cli
+        .base_url
+        .clone()
+        .unwrap_or_else(|| provider.default_base_url().to_string());
 
     let llm: Box<dyn LLM> = match provider {
         Provider::Claude => {
@@ -354,7 +364,11 @@ async fn main() -> Result<()> {
         Some(Commands::Serve) => {
             let session_id = require_session(cli.session.clone())?;
             init_tracing(&session_id);
-            init_browser_client(cli.browser_server_url.clone(), cli.browser_server_token.clone()).await?;
+            init_browser_client(
+                cli.browser_server_url.clone(),
+                cli.browser_server_token.clone(),
+            )
+            .await?;
             let (llm, model) = create_llm(&cli)?;
             let chat_options = build_chat_options(&cli);
             let session = Session::new(session_id)?;
@@ -411,25 +425,36 @@ async fn main() -> Result<()> {
                 None => return Ok(()),
             };
             if !is_in_tmux() {
-                anyhow::bail!("tcode attach must be run inside tmux.\nRun `tcode serve` to start the server without tmux.");
+                anyhow::bail!(
+                    "tcode attach must be run inside tmux.\nRun `tcode serve` to start the server without tmux."
+                );
             }
             let session = Session::new(session_id.clone())?;
             if !session.conversation_state_file().exists() {
-                anyhow::bail!("No conversation state found for session '{}'. Nothing to resume.", session_id);
+                anyhow::bail!(
+                    "No conversation state found for session '{}'. Nothing to resume.",
+                    session_id
+                );
             }
             let (llm, model) = create_llm(&cli)?;
             let chat_options = build_chat_options(&cli);
             run_unified_with_session(
-                session, session_id,
-                llm, model, chat_options,
-                cli.subagent_max_iterations, cli.max_subagent_depth,
-                cli.browser_server_url, cli.browser_server_token,
+                session,
+                session_id,
+                llm,
+                model,
+                chat_options,
+                cli.subagent_max_iterations,
+                cli.max_subagent_depth,
+                cli.browser_server_url,
+                cli.browser_server_token,
                 "Attaching to session",
-            ).await
+            )
+            .await
         }
         Some(Commands::Sessions) => {
-            use std::os::unix::net::UnixStream;
             use llm_rs::conversation::SessionMeta;
+            use std::os::unix::net::UnixStream;
             let sessions = session::list_sessions()?;
             if sessions.is_empty() {
                 println!("No sessions in ~/.tcode/sessions/");
@@ -483,10 +508,7 @@ async fn main() -> Result<()> {
                 "{} --session={} tool-call {}",
                 exe_str, session_id, tool_call_id
             );
-            let tmux_cmd = format!(
-                "tmux new-window -n \"tool-detail\" \"{}\"",
-                inner_cmd
-            );
+            let tmux_cmd = format!("tmux new-window -n \"tool-detail\" \"{}\"", inner_cmd);
             run_shell_cmd(&tmux_cmd, "Failed to open tool-call detail window")
         }
         Some(Commands::OpenSubagent { conversation_id }) => {
@@ -516,7 +538,15 @@ async fn main() -> Result<()> {
             let session = Session::new(session_id)?;
             permission_ui::run_permission_ui(session)
         }
-        Some(Commands::Approve { tool, key, value, manage, prompt, request_id, preview_file_path }) => {
+        Some(Commands::Approve {
+            tool,
+            key,
+            value,
+            manage,
+            prompt,
+            request_id,
+            preview_file_path,
+        }) => {
             let session_id = require_session(cli.session)?;
             let session = Session::new(root_session_id(&session_id))?;
             let args = approve_ui::ApproveArgs {
@@ -573,7 +603,9 @@ async fn run_browser() -> Result<()> {
 
 async fn run_unified(cli: Cli, _lua_path: PathBuf) -> Result<()> {
     if !is_in_tmux() {
-        anyhow::bail!("tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux.");
+        anyhow::bail!(
+            "tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux."
+        );
     }
 
     let session_id = session::generate_session_id();
@@ -582,12 +614,18 @@ async fn run_unified(cli: Cli, _lua_path: PathBuf) -> Result<()> {
     let chat_options = build_chat_options(&cli);
 
     run_unified_with_session(
-        session, session_id,
-        llm, model, chat_options,
-        cli.subagent_max_iterations, cli.max_subagent_depth,
-        cli.browser_server_url, cli.browser_server_token,
+        session,
+        session_id,
+        llm,
+        model,
+        chat_options,
+        cli.subagent_max_iterations,
+        cli.max_subagent_depth,
+        cli.browser_server_url,
+        cli.browser_server_token,
         "Session",
-    ).await
+    )
+    .await
 }
 
 /// Shared entry point for unified mode: redirects stdio, initializes tracing,
@@ -604,10 +642,8 @@ async fn run_unified_with_session(
     browser_server_token: Option<String>,
     label: &str,
 ) -> Result<()> {
-    let original_stdout = tty_stdio::redirect_output_to_files(
-        &session.stdout_log(),
-        &session.stderr_log(),
-    );
+    let original_stdout =
+        tty_stdio::redirect_output_to_files(&session.stdout_log(), &session.stderr_log());
     tty_stdio::write_to_terminal(original_stdout, &format!("{}: {}\n", label, session_id));
 
     init_tracing(&session_id);
@@ -617,7 +653,8 @@ async fn run_unified_with_session(
 
     let socket_path = session.socket_path();
 
-    let exe_path = std::env::current_exe().context("Failed to determine current executable path")?;
+    let exe_path =
+        std::env::current_exe().context("Failed to determine current executable path")?;
     let exe_str = exe_path.to_string_lossy();
     let session_arg = format!("--session={}", session_id);
 
@@ -659,9 +696,16 @@ async fn run_unified_with_session(
     let tree_pane_id = if !current_pane_id.is_empty() {
         Command::new("tmux")
             .args([
-                "split-window", "-h", "-d", "-p", "30",
-                "-t", &current_pane_id,
-                "-P", "-F", "#{pane_id}",
+                "split-window",
+                "-h",
+                "-d",
+                "-p",
+                "30",
+                "-t",
+                &current_pane_id,
+                "-P",
+                "-F",
+                "#{pane_id}",
                 &tree_cmd,
             ])
             .output()
@@ -674,7 +718,16 @@ async fn run_unified_with_session(
     // 2. Split left column: edit below display (30% height)
     let edit_cmd = format!("{} {} edit", exe_str, session_arg);
     let output = Command::new("tmux")
-        .args(["split-window", "-v", "-p", "30", "-P", "-F", "#{pane_id}", &edit_cmd])
+        .args([
+            "split-window",
+            "-v",
+            "-p",
+            "30",
+            "-P",
+            "-F",
+            "#{pane_id}",
+            &edit_cmd,
+        ])
         .output()
         .context("Failed to run 'tmux' - is tmux installed and in PATH?");
 
@@ -696,9 +749,16 @@ async fn run_unified_with_session(
     let perm_pane_id = if let Some(ref tree_pane) = tree_pane_id {
         Command::new("tmux")
             .args([
-                "split-window", "-v", "-d", "-p", "50",
-                "-t", tree_pane,
-                "-P", "-F", "#{pane_id}",
+                "split-window",
+                "-v",
+                "-d",
+                "-p",
+                "50",
+                "-t",
+                tree_pane,
+                "-P",
+                "-F",
+                "#{pane_id}",
                 &perm_cmd,
             ])
             .output()
@@ -714,8 +774,8 @@ async fn run_unified_with_session(
         .output();
 
     let display_cmd = format!("{} {} display", exe_str, session_arg);
-    let (stdin, stdout, stderr) = tty_stdio::get_original_stdio()
-        .context("Failed to get original stdio fds")?;
+    let (stdin, stdout, stderr) =
+        tty_stdio::get_original_stdio().context("Failed to get original stdio fds")?;
 
     let mut display_child = Command::new("sh")
         .args(["-c", &display_cmd])
@@ -805,8 +865,8 @@ async fn init_browser_client(
 
     // Create client with auto-restart: if the browser-server exits after idle timeout,
     // the client will automatically respawn it on the next request.
-    let client = BrowserClient::unix(socket_path.clone())
-        .with_auto_restart(socket_path, browser_server_exe);
+    let client =
+        BrowserClient::unix(socket_path.clone()).with_auto_restart(socket_path, browser_server_exe);
 
     // Eagerly start the server (or reuse an existing one) so the first request is fast.
     client.ensure_server_running().await;

@@ -10,8 +10,7 @@ mod tests {
     use crate::file_permission::check_file_read_permission;
 
     fn test_root() -> std::path::PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../target/test-tmp/file_permission")
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/file_permission")
     }
 
     fn temp_path() -> std::path::PathBuf {
@@ -68,12 +67,16 @@ mod tests {
         let canonical_base_str = canonical_base.to_string_lossy().to_string();
 
         let key = make_key("file_read", "path", &canonical_base_str);
-        pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
+        pm.resolve(&key, &PermissionDecision::AllowSession, None)
+            .unwrap();
 
         let scoped = make_scoped(Arc::clone(&pm));
 
         let result = check_file_read_permission(&scoped, &sub, true).await;
-        assert!(result.is_ok(), "child directory should be covered by parent approval");
+        assert!(
+            result.is_ok(),
+            "child directory should be covered by parent approval"
+        );
         assert!(pm.snapshot().pending.is_empty());
 
         let _ = std::fs::remove_dir_all(&base);
@@ -102,16 +105,25 @@ mod tests {
         let canonical_dir_str = canonical_dir.to_string_lossy().to_string();
 
         let key = make_key("file_read", "path", &canonical_dir_str);
-        pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
+        pm.resolve(&key, &PermissionDecision::AllowSession, None)
+            .unwrap();
 
         let read_scoped = ScopedPermissionManager::new(
-            "read", Arc::clone(&pm), Arc::new(|| {}), Arc::new(|| {}), None,
+            "read",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+            None,
         );
         let result = check_file_read_permission(&read_scoped, &dir, true).await;
         assert!(result.is_ok(), "read tool should see file_read approval");
 
         let glob_scoped = ScopedPermissionManager::new(
-            "glob", Arc::clone(&pm), Arc::new(|| {}), Arc::new(|| {}), None,
+            "glob",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+            None,
         );
         let result = check_file_read_permission(&glob_scoped, &dir, true).await;
         assert!(result.is_ok(), "glob tool should see file_read approval");

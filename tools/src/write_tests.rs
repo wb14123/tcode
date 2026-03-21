@@ -11,7 +11,10 @@ mod tests {
 
     fn test_dir() -> std::path::PathBuf {
         let cwd = std::env::current_dir().unwrap();
-        let dir = cwd.join("target").join("test-tmp").join("write")
+        let dir = cwd
+            .join("target")
+            .join("test-tmp")
+            .join("write")
             .join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&dir).unwrap();
         dir
@@ -32,10 +35,10 @@ mod tests {
             key: "path".to_string(),
             value: canonical_dir.to_string_lossy().to_string(),
         };
-        pm.resolve(&key, &PermissionDecision::AllowSession, None).unwrap();
-        let scoped = ScopedPermissionManager::new(
-            "write", pm, Arc::new(|| {}), Arc::new(|| {}), None,
-        );
+        pm.resolve(&key, &PermissionDecision::AllowSession, None)
+            .unwrap();
+        let scoped =
+            ScopedPermissionManager::new("write", pm, Arc::new(|| {}), Arc::new(|| {}), None);
         ToolContext {
             cancel_token: CancellationToken::new(),
             permission: scoped,
@@ -67,7 +70,11 @@ mod tests {
         let result = collect_stream(Box::pin(stream)).await;
         assert!(result.is_ok(), "write should succeed: {:?}", result);
         let msg = result.unwrap();
-        assert!(msg.contains("created new"), "message should say 'created new': {}", msg);
+        assert!(
+            msg.contains("created new"),
+            "message should say 'created new': {}",
+            msg
+        );
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "hello world\n");
@@ -90,7 +97,11 @@ mod tests {
         let result = collect_stream(Box::pin(stream)).await;
         assert!(result.is_ok(), "write should succeed: {:?}", result);
         let msg = result.unwrap();
-        assert!(msg.contains("overwrote existing"), "message should say 'overwrote existing': {}", msg);
+        assert!(
+            msg.contains("overwrote existing"),
+            "message should say 'overwrote existing': {}",
+            msg
+        );
 
         let content = std::fs::read_to_string(&file_path).unwrap();
         assert_eq!(content, "new content\n");
@@ -104,21 +115,25 @@ mod tests {
             cancel_token: CancellationToken::new(),
             permission: ScopedPermissionManager::always_allow("write"),
         };
-        let stream = crate::write::write(
-            ctx,
-            "relative/path.txt".to_string(),
-            "content".to_string(),
-        );
+        let stream =
+            crate::write::write(ctx, "relative/path.txt".to_string(), "content".to_string());
         let result = collect_stream(Box::pin(stream)).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("absolute path"), "error should mention absolute path: {}", err);
+        assert!(
+            err.contains("absolute path"),
+            "error should mention absolute path: {}",
+            err
+        );
     }
 
     #[tokio::test]
     async fn rejects_nonexistent_parent() {
         let cwd = std::env::current_dir().unwrap();
-        let dir = cwd.join("target").join("test-tmp").join("write")
+        let dir = cwd
+            .join("target")
+            .join("test-tmp")
+            .join("write")
             .join(uuid::Uuid::new_v4().to_string());
         // Do NOT create the directory
         let file_path = dir.join("no_parent").join("file.txt");
@@ -135,6 +150,10 @@ mod tests {
         let result = collect_stream(Box::pin(stream)).await;
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
-        assert!(err.contains("Parent directory does not exist"), "error should mention parent: {}", err);
+        assert!(
+            err.contains("Parent directory does not exist"),
+            "error should mention parent: {}",
+            err
+        );
     }
 }

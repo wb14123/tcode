@@ -1,9 +1,9 @@
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
-use crate::ErrorResponse;
 use crate::ErrorDetail;
+use crate::ErrorResponse;
 
 /// Application error type that converts to an Axum response.
 pub struct AppError(pub anyhow::Error);

@@ -1,7 +1,7 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 
-use crate::browser;
 use crate::SearchResult;
+use crate::browser;
 
 const EXTRACT_SEARCH_RESULTS_JS: &str = include_str!("extract-search-results.js");
 

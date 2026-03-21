@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 
@@ -54,7 +54,12 @@ fn apply_truncation(content: &str, max_length: usize, skip_chars: usize) -> (Str
 }
 
 /// Format the web_fetch result with metadata header.
-fn format_result(content: &str, total_length: u32, is_truncated: bool, skip_chars: usize) -> String {
+fn format_result(
+    content: &str,
+    total_length: u32,
+    is_truncated: bool,
+    skip_chars: usize,
+) -> String {
     if is_truncated {
         let start = skip_chars;
         let end = start + content.chars().count();

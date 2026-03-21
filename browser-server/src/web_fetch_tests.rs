@@ -1,4 +1,4 @@
-use crate::web_fetch::{format_ax_tree, validate_url, AXNode, AXProperty, AXValue};
+use crate::web_fetch::{AXNode, AXProperty, AXValue, format_ax_tree, validate_url};
 
 /// Helper to build an AXNode with common defaults.
 fn make_node(
@@ -95,7 +95,10 @@ fn heading_with_level() {
         make_node("2", "StaticText", "Welcome", Some("1"), vec![]),
     ];
     let result = format_ax_tree(&nodes);
-    assert!(result.contains("heading \"Welcome\" level: 1"), "got: {result}");
+    assert!(
+        result.contains("heading \"Welcome\" level: 1"),
+        "got: {result}"
+    );
 }
 
 #[test]
@@ -112,7 +115,10 @@ fn link_with_url() {
         make_node("2", "StaticText", "Home", Some("1"), vec![]),
     ];
     let result = format_ax_tree(&nodes);
-    assert!(result.contains("link \"Home\" url: https://example.com/"), "got: {result}");
+    assert!(
+        result.contains("link \"Home\" url: https://example.com/"),
+        "got: {result}"
+    );
 }
 
 #[test]
@@ -163,7 +169,10 @@ fn nested_structure() {
     let result = format_ax_tree(&nodes);
     assert!(result.contains("navigation \"Main Nav\""), "got: {result}");
     assert!(result.contains("  link \"Home\" url: /"), "got: {result}");
-    assert!(result.contains("  link \"About\" url: /about"), "got: {result}");
+    assert!(
+        result.contains("  link \"About\" url: /about"),
+        "got: {result}"
+    );
 }
 
 #[test]
@@ -209,7 +218,10 @@ fn paragraph_with_mixed_content() {
     let result = format_ax_tree(&nodes);
     assert!(result.contains("paragraph"), "got: {result}");
     assert!(result.contains("  Read the "), "got: {result}");
-    assert!(result.contains("  link \"documentation\" url: /docs"), "got: {result}");
+    assert!(
+        result.contains("  link \"documentation\" url: /docs"),
+        "got: {result}"
+    );
 }
 
 #[test]
@@ -221,7 +233,10 @@ fn unknown_property_tolerated() {
         "text",
         None,
         vec![],
-        vec![make_prop("uninteresting", "true"), make_prop("url", "http://x")],
+        vec![
+            make_prop("uninteresting", "true"),
+            make_prop("url", "http://x"),
+        ],
     )];
     let result = format_ax_tree(&nodes);
     assert!(result.contains("url: http://x"), "got: {result}");
@@ -278,47 +293,71 @@ fn validate_url_blocks_localhost_with_port() {
 #[test]
 fn validate_url_blocks_127_0_0_1() {
     let err = validate_url("http://127.0.0.1").unwrap_err();
-    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+    assert!(
+        err.to_string().contains("Blocked private/internal IP"),
+        "{err}"
+    );
 }
 
 #[test]
 fn validate_url_blocks_ipv6_loopback() {
     let err = validate_url("http://[::1]").unwrap_err();
-    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+    assert!(
+        err.to_string().contains("Blocked private/internal IP"),
+        "{err}"
+    );
 }
 
 #[test]
 fn validate_url_blocks_link_local() {
     let err = validate_url("http://169.254.169.254").unwrap_err();
-    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+    assert!(
+        err.to_string().contains("Blocked private/internal IP"),
+        "{err}"
+    );
 }
 
 #[test]
 fn validate_url_blocks_10_network() {
     let err = validate_url("http://10.0.0.1").unwrap_err();
-    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+    assert!(
+        err.to_string().contains("Blocked private/internal IP"),
+        "{err}"
+    );
 }
 
 #[test]
 fn validate_url_blocks_192_168_network() {
     let err = validate_url("http://192.168.1.1").unwrap_err();
-    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+    assert!(
+        err.to_string().contains("Blocked private/internal IP"),
+        "{err}"
+    );
 }
 
 #[test]
 fn validate_url_blocks_172_16_network() {
     let err = validate_url("http://172.16.0.1").unwrap_err();
-    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+    assert!(
+        err.to_string().contains("Blocked private/internal IP"),
+        "{err}"
+    );
 }
 
 #[test]
 fn validate_url_blocks_unspecified() {
     let err = validate_url("http://0.0.0.0").unwrap_err();
-    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+    assert!(
+        err.to_string().contains("Blocked private/internal IP"),
+        "{err}"
+    );
 }
 
 #[test]
 fn validate_url_blocks_cgnat() {
     let err = validate_url("http://100.64.0.1").unwrap_err();
-    assert!(err.to_string().contains("Blocked private/internal IP"), "{err}");
+    assert!(
+        err.to_string().contains("Blocked private/internal IP"),
+        "{err}"
+    );
 }

@@ -1,5 +1,5 @@
-use std::env;
 use llm_rs::tool::{CancellationToken, ToolContext};
+use std::env;
 use tokio_stream::StreamExt;
 
 #[tokio::main]

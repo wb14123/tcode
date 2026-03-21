@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
@@ -124,11 +124,14 @@ impl PermissionManager {
         } else {
             let mut waiters = HashMap::new();
             waiters.insert(request_id.clone(), tx);
-            pending.insert(pk, PendingRequest {
-                prompt: prompt.to_string(),
-                waiters,
-                preview_file_path,
-            });
+            pending.insert(
+                pk,
+                PendingRequest {
+                    prompt: prompt.to_string(),
+                    waiters,
+                    preview_file_path,
+                },
+            );
         }
         (request_id, rx)
     }
@@ -139,7 +142,12 @@ impl PermissionManager {
     /// For `AllowOnce`, `request_id` must be provided to target a specific invocation.
     /// For `AllowSession`/`AllowProject`/`Deny`, all waiters are notified and
     /// `request_id` is ignored.
-    pub fn resolve(&self, key: &PermissionKey, decision: &PermissionDecision, request_id: Option<&str>) -> anyhow::Result<()> {
+    pub fn resolve(
+        &self,
+        key: &PermissionKey,
+        decision: &PermissionDecision,
+        request_id: Option<&str>,
+    ) -> anyhow::Result<()> {
         // Save to storage based on decision
         match decision {
             PermissionDecision::AllowSession => {
@@ -157,7 +165,9 @@ impl PermissionManager {
         if let Some(request) = pending.get_mut(key) {
             match (decision, request_id) {
                 (PermissionDecision::AllowOnce, None) => {
-                    anyhow::bail!("AllowOnce requires a request_id to target a specific invocation");
+                    anyhow::bail!(
+                        "AllowOnce requires a request_id to target a specific invocation"
+                    );
                 }
                 (PermissionDecision::AllowOnce, Some(rid)) => {
                     // AllowOnce: only approve the targeted waiter
@@ -211,9 +221,7 @@ impl PermissionManager {
             .iter()
             .map(|(k, r)| {
                 // Use the first waiter's request_id (arbitrary but stable for display)
-                let request_id = r.waiters.keys().next()
-                    .cloned()
-                    .unwrap_or_default();
+                let request_id = r.waiters.keys().next().cloned().unwrap_or_default();
                 PendingPermissionInfo {
                     tool: k.tool.clone(),
                     prompt: r.prompt.clone(),
@@ -225,10 +233,20 @@ impl PermissionManager {
             })
             .collect();
 
-        let session: Vec<PermissionKey> = self.session_permissions.lock().unwrap()
-            .iter().cloned().collect();
-        let project: Vec<PermissionKey> = self.project_permissions.lock().unwrap()
-            .iter().cloned().collect();
+        let session: Vec<PermissionKey> = self
+            .session_permissions
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
+        let project: Vec<PermissionKey> = self
+            .project_permissions
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
 
         PermissionState {
             pending: pending_infos,
@@ -248,8 +266,13 @@ impl PermissionManager {
     }
 
     fn save_project_permissions(&self) -> anyhow::Result<()> {
-        let perms: Vec<PermissionKey> = self.project_permissions.lock().unwrap()
-            .iter().cloned().collect();
+        let perms: Vec<PermissionKey> = self
+            .project_permissions
+            .lock()
+            .unwrap()
+            .iter()
+            .cloned()
+            .collect();
         let file = ProjectPermissionsFile {
             version: 1,
             permissions: perms,
@@ -334,7 +357,8 @@ impl ScopedPermissionManager {
     /// Check if the action is permitted. If no saved preference exists, registers
     /// a pending request, notifies the UI, and awaits the user's decision.
     pub async fn ask_permission(&self, prompt: &str, key: &str, value: &str) -> bool {
-        self.ask_permission_for(&self.tool_name.clone(), prompt, key, value).await
+        self.ask_permission_for(&self.tool_name.clone(), prompt, key, value)
+            .await
     }
 
     /// Check if a permission exists without prompting, using a custom scope
@@ -347,8 +371,15 @@ impl ScopedPermissionManager {
     /// Check if the action is permitted using a custom scope instead of this
     /// manager's tool name. If no saved preference exists, registers a pending
     /// request, notifies the UI, and awaits the user's decision.
-    pub async fn ask_permission_for(&self, scope: &str, prompt: &str, key: &str, value: &str) -> bool {
-        self.ask_permission_inner(scope, prompt, key, value, None).await
+    pub async fn ask_permission_for(
+        &self,
+        scope: &str,
+        prompt: &str,
+        key: &str,
+        value: &str,
+    ) -> bool {
+        self.ask_permission_inner(scope, prompt, key, value, None)
+            .await
     }
 
     /// Like `ask_permission_for`, but writes `content` to a preview file under
@@ -370,7 +401,8 @@ impl ScopedPermissionManager {
                 None
             }
         };
-        self.ask_permission_inner(scope, prompt, key, value, preview_path).await
+        self.ask_permission_inner(scope, prompt, key, value, preview_path)
+            .await
     }
 
     /// Core permission-request flow shared by `ask_permission_for` and
@@ -389,9 +421,9 @@ impl ScopedPermissionManager {
             return true;
         }
 
-        let (_request_id, rx) = self.manager.register_request(
-            scope, prompt, key, value, preview_file_path.clone(),
-        );
+        let (_request_id, rx) =
+            self.manager
+                .register_request(scope, prompt, key, value, preview_file_path.clone());
 
         // Notify UI that permission state changed (idempotent)
         (self.notify_fn)();
@@ -412,7 +444,9 @@ impl ScopedPermissionManager {
 
     /// Write content to a preview file under session_dir/tool-file-preview/.
     fn write_preview_file(&self, content: &str, extension: &str) -> anyhow::Result<PathBuf> {
-        let session_dir = self.session_dir.as_ref()
+        let session_dir = self
+            .session_dir
+            .as_ref()
             .ok_or_else(|| anyhow::anyhow!("No session_dir configured for preview files"))?;
         let preview_dir = session_dir.join("tool-file-preview");
         std::fs::create_dir_all(&preview_dir)?;

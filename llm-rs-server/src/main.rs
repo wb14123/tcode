@@ -1,14 +1,14 @@
 use std::sync::Arc;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use llm_rs::llm::{Claude, OpenAI, OpenRouter, LLM};
+use llm_rs::llm::{Claude, LLM, OpenAI, OpenRouter};
 use llm_rs_server::auth::{default_token_file, load_tokens};
 use llm_rs_server::claude_auth;
 use llm_rs_server::config::Provider;
-use llm_rs_server::handler::{create_router, AppState};
+use llm_rs_server::handler::{AppState, create_router};
 
 #[derive(Parser)]
 #[command(name = "llm-rs-server")]
@@ -63,9 +63,8 @@ fn create_llm(cli: &Cli) -> Result<Box<dyn LLM>> {
             }
         }
         Provider::OpenAi => {
-            let api_key = get_api_key(cli, provider).ok_or_else(|| {
-                anyhow!("API key required. Set OPENAI_API_KEY or use --api-key")
-            })?;
+            let api_key = get_api_key(cli, provider)
+                .ok_or_else(|| anyhow!("API key required. Set OPENAI_API_KEY or use --api-key"))?;
             Ok(Box::new(OpenAI::with_base_url(&api_key, &base_url)))
         }
         Provider::OpenRouter => {
@@ -101,10 +100,7 @@ async fn main() -> Result<()> {
 
     let llm = create_llm(&cli)?;
 
-    let state = Arc::new(AppState {
-        llm,
-        auth_tokens,
-    });
+    let state = Arc::new(AppState { llm, auth_tokens });
 
     let app = create_router(state);
     let listener = tokio::net::TcpListener::bind(&cli.bind).await?;

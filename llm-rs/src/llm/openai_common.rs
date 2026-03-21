@@ -61,7 +61,10 @@ pub(crate) fn build_tool_defs(tools: &[Arc<Tool>]) -> Option<Vec<ToolDefinition>
 
 /// Build a `ReasoningRequest` from `ChatOptions` for the OpenRouter/Chat Completions format.
 pub(crate) fn build_reasoning_request(options: &ChatOptions) -> Option<ReasoningRequest> {
-    if options.reasoning_effort.is_none() && options.reasoning_budget.is_none() && !options.exclude_reasoning {
+    if options.reasoning_effort.is_none()
+        && options.reasoning_budget.is_none()
+        && !options.exclude_reasoning
+    {
         return None;
     }
     Some(ReasoningRequest {

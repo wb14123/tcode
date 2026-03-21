@@ -14,20 +14,30 @@ pub struct DisplayClient {
 
 impl DisplayClient {
     pub fn new(session: Session, lua_path: PathBuf, session_id: String) -> Self {
-        Self { session, lua_path, session_id }
+        Self {
+            session,
+            lua_path,
+            session_id,
+        }
     }
 
     pub async fn run(&self) -> Result<()> {
         let display_file = self.session.display_file();
         let status_file = self.session.status_file();
-        let exe_path = std::env::current_exe()
-            .context("Failed to determine current executable path")?;
+        let exe_path =
+            std::env::current_exe().context("Failed to determine current executable path")?;
 
         // Save terminal settings before neovim takes over
         let saved_termios = nix::sys::termios::tcgetattr(std::io::stdin()).ok();
 
         // Spawn neovim
-        let mut nvim = spawn_nvim(&self.lua_path, &display_file, &status_file, &self.session_id, &exe_path)?;
+        let mut nvim = spawn_nvim(
+            &self.lua_path,
+            &display_file,
+            &status_file,
+            &self.session_id,
+            &exe_path,
+        )?;
         nvim.wait().await?;
 
         // Restore terminal settings as a safety net
@@ -40,7 +50,13 @@ impl DisplayClient {
     }
 }
 
-fn spawn_nvim(lua_path: &PathBuf, display_file: &PathBuf, status_file: &PathBuf, session_id: &str, exe_path: &PathBuf) -> Result<Child> {
+fn spawn_nvim(
+    lua_path: &PathBuf,
+    display_file: &PathBuf,
+    status_file: &PathBuf,
+    session_id: &str,
+    exe_path: &PathBuf,
+) -> Result<Child> {
     let lua_cmd = format!(
         "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}')",
         lua_path.display(),

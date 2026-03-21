@@ -8,7 +8,7 @@ use tower::ServiceExt;
 
 use llm_rs::llm::{LLMEvent, StopReason};
 
-use crate::handler::{create_router, AppState};
+use crate::handler::{AppState, create_router};
 use crate::test_helpers::MockLLM;
 
 fn mock_events() -> Vec<LLMEvent> {

@@ -9,7 +9,7 @@
 use std::env;
 use std::io::{self, Write};
 
-use llm_rs::llm::{ChatOptions, LLMEvent, LLMMessage, OpenRouter, ReasoningEffort, LLM};
+use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, OpenRouter, ReasoningEffort};
 use tokio_stream::StreamExt;
 
 #[tokio::main]
@@ -64,7 +64,10 @@ async fn main() {
                 io::stdout().flush().unwrap();
             }
             LLMEvent::ToolCall(tool_call) => {
-                println!("\n[Tool call: {} with args: {}]", tool_call.name, tool_call.arguments);
+                println!(
+                    "\n[Tool call: {} with args: {}]",
+                    tool_call.name, tool_call.arguments
+                );
             }
             LLMEvent::MessageEnd {
                 stop_reason,
@@ -83,7 +86,10 @@ async fn main() {
                 println!();
                 println!("--- Done ---");
                 println!("Stop reason: {:?}", stop_reason);
-                println!("Tokens: {} input, {} output ({} reasoning)", total_input, total_output, reasoning_tokens);
+                println!(
+                    "Tokens: {} input, {} output ({} reasoning)",
+                    total_input, total_output, reasoning_tokens
+                );
             }
             LLMEvent::Error(err) => {
                 eprintln!("\nError: {}", err);

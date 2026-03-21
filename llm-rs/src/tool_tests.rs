@@ -24,9 +24,14 @@ mod tests {
 
     #[test]
     fn test_tool_creation() {
-        let tool = Tool::new("test_tool", "A test tool", None, |_ctx: ToolContext, _params: TestParams| {
-            tokio_stream::empty::<Result<String, String>>()
-        });
+        let tool = Tool::new(
+            "test_tool",
+            "A test tool",
+            None,
+            |_ctx: ToolContext, _params: TestParams| {
+                tokio_stream::empty::<Result<String, String>>()
+            },
+        );
 
         assert_eq!(tool.name, "test_tool");
         assert_eq!(tool.description, "A test tool");
@@ -34,9 +39,14 @@ mod tests {
 
     #[test]
     fn test_tool_param_schema() {
-        let tool = Tool::new("test_tool", "A test tool", None, |_ctx: ToolContext, _params: TestParams| {
-            tokio_stream::empty::<Result<String, String>>()
-        });
+        let tool = Tool::new(
+            "test_tool",
+            "A test tool",
+            None,
+            |_ctx: ToolContext, _params: TestParams| {
+                tokio_stream::empty::<Result<String, String>>()
+            },
+        );
 
         assert_eq!(tool.name, "test_tool");
         assert_eq!(tool.description, "A test tool");
@@ -65,13 +75,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execute_json() {
-        let tool = Tool::new("greeter", "Greet someone", None, |_ctx: ToolContext, params: TestParams| {
-            let msg = params.message.clone();
-            let count = params.count.unwrap_or(1);
-            tokio_stream::iter((0..count).map(move |i| {
-                Ok::<_, String>(format!("{}. Hello, {}!", i + 1, msg))
-            }))
-        });
+        let tool = Tool::new(
+            "greeter",
+            "Greet someone",
+            None,
+            |_ctx: ToolContext, params: TestParams| {
+                let msg = params.message.clone();
+                let count = params.count.unwrap_or(1);
+                tokio_stream::iter(
+                    (0..count).map(move |i| Ok::<_, String>(format!("{}. Hello, {}!", i + 1, msg))),
+                )
+            },
+        );
 
         // Execute with JSON string
         let json_args = r#"{"message": "Rust", "count": 2}"#.to_string();
@@ -89,13 +104,18 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execute_with_default() {
-        let tool = Tool::new("greeter", "Greet someone", None, |_ctx: ToolContext, params: TestParams| {
-            let msg = params.message.clone();
-            let count = params.count.unwrap_or(1);
-            tokio_stream::iter((0..count).map(move |i| {
-                Ok::<_, String>(format!("{}. Hello, {}!", i + 1, msg))
-            }))
-        });
+        let tool = Tool::new(
+            "greeter",
+            "Greet someone",
+            None,
+            |_ctx: ToolContext, params: TestParams| {
+                let msg = params.message.clone();
+                let count = params.count.unwrap_or(1);
+                tokio_stream::iter(
+                    (0..count).map(move |i| Ok::<_, String>(format!("{}. Hello, {}!", i + 1, msg))),
+                )
+            },
+        );
 
         // Execute without optional field (uses default)
         let json_args = r#"{"message": "Default"}"#.to_string();
@@ -112,9 +132,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execute_invalid_json() {
-        let tool = Tool::new("greeter", "Greet someone", None, |_ctx: ToolContext, params: TestParams| {
-            tokio_stream::once(Ok::<_, String>(format!("Hello, {}!", params.message)))
-        });
+        let tool = Tool::new(
+            "greeter",
+            "Greet someone",
+            None,
+            |_ctx: ToolContext, params: TestParams| {
+                tokio_stream::once(Ok::<_, String>(format!("Hello, {}!", params.message)))
+            },
+        );
 
         // Execute with invalid JSON
         let json_args = r#"not valid json"#.to_string();
@@ -126,9 +151,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execute_missing_required_field() {
-        let tool = Tool::new("greeter", "Greet someone", None, |_ctx: ToolContext, params: TestParams| {
-            tokio_stream::once(Ok::<_, String>(format!("Hello, {}!", params.message)))
-        });
+        let tool = Tool::new(
+            "greeter",
+            "Greet someone",
+            None,
+            |_ctx: ToolContext, params: TestParams| {
+                tokio_stream::once(Ok::<_, String>(format!("Hello, {}!", params.message)))
+            },
+        );
 
         // Execute with missing required field
         let json_args = r#"{"count": 5}"#.to_string();
@@ -141,9 +171,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_tool_execute_error() {
-        let tool = Tool::new("fallible", "A fallible tool", None, |_ctx: ToolContext, _params: TestParams| {
-            tokio_stream::once(Err::<String, _>("something went wrong".to_string()))
-        });
+        let tool = Tool::new(
+            "fallible",
+            "A fallible tool",
+            None,
+            |_ctx: ToolContext, _params: TestParams| {
+                tokio_stream::once(Err::<String, _>("something went wrong".to_string()))
+            },
+        );
 
         let json_args = r#"{"message": "test"}"#.to_string();
         let mut stream = tool.execute(test_ctx(), json_args);
@@ -154,9 +189,12 @@ mod tests {
 
     #[test]
     fn test_tool_default_timeout() {
-        let tool = Tool::new("test", "A test tool", None, |_ctx: ToolContext, _: TestParams| {
-            tokio_stream::empty::<Result<String, String>>()
-        });
+        let tool = Tool::new(
+            "test",
+            "A test tool",
+            None,
+            |_ctx: ToolContext, _: TestParams| tokio_stream::empty::<Result<String, String>>(),
+        );
 
         assert_eq!(tool.timeout, None);
     }
@@ -235,7 +273,11 @@ mod tests {
         let mut stream = tool.execute(test_ctx(), json_args);
 
         let result = stream.next().await.unwrap();
-        assert!(result.contains("timed out"), "Expected timeout, got: {}", result);
+        assert!(
+            result.contains("timed out"),
+            "Expected timeout, got: {}",
+            result
+        );
     }
 
     #[tokio::test]
@@ -271,7 +313,11 @@ mod tests {
 
         // Should get cancellation message
         let cancelled = stream.next().await.unwrap();
-        assert!(cancelled.contains("cancelled"), "Expected cancelled, got: {}", cancelled);
+        assert!(
+            cancelled.contains("cancelled"),
+            "Expected cancelled, got: {}",
+            cancelled
+        );
 
         // Stream should end
         assert!(stream.next().await.is_none());
@@ -343,9 +389,9 @@ mod tests {
             limit: Option<u32>,
         ) -> impl tokio_stream::Stream<Item = Result<String, String>> {
             let limit = limit.unwrap_or(10);
-            tokio_stream::iter((0..limit).map(move |i| {
-                Ok(format!("Result {}: matched '{}'", i + 1, query))
-            }))
+            tokio_stream::iter(
+                (0..limit).map(move |i| Ok(format!("Result {}: matched '{}'", i + 1, query))),
+            )
         }
 
         #[test]
@@ -428,10 +474,7 @@ mod tests {
 
             assert_eq!(tool.name, "slow_operation");
             assert_eq!(tool.description, "A slow operation");
-            assert_eq!(
-                tool.timeout,
-                Some(std::time::Duration::from_millis(60000))
-            );
+            assert_eq!(tool.timeout, Some(std::time::Duration::from_millis(60000)));
         }
 
         /// Quick operation without timeout

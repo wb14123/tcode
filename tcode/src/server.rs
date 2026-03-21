@@ -5,12 +5,15 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use sha2::Digest;
 use bytes::Bytes;
 use futures::{SinkExt, Stream, StreamExt};
-use llm_rs::conversation::{ConversationManager, ConversationState, Message, MessageEndStatus, create_subagent_tool, create_continue_subagent_tool, format_subagent_result};
+use llm_rs::conversation::{
+    ConversationManager, ConversationState, Message, MessageEndStatus,
+    create_continue_subagent_tool, create_subagent_tool, format_subagent_result,
+};
 use llm_rs::llm::{ChatOptions, LLM};
 use llm_rs::tool::Tool;
+use sha2::Digest;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -86,8 +89,9 @@ impl Server {
     pub async fn run(self) -> Result<()> {
         // Clean up existing socket file
         if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path)
-                .with_context(|| format!("Failed to remove existing socket {:?}", self.socket_path))?;
+            std::fs::remove_file(&self.socket_path).with_context(|| {
+                format!("Failed to remove existing socket {:?}", self.socket_path)
+            })?;
         }
 
         let listener = UnixListener::bind(&self.socket_path)
@@ -101,9 +105,13 @@ impl Server {
         let mut hasher = sha2::Sha256::new();
         hasher.update(cwd_str.as_bytes());
         let hash = format!("{:x}", hasher.finalize());
-        let base = dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
-        let permissions_path = base.join(".tcode").join("projects").join(&hash).join("permissions.json");
+        let base =
+            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
+        let permissions_path = base
+            .join(".tcode")
+            .join("projects")
+            .join(&hash)
+            .join("permissions.json");
         let manager = ConversationManager::new(permissions_path);
 
         // Build tools list including subagent tools
@@ -120,13 +128,15 @@ impl Server {
         tools_list.push(Arc::new(create_subagent_tool(&model_infos)));
         tools_list.push(Arc::new(create_continue_subagent_tool()));
 
-
         let tool_clients: ToolClientMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
 
         let resuming = self.conversation_state_file.exists();
 
         let conversation_client = if resuming {
-            tracing::info!("Resuming conversation from {:?}", self.conversation_state_file);
+            tracing::info!(
+                "Resuming conversation from {:?}",
+                self.conversation_state_file
+            );
 
             // Load root conversation state
             let state_json = std::fs::read_to_string(&self.conversation_state_file)
@@ -148,7 +158,8 @@ impl Server {
             manager.permission_manager().close_all_pending();
 
             // Close stale "running" tool calls and subagents in display files
-            close_stale_running_items(&self.session_dir).await
+            close_stale_running_items(&self.session_dir)
+                .await
                 .with_context(|| "Failed to close stale running items on resume")?;
 
             // Spawn event writers for resumed subagents (appending to existing files)
@@ -163,16 +174,24 @@ impl Server {
                 let sa_tool_clients = Arc::clone(&tool_clients);
                 tokio::spawn(async move {
                     if let Err(e) = run_event_writer(
-                        sa_events, sa_display, sa_status, sa_dir_clone, Some(mgr_clone),
-                        sa_conv_client, sa_tool_clients,
-                    ).await {
+                        sa_events,
+                        sa_display,
+                        sa_status,
+                        sa_dir_clone,
+                        Some(mgr_clone),
+                        sa_conv_client,
+                        sa_tool_clients,
+                    )
+                    .await
+                    {
                         tracing::error!(error = %e, "Resumed subagent event writer failed");
                     }
                 });
             }
 
             // Do NOT truncate display.jsonl on resume; subscribe to new events only
-            tokio::fs::write(&self.status_file, "Ready").await
+            tokio::fs::write(&self.status_file, "Ready")
+                .await
                 .with_context(|| format!("Failed to write status file {:?}", self.status_file))?;
 
             let manager_clone = Arc::clone(&manager);
@@ -183,17 +202,28 @@ impl Server {
             let root_client = Arc::clone(&client);
             let tc_map = Arc::clone(&tool_clients);
             tokio::spawn(run_event_writer(
-                events, display_file, status_file, session_dir, Some(manager_clone),
-                root_client, tc_map,
+                events,
+                display_file,
+                status_file,
+                session_dir,
+                Some(manager_clone),
+                root_client,
+                tc_map,
             ));
 
             client
         } else {
             // New conversation path
-            tokio::fs::write(&self.display_file, "").await
-                .with_context(|| format!("Failed to initialize display file {:?}", self.display_file))?;
-            tokio::fs::write(&self.status_file, "Ready").await
-                .with_context(|| format!("Failed to initialize status file {:?}", self.status_file))?;
+            tokio::fs::write(&self.display_file, "")
+                .await
+                .with_context(|| {
+                    format!("Failed to initialize display file {:?}", self.display_file)
+                })?;
+            tokio::fs::write(&self.status_file, "Ready")
+                .await
+                .with_context(|| {
+                    format!("Failed to initialize status file {:?}", self.status_file)
+                })?;
 
             let (_, client) = manager.new_conversation(
                 self.llm,
@@ -215,8 +245,13 @@ impl Server {
             let root_client = Arc::clone(&client);
             let tc_map = Arc::clone(&tool_clients);
             tokio::spawn(run_event_writer(
-                events, display_file, status_file, session_dir, Some(manager_clone),
-                root_client, tc_map,
+                events,
+                display_file,
+                status_file,
+                session_dir,
+                Some(manager_clone),
+                root_client,
+                tc_map,
             ));
 
             client
@@ -246,8 +281,11 @@ impl Server {
         }
 
         // Signal display nvim to quit via status file
-        tokio::fs::write(&self.status_file, "Shutdown").await
-            .with_context(|| format!("Failed to write shutdown status to {:?}", self.status_file))?;
+        tokio::fs::write(&self.status_file, "Shutdown")
+            .await
+            .with_context(|| {
+                format!("Failed to write shutdown status to {:?}", self.status_file)
+            })?;
         std::fs::remove_file(&socket_path)
             .with_context(|| format!("Failed to remove socket {:?}", socket_path))?;
         Ok(())
@@ -258,7 +296,8 @@ impl Server {
 /// Used for both the main conversation (manager = Some) and subagent conversations (manager = None).
 /// When manager is Some, SubAgentStart events trigger creation of sub-session directories
 /// and spawning of nested event writers for each subagent.
-type EventStream = Pin<Box<dyn Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + Send>>;
+type EventStream =
+    Pin<Box<dyn Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + Send>>;
 
 fn run_event_writer(
     mut events: EventStream,
@@ -270,327 +309,406 @@ fn run_event_writer(
     tool_clients: ToolClientMap,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(async move {
-    let mut tool_calls: HashMap<String, ToolCallState> = HashMap::new();
-    let mut subagents: HashMap<String, SubAgentState> = HashMap::new();
-    let mut is_thinking = false;
+        let mut tool_calls: HashMap<String, ToolCallState> = HashMap::new();
+        let mut subagents: HashMap<String, SubAgentState> = HashMap::new();
+        let mut is_thinking = false;
 
-    tracing::info!("event_writer started");
+        tracing::info!("event_writer started");
 
-    while let Some(item) = events.next().await {
-        let event = match item {
-            Ok(event) => event,
-            Err(BroadcastStreamRecvError::Lagged(n)) => {
-                tracing::warn!(skipped = n, "broadcast lagged");
-                continue;
+        while let Some(item) = events.next().await {
+            let event = match item {
+                Ok(event) => event,
+                Err(BroadcastStreamRecvError::Lagged(n)) => {
+                    tracing::warn!(skipped = n, "broadcast lagged");
+                    continue;
+                }
+            };
+
+            // Status file updates for assistant messages
+            if matches!(&*event, Message::AssistantMessageStart { .. }) {
+                is_thinking = false;
+                tokio::fs::write(&status_file, "Streaming...")
+                    .await
+                    .context("Failed to write status file")?;
             }
-        };
+            if matches!(&*event, Message::AssistantThinkingChunk { .. }) && !is_thinking {
+                is_thinking = true;
+                tokio::fs::write(&status_file, "Thinking...")
+                    .await
+                    .context("Failed to write status file")?;
+            }
+            if matches!(&*event, Message::AssistantMessageChunk { .. }) && is_thinking {
+                is_thinking = false;
+                tokio::fs::write(&status_file, "Streaming...")
+                    .await
+                    .context("Failed to write status file")?;
+            }
+            if matches!(&*event, Message::AssistantMessageEnd { .. }) {
+                is_thinking = false;
+                tokio::fs::write(&status_file, "Ready")
+                    .await
+                    .context("Failed to write status file")?;
+            }
 
-        // Status file updates for assistant messages
-        if matches!(&*event, Message::AssistantMessageStart { .. }) {
-            is_thinking = false;
-            tokio::fs::write(&status_file, "Streaming...").await
-                .context("Failed to write status file")?;
-        }
-        if matches!(&*event, Message::AssistantThinkingChunk { .. }) && !is_thinking {
-            is_thinking = true;
-            tokio::fs::write(&status_file, "Thinking...").await
-                .context("Failed to write status file")?;
-        }
-        if matches!(&*event, Message::AssistantMessageChunk { .. }) && is_thinking {
-            is_thinking = false;
-            tokio::fs::write(&status_file, "Streaming...").await
-                .context("Failed to write status file")?;
-        }
-        if matches!(&*event, Message::AssistantMessageEnd { .. }) {
-            is_thinking = false;
-            tokio::fs::write(&status_file, "Ready").await
-                .context("Failed to write status file")?;
-        }
-
-        match &*event {
-            Message::ToolMessageStart { tool_call_id, tool_name, tool_args, .. } => {
-                tracing::info!(
+            match &*event {
+                Message::ToolMessageStart {
                     tool_call_id,
                     tool_name,
                     tool_args,
-                    "ToolMessageStart received"
-                );
-
-                // Create per-tool-call files
-                let tc_file = session_dir.join(format!("tool-call-{}.jsonl", tool_call_id));
-                let tc_status = session_dir.join(format!("tool-call-{}-status.txt", tool_call_id));
-                tokio::fs::write(&tc_file, "").await
-                    .context("Failed to create tool call file")?;
-                tokio::fs::write(&tc_status, "Running").await
-                    .context("Failed to create tool call status file")?;
-
-                // Write event to both main display and per-tool-call file
-                append_event(&display_file, &event).await
-                    .context("Failed to append display event")?;
-                append_event(&tc_file, &event).await
-                    .context("Failed to append tool call event")?;
-
-                tool_calls.insert(tool_call_id.clone(), ToolCallState {
-                    file_path: tc_file,
-                    status_file_path: tc_status,
-                    tool_name: tool_name.clone(),
-                    accumulated_preview: String::new(),
-                });
-                tool_clients.lock().unwrap().insert(tool_call_id.clone(), Arc::clone(&conv_client));
-            }
-
-            Message::ToolOutputChunk { tool_call_id, content, .. } => {
-                let tracked = tool_calls.contains_key(tool_call_id.as_str());
-                tracing::debug!(
-                    tool_call_id,
-                    tracked,
-                    content_len = content.len(),
-                    "ToolOutputChunk received"
-                );
-                if let Some(state) = tool_calls.get_mut(tool_call_id) {
-                    // Write to per-tool-call file only (NOT main display)
-                    append_event(&state.file_path, &event).await
-                        .context("Failed to append tool call chunk")?;
-
-                    // Accumulate first N chars for preview
-                    if state.accumulated_preview.len() < PREVIEW_MAX_CHARS {
-                        let remaining = PREVIEW_MAX_CHARS - state.accumulated_preview.len();
-                        let chunk: String = content.chars().take(remaining).collect();
-                        state.accumulated_preview.push_str(&chunk);
-                    }
-                } else {
-                    tracing::warn!(
+                    ..
+                } => {
+                    tracing::info!(
                         tool_call_id,
-                        "ToolOutputChunk for untracked tool call — dropped"
+                        tool_name,
+                        tool_args,
+                        "ToolMessageStart received"
                     );
-                }
-            }
 
-            Message::ToolMessageEnd { tool_call_id, end_status, .. } => {
-                tracing::info!(
+                    // Create per-tool-call files
+                    let tc_file = session_dir.join(format!("tool-call-{}.jsonl", tool_call_id));
+                    let tc_status =
+                        session_dir.join(format!("tool-call-{}-status.txt", tool_call_id));
+                    tokio::fs::write(&tc_file, "")
+                        .await
+                        .context("Failed to create tool call file")?;
+                    tokio::fs::write(&tc_status, "Running")
+                        .await
+                        .context("Failed to create tool call status file")?;
+
+                    // Write event to both main display and per-tool-call file
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append display event")?;
+                    append_event(&tc_file, &event)
+                        .await
+                        .context("Failed to append tool call event")?;
+
+                    tool_calls.insert(
+                        tool_call_id.clone(),
+                        ToolCallState {
+                            file_path: tc_file,
+                            status_file_path: tc_status,
+                            tool_name: tool_name.clone(),
+                            accumulated_preview: String::new(),
+                        },
+                    );
+                    tool_clients
+                        .lock()
+                        .unwrap()
+                        .insert(tool_call_id.clone(), Arc::clone(&conv_client));
+                }
+
+                Message::ToolOutputChunk {
                     tool_call_id,
-                    ?end_status,
-                    "ToolMessageEnd received"
-                );
-                tool_clients.lock().unwrap().remove(tool_call_id.as_str());
-                if let Some(state) = tool_calls.remove(tool_call_id) {
-                    // Write truncated preview to main display as a single ToolOutputChunk
-                    if !state.accumulated_preview.is_empty() {
-                        let mut preview = state.accumulated_preview;
-                        if preview.len() >= PREVIEW_MAX_CHARS {
-                            preview.push_str("...");
+                    content,
+                    ..
+                } => {
+                    let tracked = tool_calls.contains_key(tool_call_id.as_str());
+                    tracing::debug!(
+                        tool_call_id,
+                        tracked,
+                        content_len = content.len(),
+                        "ToolOutputChunk received"
+                    );
+                    if let Some(state) = tool_calls.get_mut(tool_call_id) {
+                        // Write to per-tool-call file only (NOT main display)
+                        append_event(&state.file_path, &event)
+                            .await
+                            .context("Failed to append tool call chunk")?;
+
+                        // Accumulate first N chars for preview
+                        if state.accumulated_preview.len() < PREVIEW_MAX_CHARS {
+                            let remaining = PREVIEW_MAX_CHARS - state.accumulated_preview.len();
+                            let chunk: String = content.chars().take(remaining).collect();
+                            state.accumulated_preview.push_str(&chunk);
                         }
-                        let preview_event = Message::ToolOutputChunk {
-                            msg_id: 0,
-                            tool_call_id: tool_call_id.clone(),
-                            tool_name: state.tool_name,
-                            content: Arc::new(preview),
+                    } else {
+                        tracing::warn!(
+                            tool_call_id,
+                            "ToolOutputChunk for untracked tool call — dropped"
+                        );
+                    }
+                }
+
+                Message::ToolMessageEnd {
+                    tool_call_id,
+                    end_status,
+                    ..
+                } => {
+                    tracing::info!(tool_call_id, ?end_status, "ToolMessageEnd received");
+                    tool_clients.lock().unwrap().remove(tool_call_id.as_str());
+                    if let Some(state) = tool_calls.remove(tool_call_id) {
+                        // Write truncated preview to main display as a single ToolOutputChunk
+                        if !state.accumulated_preview.is_empty() {
+                            let mut preview = state.accumulated_preview;
+                            if preview.len() >= PREVIEW_MAX_CHARS {
+                                preview.push_str("...");
+                            }
+                            let preview_event = Message::ToolOutputChunk {
+                                msg_id: 0,
+                                tool_call_id: tool_call_id.clone(),
+                                tool_name: state.tool_name,
+                                content: Arc::new(preview),
+                            };
+                            append_event(&display_file, &preview_event)
+                                .await
+                                .context("Failed to append tool call preview")?;
+                        }
+
+                        // Write ToolMessageEnd to both files
+                        append_event(&display_file, &event)
+                            .await
+                            .context("Failed to append display event")?;
+                        append_event(&state.file_path, &event)
+                            .await
+                            .context("Failed to append tool call end")?;
+
+                        // Mark the tool call with final status
+                        let status_text = match end_status {
+                            MessageEndStatus::Succeeded => "Done",
+                            MessageEndStatus::Failed => "Failed",
+                            MessageEndStatus::Cancelled => "Cancelled",
+                            MessageEndStatus::UserDenied => "Denied",
+                            MessageEndStatus::Timeout => "Timeout",
                         };
-                        append_event(&display_file, &preview_event).await
-                            .context("Failed to append tool call preview")?;
+                        tokio::fs::write(&state.status_file_path, status_text)
+                            .await
+                            .context("Failed to write tool call status")?;
+                        tracing::debug!(tool_call_id, status_text, "wrote status to status file");
+                    } else {
+                        tracing::warn!(
+                            tool_call_id,
+                            "ToolMessageEnd for untracked tool call — fallback to main display"
+                        );
+                        // Fallback: write to main display if we missed the start
+                        append_event(&display_file, &event)
+                            .await
+                            .context("Failed to append display event")?;
                     }
+                }
 
-                    // Write ToolMessageEnd to both files
-                    append_event(&display_file, &event).await
-                        .context("Failed to append display event")?;
-                    append_event(&state.file_path, &event).await
-                        .context("Failed to append tool call end")?;
+                Message::SubAgentStart {
+                    conversation_id,
+                    description,
+                    ..
+                } => {
+                    tracing::info!(conversation_id, description, "SubAgentStart received");
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append subagent start to display")?;
 
-                    // Mark the tool call with final status
-                    let status_text = match end_status {
-                        MessageEndStatus::Succeeded => "Done",
-                        MessageEndStatus::Failed => "Failed",
-                        MessageEndStatus::Cancelled => "Cancelled",
-                        MessageEndStatus::UserDenied => "Denied",
-                        MessageEndStatus::Timeout => "Timeout",
-                    };
-                    tokio::fs::write(&state.status_file_path, status_text).await
-                        .context("Failed to write tool call status")?;
-                    tracing::debug!(tool_call_id, status_text, "wrote status to status file");
-                } else {
-                    tracing::warn!(
-                        tool_call_id,
-                        "ToolMessageEnd for untracked tool call — fallback to main display"
+                    // When we have a manager, create a sub-session and spawn a nested event writer
+                    if let Some(ref mgr) = manager {
+                        let sa_dir = session_dir.join(format!("subagent-{}", conversation_id));
+                        tokio::fs::create_dir_all(&sa_dir)
+                            .await
+                            .context("Failed to create subagent directory")?;
+
+                        let sa_display = sa_dir.join("display.jsonl");
+                        let sa_status = sa_dir.join("status.txt");
+                        tokio::fs::write(&sa_display, "")
+                            .await
+                            .context("Failed to initialize subagent display file")?;
+                        tokio::fs::write(&sa_status, "Running")
+                            .await
+                            .context("Failed to initialize subagent status file")?;
+
+                        match mgr.get_conversation(conversation_id) {
+                            Ok(Some(sa_client)) => {
+                                let sa_events = Box::pin(sa_client.subscribe());
+                                let sa_status_clone = sa_status.clone();
+                                let sa_mgr = Arc::clone(mgr);
+                                let sa_tool_clients = Arc::clone(&tool_clients);
+                                let sa_conv_client = Arc::clone(&sa_client);
+                                let handle = tokio::spawn(async move {
+                                    if let Err(e) = run_event_writer(
+                                        sa_events,
+                                        sa_display,
+                                        sa_status_clone,
+                                        sa_dir,
+                                        Some(sa_mgr),
+                                        sa_conv_client,
+                                        sa_tool_clients,
+                                    )
+                                    .await
+                                    {
+                                        tracing::error!(error = %e, "Subagent event writer failed");
+                                    }
+                                });
+                                subagents.insert(
+                                    conversation_id.clone(),
+                                    SubAgentState {
+                                        status_file_path: sa_status,
+                                        task_handle: handle,
+                                    },
+                                );
+                            }
+                            Ok(None) => {
+                                tracing::warn!(
+                                    conversation_id,
+                                    "Subagent conversation not found in manager"
+                                );
+                            }
+                            Err(e) => {
+                                tracing::error!(conversation_id, error = %e, "Failed to get subagent conversation");
+                            }
+                        }
+                    }
+                }
+
+                Message::SubAgentEnd {
+                    conversation_id,
+                    end_status,
+                    input_tokens,
+                    output_tokens,
+                    response,
+                    ..
+                } => {
+                    tracing::info!(
+                        conversation_id,
+                        ?end_status,
+                        response_len = response.len(),
+                        input_tokens,
+                        output_tokens,
+                        "SubAgentEnd received"
                     );
-                    // Fallback: write to main display if we missed the start
-                    append_event(&display_file, &event).await
+
+                    // Clean up subagent event writer
+                    if let Some(state) = subagents.remove(conversation_id) {
+                        tokio::fs::write(&state.status_file_path, "Done")
+                            .await
+                            .context("Failed to write subagent done status")?;
+                        state.task_handle.abort();
+                    }
+
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append subagent end to display")?;
+                }
+
+                Message::SubAgentTurnEnd {
+                    conversation_id,
+                    end_status,
+                    input_tokens,
+                    output_tokens,
+                    response,
+                    ..
+                } => {
+                    tracing::info!(
+                        conversation_id,
+                        ?end_status,
+                        response_len = response.len(),
+                        input_tokens,
+                        output_tokens,
+                        "SubAgentTurnEnd received"
+                    );
+
+                    // Write status — do NOT abort the event writer or remove from subagents
+                    if let Some(state) = subagents.get(conversation_id) {
+                        let status_str = match end_status {
+                            MessageEndStatus::Cancelled => "Cancelled",
+                            _ => "Idle",
+                        };
+                        tokio::fs::write(&state.status_file_path, status_str)
+                            .await
+                            .context("Failed to write subagent status")?;
+                    }
+
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append subagent turn end to display")?;
+                }
+
+                Message::SubAgentContinue {
+                    conversation_id,
+                    description,
+                    ..
+                } => {
+                    tracing::info!(conversation_id, description, "SubAgentContinue received");
+
+                    // Write "Running" status — subagent dir and event writer already exist
+                    if let Some(state) = subagents.get(conversation_id) {
+                        tokio::fs::write(&state.status_file_path, "Running")
+                            .await
+                            .context("Failed to write subagent running status")?;
+                    }
+
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append subagent continue to display")?;
+                }
+
+                Message::ToolRequestPermission { tool_call_id, .. } => {
+                    if let Some(state) = tool_calls.get(tool_call_id) {
+                        tokio::fs::write(&state.status_file_path, "Permission")
+                            .await
+                            .context("Failed to write tool call permission status")?;
+                    }
+                    append_event(&display_file, &event)
+                        .await
                         .context("Failed to append display event")?;
                 }
-            }
 
-            Message::SubAgentStart { conversation_id, description, .. } => {
-                tracing::info!(
-                    conversation_id,
-                    description,
-                    "SubAgentStart received"
-                );
-                append_event(&display_file, &event).await
-                    .context("Failed to append subagent start to display")?;
-
-                // When we have a manager, create a sub-session and spawn a nested event writer
-                if let Some(ref mgr) = manager {
-                    let sa_dir = session_dir.join(format!("subagent-{}", conversation_id));
-                    tokio::fs::create_dir_all(&sa_dir).await
-                        .context("Failed to create subagent directory")?;
-
-                    let sa_display = sa_dir.join("display.jsonl");
-                    let sa_status = sa_dir.join("status.txt");
-                    tokio::fs::write(&sa_display, "").await
-                        .context("Failed to initialize subagent display file")?;
-                    tokio::fs::write(&sa_status, "Running").await
-                        .context("Failed to initialize subagent status file")?;
-
-                    match mgr.get_conversation(conversation_id) {
-                        Ok(Some(sa_client)) => {
-                            let sa_events = Box::pin(sa_client.subscribe());
-                            let sa_status_clone = sa_status.clone();
-                            let sa_mgr = Arc::clone(mgr);
-                            let sa_tool_clients = Arc::clone(&tool_clients);
-                            let sa_conv_client = Arc::clone(&sa_client);
-                            let handle = tokio::spawn(async move {
-                                if let Err(e) = run_event_writer(
-                                    sa_events,
-                                    sa_display,
-                                    sa_status_clone,
-                                    sa_dir,
-                                    Some(sa_mgr),
-                                    sa_conv_client,
-                                    sa_tool_clients,
-                                ).await {
-                                    tracing::error!(error = %e, "Subagent event writer failed");
-                                }
-                            });
-                            subagents.insert(conversation_id.clone(), SubAgentState {
-                                status_file_path: sa_status,
-                                task_handle: handle,
-                            });
-                        }
-                        Ok(None) => {
-                            tracing::warn!(conversation_id, "Subagent conversation not found in manager");
-                        }
-                        Err(e) => {
-                            tracing::error!(conversation_id, error = %e, "Failed to get subagent conversation");
-                        }
+                Message::ToolPermissionApproved { tool_call_id, .. } => {
+                    if let Some(state) = tool_calls.get(tool_call_id) {
+                        tokio::fs::write(&state.status_file_path, "Running")
+                            .await
+                            .context("Failed to write tool call running status after approval")?;
                     }
-                }
-            }
-
-            Message::SubAgentEnd { conversation_id, end_status, input_tokens, output_tokens, response, .. } => {
-                tracing::info!(
-                    conversation_id,
-                    ?end_status,
-                    response_len = response.len(),
-                    input_tokens,
-                    output_tokens,
-                    "SubAgentEnd received"
-                );
-
-                // Clean up subagent event writer
-                if let Some(state) = subagents.remove(conversation_id) {
-                    tokio::fs::write(&state.status_file_path, "Done").await
-                        .context("Failed to write subagent done status")?;
-                    state.task_handle.abort();
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append display event")?;
                 }
 
-                append_event(&display_file, &event).await
-                    .context("Failed to append subagent end to display")?;
-            }
-
-            Message::SubAgentTurnEnd { conversation_id, end_status, input_tokens, output_tokens, response, .. } => {
-                tracing::info!(
-                    conversation_id,
-                    ?end_status,
-                    response_len = response.len(),
-                    input_tokens,
-                    output_tokens,
-                    "SubAgentTurnEnd received"
-                );
-
-                // Write status — do NOT abort the event writer or remove from subagents
-                if let Some(state) = subagents.get(conversation_id) {
-                    let status_str = match end_status {
-                        MessageEndStatus::Cancelled => "Cancelled",
-                        _ => "Idle",
-                    };
-                    tokio::fs::write(&state.status_file_path, status_str).await
-                        .context("Failed to write subagent status")?;
+                Message::SubAgentWaitingPermission {
+                    conversation_id, ..
+                } => {
+                    if let Some(state) = subagents.get(conversation_id) {
+                        tokio::fs::write(&state.status_file_path, "Permission")
+                            .await
+                            .context("Failed to write subagent permission status")?;
+                    }
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append subagent waiting permission to display")?;
                 }
 
-                append_event(&display_file, &event).await
-                    .context("Failed to append subagent turn end to display")?;
-            }
-
-            Message::SubAgentContinue { conversation_id, description, .. } => {
-                tracing::info!(
-                    conversation_id,
-                    description,
-                    "SubAgentContinue received"
-                );
-
-                // Write "Running" status — subagent dir and event writer already exist
-                if let Some(state) = subagents.get(conversation_id) {
-                    tokio::fs::write(&state.status_file_path, "Running").await
-                        .context("Failed to write subagent running status")?;
+                Message::SubAgentPermissionApproved {
+                    conversation_id, ..
+                } => {
+                    if let Some(state) = subagents.get(conversation_id) {
+                        tokio::fs::write(&state.status_file_path, "Running")
+                            .await
+                            .context("Failed to write subagent running status after approval")?;
+                    }
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append subagent permission approved to display")?;
                 }
 
-                append_event(&display_file, &event).await
-                    .context("Failed to append subagent continue to display")?;
-            }
-
-            Message::ToolRequestPermission { tool_call_id, .. } => {
-                if let Some(state) = tool_calls.get(tool_call_id) {
-                    tokio::fs::write(&state.status_file_path, "Permission").await
-                        .context("Failed to write tool call permission status")?;
+                Message::SubAgentPermissionDenied {
+                    conversation_id, ..
+                } => {
+                    if let Some(state) = subagents.get(conversation_id) {
+                        tokio::fs::write(&state.status_file_path, "Denied")
+                            .await
+                            .context("Failed to write subagent denied status")?;
+                    }
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append subagent permission denied to display")?;
                 }
-                append_event(&display_file, &event).await
-                    .context("Failed to append display event")?;
-            }
 
-            Message::ToolPermissionApproved { tool_call_id, .. } => {
-                if let Some(state) = tool_calls.get(tool_call_id) {
-                    tokio::fs::write(&state.status_file_path, "Running").await
-                        .context("Failed to write tool call running status after approval")?;
+                _ => {
+                    // All other events: write to main display only
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append display event")?;
                 }
-                append_event(&display_file, &event).await
-                    .context("Failed to append display event")?;
-            }
-
-            Message::SubAgentWaitingPermission { conversation_id, .. } => {
-                if let Some(state) = subagents.get(conversation_id) {
-                    tokio::fs::write(&state.status_file_path, "Permission").await
-                        .context("Failed to write subagent permission status")?;
-                }
-                append_event(&display_file, &event).await
-                    .context("Failed to append subagent waiting permission to display")?;
-            }
-
-            Message::SubAgentPermissionApproved { conversation_id, .. } => {
-                if let Some(state) = subagents.get(conversation_id) {
-                    tokio::fs::write(&state.status_file_path, "Running").await
-                        .context("Failed to write subagent running status after approval")?;
-                }
-                append_event(&display_file, &event).await
-                    .context("Failed to append subagent permission approved to display")?;
-            }
-
-            Message::SubAgentPermissionDenied { conversation_id, .. } => {
-                if let Some(state) = subagents.get(conversation_id) {
-                    tokio::fs::write(&state.status_file_path, "Denied").await
-                        .context("Failed to write subagent denied status")?;
-                }
-                append_event(&display_file, &event).await
-                    .context("Failed to append subagent permission denied to display")?;
-            }
-
-            _ => {
-                // All other events: write to main display only
-                append_event(&display_file, &event).await
-                    .context("Failed to append display event")?;
             }
         }
-    }
-    tracing::info!("event_writer finished");
-    Ok(())
+        tracing::info!("event_writer finished");
+        Ok(())
     }) // Box::pin
 }
 
@@ -602,7 +720,16 @@ async fn handle_client(
     manager: Arc<ConversationManager>,
 ) {
     let shutdown_rx = shutdown_tx.subscribe();
-    if let Err(e) = handle_client_inner(stream, conv_client, tool_clients, shutdown_tx, shutdown_rx, manager).await {
+    if let Err(e) = handle_client_inner(
+        stream,
+        conv_client,
+        tool_clients,
+        shutdown_tx,
+        shutdown_rx,
+        manager,
+    )
+    .await
+    {
         eprintln!("[Server] Client handler error: {}", e);
     }
 }
@@ -796,128 +923,160 @@ async fn close_stale_running_items(session_dir: &PathBuf) -> Result<()> {
 /// Process a single directory's display.jsonl, close stale items, and recurse into subagent dirs.
 fn close_stale_in_dir(dir: &PathBuf) -> Pin<Box<dyn Future<Output = Result<()>> + Send + '_>> {
     Box::pin(async move {
-    let display_file = dir.join("display.jsonl");
-    if !display_file.exists() {
-        return Ok(());
-    }
-
-    let content = tokio::fs::read_to_string(&display_file).await
-        .with_context(|| format!("Failed to read {:?}", display_file))?;
-
-    // Track open tool calls: tool_call_id -> tool_name
-    let mut open_tools: HashMap<String, String> = HashMap::new();
-
-    // Track subagent states: conversation_id -> is_running
-    // true = Running (needs closing), false = Idle (already has turn end)
-    let mut subagent_running: HashMap<String, bool> = HashMap::new();
-
-    for line in content.lines() {
-        if line.trim().is_empty() {
-            continue;
+        let display_file = dir.join("display.jsonl");
+        if !display_file.exists() {
+            return Ok(());
         }
-        let msg: Message = match serde_json::from_str(line) {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::warn!(error = %e, "Skipping unparseable line in display.jsonl");
+
+        let content = tokio::fs::read_to_string(&display_file)
+            .await
+            .with_context(|| format!("Failed to read {:?}", display_file))?;
+
+        // Track open tool calls: tool_call_id -> tool_name
+        let mut open_tools: HashMap<String, String> = HashMap::new();
+
+        // Track subagent states: conversation_id -> is_running
+        // true = Running (needs closing), false = Idle (already has turn end)
+        let mut subagent_running: HashMap<String, bool> = HashMap::new();
+
+        for line in content.lines() {
+            if line.trim().is_empty() {
                 continue;
             }
-        };
-        match &msg {
-            Message::ToolMessageStart { tool_call_id, tool_name, .. } => {
-                open_tools.insert(tool_call_id.clone(), tool_name.clone());
-            }
-            Message::ToolMessageEnd { tool_call_id, .. } => {
-                open_tools.remove(tool_call_id);
-            }
-            Message::SubAgentStart { conversation_id, .. } => {
-                subagent_running.insert(conversation_id.clone(), true);
-            }
-            Message::SubAgentTurnEnd { conversation_id, .. } => {
-                if let Some(running) = subagent_running.get_mut(conversation_id) {
-                    *running = false;
+            let msg: Message = match serde_json::from_str(line) {
+                Ok(m) => m,
+                Err(e) => {
+                    tracing::warn!(error = %e, "Skipping unparseable line in display.jsonl");
+                    continue;
                 }
-            }
-            Message::SubAgentContinue { conversation_id, .. } => {
-                if let Some(running) = subagent_running.get_mut(conversation_id) {
-                    *running = true;
+            };
+            match &msg {
+                Message::ToolMessageStart {
+                    tool_call_id,
+                    tool_name,
+                    ..
+                } => {
+                    open_tools.insert(tool_call_id.clone(), tool_name.clone());
                 }
+                Message::ToolMessageEnd { tool_call_id, .. } => {
+                    open_tools.remove(tool_call_id);
+                }
+                Message::SubAgentStart {
+                    conversation_id, ..
+                } => {
+                    subagent_running.insert(conversation_id.clone(), true);
+                }
+                Message::SubAgentTurnEnd {
+                    conversation_id, ..
+                } => {
+                    if let Some(running) = subagent_running.get_mut(conversation_id) {
+                        *running = false;
+                    }
+                }
+                Message::SubAgentContinue {
+                    conversation_id, ..
+                } => {
+                    if let Some(running) = subagent_running.get_mut(conversation_id) {
+                        *running = true;
+                    }
+                }
+                Message::SubAgentEnd {
+                    conversation_id, ..
+                } => {
+                    subagent_running.remove(conversation_id);
+                }
+                _ => {}
             }
-            Message::SubAgentEnd { conversation_id, .. } => {
-                subagent_running.remove(conversation_id);
+        }
+
+        // Close stale tool calls
+        for (tool_call_id, _tool_name) in &open_tools {
+            tracing::info!(tool_call_id, dir = ?dir, "Closing stale running tool call");
+
+            let end_event = Message::ToolMessageEnd {
+                msg_id: 0,
+                tool_call_id: tool_call_id.clone(),
+                end_status: MessageEndStatus::Cancelled,
+                input_tokens: 0,
+                output_tokens: 0,
+            };
+
+            append_event(&display_file, &end_event)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to append synthetic ToolMessageEnd for {}",
+                        tool_call_id
+                    )
+                })?;
+
+            // Also append to per-tool-call file
+            let tc_file = dir.join(format!("tool-call-{}.jsonl", tool_call_id));
+            if tc_file.exists() {
+                append_event(&tc_file, &end_event).await.with_context(|| {
+                    format!("Failed to append synthetic ToolMessageEnd to {:?}", tc_file)
+                })?;
             }
-            _ => {}
-        }
-    }
 
-    // Close stale tool calls
-    for (tool_call_id, _tool_name) in &open_tools {
-        tracing::info!(tool_call_id, dir = ?dir, "Closing stale running tool call");
-
-        let end_event = Message::ToolMessageEnd {
-            msg_id: 0,
-            tool_call_id: tool_call_id.clone(),
-            end_status: MessageEndStatus::Cancelled,
-            input_tokens: 0,
-            output_tokens: 0,
-        };
-
-        append_event(&display_file, &end_event).await
-            .with_context(|| format!("Failed to append synthetic ToolMessageEnd for {}", tool_call_id))?;
-
-        // Also append to per-tool-call file
-        let tc_file = dir.join(format!("tool-call-{}.jsonl", tool_call_id));
-        if tc_file.exists() {
-            append_event(&tc_file, &end_event).await
-                .with_context(|| format!("Failed to append synthetic ToolMessageEnd to {:?}", tc_file))?;
+            // Update status file
+            let tc_status = dir.join(format!("tool-call-{}-status.txt", tool_call_id));
+            tokio::fs::write(&tc_status, "Done")
+                .await
+                .with_context(|| format!("Failed to write tool call status {:?}", tc_status))?;
         }
 
-        // Update status file
-        let tc_status = dir.join(format!("tool-call-{}-status.txt", tool_call_id));
-        tokio::fs::write(&tc_status, "Done").await
-            .with_context(|| format!("Failed to write tool call status {:?}", tc_status))?;
-    }
+        // Close stale running subagents (only those still in Running state)
+        for (conversation_id, is_running) in &subagent_running {
+            if !*is_running {
+                continue;
+            }
 
-    // Close stale running subagents (only those still in Running state)
-    for (conversation_id, is_running) in &subagent_running {
-        if !*is_running {
-            continue;
+            tracing::info!(conversation_id, dir = ?dir, "Closing stale running subagent");
+
+            let end_event = Message::SubAgentTurnEnd {
+                msg_id: 0,
+                conversation_id: conversation_id.clone(),
+                end_status: MessageEndStatus::Cancelled,
+                response: Arc::new(String::new()),
+                input_tokens: 0,
+                output_tokens: 0,
+            };
+
+            append_event(&display_file, &end_event)
+                .await
+                .with_context(|| {
+                    format!(
+                        "Failed to append synthetic SubAgentTurnEnd for {}",
+                        conversation_id
+                    )
+                })?;
+
+            // Update subagent status file
+            let sa_status = dir
+                .join(format!("subagent-{}", conversation_id))
+                .join("status.txt");
+            if sa_status.exists() {
+                tokio::fs::write(&sa_status, "Cancelled")
+                    .await
+                    .with_context(|| format!("Failed to write subagent status {:?}", sa_status))?;
+            }
         }
 
-        tracing::info!(conversation_id, dir = ?dir, "Closing stale running subagent");
-
-        let end_event = Message::SubAgentTurnEnd {
-            msg_id: 0,
-            conversation_id: conversation_id.clone(),
-            end_status: MessageEndStatus::Cancelled,
-            response: Arc::new(String::new()),
-            input_tokens: 0,
-            output_tokens: 0,
-        };
-
-        append_event(&display_file, &end_event).await
-            .with_context(|| format!("Failed to append synthetic SubAgentTurnEnd for {}", conversation_id))?;
-
-        // Update subagent status file
-        let sa_status = dir.join(format!("subagent-{}", conversation_id)).join("status.txt");
-        if sa_status.exists() {
-            tokio::fs::write(&sa_status, "Cancelled").await
-                .with_context(|| format!("Failed to write subagent status {:?}", sa_status))?;
+        // Recurse into subagent directories
+        let mut read_dir = tokio::fs::read_dir(dir)
+            .await
+            .with_context(|| format!("Failed to read directory {:?}", dir))?;
+        while let Some(entry) = read_dir.next_entry().await? {
+            let name = entry.file_name();
+            let name_str = name.to_string_lossy();
+            if name_str.starts_with("subagent-") && entry.file_type().await?.is_dir() {
+                let subdir = entry.path();
+                close_stale_in_dir(&subdir)
+                    .await
+                    .with_context(|| format!("Failed to close stale items in {:?}", subdir))?;
+            }
         }
-    }
 
-    // Recurse into subagent directories
-    let mut read_dir = tokio::fs::read_dir(dir).await
-        .with_context(|| format!("Failed to read directory {:?}", dir))?;
-    while let Some(entry) = read_dir.next_entry().await? {
-        let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.starts_with("subagent-") && entry.file_type().await?.is_dir() {
-            let subdir = entry.path();
-            close_stale_in_dir(&subdir).await
-                .with_context(|| format!("Failed to close stale items in {:?}", subdir))?;
-        }
-    }
-
-    Ok(())
+        Ok(())
     }) // Box::pin
 }

@@ -4,11 +4,13 @@
 
 use convert_case::{Case, Casing};
 use proc_macro::TokenStream;
-use proc_macro_crate::{crate_name, FoundCrate};
+use proc_macro_crate::{FoundCrate, crate_name};
 use quote::{format_ident, quote};
 use syn::{
+    Attribute, FnArg, ItemFn, Lit, Pat, PatType, Token, Type,
     parse::{Parse, ParseStream},
-    parse_macro_input, spanned::Spanned, Attribute, FnArg, ItemFn, Lit, Pat, PatType, Token, Type,
+    parse_macro_input,
+    spanned::Spanned,
 };
 
 /// Parsed attributes for the #[tool] macro.
@@ -195,7 +197,11 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Extract parameters with their names, types, and attributes
     // Skip the first param if it's ToolContext
-    let args_to_process = if has_tool_context { &all_args[1..] } else { &all_args[..] };
+    let args_to_process = if has_tool_context {
+        &all_args[1..]
+    } else {
+        &all_args[..]
+    };
 
     let mut params = Vec::new();
     for arg in args_to_process {

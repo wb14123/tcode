@@ -9,7 +9,7 @@ use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use llm_rs::llm::{ChatOptions, Claude, LLMEvent, LLMMessage, StopReason, LLM};
+use llm_rs::llm::{ChatOptions, Claude, LLM, LLMEvent, LLMMessage, StopReason};
 use llm_rs::tool;
 use llm_rs::tool::{CancellationToken, Tool, ToolContext};
 use tokio_stream::StreamExt;
@@ -25,10 +25,7 @@ fn get_weather(
     /// The city name to get weather for
     city: String,
 ) -> impl tokio_stream::Stream<Item = Result<String, String>> {
-    let result = format!(
-        "Weather in {}: 22°C, partly cloudy, humidity 65%",
-        city
-    );
+    let result = format!("Weather in {}: 22°C, partly cloudy, humidity 65%", city);
     tokio_stream::once(Ok(result))
 }
 
@@ -41,8 +38,7 @@ fn get_current_time() -> impl tokio_stream::Stream<Item = Result<String, String>
 
 #[tokio::main]
 async fn main() {
-    let access_token =
-        env::var("CLAUDE_ACCESS_TOKEN").expect("CLAUDE_ACCESS_TOKEN must be set");
+    let access_token = env::var("CLAUDE_ACCESS_TOKEN").expect("CLAUDE_ACCESS_TOKEN must be set");
     let model = env::var("CLAUDE_MODEL").unwrap_or_else(|_| "claude-sonnet-4-20250514".to_string());
 
     // Create tools using the generated constructor functions
@@ -103,7 +99,10 @@ async fn main() {
                         let result = if let Some(tool) = tools.get(&tool_call.name) {
                             let ctx = ToolContext {
                                 cancel_token: CancellationToken::new(),
-                                permission: llm_rs::permission::ScopedPermissionManager::always_allow(&tool_call.name),
+                                permission:
+                                    llm_rs::permission::ScopedPermissionManager::always_allow(
+                                        &tool_call.name,
+                                    ),
                             };
                             let mut result_stream = tool.execute(ctx, tool_call.arguments.clone());
                             let mut result = String::new();

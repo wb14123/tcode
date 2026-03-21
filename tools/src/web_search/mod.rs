@@ -1,6 +1,6 @@
 use std::fmt::Write;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use browser_server::SearchResult;
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;

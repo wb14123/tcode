@@ -24,18 +24,15 @@ fn parallel_open_tab() {
                 let result = tab
                     .evaluate("document.title", false)
                     .expect("JS eval failed");
-                let title = result
-                    .value
-                    .as_ref()
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("");
+                let title = result.value.as_ref().and_then(|v| v.as_str()).unwrap_or("");
                 assert_eq!(title, content, "tab {i} has wrong title");
             })
         })
         .collect();
 
     for (i, h) in handles.into_iter().enumerate() {
-        h.join().unwrap_or_else(|e| panic!("thread {i} panicked: {e:?}"));
+        h.join()
+            .unwrap_or_else(|e| panic!("thread {i} panicked: {e:?}"));
     }
 }
 
@@ -43,8 +40,7 @@ fn parallel_open_tab() {
 #[test]
 fn tab_guard_cleanup() {
     {
-        let tab = browser::open_tab("data:text/html,<p>cleanup-test</p>")
-            .expect("open_tab failed");
+        let tab = browser::open_tab("data:text/html,<p>cleanup-test</p>").expect("open_tab failed");
         let result = tab
             .evaluate("document.querySelector('p').textContent", false)
             .expect("JS eval failed");

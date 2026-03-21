@@ -1,8 +1,8 @@
 //! Application error type with OpenAI-compatible JSON error responses.
 
+use axum::Json;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use axum::Json;
 
 #[derive(Debug)]
 pub enum AppError {

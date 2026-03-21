@@ -3,7 +3,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use llm_rs::llm::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, LLM};
+use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo};
 use llm_rs::tool::Tool;
 use tokio_stream::Stream;
 

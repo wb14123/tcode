@@ -11,9 +11,9 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
-use super::sse;
-use super::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall, LLM};
 use super::openai_common::{self, ReasoningRequest, ToolDefinition};
+use super::sse;
+use super::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
 use crate::tool::Tool;
 
 // ============================================================================
@@ -181,9 +181,18 @@ impl LLM for OpenRouter {
 
     fn available_models(&self) -> Vec<ModelInfo> {
         vec![
-            ModelInfo { id: "deepseek/deepseek-r1".into(), description: "DeepSeek R1 reasoning model".into() },
-            ModelInfo { id: "openai/gpt-5".into(), description: "OpenAI GPT-5".into() },
-            ModelInfo { id: "anthropic/claude-sonnet-4-6".into(), description: "Claude Sonnet 4.6".into() },
+            ModelInfo {
+                id: "deepseek/deepseek-r1".into(),
+                description: "DeepSeek R1 reasoning model".into(),
+            },
+            ModelInfo {
+                id: "openai/gpt-5".into(),
+                description: "OpenAI GPT-5".into(),
+            },
+            ModelInfo {
+                id: "anthropic/claude-sonnet-4-6".into(),
+                description: "Claude Sonnet 4.6".into(),
+            },
         ]
     }
 
@@ -225,13 +234,16 @@ impl LLM for OpenRouter {
                 } => {
                     if let Some(raw_value) = raw {
                         // Use raw message directly if available
-                        let content = raw_value.get("content").and_then(|v| v.as_str()).map(String::from);
+                        let content = raw_value
+                            .get("content")
+                            .and_then(|v| v.as_str())
+                            .map(String::from);
                         let tc = raw_value.get("tool_calls").and_then(|v| {
                             serde_json::from_value::<Vec<ChatMessageToolCall>>(v.clone()).ok()
                         });
-                        let rd = raw_value.get("reasoning_details").and_then(|v| {
-                            v.as_array().map(|arr| arr.clone())
-                        });
+                        let rd = raw_value
+                            .get("reasoning_details")
+                            .and_then(|v| v.as_array().map(|arr| arr.clone()));
                         ChatMessage {
                             role: "assistant",
                             content,
@@ -274,14 +286,12 @@ impl LLM for OpenRouter {
                 LLMMessage::ToolResult {
                     tool_call_id,
                     content,
-                } => {
-                    ChatMessage {
-                        role: "tool",
-                        content: Some(content.clone()),
-                        tool_call_id: Some(tool_call_id.clone()),
-                        tool_calls: None,
-                        reasoning_details: None,
-                    }
+                } => ChatMessage {
+                    role: "tool",
+                    content: Some(content.clone()),
+                    tool_call_id: Some(tool_call_id.clone()),
+                    tool_calls: None,
+                    reasoning_details: None,
                 },
             })
             .collect();

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 

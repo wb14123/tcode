@@ -7,12 +7,12 @@ use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
 use llm_rs::conversation::SessionMeta;
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
-use ratatui::Terminal;
 
 use crate::session::{self, Session};
 
@@ -36,12 +36,11 @@ pub fn pick_session() -> Result<Option<String>> {
         .into_iter()
         .filter_map(|id| {
             let session = Session::new(id.clone()).ok()?;
-            let status =
-                if std::os::unix::net::UnixStream::connect(session.socket_path()).is_ok() {
-                    "active"
-                } else {
-                    "inactive"
-                };
+            let status = if std::os::unix::net::UnixStream::connect(session.socket_path()).is_ok() {
+                "active"
+            } else {
+                "inactive"
+            };
             let meta = std::fs::read_to_string(session.session_meta_file())
                 .ok()
                 .and_then(|json| serde_json::from_str::<SessionMeta>(&json).ok());
@@ -78,7 +77,8 @@ fn run_picker(entries: &[SessionEntry]) -> Result<Option<String>> {
 
     let result = loop {
         terminal.draw(|f| {
-            let chunks = Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(f.area());
+            let chunks =
+                Layout::vertical([Constraint::Min(3), Constraint::Length(1)]).split(f.area());
 
             let items: Vec<ListItem> = entries
                 .iter()
@@ -95,7 +95,10 @@ fn run_picker(entries: &[SessionEntry]) -> Result<Option<String>> {
                     ];
                     if let Some(ref desc) = e.description {
                         spans.push(Span::raw(" "));
-                        spans.push(Span::styled(desc.as_str(), Style::default().fg(Color::Cyan)));
+                        spans.push(Span::styled(
+                            desc.as_str(),
+                            Style::default().fg(Color::Cyan),
+                        ));
                     }
                     ListItem::new(Line::from(spans))
                 })

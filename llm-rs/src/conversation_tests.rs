@@ -1,6 +1,6 @@
 #[cfg(test)]
 mod tests {
-    use crate::conversation::{fill_cancelled_tool_results, ConversationClient, ConversationState};
+    use crate::conversation::{ConversationClient, ConversationState, fill_cancelled_tool_results};
     use crate::llm::{ChatOptions, LLMMessage, ReasoningEffort, ToolCall};
 
     fn make_tool_call(id: &str, name: &str) -> ToolCall {
@@ -63,7 +63,10 @@ mod tests {
 
         // Verify chat_options
         assert_eq!(deserialized.chat_options.max_tokens, Some(4096));
-        assert_eq!(deserialized.chat_options.reasoning_effort, Some(ReasoningEffort::Medium));
+        assert_eq!(
+            deserialized.chat_options.reasoning_effort,
+            Some(ReasoningEffort::Medium)
+        );
     }
 
     // ======== fill_cancelled_tool_results ========
@@ -105,14 +108,17 @@ mod tests {
             LLMMessage::User("hello".to_string()),
             LLMMessage::Assistant {
                 content: "".to_string(),
-                tool_calls: vec![
-                    make_tool_call("a", "tool_a"),
-                    make_tool_call("b", "tool_b"),
-                ],
+                tool_calls: vec![make_tool_call("a", "tool_a"), make_tool_call("b", "tool_b")],
                 raw: None,
             },
-            LLMMessage::ToolResult { tool_call_id: "a".to_string(), content: "result a".to_string() },
-            LLMMessage::ToolResult { tool_call_id: "b".to_string(), content: "result b".to_string() },
+            LLMMessage::ToolResult {
+                tool_call_id: "a".to_string(),
+                content: "result a".to_string(),
+            },
+            LLMMessage::ToolResult {
+                tool_call_id: "b".to_string(),
+                content: "result b".to_string(),
+            },
         ];
         fill_cancelled_tool_results(&mut msgs);
         assert_eq!(msgs.len(), 4); // No change
@@ -131,19 +137,28 @@ mod tests {
                 ],
                 raw: None,
             },
-            LLMMessage::ToolResult { tool_call_id: "a".to_string(), content: "result a".to_string() },
+            LLMMessage::ToolResult {
+                tool_call_id: "a".to_string(),
+                content: "result a".to_string(),
+            },
         ];
         fill_cancelled_tool_results(&mut msgs);
         assert_eq!(msgs.len(), 5); // Added 2 cancelled results for b and c
         match &msgs[3] {
-            LLMMessage::ToolResult { tool_call_id, content } => {
+            LLMMessage::ToolResult {
+                tool_call_id,
+                content,
+            } => {
                 assert_eq!(tool_call_id, "b");
                 assert!(content.contains("cancelled"));
             }
             _ => panic!("Expected ToolResult"),
         }
         match &msgs[4] {
-            LLMMessage::ToolResult { tool_call_id, content } => {
+            LLMMessage::ToolResult {
+                tool_call_id,
+                content,
+            } => {
                 assert_eq!(tool_call_id, "c");
                 assert!(content.contains("cancelled"));
             }
@@ -157,10 +172,7 @@ mod tests {
             LLMMessage::User("hello".to_string()),
             LLMMessage::Assistant {
                 content: "".to_string(),
-                tool_calls: vec![
-                    make_tool_call("a", "tool_a"),
-                    make_tool_call("b", "tool_b"),
-                ],
+                tool_calls: vec![make_tool_call("a", "tool_a"), make_tool_call("b", "tool_b")],
                 raw: None,
             },
         ];

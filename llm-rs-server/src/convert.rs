@@ -13,12 +13,8 @@ pub fn convert_request_messages(messages: &[RequestMessage]) -> Result<Vec<LLMMe
     messages
         .iter()
         .map(|msg| match msg.role.as_str() {
-            "system" => Ok(LLMMessage::System(
-                msg.content.clone().unwrap_or_default(),
-            )),
-            "user" => Ok(LLMMessage::User(
-                msg.content.clone().unwrap_or_default(),
-            )),
+            "system" => Ok(LLMMessage::System(msg.content.clone().unwrap_or_default())),
+            "user" => Ok(LLMMessage::User(msg.content.clone().unwrap_or_default())),
             "assistant" => {
                 let tool_calls = msg
                     .tool_calls
@@ -40,10 +36,9 @@ pub fn convert_request_messages(messages: &[RequestMessage]) -> Result<Vec<LLMMe
                 })
             }
             "tool" => {
-                let tool_call_id = msg
-                    .tool_call_id
-                    .clone()
-                    .ok_or_else(|| AppError::BadRequest("tool message missing tool_call_id".into()))?;
+                let tool_call_id = msg.tool_call_id.clone().ok_or_else(|| {
+                    AppError::BadRequest("tool message missing tool_call_id".into())
+                })?;
                 Ok(LLMMessage::ToolResult {
                     tool_call_id,
                     content: msg.content.clone().unwrap_or_default(),
@@ -64,8 +59,9 @@ pub fn convert_request_tools(tools: &[RequestTool]) -> Result<Vec<Arc<Tool>>, Ap
                 .parameters
                 .clone()
                 .unwrap_or(serde_json::json!({"type": "object", "properties": {}}));
-            let schema: schemars::Schema = serde_json::from_value(params)
-                .map_err(|e| AppError::BadRequest(format!("invalid tool parameters schema: {e}")))?;
+            let schema: schemars::Schema = serde_json::from_value(params).map_err(|e| {
+                AppError::BadRequest(format!("invalid tool parameters schema: {e}"))
+            })?;
             Ok(Arc::new(Tool::new_sentinel(
                 &t.function.name,
                 t.function.description.as_deref().unwrap_or(""),

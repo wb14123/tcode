@@ -33,7 +33,9 @@ pub fn load_tokens(path: &Path) -> Result<HashSet<String>> {
              Create it with a JSON array of allowed bearer tokens, e.g.:\n  \
              mkdir -p {} && echo '[\"my-secret-token\"]' > {}",
             path.display(),
-            path.parent().map(|p| p.display().to_string()).unwrap_or_default(),
+            path.parent()
+                .map(|p| p.display().to_string())
+                .unwrap_or_default(),
             path.display(),
         );
     }

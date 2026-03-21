@@ -25,7 +25,11 @@ pub struct EditClient {
 
 impl EditClient {
     pub fn new(session: Session, lua_path: PathBuf, conversation_id: Option<String>) -> Self {
-        Self { session, lua_path, conversation_id }
+        Self {
+            session,
+            lua_path,
+            conversation_id,
+        }
     }
 
     /// Determine the socket path. When targeting a subagent, walk up to the root
@@ -34,7 +38,10 @@ impl EditClient {
         if self.conversation_id.is_some() {
             // Walk up past subagent-* components to find root session dir
             let mut dir = self.session.session_dir().clone();
-            while dir.file_name().map_or(false, |n| n.to_string_lossy().starts_with("subagent-")) {
+            while dir
+                .file_name()
+                .map_or(false, |n| n.to_string_lossy().starts_with("subagent-"))
+            {
                 if let Some(parent) = dir.parent() {
                     dir = parent.to_path_buf();
                 } else {
@@ -57,15 +64,13 @@ impl EditClient {
         }
 
         let socket_path = self.socket_path();
-        let stream = UnixStream::connect(&socket_path)
-            .await
-            .map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to connect to socket {:?}: {}. Is the server running?",
-                    socket_path,
-                    e
-                )
-            })?;
+        let stream = UnixStream::connect(&socket_path).await.map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to connect to socket {:?}: {}. Is the server running?",
+                socket_path,
+                e
+            )
+        })?;
 
         let framed = Framed::new(stream, LengthDelimitedCodec::new());
         let (mut sink, mut server_stream) = framed.split();
@@ -82,8 +87,14 @@ impl EditClient {
         })?;
 
         // Watch the session directory for file creation/modification
-        watcher.watch(self.session.session_dir(), RecursiveMode::NonRecursive)
-            .with_context(|| format!("Failed to watch session directory {:?}", self.session.session_dir()))?;
+        watcher
+            .watch(self.session.session_dir(), RecursiveMode::NonRecursive)
+            .with_context(|| {
+                format!(
+                    "Failed to watch session directory {:?}",
+                    self.session.session_dir()
+                )
+            })?;
 
         // Convert sync channel to async stream
         let (async_tx, mut file_events) = tokio::sync::mpsc::unbounded_channel::<Event>();
@@ -132,33 +143,25 @@ impl EditClient {
     /// Build the appropriate `ClientMessage` based on conversation_id and content.
     fn build_client_message(&self, content: &str) -> ClientMessage {
         match &self.conversation_id {
-            Some(conv_id) if content.trim() == "/done" => {
-                ClientMessage::UserRequestEnd {
-                    conversation_id: conv_id.clone(),
-                }
-            }
-            Some(conv_id) => {
-                ClientMessage::SendMessage {
-                    conversation_id: Some(conv_id.clone()),
-                    content: content.to_string(),
-                }
-            }
-            None => {
-                ClientMessage::SendMessage {
-                    conversation_id: None,
-                    content: content.to_string(),
-                }
-            }
+            Some(conv_id) if content.trim() == "/done" => ClientMessage::UserRequestEnd {
+                conversation_id: conv_id.clone(),
+            },
+            Some(conv_id) => ClientMessage::SendMessage {
+                conversation_id: Some(conv_id.clone()),
+                content: content.to_string(),
+            },
+            None => ClientMessage::SendMessage {
+                conversation_id: None,
+                content: content.to_string(),
+            },
         }
     }
 }
 
 fn is_msg_file_event(event: &Event, msg_file: &PathBuf) -> bool {
     // Check if this is a create or modify event for our message file
-    matches!(
-        event.kind,
-        EventKind::Create(_) | EventKind::Modify(_)
-    ) && event.paths.iter().any(|p| p == msg_file)
+    matches!(event.kind, EventKind::Create(_) | EventKind::Modify(_))
+        && event.paths.iter().any(|p| p == msg_file)
 }
 
 fn spawn_nvim(lua_path: &PathBuf, msg_file: &PathBuf, is_subagent: bool) -> Result<Child> {

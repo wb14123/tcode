@@ -88,10 +88,7 @@ fn test_response_serialization_roundtrip() {
     let parsed: ChatCompletionResponse = serde_json::from_str(&json).unwrap();
     assert_eq!(parsed.id, "chatcmpl-123");
     assert_eq!(parsed.choices[0].finish_reason, "stop");
-    assert_eq!(
-        parsed.choices[0].message.content.as_deref(),
-        Some("Hello!")
-    );
+    assert_eq!(parsed.choices[0].message.content.as_deref(), Some("Hello!"));
     assert_eq!(parsed.usage.as_ref().unwrap().total_tokens, 15);
 }
 

@@ -12,7 +12,9 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
 use super::sse;
-use super::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall, LLM};
+use super::{
+    ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall,
+};
 use crate::tool::Tool;
 
 // ============================================================================
@@ -193,10 +195,7 @@ enum ContentBlock {
         content: String,
     },
     #[serde(rename = "thinking")]
-    Thinking {
-        thinking: String,
-        signature: String,
-    },
+    Thinking { thinking: String, signature: String },
 }
 
 // ============================================================================
@@ -470,9 +469,18 @@ impl LLM for Claude {
 
     fn available_models(&self) -> Vec<ModelInfo> {
         vec![
-            ModelInfo { id: "claude-opus-4-6".into(), description: "Most capable, best for complex tasks".into() },
-            ModelInfo { id: "claude-sonnet-4-6".into(), description: "Balanced speed and capability".into() },
-            ModelInfo { id: "claude-haiku-4-5".into(), description: "Fast and cost-effective".into() },
+            ModelInfo {
+                id: "claude-opus-4-6".into(),
+                description: "Most capable, best for complex tasks".into(),
+            },
+            ModelInfo {
+                id: "claude-sonnet-4-6".into(),
+                description: "Balanced speed and capability".into(),
+            },
+            ModelInfo {
+                id: "claude-haiku-4-5".into(),
+                description: "Fast and cost-effective".into(),
+            },
         ]
     }
 

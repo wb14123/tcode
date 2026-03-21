@@ -11,18 +11,17 @@ use std::sync::Arc;
 use async_openai::config::OpenAIConfig;
 use async_openai::types::responses::{
     CreateResponseArgs, EasyInputContent, EasyInputMessage, FunctionCallOutput,
-    FunctionCallOutputItemParam, FunctionToolCall, InputItem, InputParam, Item,
-    OutputItem, Reasoning, ResponseStreamEvent, Role, Status,
-    Tool as OAITool, FunctionTool,
+    FunctionCallOutputItemParam, FunctionTool, FunctionToolCall, InputItem, InputParam, Item,
+    OutputItem, Reasoning, ResponseStreamEvent, Role, Status, Tool as OAITool,
 };
 use async_stream::stream;
 use futures::StreamExt;
 use tokio_stream::Stream;
 
 use super::openai_common::effort_to_str;
-use crate::tool::normalize_schema;
-use super::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall, LLM};
+use super::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
 use crate::tool::Tool;
+use crate::tool::normalize_schema;
 
 // ============================================================================
 // OpenAI client (Responses API)
@@ -47,10 +46,7 @@ impl OpenAI {
     }
 
     /// Create a new OpenAI client with a custom base URL.
-    pub fn with_base_url(
-        api_key: impl Into<String>,
-        base_url: impl Into<String>,
-    ) -> Self {
+    pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         let api_key = api_key.into();
         let base_url = base_url.into();
         let config = OpenAIConfig::new()
@@ -178,9 +174,18 @@ impl LLM for OpenAI {
 
     fn available_models(&self) -> Vec<ModelInfo> {
         vec![
-            ModelInfo { id: "gpt-5".into(), description: "Most capable OpenAI model".into() },
-            ModelInfo { id: "gpt-5-nano".into(), description: "Fast and cost-effective".into() },
-            ModelInfo { id: "o3".into(), description: "Reasoning model".into() },
+            ModelInfo {
+                id: "gpt-5".into(),
+                description: "Most capable OpenAI model".into(),
+            },
+            ModelInfo {
+                id: "gpt-5-nano".into(),
+                description: "Fast and cost-effective".into(),
+            },
+            ModelInfo {
+                id: "o3".into(),
+                description: "Reasoning model".into(),
+            },
         ]
     }
 
@@ -198,8 +203,8 @@ impl LLM for OpenAI {
 
         // Build reasoning config
         let reasoning = {
-            let has_reasoning = options.reasoning_effort.is_some()
-                || options.reasoning_budget.is_some();
+            let has_reasoning =
+                options.reasoning_effort.is_some() || options.reasoning_budget.is_some();
             if has_reasoning {
                 let effort = options
                     .reasoning_effort

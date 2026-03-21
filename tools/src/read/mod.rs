@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 use quick_xml::escape::escape;
@@ -15,20 +15,13 @@ const BINARY_EXTENSIONS: &[&str] = &[
     // Executables / libraries
     "exe", "bin", "so", "dll", "o", "a", "dylib", "lib", "obj", "pyc", "pyo", "class",
     // Archives
-    "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst", "lz4",
-    // Images
-    "jpg", "jpeg", "png", "gif", "bmp", "ico", "webp", "tiff", "tif", "psd",
-    // Audio
-    "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a",
-    // Video
-    "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm",
-    // Fonts
-    "woff", "woff2", "ttf", "eot", "otf",
-    // Documents (binary)
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx",
-    // Database
-    "db", "sqlite", "sqlite3",
-    // Other
+    "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst", "lz4", // Images
+    "jpg", "jpeg", "png", "gif", "bmp", "ico", "webp", "tiff", "tif", "psd", // Audio
+    "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", // Video
+    "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", // Fonts
+    "woff", "woff2", "ttf", "eot", "otf", // Documents (binary)
+    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", // Database
+    "db", "sqlite", "sqlite3", // Other
     "wasm",
 ];
 
@@ -88,7 +81,11 @@ fn process_line(
     line_buf_capped: bool,
 ) -> ProcessedLine {
     if chars_remaining == 0 {
-        return ProcessedLine { xml: String::new(), chars_used: 0, hit_char_cap: true };
+        return ProcessedLine {
+            xml: String::new(),
+            chars_used: 0,
+            hit_char_cap: true,
+        };
     }
 
     // Step 1: Apply first_line_offset to get the visible portion
@@ -118,7 +115,11 @@ fn process_line(
         (content, false)
     };
 
-    let chars_used = if hit_cap { chars_remaining } else { content_chars };
+    let chars_used = if hit_cap {
+        chars_remaining
+    } else {
+        content_chars
+    };
     let xml_truncated = line_buf_capped || hit_cap;
 
     // Only add char range attrs when there's an offset or truncation to report
@@ -139,11 +140,7 @@ fn process_line(
 ///
 /// `char_info` is `(chars_start, chars_end, truncated)` — only present when the line
 /// was read from an offset or truncated. Plain lines get just `<line n="...">`.
-fn format_line_xml(
-    line_num: u64,
-    content: &str,
-    char_info: Option<(u64, u64, bool)>,
-) -> String {
+fn format_line_xml(line_num: u64, content: &str, char_info: Option<(u64, u64, bool)>) -> String {
     let escaped = escape(content);
     let mut tag = format!("<line n=\"{line_num}\"");
     if let Some((start, end, truncated)) = char_info {
@@ -175,7 +172,14 @@ fn emit_line(
     let remaining = max_chars.saturating_sub(chars_consumed);
     let is_first = lines_yielded == 0;
     let line_flo = if is_first { flo } else { 0 };
-    let processed = process_line(line_content, line_num, is_first, line_flo, remaining, line_buf_capped);
+    let processed = process_line(
+        line_content,
+        line_num,
+        is_first,
+        line_flo,
+        remaining,
+        line_buf_capped,
+    );
     if processed.hit_char_cap && processed.xml.is_empty() {
         *was_truncated = true;
         return None;
@@ -192,13 +196,18 @@ fn emit_line(
 async fn read_directory(path: &Path) -> Result<String> {
     let mut entries: Vec<String> = Vec::new();
 
-    let mut dir_iter = tokio::fs::read_dir(path).await
+    let mut dir_iter = tokio::fs::read_dir(path)
+        .await
         .map_err(|e| anyhow!("Failed to read directory {}: {}", path.display(), e))?;
 
     let mut items: Vec<tokio::fs::DirEntry> = Vec::new();
-    while let Some(entry) = dir_iter.next_entry().await
-        .map_err(|e| anyhow!("Failed to read directory entry in {}: {}", path.display(), e))?
-    {
+    while let Some(entry) = dir_iter.next_entry().await.map_err(|e| {
+        anyhow!(
+            "Failed to read directory entry in {}: {}",
+            path.display(),
+            e
+        )
+    })? {
         items.push(entry);
     }
     items.sort_by_key(|e| e.file_name());

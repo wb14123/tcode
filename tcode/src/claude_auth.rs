@@ -1,11 +1,11 @@
 use anyhow::{Context, Result};
-use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::Rng;
 use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 
-pub use auth::{load_token_manager, TokenManager};
-use auth::{OAuthTokens, CLIENT_ID};
+use auth::{CLIENT_ID, OAuthTokens};
+pub use auth::{TokenManager, load_token_manager};
 
 const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 const SCOPES: &str = "org:create_api_key user:profile user:inference";
@@ -69,7 +69,10 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OAuthTokens> {
         anyhow::bail!("Token exchange failed ({}): {}", status, body);
     }
 
-    let json: serde_json::Value = response.json().await.context("Failed to parse token response")?;
+    let json: serde_json::Value = response
+        .json()
+        .await
+        .context("Failed to parse token response")?;
 
     let access_token = json["access_token"]
         .as_str()

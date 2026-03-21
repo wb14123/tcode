@@ -75,8 +75,12 @@ impl PermStatus {
 #[derive(Debug, Clone)]
 #[allow(dead_code)]
 enum NodeKind {
-    Tool { name: String },
-    Key { key: String },
+    Tool {
+        name: String,
+    },
+    Key {
+        key: String,
+    },
     Value {
         value: String,
         status: PermStatus,
@@ -131,7 +135,13 @@ impl PermissionTreeState {
     /// Check if any pending permissions exist in the tree.
     fn has_pending(&self) -> bool {
         self.arena.iter().any(|n| {
-            matches!(&n.kind, NodeKind::Value { status: PermStatus::Pending, .. })
+            matches!(
+                &n.kind,
+                NodeKind::Value {
+                    status: PermStatus::Pending,
+                    ..
+                }
+            )
         })
     }
 
@@ -140,9 +150,14 @@ impl PermissionTreeState {
         self.arena.clear();
 
         // Group all entries by tool -> key -> Vec<(value, status, prompt, request_id, preview_file_path)>
-        type EntryTuple = (String, PermStatus, Option<String>, Option<String>, Option<String>);
-        let mut groups: HashMap<String, HashMap<String, Vec<EntryTuple>>> =
-            HashMap::new();
+        type EntryTuple = (
+            String,
+            PermStatus,
+            Option<String>,
+            Option<String>,
+            Option<String>,
+        );
+        let mut groups: HashMap<String, HashMap<String, Vec<EntryTuple>>> = HashMap::new();
 
         for p in &state.pending {
             groups
@@ -155,7 +170,9 @@ impl PermissionTreeState {
                     PermStatus::Pending,
                     Some(p.prompt.clone()),
                     Some(p.request_id.clone()),
-                    p.preview_file_path.as_ref().map(|p| p.to_string_lossy().to_string()),
+                    p.preview_file_path
+                        .as_ref()
+                        .map(|p| p.to_string_lossy().to_string()),
                 ));
         }
         for k in &state.session {
@@ -178,15 +195,21 @@ impl PermissionTreeState {
         // Sort tools alphabetically, but put tools with pending items first
         let mut tool_names: Vec<String> = groups.keys().cloned().collect();
         tool_names.sort_by(|a, b| {
-            let a_pending = groups[a].values().any(|vals| vals.iter().any(|e| e.1 == PermStatus::Pending));
-            let b_pending = groups[b].values().any(|vals| vals.iter().any(|e| e.1 == PermStatus::Pending));
+            let a_pending = groups[a]
+                .values()
+                .any(|vals| vals.iter().any(|e| e.1 == PermStatus::Pending));
+            let b_pending = groups[b]
+                .values()
+                .any(|vals| vals.iter().any(|e| e.1 == PermStatus::Pending));
             b_pending.cmp(&a_pending).then(a.cmp(b))
         });
 
         for tool_name in &tool_names {
             let tool_idx = self.arena.len();
             self.arena.push(TreeNode {
-                kind: NodeKind::Tool { name: tool_name.clone() },
+                kind: NodeKind::Tool {
+                    name: tool_name.clone(),
+                },
                 depth: 0,
                 children: Vec::new(),
                 collapsed: false,
@@ -199,7 +222,9 @@ impl PermissionTreeState {
             for key_name in &key_names {
                 let key_idx = self.arena.len();
                 self.arena.push(TreeNode {
-                    kind: NodeKind::Key { key: key_name.clone() },
+                    kind: NodeKind::Key {
+                        key: key_name.clone(),
+                    },
                     depth: 1,
                     children: Vec::new(),
                     collapsed: false,
@@ -220,7 +245,13 @@ impl PermissionTreeState {
                     }
                     let val_idx = self.arena.len();
                     self.arena.push(TreeNode {
-                        kind: NodeKind::Value { value, status, prompt, request_id, preview_file_path },
+                        kind: NodeKind::Value {
+                            value,
+                            status,
+                            prompt,
+                            request_id,
+                            preview_file_path,
+                        },
                         depth: 2,
                         children: Vec::new(),
                         collapsed: false,
@@ -249,11 +280,20 @@ impl PermissionTreeState {
 
     /// Open the approval or management popup for the selected leaf node.
     fn open_popup(&mut self) {
-        let Some(&idx) = self.visible.get(self.selected) else { return };
+        let Some(&idx) = self.visible.get(self.selected) else {
+            return;
+        };
         let node = &self.arena[idx];
 
         match &node.kind {
-            NodeKind::Value { value, status, prompt, request_id, preview_file_path, .. } => {
+            NodeKind::Value {
+                value,
+                status,
+                prompt,
+                request_id,
+                preview_file_path,
+                ..
+            } => {
                 // Walk up to find tool and key
                 let (tool_name, key_name) = self.find_tool_key_for(idx);
                 let exe = match std::env::current_exe() {
@@ -359,7 +399,9 @@ impl PermissionTreeState {
                 loop {
                     let popup_cmd = format!(
                         "tmux display-popup -E -w {} -h {} \"{}\"",
-                        popup_width, popup_height, cmd.replace('"', "\\\"")
+                        popup_width,
+                        popup_height,
+                        cmd.replace('"', "\\\"")
                     );
                     let exit_code = match Command::new("sh").args(["-c", &popup_cmd]).output() {
                         Ok(out) => out.status.code().unwrap_or(0),
@@ -377,7 +419,9 @@ impl PermissionTreeState {
                                     "tmux display-popup -E -w '80%' -h '80%' \"nvim -R '{}'\"",
                                     escaped,
                                 );
-                                if let Err(e) = Command::new("sh").args(["-c", &nvim_popup]).output() {
+                                if let Err(e) =
+                                    Command::new("sh").args(["-c", &nvim_popup]).output()
+                                {
                                     tracing::warn!("failed to launch nvim popup: {}", e);
                                 }
                             }
@@ -423,7 +467,11 @@ impl PermissionTreeState {
                     if node.children.contains(&value_idx) {
                         key_name = key.clone();
                         // Find tool parent of this key node
-                        let key_idx = self.arena.iter().position(|n| std::ptr::eq(n, node)).unwrap_or(0);
+                        let key_idx = self
+                            .arena
+                            .iter()
+                            .position(|n| std::ptr::eq(n, node))
+                            .unwrap_or(0);
                         for tool_node in &self.arena {
                             if let NodeKind::Tool { name } = &tool_node.kind {
                                 if tool_node.children.contains(&key_idx) {
@@ -443,16 +491,31 @@ impl PermissionTreeState {
 }
 
 impl TreeNav for PermissionTreeState {
-    fn node_children(&self, idx: usize) -> &[usize] { &self.arena[idx].children }
-    fn node_collapsed(&self, idx: usize) -> bool { self.arena[idx].collapsed }
-    fn set_node_collapsed(&mut self, idx: usize, collapsed: bool) { self.arena[idx].collapsed = collapsed; }
-    fn visible(&self) -> &[usize] { &self.visible }
-    fn selected(&self) -> usize { self.selected }
-    fn set_selected(&mut self, idx: usize) { self.selected = idx; }
+    fn node_children(&self, idx: usize) -> &[usize] {
+        &self.arena[idx].children
+    }
+    fn node_collapsed(&self, idx: usize) -> bool {
+        self.arena[idx].collapsed
+    }
+    fn set_node_collapsed(&mut self, idx: usize, collapsed: bool) {
+        self.arena[idx].collapsed = collapsed;
+    }
+    fn visible(&self) -> &[usize] {
+        &self.visible
+    }
+    fn selected(&self) -> usize {
+        self.selected
+    }
+    fn set_selected(&mut self, idx: usize) {
+        self.selected = idx;
+    }
 
     fn rebuild_visible(&mut self) {
         self.visible.clear();
-        let top_level: Vec<usize> = self.arena.iter().enumerate()
+        let top_level: Vec<usize> = self
+            .arena
+            .iter()
+            .enumerate()
             .filter(|(_, n)| n.depth == 0)
             .map(|(i, _)| i)
             .collect();
@@ -474,10 +537,7 @@ fn render_tree(
 ) -> Result<()> {
     terminal.draw(|frame| {
         let area = frame.area();
-        let chunks = Layout::vertical([
-            Constraint::Min(0),
-            Constraint::Length(1),
-        ]).split(area);
+        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
 
         // Flash: toggle every 3 frames (~600ms cycle at 200ms poll)
         let flash_on = (state.frame_count / 3) % 2 == 0;
@@ -485,61 +545,73 @@ fn render_tree(
         let any_pending = state.has_pending();
 
         // Build list items
-        let items: Vec<ListItem> = state.visible.iter().map(|&idx| {
-            let node = &state.arena[idx];
-            let indent = "  ".repeat(node.depth);
-            match &node.kind {
-                NodeKind::Tool { name } => {
-                    let prefix = if node.collapsed { "+" } else { "-" };
-                    let has_pending = node.children.iter().any(|&ki| {
-                        state.arena[ki].children.iter().any(|&vi| {
-                            matches!(&state.arena[vi].kind, NodeKind::Value { status: PermStatus::Pending, .. })
-                        })
-                    });
-                    let status_icon = if has_pending { " ?" } else { "" };
-                    let line = Line::from(vec![
-                        Span::raw(format!("{}{} {}", indent, prefix, name)),
-                        Span::styled(status_icon, Style::default().fg(Color::Yellow)),
-                    ]);
-                    ListItem::new(line)
+        let items: Vec<ListItem> = state
+            .visible
+            .iter()
+            .map(|&idx| {
+                let node = &state.arena[idx];
+                let indent = "  ".repeat(node.depth);
+                match &node.kind {
+                    NodeKind::Tool { name } => {
+                        let prefix = if node.collapsed { "+" } else { "-" };
+                        let has_pending = node.children.iter().any(|&ki| {
+                            state.arena[ki].children.iter().any(|&vi| {
+                                matches!(
+                                    &state.arena[vi].kind,
+                                    NodeKind::Value {
+                                        status: PermStatus::Pending,
+                                        ..
+                                    }
+                                )
+                            })
+                        });
+                        let status_icon = if has_pending { " ?" } else { "" };
+                        let line = Line::from(vec![
+                            Span::raw(format!("{}{} {}", indent, prefix, name)),
+                            Span::styled(status_icon, Style::default().fg(Color::Yellow)),
+                        ]);
+                        ListItem::new(line)
+                    }
+                    NodeKind::Key { key } => {
+                        let prefix = if node.collapsed { "+" } else { "-" };
+                        ListItem::new(Line::from(Span::raw(format!(
+                            "{}{} {}",
+                            indent, prefix, key
+                        ))))
+                    }
+                    NodeKind::Value { value, status, .. } => {
+                        let (icon_style, text_style, label_style) =
+                            if matches!(status, PermStatus::Pending) {
+                                let s = if flash_on {
+                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+                                } else {
+                                    Style::default().fg(Color::DarkGray)
+                                };
+                                (s, s, s)
+                            } else {
+                                (
+                                    Style::default().fg(status.color()),
+                                    Style::default(),
+                                    Style::default().fg(Color::DarkGray),
+                                )
+                            };
+                        let line = Line::from(vec![
+                            Span::styled(format!("{}  ", indent), text_style),
+                            Span::styled(format!("[{}]", status.icon()), icon_style),
+                            Span::styled(format!(" {}", value), text_style),
+                            Span::styled(format!(" ({})", status.label()), label_style),
+                        ]);
+                        ListItem::new(line)
+                    }
                 }
-                NodeKind::Key { key } => {
-                    let prefix = if node.collapsed { "+" } else { "-" };
-                    ListItem::new(Line::from(Span::raw(format!("{}{} {}", indent, prefix, key))))
-                }
-                NodeKind::Value { value, status, .. } => {
-                    let (icon_style, text_style, label_style) = if matches!(status, PermStatus::Pending) {
-                        let s = if flash_on {
-                            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                        } else {
-                            Style::default().fg(Color::DarkGray)
-                        };
-                        (s, s, s)
-                    } else {
-                        (
-                            Style::default().fg(status.color()),
-                            Style::default(),
-                            Style::default().fg(Color::DarkGray),
-                        )
-                    };
-                    let line = Line::from(vec![
-                        Span::styled(format!("{}  ", indent), text_style),
-                        Span::styled(
-                            format!("[{}]", status.icon()),
-                            icon_style,
-                        ),
-                        Span::styled(format!(" {}", value), text_style),
-                        Span::styled(
-                            format!(" ({})", status.label()),
-                            label_style,
-                        ),
-                    ]);
-                    ListItem::new(line)
-                }
-            }
-        }).collect();
+            })
+            .collect();
 
-        let filter_indicator = if state.filter_pending_only { " [pending only]" } else { "" };
+        let filter_indicator = if state.filter_pending_only {
+            " [pending only]"
+        } else {
+            ""
+        };
         let title_text = format!(" Permissions{} ", filter_indicator);
 
         let (border_style, title_style) = if any_pending && flash_on {
@@ -563,7 +635,10 @@ fn render_tree(
         frame.render_stateful_widget(list, chunks[0], list_state);
 
         // Status bar
-        let status_text = state.status_message.as_deref().unwrap_or("j/k:nav  o:open  f:filter  q:quit");
+        let status_text = state
+            .status_message
+            .as_deref()
+            .unwrap_or("j/k:nav  o:open  f:filter  q:quit");
         let status = Paragraph::new(Line::from(Span::styled(
             status_text,
             Style::default().fg(Color::DarkGray),
@@ -583,7 +658,9 @@ fn query_permission_state_sync(socket_path: &PathBuf) -> Option<PermissionState>
 
     let mut stream = StdUnixStream::connect(socket_path).ok()?;
     stream.set_read_timeout(Some(Duration::from_secs(5))).ok()?;
-    stream.set_write_timeout(Some(Duration::from_secs(5))).ok()?;
+    stream
+        .set_write_timeout(Some(Duration::from_secs(5)))
+        .ok()?;
 
     // LengthDelimitedCodec: 4-byte big-endian length prefix, then payload
     let msg = ClientMessage::GetPermissionState;

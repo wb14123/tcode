@@ -6,8 +6,8 @@ pub mod auth;
 mod error;
 pub mod handler;
 
-pub use handler::build_app;
 pub use handler::AppState;
+pub use handler::build_app;
 
 use serde::{Deserialize, Serialize};
 

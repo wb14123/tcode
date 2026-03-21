@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result};
@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 
 use browser_server::auth::{self, TokenSet};
 use browser_server::browser;
-use browser_server::handler::{build_app, AppState};
+use browser_server::handler::{AppState, build_app};
 
 #[derive(Parser)]
 #[command(name = "browser-server")]
@@ -124,8 +124,9 @@ async fn main() -> Result<()> {
 
         // Clean up stale socket
         if socket_path.exists() {
-            std::fs::remove_file(&socket_path)
-                .with_context(|| format!("Failed to remove stale socket: {}", socket_path.display()))?;
+            std::fs::remove_file(&socket_path).with_context(|| {
+                format!("Failed to remove stale socket: {}", socket_path.display())
+            })?;
         }
 
         // Ensure parent directory exists
@@ -139,12 +140,9 @@ async fn main() -> Result<()> {
 
         let app = build_app(Arc::clone(&state));
 
-        axum::serve(
-            tokio_listener_from_unix(listener),
-            app,
-        )
-        .with_graceful_shutdown(shutdown_signal(Arc::clone(&shutdown_notify)))
-        .await?;
+        axum::serve(tokio_listener_from_unix(listener), app)
+            .with_graceful_shutdown(shutdown_signal(Arc::clone(&shutdown_notify)))
+            .await?;
 
         // Clean up socket file
         if socket_path.exists() {
@@ -177,7 +175,9 @@ async fn shutdown_signal(notify: Arc<tokio::sync::Notify>) {
 
 /// Convert a `tokio::net::UnixListener` into a type that implements the
 /// `axum::serve` listener trait via `tokio_util`.
-fn tokio_listener_from_unix(listener: UnixListener) -> impl axum::serve::Listener<Addr = std::sync::Arc<tokio::net::unix::SocketAddr>> {
+fn tokio_listener_from_unix(
+    listener: UnixListener,
+) -> impl axum::serve::Listener<Addr = std::sync::Arc<tokio::net::unix::SocketAddr>> {
     TokioUnixListener(listener)
 }
 

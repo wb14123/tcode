@@ -2,7 +2,7 @@ use std::collections::HashMap;
 use std::fmt::Write;
 use std::net::{IpAddr, Ipv6Addr, ToSocketAddrs};
 
-use anyhow::{anyhow, bail, Result};
+use anyhow::{Result, anyhow, bail};
 use headless_chrome::protocol::cdp::Accessibility;
 use url::Url;
 
@@ -225,28 +225,34 @@ fn ax_value_str(val: &Option<AXValue>) -> &str {
 
 /// Get a named property's string value from an AX node's properties list.
 fn ax_prop_str<'a>(props: &'a Option<Vec<AXProperty>>, name: &str) -> Option<&'a str> {
-    props.as_ref()?.iter().find(|p| p.name == name).and_then(|p| {
-        match &p.value.value {
-            Some(serde_json::Value::String(s)) => Some(s.as_str()),
-            Some(serde_json::Value::Number(n)) => {
-                // Numbers don't have a string repr we can return as &str,
-                // so we skip them here — callers use ax_prop_number instead
-                let _ = n;
-                None
+    props
+        .as_ref()?
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| {
+            match &p.value.value {
+                Some(serde_json::Value::String(s)) => Some(s.as_str()),
+                Some(serde_json::Value::Number(n)) => {
+                    // Numbers don't have a string repr we can return as &str,
+                    // so we skip them here — callers use ax_prop_number instead
+                    let _ = n;
+                    None
+                }
+                _ => None,
             }
-            _ => None,
-        }
-    })
+        })
 }
 
 /// Get a named property's numeric value.
 fn ax_prop_number(props: &Option<Vec<AXProperty>>, name: &str) -> Option<i64> {
-    props.as_ref()?.iter().find(|p| p.name == name).and_then(|p| {
-        match &p.value.value {
+    props
+        .as_ref()?
+        .iter()
+        .find(|p| p.name == name)
+        .and_then(|p| match &p.value.value {
             Some(serde_json::Value::Number(n)) => n.as_i64(),
             _ => None,
-        }
-    })
+        })
 }
 
 /// Format a flat CDP accessibility tree into compact text for LLM consumption.
@@ -256,17 +262,14 @@ pub fn format_ax_tree(nodes: &[AXNode]) -> String {
     }
 
     // Build lookup: node_id -> &AXNode
-    let node_map: HashMap<&str, &AXNode> =
-        nodes.iter().map(|n| (n.node_id.as_str(), n)).collect();
+    let node_map: HashMap<&str, &AXNode> = nodes.iter().map(|n| (n.node_id.as_str(), n)).collect();
 
     // Find root nodes (no parent_id, or parent not in map)
     let roots: Vec<&AXNode> = nodes
         .iter()
-        .filter(|n| {
-            match &n.parent_id {
-                None => true,
-                Some(pid) => !node_map.contains_key(pid.as_str()),
-            }
+        .filter(|n| match &n.parent_id {
+            None => true,
+            Some(pid) => !node_map.contains_key(pid.as_str()),
         })
         .collect();
 
@@ -277,12 +280,7 @@ pub fn format_ax_tree(nodes: &[AXNode]) -> String {
     out
 }
 
-fn format_node(
-    out: &mut String,
-    node: &AXNode,
-    node_map: &HashMap<&str, &AXNode>,
-    depth: usize,
-) {
+fn format_node(out: &mut String, node: &AXNode, node_map: &HashMap<&str, &AXNode>, depth: usize) {
     // Skip ignored nodes entirely
     if node.ignored {
         // Still recurse into children — some ignored containers have visible children

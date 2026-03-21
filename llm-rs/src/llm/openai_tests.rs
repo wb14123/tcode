@@ -13,7 +13,7 @@ mod tests {
     use tokio_stream::StreamExt;
 
     use crate::llm::{
-        ChatOptions, LLMEvent, LLMMessage, OpenAI, OpenRouter, ReasoningEffort, StopReason, LLM,
+        ChatOptions, LLM, LLMEvent, LLMMessage, OpenAI, OpenRouter, ReasoningEffort, StopReason,
     };
     use crate::tool::Tool;
 
@@ -86,25 +86,47 @@ mod tests {
         // Should have at least MessageStart, some TextDelta, and MessageEnd
         let errors = collect_errors(&events);
         let summary = event_summary(&events);
-        assert!(errors.is_empty(), "Unexpected errors: {errors:?}\nEvents: {summary}");
+        assert!(
+            errors.is_empty(),
+            "Unexpected errors: {errors:?}\nEvents: {summary}"
+        );
 
-        assert!(events.iter().any(|e| matches!(e, LLMEvent::MessageStart { .. })),
-            "Expected MessageStart event, got: {summary}");
-        assert!(events.iter().any(|e| matches!(e, LLMEvent::TextDelta(_))),
-            "Expected at least one TextDelta event, got: {summary}");
-        assert!(events.iter().any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
-            "Expected MessageEnd event, got: {summary}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LLMEvent::MessageStart { .. })),
+            "Expected MessageStart event, got: {summary}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, LLMEvent::TextDelta(_))),
+            "Expected at least one TextDelta event, got: {summary}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
+            "Expected MessageEnd event, got: {summary}"
+        );
 
         // Check MessageEnd has valid token counts
         if let Some(LLMEvent::MessageEnd {
             stop_reason,
             output_tokens,
             ..
-        }) = events.iter().find(|e| matches!(e, LLMEvent::MessageEnd { .. }))
+        }) = events
+            .iter()
+            .find(|e| matches!(e, LLMEvent::MessageEnd { .. }))
         {
-            assert_eq!(*stop_reason, StopReason::EndTurn,
-                "Expected EndTurn stop reason, got {:?}", stop_reason);
-            assert!(*output_tokens > 0, "Expected output_tokens > 0, got {output_tokens}");
+            assert_eq!(
+                *stop_reason,
+                StopReason::EndTurn,
+                "Expected EndTurn stop reason, got {:?}",
+                stop_reason
+            );
+            assert!(
+                *output_tokens > 0,
+                "Expected output_tokens > 0, got {output_tokens}"
+            );
         }
     }
 
@@ -127,13 +149,22 @@ mod tests {
 
         let errors = collect_errors(&events);
         let summary = event_summary(&events);
-        assert!(errors.is_empty(), "API returned errors: {errors:?}\nEvents: {summary}");
+        assert!(
+            errors.is_empty(),
+            "API returned errors: {errors:?}\nEvents: {summary}"
+        );
 
         // With reasoning enabled, we should get ThinkingDelta events
-        assert!(events.iter().any(|e| matches!(e, LLMEvent::ThinkingDelta(_))),
-            "Expected ThinkingDelta events with reasoning enabled, got: {summary}");
-        assert!(events.iter().any(|e| matches!(e, LLMEvent::TextDelta(_))),
-            "Expected TextDelta events, got: {summary}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LLMEvent::ThinkingDelta(_))),
+            "Expected ThinkingDelta events with reasoning enabled, got: {summary}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, LLMEvent::TextDelta(_))),
+            "Expected TextDelta events, got: {summary}"
+        );
 
         // Check raw is present for round-tripping and contains reasoning
         if let Some(LLMEvent::MessageEnd {
@@ -142,9 +173,14 @@ mod tests {
             output_tokens: _,
             reasoning_tokens: _,
             raw,
-        }) = events.iter().find(|e| matches!(e, LLMEvent::MessageEnd { .. }))
+        }) = events
+            .iter()
+            .find(|e| matches!(e, LLMEvent::MessageEnd { .. }))
         {
-            let thinking_count = events.iter().filter(|e| matches!(e, LLMEvent::ThinkingDelta(_))).count();
+            let thinking_count = events
+                .iter()
+                .filter(|e| matches!(e, LLMEvent::ThinkingDelta(_)))
+                .count();
             assert!(
                 thinking_count > 0,
                 "Expected ThinkingDelta events with reasoning enabled, got 0",
@@ -166,9 +202,9 @@ mod tests {
                     "Expected raw array to have items for round-tripping"
                 );
                 // Check that at least one item is a reasoning item
-                let has_reasoning = arr.iter().any(|item| {
-                    item.get("type").and_then(|t| t.as_str()) == Some("reasoning")
-                });
+                let has_reasoning = arr
+                    .iter()
+                    .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning"));
                 assert!(
                     has_reasoning,
                     "Expected raw to contain a reasoning item for round-tripping, got: {raw_value:?}"
@@ -204,25 +240,38 @@ mod tests {
 
         let errors = collect_errors(&events);
         let summary = event_summary(&events);
-        assert!(errors.is_empty(), "API returned errors: {errors:?}\nEvents: {summary}");
+        assert!(
+            errors.is_empty(),
+            "API returned errors: {errors:?}\nEvents: {summary}"
+        );
 
-        assert!(events.iter().any(|e| matches!(e, LLMEvent::ToolCall(_))),
-            "Expected a ToolCall event, got: {summary}");
+        assert!(
+            events.iter().any(|e| matches!(e, LLMEvent::ToolCall(_))),
+            "Expected a ToolCall event, got: {summary}"
+        );
 
         // Check the tool call has the right name
         if let Some(LLMEvent::ToolCall(tc)) =
             events.iter().find(|e| matches!(e, LLMEvent::ToolCall(_)))
         {
-            assert_eq!(tc.name, "get_weather",
-                "Expected tool call to 'get_weather', got '{}'", tc.name);
+            assert_eq!(
+                tc.name, "get_weather",
+                "Expected tool call to 'get_weather', got '{}'",
+                tc.name
+            );
         }
 
         // Check stop reason is ToolUse
-        if let Some(LLMEvent::MessageEnd { stop_reason, .. }) =
-            events.iter().find(|e| matches!(e, LLMEvent::MessageEnd { .. }))
+        if let Some(LLMEvent::MessageEnd { stop_reason, .. }) = events
+            .iter()
+            .find(|e| matches!(e, LLMEvent::MessageEnd { .. }))
         {
-            assert_eq!(*stop_reason, StopReason::ToolUse,
-                "Expected ToolUse stop reason, got {:?}", stop_reason);
+            assert_eq!(
+                *stop_reason,
+                StopReason::ToolUse,
+                "Expected ToolUse stop reason, got {:?}",
+                stop_reason
+            );
         } else {
             panic!("No MessageEnd event found, got: {summary}");
         }
@@ -248,7 +297,10 @@ mod tests {
 
         let errors = collect_errors(&events);
         let summary = event_summary(&events);
-        assert!(errors.is_empty(), "First turn errors: {errors:?}\nEvents: {summary}");
+        assert!(
+            errors.is_empty(),
+            "First turn errors: {errors:?}\nEvents: {summary}"
+        );
 
         // Extract the response for round-tripping
         let mut accumulated_text = String::new();
@@ -266,9 +318,11 @@ mod tests {
         assert!(raw.is_some(), "Expected raw for round-tripping, got None");
         let raw_value = raw.as_ref().unwrap();
         assert!(raw_value.is_array(), "Expected raw to be an array");
-        let has_reasoning = raw_value.as_array().unwrap().iter().any(|item| {
-            item.get("type").and_then(|t| t.as_str()) == Some("reasoning")
-        });
+        let has_reasoning = raw_value
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning"));
         assert!(
             has_reasoning,
             "First turn raw must contain reasoning item for round-trip test. Got: {raw_value:?}"
@@ -299,7 +353,9 @@ mod tests {
         );
 
         assert!(
-            events.iter().any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
             "Expected MessageEnd in second turn, got: {summary}"
         );
     }
@@ -318,23 +374,32 @@ mod tests {
         ];
 
         // Use a cheap model
-        let stream = client.chat(
-            "deepseek/deepseek-chat",
-            &messages,
-            &ChatOptions::default(),
-        );
+        let stream = client.chat("deepseek/deepseek-chat", &messages, &ChatOptions::default());
         let events = collect_events(stream).await;
 
         let errors = collect_errors(&events);
         let summary = event_summary(&events);
-        assert!(errors.is_empty(), "Unexpected errors: {errors:?}\nEvents: {summary}");
+        assert!(
+            errors.is_empty(),
+            "Unexpected errors: {errors:?}\nEvents: {summary}"
+        );
 
-        assert!(events.iter().any(|e| matches!(e, LLMEvent::MessageStart { .. })),
-            "Expected MessageStart event, got: {summary}");
-        assert!(events.iter().any(|e| matches!(e, LLMEvent::TextDelta(_))),
-            "Expected at least one TextDelta event, got: {summary}");
-        assert!(events.iter().any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
-            "Expected MessageEnd event, got: {summary}");
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LLMEvent::MessageStart { .. })),
+            "Expected MessageStart event, got: {summary}"
+        );
+        assert!(
+            events.iter().any(|e| matches!(e, LLMEvent::TextDelta(_))),
+            "Expected at least one TextDelta event, got: {summary}"
+        );
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
+            "Expected MessageEnd event, got: {summary}"
+        );
     }
 
     #[tokio::test]
@@ -353,7 +418,10 @@ mod tests {
 
         let errors = collect_errors(&events);
         let summary = event_summary(&events);
-        assert!(errors.is_empty(), "First turn errors: {errors:?}\nEvents: {summary}");
+        assert!(
+            errors.is_empty(),
+            "First turn errors: {errors:?}\nEvents: {summary}"
+        );
 
         // Extract response for round-tripping
         let mut accumulated_text = String::new();
@@ -386,10 +454,15 @@ mod tests {
 
         let errors = collect_errors(&events);
         let summary = event_summary(&events);
-        assert!(errors.is_empty(), "Second turn errors: {errors:?}\nEvents: {summary}");
+        assert!(
+            errors.is_empty(),
+            "Second turn errors: {errors:?}\nEvents: {summary}"
+        );
 
         assert!(
-            events.iter().any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
+            events
+                .iter()
+                .any(|e| matches!(e, LLMEvent::MessageEnd { .. })),
             "Expected MessageEnd in second turn, got: {summary}"
         );
     }

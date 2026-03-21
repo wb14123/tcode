@@ -4,7 +4,10 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ClientMessage {
     /// Send a user message to a conversation (main if conversation_id is None)
-    SendMessage { conversation_id: Option<String>, content: String },
+    SendMessage {
+        conversation_id: Option<String>,
+        content: String,
+    },
     /// Notify that the user finished interacting with a subagent (/done command)
     UserRequestEnd { conversation_id: String },
     /// Cancel a specific tool call by its ID

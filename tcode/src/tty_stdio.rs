@@ -30,7 +30,9 @@ pub fn redirect_output_to_files(stdout_log: &Path, stderr_log: &Path) -> Option<
     // Dup stdout again for immediate return (before we move originals into SAVED_FDS)
     let stdout_for_return = dup_fd(original_stdout.as_fd())?;
 
-    SAVED_FDS.set((original_stdin, original_stdout, original_stderr)).ok();
+    SAVED_FDS
+        .set((original_stdin, original_stdout, original_stderr))
+        .ok();
 
     // Open log files
     let stdout_file = OpenOptions::new()

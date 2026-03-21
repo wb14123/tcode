@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use llm_rs::permission::ScopedPermissionManager;
 
 /// Shared permission scope used by both the `read` and `glob` tools.
@@ -49,13 +49,19 @@ async fn canonicalize_path(path: &Path) -> Result<(PathBuf, bool)> {
             .map_err(|e| anyhow!("Failed to resolve path {}: {}", path.display(), e))?;
         Ok((canonical, true))
     } else {
-        let parent = path.parent()
+        let parent = path
+            .parent()
             .ok_or_else(|| anyhow!("No parent directory for {}", path.display()))?;
-        let filename = path.file_name()
+        let filename = path
+            .file_name()
             .ok_or_else(|| anyhow!("No filename in path {}", path.display()))?;
-        let canonical_parent = tokio::fs::canonicalize(parent)
-            .await
-            .map_err(|e| anyhow!("Failed to resolve parent directory {}: {}", parent.display(), e))?;
+        let canonical_parent = tokio::fs::canonicalize(parent).await.map_err(|e| {
+            anyhow!(
+                "Failed to resolve parent directory {}: {}",
+                parent.display(),
+                e
+            )
+        })?;
         Ok((canonical_parent.join(filename), false))
     }
 }
@@ -75,8 +81,8 @@ pub async fn check_file_read_permission(
     }
 
     // Inside cwd — no permission required
-    let cwd = std::env::current_dir()
-        .map_err(|e| anyhow!("Failed to get current directory: {}", e))?;
+    let cwd =
+        std::env::current_dir().map_err(|e| anyhow!("Failed to get current directory: {}", e))?;
     let canonical_cwd = tokio::fs::canonicalize(&cwd)
         .await
         .map_err(|e| anyhow!("Failed to resolve cwd {}: {}", cwd.display(), e))?;
@@ -101,7 +107,10 @@ pub async fn check_file_read_permission(
     {
         Ok(())
     } else {
-        Err(anyhow!("User denied read permission for {}", path.display()))
+        Err(anyhow!(
+            "User denied read permission for {}",
+            path.display()
+        ))
     }
 }
 
@@ -127,9 +136,7 @@ pub async fn check_file_write_permission(
     } else {
         format!("Allow creating new file {}?", path.display())
     };
-    let file_extension = path.extension()
-        .and_then(|e| e.to_str())
-        .unwrap_or("txt");
+    let file_extension = path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
 
     if permission
         .ask_permission_with_preview(
@@ -144,6 +151,9 @@ pub async fn check_file_write_permission(
     {
         Ok(())
     } else {
-        Err(anyhow!("User denied write permission for {}", path.display()))
+        Err(anyhow!(
+            "User denied write permission for {}",
+            path.display()
+        ))
     }
 }

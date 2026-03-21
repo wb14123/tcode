@@ -27,13 +27,17 @@ impl ToolCallDisplayClient {
 
         // Create the JSONL file if it doesn't exist yet (the tool call may not have started)
         if !tool_call_file.exists() {
-            tokio::fs::write(&tool_call_file, "").await
+            tokio::fs::write(&tool_call_file, "")
+                .await
                 .with_context(|| format!("Failed to create tool call file {:?}", tool_call_file))?;
         }
         // Create the status file if it doesn't exist yet
         if !status_file.exists() {
-            tokio::fs::write(&status_file, "Waiting").await
-                .with_context(|| format!("Failed to create tool call status file {:?}", status_file))?;
+            tokio::fs::write(&status_file, "Waiting")
+                .await
+                .with_context(|| {
+                    format!("Failed to create tool call status file {:?}", status_file)
+                })?;
         }
 
         // Save terminal settings before neovim takes over
@@ -45,12 +49,8 @@ impl ToolCallDisplayClient {
 
         // Restore terminal settings as a safety net
         if let Some(ref t) = saved_termios {
-            nix::sys::termios::tcsetattr(
-                std::io::stdin(),
-                nix::sys::termios::SetArg::TCSANOW,
-                t,
-            )
-            .context("Failed to restore terminal settings")?;
+            nix::sys::termios::tcsetattr(std::io::stdin(), nix::sys::termios::SetArg::TCSANOW, t)
+                .context("Failed to restore terminal settings")?;
         }
 
         Ok(())
