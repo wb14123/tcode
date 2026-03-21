@@ -648,7 +648,7 @@ async fn handle_client_inner(
                         match manager.get_conversation(&conversation_id) {
                             Ok(Some(client)) => {
                                 // Broadcast UserRequestEnd on the subagent's channel (for UI)
-                                let msg = llm_rs::conversation::Message::UserRequestEnd {
+                                let msg = Message::UserRequestEnd {
                                     msg_id: client.next_msg_id(),
                                     conversation_id: conversation_id.clone(),
                                 };
@@ -717,7 +717,7 @@ async fn handle_client_inner(
                         match manager.permission_manager().resolve(&key, &decision, request_id.as_deref()) {
                             Ok(()) => {
                                 if let Err(e) = conv_client.notify_msg(
-                                    llm_rs::conversation::Message::PermissionUpdated {
+                                    Message::PermissionUpdated {
                                         msg_id: conv_client.next_msg_id(),
                                     },
                                 ) {
@@ -734,7 +734,7 @@ async fn handle_client_inner(
                         match manager.permission_manager().revoke(&key) {
                             Ok(()) => {
                                 if let Err(e) = conv_client.notify_msg(
-                                    llm_rs::conversation::Message::PermissionUpdated {
+                                    Message::PermissionUpdated {
                                         msg_id: conv_client.next_msg_id(),
                                     },
                                 ) {
