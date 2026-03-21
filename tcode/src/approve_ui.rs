@@ -71,22 +71,22 @@ fn send_msg_sync(socket_path: &PathBuf, msg: &ClientMessage) -> Result<ServerMes
     Ok(server_msg)
 }
 
-fn send_resolve(socket_path: &PathBuf, key: PermissionKey, decision: PermissionDecision, request_id: Option<String>) -> Result<()> {
-    let msg = ClientMessage::ResolvePermission { key, decision, request_id };
-    match send_msg_sync(socket_path, &msg)? {
+fn send_and_expect_ack(socket_path: &PathBuf, msg: &ClientMessage) -> Result<()> {
+    match send_msg_sync(socket_path, msg)? {
         ServerMessage::Ack => Ok(()),
         ServerMessage::Error { message } => anyhow::bail!("Server error: {}", message),
         _ => anyhow::bail!("Unexpected server response"),
     }
 }
 
+fn send_resolve(socket_path: &PathBuf, key: PermissionKey, decision: PermissionDecision, request_id: Option<String>) -> Result<()> {
+    let msg = ClientMessage::ResolvePermission { key, decision, request_id };
+    send_and_expect_ack(socket_path, &msg)
+}
+
 fn send_revoke(socket_path: &PathBuf, key: PermissionKey) -> Result<()> {
     let msg = ClientMessage::RevokePermission { key };
-    match send_msg_sync(socket_path, &msg)? {
-        ServerMessage::Ack => Ok(()),
-        ServerMessage::Error { message } => anyhow::bail!("Server error: {}", message),
-        _ => anyhow::bail!("Unexpected server response"),
-    }
+    send_and_expect_ack(socket_path, &msg)
 }
 
 pub fn run_approve(args: ApproveArgs) -> Result<ApproveResult> {
@@ -105,6 +105,29 @@ pub fn run_approve(args: ApproveArgs) -> Result<ApproveResult> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     result
+}
+
+fn render_title<'a>(text: &'a str, color: Color) -> Paragraph<'a> {
+    Paragraph::new(Line::from(vec![
+        Span::styled(text, Style::default().fg(color)),
+    ]))
+    .alignment(Alignment::Center)
+    .block(Block::default().borders(Borders::BOTTOM))
+}
+
+fn render_details<'a>(args: &'a ApproveArgs) -> Paragraph<'a> {
+    Paragraph::new(vec![
+        Line::from(vec![
+            Span::raw("  Tool: "),
+            Span::styled(&args.tool, Style::default().fg(Color::Cyan)),
+            Span::raw("  Key: "),
+            Span::styled(&args.key, Style::default().fg(Color::Cyan)),
+        ]),
+        Line::from(vec![
+            Span::raw("  Value: "),
+            Span::styled(&args.value, Style::default().fg(Color::White)),
+        ]),
+    ])
 }
 
 /// Break text into lines of at most `width` chars, with 2-char padding on each side.
@@ -184,12 +207,7 @@ fn run_approve_loop(
                     Constraint::Length(2),              // [12] Deny/Cancel
                 ]).split(area);
 
-                let title = Paragraph::new(Line::from(vec![
-                    Span::styled("Permission Request", Style::default().fg(Color::Yellow)),
-                ]))
-                .alignment(Alignment::Center)
-                .block(Block::default().borders(Borders::BOTTOM));
-                frame.render_widget(title, chunks[0]);
+                frame.render_widget(render_title("Permission Request", Color::Yellow), chunks[0]);
 
                 let prompt_content_height = chunks[2].height;
                 let scrollable = total_lines.saturating_sub(prompt_content_height);
@@ -267,26 +285,8 @@ fn run_approve_loop(
                     Constraint::Min(0),   // Spacer
                 ]).split(area);
 
-                let title = Paragraph::new(Line::from(vec![
-                    Span::styled("Permission Request", Style::default().fg(Color::Yellow)),
-                ]))
-                .alignment(Alignment::Center)
-                .block(Block::default().borders(Borders::BOTTOM));
-                frame.render_widget(title, chunks[0]);
-
-                let details = Paragraph::new(vec![
-                    Line::from(vec![
-                        Span::raw("  Tool: "),
-                        Span::styled(&args.tool, Style::default().fg(Color::Cyan)),
-                        Span::raw("  Key: "),
-                        Span::styled(&args.key, Style::default().fg(Color::Cyan)),
-                    ]),
-                    Line::from(vec![
-                        Span::raw("  Value: "),
-                        Span::styled(&args.value, Style::default().fg(Color::White)),
-                    ]),
-                ]);
-                frame.render_widget(details, chunks[1]);
+                frame.render_widget(render_title("Permission Request", Color::Yellow), chunks[0]);
+                frame.render_widget(render_details(args), chunks[1]);
 
                 let options = Paragraph::new(vec![
                     Line::from(Span::styled("  [1] Allow once", Style::default().fg(Color::Green))),
@@ -299,7 +299,7 @@ fn run_approve_loop(
             }
         })?;
 
-        if event::poll(std::time::Duration::from_millis(200))? {
+        if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
@@ -358,26 +358,8 @@ fn run_manage_loop(
                 Constraint::Min(0),   // Spacer
             ]).split(area);
 
-            let title = Paragraph::new(Line::from(vec![
-                Span::styled("Manage Permission", Style::default().fg(Color::Cyan)),
-            ]))
-            .alignment(Alignment::Center)
-            .block(Block::default().borders(Borders::BOTTOM));
-            frame.render_widget(title, chunks[0]);
-
-            let details = Paragraph::new(vec![
-                Line::from(vec![
-                    Span::raw("  Tool: "),
-                    Span::styled(&args.tool, Style::default().fg(Color::Cyan)),
-                    Span::raw("  Key: "),
-                    Span::styled(&args.key, Style::default().fg(Color::Cyan)),
-                ]),
-                Line::from(vec![
-                    Span::raw("  Value: "),
-                    Span::styled(&args.value, Style::default().fg(Color::White)),
-                ]),
-            ]);
-            frame.render_widget(details, chunks[1]);
+            frame.render_widget(render_title("Manage Permission", Color::Cyan), chunks[0]);
+            frame.render_widget(render_details(args), chunks[1]);
 
             let options = Paragraph::new(vec![
                 Line::from(Span::styled("  [r] Revoke", Style::default().fg(Color::Red))),
@@ -386,7 +368,7 @@ fn run_manage_loop(
             frame.render_widget(options, chunks[3]);
         })?;
 
-        if event::poll(std::time::Duration::from_millis(200))? {
+        if event::poll(Duration::from_millis(200))? {
             if let Event::Key(key) = event::read()? {
                 if key.kind != KeyEventKind::Press {
                     continue;
