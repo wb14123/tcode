@@ -11,6 +11,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
+use super::sse;
 use super::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall, LLM};
 use crate::tool::Tool;
 
@@ -586,25 +587,15 @@ impl LLM for Claude {
                 req = req.header("x-api-key", &access_token);
             }
 
-            let response = req
-                .json(&request_body)
-                .send()
-                .await;
-
-            let response = match response {
+            let response = match sse::check_response(
+                req.json(&request_body).send().await
+            ).await {
                 Ok(r) => r,
                 Err(e) => {
-                    yield LLMEvent::Error(format!("Request failed: {:?}", e));
+                    yield LLMEvent::Error(e);
                     return;
                 }
             };
-
-            if !response.status().is_success() {
-                let status = response.status();
-                let body = response.text().await.unwrap_or_default();
-                yield LLMEvent::Error(format!("API error {}: {}", status, body));
-                return;
-            }
 
             // State for accumulating the response
             let mut input_tokens = 0i32;
@@ -621,40 +612,19 @@ impl LLM for Claude {
             let mut thinking_blocks: HashMap<usize, ThinkingBlockAccumulator> = HashMap::new();
             let mut reasoning_tokens = 0i32;
 
-            // SSE parsing state
-            let mut byte_stream = response.bytes_stream();
-            let mut buffer = String::new();
-            let mut current_event_type: Option<String> = None;
+            let mut sse_events = sse::sse_stream(response);
 
-            while let Some(chunk_result) = byte_stream.next().await {
-                let chunk = match chunk_result {
-                    Ok(c) => c,
+            while let Some(event_result) = sse_events.next().await {
+                let event = match event_result {
+                    Ok(e) => e,
                     Err(e) => {
-                        yield LLMEvent::Error(format!("Stream error: {:?}", e));
+                        yield LLMEvent::Error(e);
                         return;
                     }
                 };
 
-                buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-                // Parse SSE format: "event: <type>\ndata: <json>\n\n"
-                while let Some(line_end) = buffer.find('\n') {
-                    let line = buffer[..line_end].trim_end().to_string();
-                    buffer = buffer[line_end + 1..].to_string();
-
-                    if line.is_empty() {
-                        // Empty line means end of event
-                        current_event_type = None;
-                        continue;
-                    }
-
-                    if let Some(event_name) = line.strip_prefix("event: ") {
-                        current_event_type = Some(event_name.to_string());
-                        continue;
-                    }
-
-                    if let Some(data) = line.strip_prefix("data: ") {
-                        let event_type = current_event_type.as_deref().unwrap_or("unknown");
+                let event_type = event.event_type.as_deref().unwrap_or("unknown");
+                let data = &event.data;
 
                         match event_type {
                             "message_start" => {
@@ -838,8 +808,6 @@ impl LLM for Claude {
                                 // Unknown event type - ignore per API versioning policy
                             }
                         }
-                    }
-                }
             }
 
             // Stream ended without message_stop (shouldn't happen normally)

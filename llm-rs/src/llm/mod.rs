@@ -7,6 +7,7 @@ mod claude;
 mod openai;
 mod openai_common;
 mod openrouter;
+mod sse;
 
 #[cfg(test)]
 mod openai_tests;
