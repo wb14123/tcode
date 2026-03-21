@@ -135,7 +135,7 @@ pub fn fill_cancelled_tool_results(llm_msgs: &mut Vec<LLMMessage>) {
     };
 
     // Collect tool_call_ids that already have ToolResults after the assistant message
-    let existing_result_ids: std::collections::HashSet<&str> = llm_msgs[assistant_idx + 1..]
+    let existing_result_ids: HashSet<&str> = llm_msgs[assistant_idx + 1..]
         .iter()
         .filter_map(|msg| {
             if let LLMMessage::ToolResult { tool_call_id, .. } = msg {
