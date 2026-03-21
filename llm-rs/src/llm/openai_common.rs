@@ -38,23 +38,6 @@ pub(crate) fn effort_to_str(effort: &ReasoningEffort) -> &'static str {
     }
 }
 
-/// Normalize a schemars Schema into OpenAI-compatible JSON.
-/// OpenAI requires `type: "object"` and `properties` even for empty params.
-pub(crate) fn normalize_schema_for_openai(schema: &schemars::Schema) -> serde_json::Value {
-    let mut value = serde_json::to_value(schema).unwrap_or(serde_json::json!({}));
-
-    if let Some(obj) = value.as_object_mut() {
-        if !obj.contains_key("type") {
-            obj.insert("type".to_string(), serde_json::json!("object"));
-        }
-        if !obj.contains_key("properties") {
-            obj.insert("properties".to_string(), serde_json::json!({}));
-        }
-    }
-
-    value
-}
-
 /// Build tool definitions from registered tools (Chat Completions format).
 pub(crate) fn build_tool_defs(tools: &[Arc<Tool>]) -> Option<Vec<ToolDefinition>> {
     if tools.is_empty() {
@@ -68,7 +51,7 @@ pub(crate) fn build_tool_defs(tools: &[Arc<Tool>]) -> Option<Vec<ToolDefinition>
                     function: FunctionDefinition {
                         name: t.name.clone(),
                         description: t.description.clone(),
-                        parameters: normalize_schema_for_openai(&t.param_schema),
+                        parameters: crate::tool::normalize_schema(&t.param_schema),
                     },
                 })
                 .collect(),

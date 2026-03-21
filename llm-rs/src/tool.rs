@@ -38,6 +38,7 @@ use std::time::Duration;
 use pin_project_lite::pin_project;
 use schemars::Schema;
 use serde::de::DeserializeOwned;
+
 use tokio::time::{Instant, Sleep};
 use tokio_stream::{Stream, StreamExt};
 
@@ -148,6 +149,24 @@ impl<S: Stream<Item = String>> Stream for CancellableStream<S> {
         // Poll the inner stream
         this.inner.poll_next(cx)
     }
+}
+
+/// Normalize a schemars `Schema` into provider-compatible JSON.
+/// Ensures `type: "object"` and `properties: {}` are present, as required
+/// by both OpenAI and Claude APIs for tool parameter schemas.
+pub fn normalize_schema(schema: &Schema) -> serde_json::Value {
+    let mut value = serde_json::to_value(schema).unwrap_or(serde_json::json!({}));
+
+    if let Some(obj) = value.as_object_mut() {
+        if !obj.contains_key("type") {
+            obj.insert("type".to_string(), serde_json::json!("object"));
+        }
+        if !obj.contains_key("properties") {
+            obj.insert("properties".to_string(), serde_json::json!({}));
+        }
+    }
+
+    value
 }
 
 /// Marker trait for valid tool parameter types.

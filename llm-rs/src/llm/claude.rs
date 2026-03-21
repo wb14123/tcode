@@ -323,23 +323,11 @@ fn build_claude_tool_defs(tools: &[Arc<Tool>]) -> Option<Vec<ClaudeToolDefinitio
         Some(
             tools
                 .iter()
-                .map(|t| {
-                    // Normalize schema for Claude (ensure type: object and properties exist)
-                    let mut schema = serde_json::to_value(&t.param_schema).unwrap_or_default();
-                    if let Some(obj) = schema.as_object_mut() {
-                        if !obj.contains_key("type") {
-                            obj.insert("type".to_string(), serde_json::json!("object"));
-                        }
-                        if !obj.contains_key("properties") {
-                            obj.insert("properties".to_string(), serde_json::json!({}));
-                        }
-                    }
-                    ClaudeToolDefinition {
-                        // Prefix tool name for OAuth
-                        name: format!("{}{}", TOOL_PREFIX, t.name),
-                        description: t.description.clone(),
-                        input_schema: schema,
-                    }
+                .map(|t| ClaudeToolDefinition {
+                    // Prefix tool name for OAuth
+                    name: format!("{}{}", TOOL_PREFIX, t.name),
+                    description: t.description.clone(),
+                    input_schema: crate::tool::normalize_schema(&t.param_schema),
                 })
                 .collect(),
         )

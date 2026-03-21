@@ -19,7 +19,8 @@ use async_stream::stream;
 use futures::StreamExt;
 use tokio_stream::Stream;
 
-use super::openai_common::{effort_to_str, normalize_schema_for_openai};
+use super::openai_common::effort_to_str;
+use crate::tool::normalize_schema;
 use super::{ChatOptions, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall, LLM};
 use crate::tool::Tool;
 
@@ -157,7 +158,7 @@ impl LLM for OpenAI {
                         OAITool::Function(FunctionTool {
                             name: t.name.clone(),
                             description: Some(t.description.clone()),
-                            parameters: Some(normalize_schema_for_openai(&t.param_schema)),
+                            parameters: Some(normalize_schema(&t.param_schema)),
                             strict: None,
                         })
                     })
