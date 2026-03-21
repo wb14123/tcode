@@ -17,6 +17,7 @@ tokio = { version = "1.49.0", features = ["macros", "rt", "rt-multi-thread", "ti
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 llm-rs-macros = { path = "../llm-rs-macros" }
+parking_lot = "0.12"
 tracing = "0.1"
 uuid = { version = "1.19.0", features = ["v4"] }
 

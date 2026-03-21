@@ -28,7 +28,7 @@ use crate::protocol::{ClientMessage, ServerMessage};
 
 /// Shared map from tool_call_id -> ConversationClient that owns the tool.
 /// Populated by event writers on ToolMessageStart, cleaned up on ToolMessageEnd.
-type ToolClientMap = Arc<std::sync::Mutex<HashMap<String, Arc<ConversationClient>>>>;
+type ToolClientMap = Arc<parking_lot::Mutex<HashMap<String, Arc<ConversationClient>>>>;
 
 /// Per-tool-call tracking state used by the event writer.
 struct ToolCallState {
@@ -129,7 +129,7 @@ impl Server {
         tools_list.push(Arc::new(create_subagent_tool(&model_infos)));
         tools_list.push(Arc::new(create_continue_subagent_tool()));
 
-        let tool_clients: ToolClientMap = Arc::new(std::sync::Mutex::new(HashMap::new()));
+        let tool_clients: ToolClientMap = Arc::new(parking_lot::Mutex::new(HashMap::new()));
 
         let resuming = self.conversation_state_file.exists();
 
@@ -395,7 +395,6 @@ fn run_event_writer(
                     );
                     tool_clients
                         .lock()
-                        .unwrap()
                         .insert(tool_call_id.clone(), Arc::clone(&conv_client));
                 }
 
@@ -437,7 +436,7 @@ fn run_event_writer(
                     ..
                 } => {
                     tracing::info!(tool_call_id, ?end_status, "ToolMessageEnd received");
-                    tool_clients.lock().unwrap().remove(tool_call_id.as_str());
+                    tool_clients.lock().remove(tool_call_id.as_str());
                     if let Some(state) = tool_calls.remove(tool_call_id) {
                         // Write truncated preview to main display as a single ToolOutputChunk
                         if !state.accumulated_preview.is_empty() {
@@ -812,7 +811,7 @@ async fn handle_client_inner(
                         }
                     }
                     ClientMessage::CancelTool { tool_call_id } => {
-                        let client = tool_clients.lock().unwrap().get(&tool_call_id).cloned();
+                        let client = tool_clients.lock().get(&tool_call_id).cloned();
                         if let Some(client) = client {
                             client.cancel_tool(&tool_call_id);
                             send_msg(&mut sink, &ServerMessage::Ack).await?;

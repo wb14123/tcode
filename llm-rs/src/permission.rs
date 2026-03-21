@@ -72,10 +72,10 @@ struct ProjectPermissionsFile {
 /// Pure-state permission manager. Does not emit events — callers (ConversationClient)
 /// handle event broadcasting.
 pub struct PermissionManager {
-    session_permissions: std::sync::Mutex<HashSet<PermissionKey>>,
-    project_permissions: std::sync::Mutex<HashSet<PermissionKey>>,
+    session_permissions: parking_lot::Mutex<HashSet<PermissionKey>>,
+    project_permissions: parking_lot::Mutex<HashSet<PermissionKey>>,
     project_permissions_path: PathBuf,
-    pending_requests: std::sync::Mutex<HashMap<PermissionKey, PendingRequest>>,
+    pending_requests: parking_lot::Mutex<HashMap<PermissionKey, PendingRequest>>,
 }
 
 impl PermissionManager {
@@ -83,10 +83,10 @@ impl PermissionManager {
     pub fn new(project_path: PathBuf) -> Self {
         let project_permissions = Self::load_project_permissions(&project_path);
         PermissionManager {
-            session_permissions: std::sync::Mutex::new(HashSet::new()),
-            project_permissions: std::sync::Mutex::new(project_permissions),
+            session_permissions: parking_lot::Mutex::new(HashSet::new()),
+            project_permissions: parking_lot::Mutex::new(project_permissions),
             project_permissions_path: project_path,
-            pending_requests: std::sync::Mutex::new(HashMap::new()),
+            pending_requests: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -97,8 +97,8 @@ impl PermissionManager {
             key: key.to_string(),
             value: value.to_string(),
         };
-        self.session_permissions.lock().unwrap().contains(&pk)
-            || self.project_permissions.lock().unwrap().contains(&pk)
+        self.session_permissions.lock().contains(&pk)
+            || self.project_permissions.lock().contains(&pk)
     }
 
     /// Register a pending permission request. If the same key is already pending,
@@ -119,7 +119,7 @@ impl PermissionManager {
         };
         let request_id = Uuid::new_v4().to_string();
         let (tx, rx) = oneshot::channel();
-        let mut pending = self.pending_requests.lock().unwrap();
+        let mut pending = self.pending_requests.lock();
         if let Some(existing) = pending.get_mut(&pk) {
             existing.waiters.insert(request_id.clone(), tx);
         } else {
@@ -152,17 +152,17 @@ impl PermissionManager {
         // Save to storage based on decision
         match decision {
             PermissionDecision::AllowSession => {
-                self.session_permissions.lock().unwrap().insert(key.clone());
+                self.session_permissions.lock().insert(key.clone());
             }
             PermissionDecision::AllowProject => {
-                self.project_permissions.lock().unwrap().insert(key.clone());
+                self.project_permissions.lock().insert(key.clone());
                 self.save_project_permissions()?;
             }
             PermissionDecision::AllowOnce | PermissionDecision::Deny => {}
         }
 
         // Notify waiters
-        let mut pending = self.pending_requests.lock().unwrap();
+        let mut pending = self.pending_requests.lock();
         if let Some(request) = pending.get_mut(key) {
             match (decision, request_id) {
                 (PermissionDecision::AllowOnce, None) => {
@@ -182,7 +182,9 @@ impl PermissionManager {
                 }
                 _ => {
                     // AllowSession/AllowProject/Deny: notify all and remove
-                    let request = pending.remove(key).unwrap();
+                    let request = pending
+                        .remove(key)
+                        .expect("key must exist: verified via get_mut under same lock");
                     let allowed = !matches!(decision, PermissionDecision::Deny);
                     for (_, tx) in request.waiters {
                         let _ = tx.send(allowed);
@@ -196,8 +198,8 @@ impl PermissionManager {
 
     /// Revoke a permission from both session and project storage.
     pub fn revoke(&self, key: &PermissionKey) -> anyhow::Result<()> {
-        self.session_permissions.lock().unwrap().remove(key);
-        let removed = self.project_permissions.lock().unwrap().remove(key);
+        self.session_permissions.lock().remove(key);
+        let removed = self.project_permissions.lock().remove(key);
         if removed {
             self.save_project_permissions()?;
         }
@@ -207,7 +209,7 @@ impl PermissionManager {
     /// Close all pending requests by sending `false` to all waiters.
     /// Used on session resume to clean up stale requests.
     pub fn close_all_pending(&self) {
-        let mut pending = self.pending_requests.lock().unwrap();
+        let mut pending = self.pending_requests.lock();
         for (_key, request) in pending.drain() {
             for (_, tx) in request.waiters {
                 let _ = tx.send(false);
@@ -217,7 +219,7 @@ impl PermissionManager {
 
     /// Get a full snapshot of the current permission state.
     pub fn snapshot(&self) -> PermissionState {
-        let pending = self.pending_requests.lock().unwrap();
+        let pending = self.pending_requests.lock();
         let pending_infos: Vec<PendingPermissionInfo> = pending
             .iter()
             .map(|(k, r)| {
@@ -234,20 +236,8 @@ impl PermissionManager {
             })
             .collect();
 
-        let session: Vec<PermissionKey> = self
-            .session_permissions
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect();
-        let project: Vec<PermissionKey> = self
-            .project_permissions
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect();
+        let session: Vec<PermissionKey> = self.session_permissions.lock().iter().cloned().collect();
+        let project: Vec<PermissionKey> = self.project_permissions.lock().iter().cloned().collect();
 
         PermissionState {
             pending: pending_infos,
@@ -267,13 +257,7 @@ impl PermissionManager {
     }
 
     fn save_project_permissions(&self) -> anyhow::Result<()> {
-        let perms: Vec<PermissionKey> = self
-            .project_permissions
-            .lock()
-            .unwrap()
-            .iter()
-            .cloned()
-            .collect();
+        let perms: Vec<PermissionKey> = self.project_permissions.lock().iter().cloned().collect();
         let file = ProjectPermissionsFile {
             version: 1,
             permissions: perms,

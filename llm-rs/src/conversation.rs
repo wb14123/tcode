@@ -427,9 +427,9 @@ fn prepare_conversation(
         msgs: RwLock::new(Vec::new()),
         input_channel_tx: input_tx,
         new_msg_notify_tx: notify_tx,
-        tool_cancel_tokens: std::sync::Mutex::new(HashMap::new()),
-        cancel_token: std::sync::Mutex::new(CancellationToken::new()),
-        children: std::sync::Mutex::new(HashMap::new()),
+        tool_cancel_tokens: parking_lot::Mutex::new(HashMap::new()),
+        cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
+        children: parking_lot::Mutex::new(HashMap::new()),
     });
     (tools_map, input_rx, client)
 }
@@ -442,7 +442,7 @@ pub struct ConversationManager {
     conversations: RwLock<HashMap<String, (Arc<ConversationClient>, AbortHandle)>>,
     /// Maps subagent_conv_id → (parent_conv_id, tool_call_id).
     /// Used by the server to route `/done` recovery to the correct parent.
-    subagent_parents: std::sync::Mutex<HashMap<String, (String, String)>>,
+    subagent_parents: parking_lot::Mutex<HashMap<String, (String, String)>>,
     /// Permission manager shared across all conversations.
     permission_manager: Arc<crate::permission::PermissionManager>,
 }
@@ -454,7 +454,7 @@ impl ConversationManager {
             Arc::new(crate::permission::PermissionManager::new(permissions_path));
         Arc::new(Self {
             conversations: RwLock::new(HashMap::new()),
-            subagent_parents: std::sync::Mutex::new(HashMap::new()),
+            subagent_parents: parking_lot::Mutex::new(HashMap::new()),
             permission_manager,
         })
     }
@@ -610,7 +610,7 @@ impl ConversationManager {
         parent_conv_id: &str,
         tool_call_id: &str,
     ) {
-        self.subagent_parents.lock().unwrap().insert(
+        self.subagent_parents.lock().insert(
             subagent_conv_id.to_string(),
             (parent_conv_id.to_string(), tool_call_id.to_string()),
         );
@@ -618,11 +618,7 @@ impl ConversationManager {
 
     /// Look up the parent conversation and tool_call_id for a subagent.
     pub fn get_subagent_parent(&self, subagent_conv_id: &str) -> Option<(String, String)> {
-        self.subagent_parents
-            .lock()
-            .unwrap()
-            .get(subagent_conv_id)
-            .cloned()
+        self.subagent_parents.lock().get(subagent_conv_id).cloned()
     }
 
     /// Resume a conversation from a persisted `ConversationState`.
@@ -2132,11 +2128,11 @@ pub struct ConversationClient {
     msgs: RwLock<Vec<Arc<Message>>>,
     input_channel_tx: mpsc::Sender<Message>,
     new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
-    tool_cancel_tokens: std::sync::Mutex<HashMap<String, CancellationToken>>,
+    tool_cancel_tokens: parking_lot::Mutex<HashMap<String, CancellationToken>>,
     /// Conversation-level cancellation token. Cancelling this cancels all child tool tokens.
-    cancel_token: std::sync::Mutex<CancellationToken>,
+    cancel_token: parking_lot::Mutex<CancellationToken>,
     /// Child subagent clients, keyed by conversation_id. Used for cascading cancellation.
-    children: std::sync::Mutex<HashMap<String, Arc<ConversationClient>>>,
+    children: parking_lot::Mutex<HashMap<String, Arc<ConversationClient>>>,
 }
 
 impl ConversationClient {
@@ -2170,10 +2166,10 @@ impl ConversationClient {
     /// Used internally when a user sends a new message while tools are running.
     pub(crate) fn cancel_silent(&self) {
         // Cancel our token (idempotent — safe to call multiple times)
-        self.cancel_token.lock().unwrap().cancel();
+        self.cancel_token.lock().cancel();
 
         // Recursively cancel all child subagent conversations
-        let children = self.children.lock().unwrap();
+        let children = self.children.lock();
         for child in children.values() {
             child.cancel_silent();
         }
@@ -2181,25 +2177,22 @@ impl ConversationClient {
 
     /// Register a child subagent client for cascading cancellation.
     pub fn register_child(&self, conversation_id: String, client: Arc<ConversationClient>) {
-        self.children
-            .lock()
-            .unwrap()
-            .insert(conversation_id, client);
+        self.children.lock().insert(conversation_id, client);
     }
 
     /// Get a clone of the current cancel token for use in `tokio::select!`.
     pub(crate) fn current_cancel_token(&self) -> CancellationToken {
-        self.cancel_token.lock().unwrap().clone()
+        self.cancel_token.lock().clone()
     }
 
     /// Replace the cancel token with a fresh one so the conversation can accept new work.
     pub(crate) fn reset_cancel_token(&self) {
-        *self.cancel_token.lock().unwrap() = CancellationToken::new();
+        *self.cancel_token.lock() = CancellationToken::new();
     }
 
     /// Cancel a specific tool call by its ID. Returns true if the tool was found and cancelled.
     pub fn cancel_tool(&self, tool_call_id: &str) -> bool {
-        let tokens = self.tool_cancel_tokens.lock().unwrap();
+        let tokens = self.tool_cancel_tokens.lock();
         if let Some(token) = tokens.get(tool_call_id) {
             token.cancel();
             true
@@ -2211,18 +2204,17 @@ impl ConversationClient {
     /// Register a cancellation token for a tool call. The token is a child of the
     /// conversation-level cancel token, so cancelling the conversation cancels all tools.
     pub(crate) fn register_tool_token(&self, tool_call_id: &str) -> CancellationToken {
-        let token = self.cancel_token.lock().unwrap().child_token();
+        let token = self.cancel_token.lock().child_token();
         let clone = token.clone();
         self.tool_cancel_tokens
             .lock()
-            .unwrap()
             .insert(tool_call_id.to_string(), token);
         clone
     }
 
     /// Remove a tool's cancellation token after it completes.
     pub(crate) fn unregister_tool_token(&self, tool_call_id: &str) {
-        self.tool_cancel_tokens.lock().unwrap().remove(tool_call_id);
+        self.tool_cancel_tokens.lock().remove(tool_call_id);
     }
 
     /// Send a chat to the conversation. Returns after the message is queued. The message
@@ -2340,9 +2332,9 @@ impl ConversationClient {
             msgs: RwLock::new(Vec::new()),
             input_channel_tx: input_tx,
             new_msg_notify_tx: notify_tx,
-            tool_cancel_tokens: std::sync::Mutex::new(HashMap::new()),
-            cancel_token: std::sync::Mutex::new(CancellationToken::new()),
-            children: std::sync::Mutex::new(HashMap::new()),
+            tool_cancel_tokens: parking_lot::Mutex::new(HashMap::new()),
+            cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
+            children: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 }
