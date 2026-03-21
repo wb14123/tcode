@@ -878,7 +878,9 @@ async fn handle_client_inner(
                         send_msg(&mut sink, &ServerMessage::PermissionState(state)).await?;
                     }
                     ClientMessage::Shutdown => {
-                        let _ = shutdown_tx.send(());
+                        if shutdown_tx.send(()).is_err() {
+                            tracing::warn!("shutdown receiver already dropped");
+                        }
                         return Ok(());
                     }
                 }

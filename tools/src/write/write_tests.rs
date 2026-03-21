@@ -116,7 +116,8 @@ mod tests {
             cancel_token: CancellationToken::new(),
             permission: ScopedPermissionManager::always_allow("write"),
         };
-        let stream = crate::write::write(ctx, "relative/path.txt".to_string(), "content".to_string());
+        let stream =
+            crate::write::write(ctx, "relative/path.txt".to_string(), "content".to_string());
         let result = collect_stream(Box::pin(stream)).await;
         assert!(result.is_err());
         let err = result

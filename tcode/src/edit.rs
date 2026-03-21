@@ -81,8 +81,10 @@ impl EditClient {
         // Set up file watcher using inotify
         let (tx, rx) = mpsc::channel();
         let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
-            if let Ok(event) = res {
-                let _ = tx.send(event);
+            if let Ok(event) = res
+                && tx.send(event).is_err()
+            {
+                tracing::debug!("edit file watcher channel closed");
             }
         })?;
 
@@ -112,7 +114,9 @@ impl EditClient {
                 _ = nvim.wait() => {
                     if self.conversation_id.is_none() {
                         let json = serde_json::to_vec(&ClientMessage::Shutdown)?;
-                        let _ = sink.send(Bytes::from(json)).await;
+                        if let Err(e) = sink.send(Bytes::from(json)).await {
+                            tracing::warn!(error = %e, "failed to send shutdown message to server");
+                        }
                     }
                     break;
                 }

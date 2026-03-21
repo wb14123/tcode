@@ -571,7 +571,13 @@ async fn main() -> Result<()> {
 }
 
 fn init_tracing(session_id: &str) {
-    let log_dir = session::base_path().join(session_id);
+    let log_dir = match session::base_path() {
+        Ok(p) => p.join(session_id),
+        Err(e) => {
+            eprintln!("Failed to determine session base path: {e}");
+            return;
+        }
+    };
     if let Err(e) = fs::create_dir_all(&log_dir) {
         eprintln!("Failed to create log directory {:?}: {}", log_dir, e);
     }
@@ -770,9 +776,12 @@ async fn run_unified_with_session(
     };
 
     // Focus the edit pane so the user starts typing there
-    let _ = Command::new("tmux")
+    if let Err(e) = Command::new("tmux")
         .args(["select-pane", "-t", &edit_pane_id])
-        .output();
+        .output()
+    {
+        tracing::warn!("failed to focus edit pane: {e}");
+    }
 
     let display_cmd = format!("{} {} display", exe_str, session_arg);
     let (stdin, stdout, stderr) =
@@ -805,20 +814,27 @@ async fn run_unified_with_session(
     };
 
     // Clean up: tmux panes and server — browser-server handles its own lifecycle
-    let _ = Command::new("tmux")
+    if let Err(e) = Command::new("tmux")
         .args(["kill-pane", "-t", &edit_pane_id])
-        .output();
-
-    if let Some(ref tree_pane) = tree_pane_id {
-        let _ = Command::new("tmux")
-            .args(["kill-pane", "-t", tree_pane])
-            .output();
+        .output()
+    {
+        tracing::debug!("failed to kill edit pane: {e}");
     }
 
-    if let Some(ref perm_pane) = perm_pane_id {
-        let _ = Command::new("tmux")
+    if let Some(ref tree_pane) = tree_pane_id
+        && let Err(e) = Command::new("tmux")
+            .args(["kill-pane", "-t", tree_pane])
+            .output()
+    {
+        tracing::debug!("failed to kill tree pane: {e}");
+    }
+
+    if let Some(ref perm_pane) = perm_pane_id
+        && let Err(e) = Command::new("tmux")
             .args(["kill-pane", "-t", perm_pane])
-            .output();
+            .output()
+    {
+        tracing::debug!("failed to kill permission pane: {e}");
     }
 
     server_handle.abort();
@@ -866,8 +882,8 @@ async fn init_browser_client(
 
     // Create client with auto-restart: if the browser-server exits after idle timeout,
     // the client will automatically respawn it on the next request.
-    let client =
-        BrowserClient::unix(socket_path.clone()).with_auto_restart(socket_path, browser_server_exe);
+    let client = BrowserClient::unix(socket_path.clone())?
+        .with_auto_restart(socket_path, browser_server_exe);
 
     // Eagerly start the server (or reuse an existing one) so the first request is fast.
     client.ensure_server_running().await;

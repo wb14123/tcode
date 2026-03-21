@@ -69,10 +69,14 @@ pub fn get_original_stdio() -> Option<(Stdio, Stdio, Stdio)> {
 pub fn write_to_terminal(original_stdout: Option<OwnedFd>, msg: &str) {
     if let Some(fd) = original_stdout {
         let mut file = File::from(fd);
-        let _ = write!(file, "{}", msg);
+        if let Err(e) = write!(file, "{}", msg) {
+            eprintln!("failed to write to original stdout: {e}");
+        }
         // file is dropped here, closing the fd - that's fine since we got a dup
-    } else if let Ok(mut tty) = File::create("/dev/tty") {
-        let _ = write!(tty, "{}", msg);
+    } else if let Ok(mut tty) = File::create("/dev/tty")
+        && let Err(e) = write!(tty, "{}", msg)
+    {
+        eprintln!("failed to write to /dev/tty: {e}");
     }
 }
 
@@ -88,11 +92,15 @@ pub fn write_error_to_terminal(msg: &str) {
         && let Some(fd) = dup_fd(stderr_fd.as_fd())
     {
         let mut file = File::from(fd);
-        let _ = writeln!(file, "{}", msg);
+        if let Err(e) = writeln!(file, "{}", msg) {
+            eprintln!("failed to write to original stderr: {e}");
+        }
         return;
     }
     // Fallback to /dev/tty
-    if let Ok(mut tty) = File::create("/dev/tty") {
-        let _ = writeln!(tty, "{}", msg);
+    if let Ok(mut tty) = File::create("/dev/tty")
+        && let Err(e) = writeln!(tty, "{}", msg)
+    {
+        eprintln!("failed to write to /dev/tty: {e}");
     }
 }

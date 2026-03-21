@@ -172,8 +172,10 @@ impl PermissionManager {
                 }
                 (PermissionDecision::AllowOnce, Some(rid)) => {
                     // AllowOnce: only approve the targeted waiter
-                    if let Some(tx) = request.waiters.remove(rid) {
-                        let _ = tx.send(true);
+                    if let Some(tx) = request.waiters.remove(rid)
+                        && tx.send(true).is_err()
+                    {
+                        tracing::warn!("permission waiter dropped before AllowOnce was sent");
                     }
                     // Remove entry if no waiters left
                     if request.waiters.is_empty() {
@@ -187,7 +189,9 @@ impl PermissionManager {
                         .expect("key must exist: verified via get_mut under same lock");
                     let allowed = !matches!(decision, PermissionDecision::Deny);
                     for (_, tx) in request.waiters {
-                        let _ = tx.send(allowed);
+                        if tx.send(allowed).is_err() {
+                            tracing::warn!("permission waiter dropped before decision was sent");
+                        }
                     }
                 }
             }
@@ -212,7 +216,9 @@ impl PermissionManager {
         let mut pending = self.pending_requests.lock();
         for (_key, request) in pending.drain() {
             for (_, tx) in request.waiters {
-                let _ = tx.send(false);
+                if tx.send(false).is_err() {
+                    tracing::warn!("permission waiter dropped before close was sent");
+                }
             }
         }
     }

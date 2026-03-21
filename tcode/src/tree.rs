@@ -1169,8 +1169,10 @@ pub fn run_tree(session: Session) -> Result<()> {
     // Set up notify watcher
     let (fs_tx, fs_rx) = mpsc::channel();
     let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
-        if let Ok(event) = res {
-            let _ = fs_tx.send(event);
+        if let Ok(event) = res
+            && fs_tx.send(event).is_err()
+        {
+            tracing::debug!("fs watcher channel closed");
         }
     })?;
 

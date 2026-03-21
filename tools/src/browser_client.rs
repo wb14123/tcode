@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use browser_server::{
     ErrorResponse, HealthResponse, SearchResult, WebFetchRequest, WebFetchResponse,
     WebSearchRequest, WebSearchResponse,
@@ -25,17 +25,17 @@ pub struct BrowserClient {
 
 impl BrowserClient {
     /// Create a client that connects via Unix socket.
-    pub fn unix(socket_path: PathBuf) -> Self {
+    pub fn unix(socket_path: PathBuf) -> Result<Self> {
         let client = reqwest::Client::builder()
             .unix_socket(socket_path)
             .build()
-            .expect("Failed to build reqwest client with unix socket");
-        Self {
+            .context("Failed to build reqwest client with unix socket")?;
+        Ok(Self {
             client,
             base_url: "http://localhost".to_string(),
             token: None,
             restart_config: None,
-        }
+        })
     }
 
     /// Enable auto-restart: if the browser-server becomes unreachable, spawn it again.

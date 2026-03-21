@@ -7,11 +7,11 @@ use anyhow::{Context, Result};
 use rand::Rng;
 
 /// Returns the base path for all sessions: ~/.tcode/sessions/
-pub fn base_path() -> PathBuf {
-    dirs::home_dir()
-        .expect("Could not find home directory")
+pub fn base_path() -> Result<PathBuf> {
+    Ok(dirs::home_dir()
+        .context("Could not find home directory")?
         .join(".tcode")
-        .join("sessions")
+        .join("sessions"))
 }
 
 /// Generate a unique 8-character session ID (lowercase alphanumeric)
@@ -28,7 +28,7 @@ pub fn generate_session_id() -> String {
 
 /// List all session directories under ~/.tcode/sessions/
 pub fn list_sessions() -> io::Result<Vec<String>> {
-    let base = base_path();
+    let base = base_path().map_err(|e| io::Error::new(io::ErrorKind::NotFound, e))?;
     if !base.exists() {
         return Ok(vec![]);
     }
@@ -54,7 +54,7 @@ impl Session {
     /// Create a new session with the given ID.
     /// Creates the session directory with restricted permissions.
     pub fn new(session_id: String) -> Result<Self> {
-        let base_dir = base_path();
+        let base_dir = base_path()?;
         let session_dir = base_dir.join(&session_id);
 
         // Create base directory if needed

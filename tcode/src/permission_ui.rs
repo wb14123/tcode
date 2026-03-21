@@ -724,8 +724,10 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
     // Set up filesystem watcher
     let (fs_tx, fs_rx) = mpsc::channel();
     let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
-        if let Ok(event) = res {
-            let _ = fs_tx.send(event);
+        if let Ok(event) = res
+            && fs_tx.send(event).is_err()
+        {
+            tracing::debug!("permission ui watcher channel closed");
         }
     })?;
     if session_dir.exists() {
