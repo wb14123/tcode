@@ -11,8 +11,6 @@ pub mod write;
 
 #[cfg(test)]
 mod file_permission_tests;
-#[cfg(test)]
-mod write_tests;
 
 pub use current_time::current_time_tool;
 pub use glob_tool::glob_tool;

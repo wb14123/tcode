@@ -1,3 +1,6 @@
+#[cfg(test)]
+mod write_tests;
+
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
