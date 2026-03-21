@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+auth = { path = "../auth" }
 llm-rs = { path = "../llm-rs" }
 axum = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
@@ -19,7 +20,6 @@ futures = "0.3"
 anyhow = "1"
 tower-http = { version = "0.6", features = ["cors"] }
 async-stream = "0.3"
-reqwest = { version = "0.13", features = ["json"] }
 dirs = "6"
 
 [dev-dependencies]

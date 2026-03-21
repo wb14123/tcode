@@ -11,7 +11,7 @@ mod openrouter;
 #[cfg(test)]
 mod openai_tests;
 
-pub use claude::{Claude, GetTokenFn};
+pub use claude::{Claude, GetTokenFn, TokenProvider};
 pub use openai::OpenAI;
 pub use openrouter::OpenRouter;
 

@@ -23,6 +23,12 @@ use crate::tool::Tool;
 pub type GetTokenFn =
     Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync>;
 
+/// Trait for types that can provide an access token (e.g. OAuth token managers).
+/// Implement this to use [`Claude::with_token_provider`].
+pub trait TokenProvider {
+    fn get_access_token(&self) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
+}
+
 // ============================================================================
 // Claude client
 // ============================================================================
@@ -79,6 +85,27 @@ impl Claude {
             use_oauth: true,
             cached_tool_defs: None,
         }
+    }
+
+    /// Create a new Claude client with a token provider.
+    ///
+    /// Accepts any cloneable type with an async `get_access_token` method,
+    /// wrapping it into the `GetTokenFn` boilerplate automatically.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let manager = TokenManager::load(...);
+    /// let claude = Claude::with_token_provider(manager, "https://api.anthropic.com");
+    /// ```
+    pub fn with_token_provider<T>(provider: T, base_url: impl Into<String>) -> Self
+    where
+        T: TokenProvider + Clone + Send + Sync + 'static,
+    {
+        let get_token: GetTokenFn = Arc::new(move || {
+            let p = provider.clone();
+            Box::pin(async move { p.get_access_token().await })
+        });
+        Self::with_get_token(get_token, base_url)
     }
 }
 

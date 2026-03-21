@@ -4,7 +4,7 @@ use anyhow::{anyhow, Result};
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
-use llm_rs::llm::{Claude, GetTokenFn, OpenAI, OpenRouter, LLM};
+use llm_rs::llm::{Claude, OpenAI, OpenRouter, LLM};
 use llm_rs_server::auth::{default_token_file, load_tokens};
 use llm_rs_server::claude_auth;
 use llm_rs_server::config::Provider;
@@ -54,11 +54,7 @@ fn create_llm(cli: &Cli) -> Result<Box<dyn LLM>> {
                 Ok(Box::new(Claude::with_base_url(&api_key, &base_url)))
             } else if let Some(manager) = claude_auth::load_token_manager() {
                 tracing::info!("Using Claude OAuth tokens from ~/.tcode/auth/claude_tokens.json");
-                let get_token: GetTokenFn = Arc::new(move || {
-                    let m = manager.clone();
-                    Box::pin(async move { m.get_access_token().await.map_err(|e| e.to_string()) })
-                });
-                Ok(Box::new(Claude::with_get_token(get_token, &base_url)))
+                Ok(Box::new(Claude::with_token_provider(manager, &base_url)))
             } else {
                 Err(anyhow!(
                     "Claude requires an API key or OAuth tokens.\n\

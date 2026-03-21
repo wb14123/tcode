@@ -82,7 +82,7 @@ pub(crate) async fn terminate_child(child: &mut Child) -> Result<()> {
 
 use display::DisplayClient;
 use edit::EditClient;
-use llm_rs::llm::{ChatOptions, Claude, GetTokenFn, OpenAI, OpenRouter, ReasoningEffort, LLM};
+use llm_rs::llm::{ChatOptions, Claude, OpenAI, OpenRouter, ReasoningEffort, LLM};
 use server::Server;
 use session::Session;
 use tool_call_display::ToolCallDisplayClient;
@@ -119,13 +119,7 @@ fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String)> {
                 let manager = claude_auth::load_token_manager().ok_or_else(|| {
                     anyhow!("No Claude authentication found. Set ANTHROPIC_API_KEY env, use --api-key, or run 'tcode claude-auth' to authenticate via OAuth.")
                 })?;
-                let get_token: GetTokenFn = std::sync::Arc::new(move || {
-                    let m = manager.clone();
-                    Box::pin(async move {
-                        m.get_access_token().await.map_err(|e| e.to_string())
-                    })
-                });
-                Box::new(Claude::with_get_token(get_token, &base_url))
+                Box::new(Claude::with_token_provider(manager, &base_url))
             }
         }
         Provider::OpenAi => {
@@ -288,6 +282,60 @@ fn is_in_tmux() -> bool {
     std::env::var("TMUX").is_ok()
 }
 
+/// Extract root session ID by stripping any /subagent-* suffix.
+fn root_session_id(session_id: &str) -> String {
+    session_id
+        .split("/subagent-")
+        .next()
+        .unwrap_or(session_id)
+        .to_string()
+}
+
+/// Resolve session ID from CLI option, falling back to interactive picker.
+/// Returns None if the user cancels the picker.
+fn session_id_or_pick(opt: Option<String>) -> Result<Option<String>> {
+    match opt {
+        Some(id) => Ok(Some(id)),
+        None => session_picker::pick_session(),
+    }
+}
+
+/// Send a message to the server and print the response.
+async fn send_server_message(
+    session: &Session,
+    msg: protocol::ClientMessage,
+    success_msg: &str,
+) -> Result<()> {
+    let stream = UnixStream::connect(session.socket_path())
+        .await
+        .context("Failed to connect to server socket. Is the server running?")?;
+    let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+    let json = serde_json::to_vec(&msg)?;
+    framed.send(Bytes::from(json)).await?;
+    if let Some(Ok(resp)) = framed.next().await {
+        let resp: protocol::ServerMessage = serde_json::from_slice(&resp)?;
+        match resp {
+            protocol::ServerMessage::Ack => println!("{}", success_msg),
+            protocol::ServerMessage::Error { message } => eprintln!("Error: {}", message),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// Run a shell command and bail on failure.
+fn run_shell_cmd(cmd: &str, context_msg: &str) -> Result<()> {
+    let output = Command::new("sh")
+        .args(["-c", cmd])
+        .output()
+        .map_err(|e| anyhow!("{}: {}", context_msg, e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!("{}: {}", context_msg, stderr);
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -347,53 +395,20 @@ async fn main() -> Result<()> {
         }
         Some(Commands::CancelTool { tool_call_id }) => {
             let session_id = require_session(cli.session)?;
-            // Extract root session ID (strip /subagent-* suffix) since the socket
-            // is only in the root session directory
-            let root_session_id = session_id.split("/subagent-").next().unwrap_or(&session_id).to_string();
-            let session = Session::new(root_session_id)?;
-            let stream = UnixStream::connect(session.socket_path()).await
-                .context("Failed to connect to server socket. Is the server running?")?;
-            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+            let session = Session::new(root_session_id(&session_id))?;
             let msg = protocol::ClientMessage::CancelTool { tool_call_id };
-            let json = serde_json::to_vec(&msg)?;
-            framed.send(Bytes::from(json)).await?;
-            if let Some(Ok(resp)) = framed.next().await {
-                let resp: protocol::ServerMessage = serde_json::from_slice(&resp)?;
-                match resp {
-                    protocol::ServerMessage::Ack => println!("Tool cancelled"),
-                    protocol::ServerMessage::Error { message } => eprintln!("Error: {}", message),
-                    _ => {}
-                }
-            }
-            Ok(())
+            send_server_message(&session, msg, "Tool cancelled").await
         }
         Some(Commands::CancelConversation { conversation_id }) => {
             let session_id = require_session(cli.session)?;
-            let root_session_id = session_id.split("/subagent-").next().unwrap_or(&session_id).to_string();
-            let session = Session::new(root_session_id)?;
-            let stream = UnixStream::connect(session.socket_path()).await
-                .context("Failed to connect to server socket. Is the server running?")?;
-            let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
+            let session = Session::new(root_session_id(&session_id))?;
             let msg = protocol::ClientMessage::CancelConversation { conversation_id };
-            let json = serde_json::to_vec(&msg)?;
-            framed.send(Bytes::from(json)).await?;
-            if let Some(Ok(resp)) = framed.next().await {
-                let resp: protocol::ServerMessage = serde_json::from_slice(&resp)?;
-                match resp {
-                    protocol::ServerMessage::Ack => println!("Conversation cancelled"),
-                    protocol::ServerMessage::Error { message } => eprintln!("Error: {}", message),
-                    _ => {}
-                }
-            }
-            Ok(())
+            send_server_message(&session, msg, "Conversation cancelled").await
         }
         Some(Commands::Attach) => {
-            let session_id = match cli.session.clone() {
+            let session_id = match session_id_or_pick(cli.session.clone())? {
                 Some(id) => id,
-                None => match session_picker::pick_session()? {
-                    Some(id) => id,
-                    None => return Ok(()),
-                },
+                None => return Ok(()),
             };
             if !is_in_tmux() {
                 anyhow::bail!("tcode attach must be run inside tmux.\nRun `tcode serve` to start the server without tmux.");
@@ -429,7 +444,7 @@ async fn main() -> Result<()> {
                         } else {
                             "inactive"
                         };
-                        let meta = std::fs::read_to_string(session.session_meta_file())
+                        let meta = fs::read_to_string(session.session_meta_file())
                             .ok()
                             .and_then(|json| serde_json::from_str::<SessionMeta>(&json).ok());
                         let last_active = meta.as_ref().and_then(|m| m.last_active_at).unwrap_or(0);
@@ -453,12 +468,9 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::Tree) => {
-            let session_id = match cli.session.clone() {
+            let session_id = match session_id_or_pick(cli.session.clone())? {
                 Some(id) => id,
-                None => match session_picker::pick_session()? {
-                    Some(id) => id,
-                    None => return Ok(()),
-                },
+                None => return Ok(()),
             };
             let session = Session::new(session_id)?;
             tree::run_tree(session)
@@ -475,15 +487,7 @@ async fn main() -> Result<()> {
                 "tmux new-window -n \"tool-detail\" \"{}\"",
                 inner_cmd
             );
-            let output = Command::new("sh")
-                .args(["-c", &tmux_cmd])
-                .output()
-                .context("Failed to run tmux new-window for tool-call detail")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("tmux new-window failed: {}", stderr);
-            }
-            Ok(())
+            run_shell_cmd(&tmux_cmd, "Failed to open tool-call detail window")
         }
         Some(Commands::OpenSubagent { conversation_id }) => {
             let session_id = require_session(cli.session)?;
@@ -502,31 +506,19 @@ async fn main() -> Result<()> {
                 "tmux new-window -n \"subagent\" \"{}\" \\; split-window -v -p 30 \"{}\"",
                 display_cmd, edit_cmd
             );
-            let output = Command::new("sh")
-                .args(["-c", &tmux_cmd])
-                .output()
-                .context("Failed to run tmux new-window for subagent")?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                anyhow::bail!("tmux new-window failed: {}", stderr);
-            }
-            Ok(())
+            run_shell_cmd(&tmux_cmd, "Failed to open subagent window")
         }
         Some(Commands::Permission) => {
-            let session_id = match cli.session.clone() {
+            let session_id = match session_id_or_pick(cli.session.clone())? {
                 Some(id) => id,
-                None => match session_picker::pick_session()? {
-                    Some(id) => id,
-                    None => return Ok(()),
-                },
+                None => return Ok(()),
             };
             let session = Session::new(session_id)?;
             permission_ui::run_permission_ui(session)
         }
         Some(Commands::Approve { tool, key, value, manage, prompt, request_id, preview_file_path }) => {
             let session_id = require_session(cli.session)?;
-            let root_session_id = session_id.split("/subagent-").next().unwrap_or(&session_id).to_string();
-            let session = Session::new(root_session_id)?;
+            let session = Session::new(root_session_id(&session_id))?;
             let args = approve_ui::ApproveArgs {
                 socket_path: session.socket_path(),
                 tool,
@@ -648,7 +640,7 @@ async fn run_unified_with_session(
         }
     });
 
-    tokio::time::sleep(tokio::time::Duration::from_millis(200)).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
 
     // Capture current pane ID before splitting (for layout placement)
     let current_pane_id = Command::new("tmux")
@@ -725,7 +717,7 @@ async fn run_unified_with_session(
     let (stdin, stdout, stderr) = tty_stdio::get_original_stdio()
         .context("Failed to get original stdio fds")?;
 
-    let mut display_child = std::process::Command::new("sh")
+    let mut display_child = Command::new("sh")
         .args(["-c", &display_cmd])
         .stdin(stdin)
         .stdout(stdout)
