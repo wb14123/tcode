@@ -187,7 +187,7 @@ mod tests {
             let result = scoped_clone
                 .ask_permission("Allow?", "hostname", "evil.com")
                 .await;
-            assert!(!result);
+            assert!(result.is_err());
         });
         // Give the task a moment to register the request
         tokio::task::yield_now().await;
@@ -216,11 +216,12 @@ mod tests {
             Arc::new(|| {}),
             None,
         );
-        // Should return true immediately without registering a pending request
+        // Should return Ok immediately without registering a pending request
         assert!(
             scoped
                 .ask_permission("Allow?", "hostname", "known.com")
                 .await
+                .is_ok()
         );
         assert!(pm.snapshot().pending.is_empty());
     }
@@ -250,7 +251,7 @@ mod tests {
             let result = scoped_clone
                 .ask_permission("Allow?", "hostname", "example.com")
                 .await;
-            assert!(result);
+            assert!(result.is_ok());
         });
         // Let the task register the request
         tokio::task::yield_now().await;
@@ -309,6 +310,7 @@ mod tests {
             scoped
                 .ask_permission_for("file_read", "Allow?", "path", "/data")
                 .await
+                .is_ok()
         );
         assert!(pm.snapshot().pending.is_empty());
     }
@@ -343,7 +345,7 @@ mod tests {
         pm_clone
             .resolve(&key, &PermissionDecision::AllowSession, None)
             .unwrap();
-        assert!(handle.await.unwrap());
+        assert!(handle.await.unwrap().is_ok());
     }
 
     #[tokio::test]
@@ -370,7 +372,7 @@ mod tests {
             let result = scoped_clone
                 .ask_permission("Allow?", "hostname", "evil.com")
                 .await;
-            assert!(!result);
+            assert!(result.is_err());
         });
         tokio::task::yield_now().await;
 

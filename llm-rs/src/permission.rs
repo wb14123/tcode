@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use uuid::Uuid;
@@ -356,7 +357,7 @@ impl ScopedPermissionManager {
 
     /// Check if the action is permitted. If no saved preference exists, registers
     /// a pending request, notifies the UI, and awaits the user's decision.
-    pub async fn ask_permission(&self, prompt: &str, key: &str, value: &str) -> bool {
+    pub async fn ask_permission(&self, prompt: &str, key: &str, value: &str) -> anyhow::Result<()> {
         self.ask_permission_for(&self.tool_name.clone(), prompt, key, value)
             .await
     }
@@ -377,7 +378,7 @@ impl ScopedPermissionManager {
         prompt: &str,
         key: &str,
         value: &str,
-    ) -> bool {
+    ) -> anyhow::Result<()> {
         self.ask_permission_inner(scope, prompt, key, value, None)
             .await
     }
@@ -393,7 +394,7 @@ impl ScopedPermissionManager {
         value: &str,
         content: &str,
         file_extension: &str,
-    ) -> bool {
+    ) -> anyhow::Result<()> {
         let preview_path = match self.write_preview_file(content, file_extension) {
             Ok(path) => Some(path),
             Err(e) => {
@@ -415,10 +416,10 @@ impl ScopedPermissionManager {
         key: &str,
         value: &str,
         preview_file_path: Option<PathBuf>,
-    ) -> bool {
+    ) -> anyhow::Result<()> {
         if self.manager.has_permission(scope, key, value) {
             Self::cleanup_preview_file(&preview_file_path);
-            return true;
+            return Ok(());
         }
 
         let (_request_id, rx) =
@@ -436,10 +437,14 @@ impl ScopedPermissionManager {
 
         if allowed {
             (self.on_approved_fn)();
+            Ok(())
         } else {
             self.denied.store(true, Ordering::Relaxed);
+            Err(anyhow!(
+                "Permission denied: {} The user chose not to allow this action.",
+                prompt
+            ))
         }
-        allowed
     }
 
     /// Write content to a preview file under session_dir/tool-file-preview/.

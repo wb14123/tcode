@@ -107,12 +107,12 @@ pub fn web_fetch(
             .and_then(|u| u.host_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "unknown".to_string());
 
-        if !ctx.permission.ask_permission(
+        if let Err(e) = ctx.permission.ask_permission(
             &format!("Allow web_fetch to access {}?", url),
             "hostname",
             &hostname,
         ).await {
-            yield Err(anyhow!("User denied web_fetch permission to access {}", hostname));
+            yield Err(e);
             return;
         }
 

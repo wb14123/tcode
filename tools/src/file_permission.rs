@@ -96,7 +96,7 @@ pub async fn check_file_read_permission(
     }
 
     let permission_dir_str = permission_dir.to_string_lossy().to_string();
-    if permission
+    permission
         .ask_permission_for(
             FILE_READ_SCOPE,
             &format!("Allow read access to {}?", path.display()),
@@ -104,14 +104,6 @@ pub async fn check_file_read_permission(
             &permission_dir_str,
         )
         .await
-    {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "User denied read permission for {}",
-            path.display()
-        ))
-    }
 }
 
 /// Check whether the caller has permission to write `path`.
@@ -138,7 +130,7 @@ pub async fn check_file_write_permission(
     };
     let file_extension = path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
 
-    if permission
+    permission
         .ask_permission_with_preview(
             FILE_WRITE_SCOPE,
             &prompt,
@@ -148,12 +140,4 @@ pub async fn check_file_write_permission(
             file_extension,
         )
         .await
-    {
-        Ok(())
-    } else {
-        Err(anyhow!(
-            "User denied write permission for {}",
-            path.display()
-        ))
-    }
 }
