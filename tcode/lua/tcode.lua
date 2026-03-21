@@ -902,6 +902,26 @@ local function create_status_watcher(filepath, on_status)
   end)
 end
 
+-- Last message from open_pending_approvals, for re-echo after startinsert
+local last_approval_msg = nil
+
+-- Open pending tool approvals via tcode approve-next CLI
+local function open_pending_approvals()
+  last_approval_msg = nil
+  if not M.exe_path or not M.session_id then
+    last_approval_msg = 'Session info not available'
+    vim.notify(last_approval_msg, vim.log.levels.ERROR)
+    return
+  end
+  local result = vim.fn.system(string.format(
+    '%s --session=%s approve-next', M.exe_path, M.session_id))
+  local trimmed = vim.trim(result)
+  if trimmed ~= '' then
+    last_approval_msg = trimmed
+    vim.notify(trimmed, vim.log.levels.INFO, { title = 'TCode' })
+  end
+end
+
 -- Setup display window for viewing conversation
 -- @param display_file: Path to file where display content is written (JSONL)
 -- @param status_file: Path to file where status messages are written
@@ -1092,6 +1112,10 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
       vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
     end)
   end, { buffer = true, silent = true, desc = 'Cancel conversation' })
+
+  -- Open pending tool approvals (Ctrl-P)
+  vim.keymap.set('n', '<C-p>', open_pending_approvals,
+    { buffer = true, silent = true, desc = 'Open pending tool approvals' })
 end
 
 -- Setup tool call display window for viewing a single tool call's details
@@ -1137,8 +1161,13 @@ end
 
 -- Setup edit window for composing messages
 -- @param msg_file: Path to file where messages should be written
-function M.setup_edit(msg_file, is_subagent)
+-- @param is_subagent: Whether this is a subagent edit window
+-- @param session_id: Session ID (for approve-next)
+-- @param exe_path: Path to tcode executable (for approve-next)
+function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
   M.msg_file = msg_file or '/tmp/tcode-edit-msg.txt'
+  M.session_id = session_id or M.session_id
+  M.exe_path = exe_path or M.exe_path
 
   vim.cmd('enew')
   vim.api.nvim_buf_set_name(0, '[TCode Edit]')
@@ -1154,7 +1183,7 @@ function M.setup_edit(msg_file, is_subagent)
   if is_subagent then
     vim.wo.statusline = '%#TCodeEditStatus# Subagent Edit - Enter to send, /done to finish %='
   else
-    vim.wo.statusline = '%#TCodeEditStatus# TCode Edit - Enter to send, o for new line %='
+    vim.wo.statusline = '%#TCodeEditStatus# TCode Edit - Enter to send, o for new line, Ctrl-p approvals %='
   end
 
   -- Create autocmd to send content on save
@@ -1202,6 +1231,24 @@ function M.setup_edit(msg_file, is_subagent)
   vim.cmd([[
     highlight TCodeEditStatus guibg=#282c34 guifg=#61afef ctermfg=75 ctermbg=236
   ]])
+
+  -- Open pending tool approvals (Ctrl-P, normal and insert mode)
+  vim.keymap.set('n', '<C-p>', open_pending_approvals,
+    { buffer = true, silent = true, desc = 'Open pending tool approvals' })
+  vim.keymap.set('i', '<C-p>', function()
+    vim.cmd('stopinsert')
+    open_pending_approvals()
+    vim.schedule(function()
+      vim.cmd('startinsert')
+      if last_approval_msg then
+        vim.o.showmode = false
+        vim.defer_fn(function()
+          vim.api.nvim_echo({{ last_approval_msg }}, false, {})
+          vim.defer_fn(function() vim.o.showmode = true end, 2000)
+        end, 50)
+      end
+    end)
+  end, { buffer = true, silent = true, desc = 'Open pending tool approvals' })
 
   vim.api.nvim_buf_set_lines(0, 0, -1, false, { '' })
   vim.cmd('startinsert')

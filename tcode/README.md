@@ -143,6 +143,10 @@ The pane watches `display.jsonl` for `PermissionUpdated` signals and queries the
 
 Pressing Enter on a pending permission opens a `tmux display-popup` with approval options. Pressing Enter on a granted permission opens a management popup to revoke it.
 
+### `tcode --session <id> approve-next`
+
+Opens pending tool approvals one by one in tmux popups. Each approval is fetched from the server via `GetPermissionState`. Prints "No pending approvals" if none exist; exits silently if the user cancels a popup. Used by the `Ctrl-p` keybinding in display and edit windows.
+
 ### `tcode --session <id> approve --tool <t> --key <k> --value <v> [--manage]`
 
 Opens a small approval dialog (designed for `tmux display-popup`). Shows the permission details and presents options:
@@ -251,9 +255,18 @@ In the main display, subagent blocks are rendered with `>>> SUB-AGENT: {descript
 | `Ctrl-k` | Running subagent | Cancel the subagent conversation (with confirmation popup) |
 | `Ctrl-k` | Running tool call | Cancel the tool call (with confirmation popup) |
 | `Ctrl-c` | Anywhere | Cancel the entire conversation (with confirmation popup) |
+| `Ctrl-p` | Anywhere | Open pending tool approvals one by one |
 | `q` | Anywhere | Quit |
 
-Context is determined by cursor position using extmarks. `Ctrl-k` checks for a subagent under the cursor first, then falls back to tool call. A `[Ctrl-k to cancel]` hint is shown on tool/subagent labels while they are running and removed when they finish. `Ctrl-c` reads the root conversation ID from `conversation-state.json` and cancels it, cascading to all running tools and child subagents.
+Context is determined by cursor position using extmarks. `Ctrl-k` checks for a subagent under the cursor first, then falls back to tool call. A `[Ctrl-k to cancel]` hint is shown on tool/subagent labels while they are running and removed when they finish. `Ctrl-c` reads the root conversation ID from `conversation-state.json` and cancels it, cascading to all running tools and child subagents. `Ctrl-p` calls `tcode approve-next` to loop through pending tool approvals via tmux popups.
+
+## Edit Keybindings
+
+| Key | Mode | Action |
+|-----|------|--------|
+| `Enter` | Insert | Send message |
+| `Ctrl-s` | Normal | Send message |
+| `Ctrl-p` | Normal/Insert | Open pending tool approvals one by one |
 
 ## Cancellation
 

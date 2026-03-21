@@ -76,7 +76,22 @@ impl EditClient {
         let (mut sink, mut server_stream) = framed.split();
 
         let is_subagent = self.conversation_id.is_some();
-        let mut nvim = spawn_nvim(&self.lua_path, &msg_file, is_subagent)?;
+        let exe_path =
+            std::env::current_exe().context("Failed to determine current executable path")?;
+        let session_id = self
+            .session
+            .session_dir()
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("unknown")
+            .to_string();
+        let mut nvim = spawn_nvim(
+            &self.lua_path,
+            &msg_file,
+            is_subagent,
+            &session_id,
+            &exe_path,
+        )?;
 
         // Set up file watcher using inotify
         let (tx, rx) = mpsc::channel();
@@ -166,12 +181,20 @@ fn is_msg_file_event(event: &Event, msg_file: &PathBuf) -> bool {
         && event.paths.iter().any(|p| p == msg_file)
 }
 
-fn spawn_nvim(lua_path: &Path, msg_file: &Path, is_subagent: bool) -> Result<Child> {
+fn spawn_nvim(
+    lua_path: &Path,
+    msg_file: &Path,
+    is_subagent: bool,
+    session_id: &str,
+    exe_path: &Path,
+) -> Result<Child> {
     let lua_cmd = format!(
-        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_edit('{}', {})",
+        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_edit('{}', {}, '{}', '{}')",
         lua_path.display(),
         msg_file.display(),
         is_subagent,
+        session_id,
+        exe_path.display(),
     );
 
     let (stdin, stdout, stderr) = tty_stdio::get_tty_stdio();

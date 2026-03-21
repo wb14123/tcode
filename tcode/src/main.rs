@@ -238,6 +238,8 @@ enum Commands {
     },
     /// Show the permission tree view
     Permission,
+    /// Open pending tool approvals one by one (used by Ctrl-P shortcut)
+    ApproveNext,
     /// Approve or manage a permission (used in tmux display-popup)
     Approve {
         /// Tool name
@@ -537,6 +539,14 @@ async fn main() -> Result<()> {
             };
             let session = Session::new(session_id)?;
             permission_ui::run_permission_ui(session)
+        }
+        Some(Commands::ApproveNext) => {
+            let session_id = require_session(cli.session)?;
+            let session = Session::new(root_session_id(&session_id))?;
+            if let Some(0) = permission_ui::approve_all_pending(&session_id, &session.socket_path()) {
+                println!("No pending approvals");
+            }
+            Ok(())
         }
         Some(Commands::Approve {
             tool,

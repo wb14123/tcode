@@ -278,24 +278,6 @@ impl PermissionTreeState {
         self.filter_pending_only = !self.filter_pending_only;
     }
 
-    /// Select the first pending value node in the visible list.
-    /// Returns `true` if a pending node was found and selected.
-    fn select_first_pending(&mut self) -> bool {
-        for (vis_idx, &arena_idx) in self.visible.iter().enumerate() {
-            if matches!(
-                &self.arena[arena_idx].kind,
-                NodeKind::Value {
-                    status: PermStatus::Pending,
-                    ..
-                }
-            ) {
-                self.selected = vis_idx;
-                return true;
-            }
-        }
-        false
-    }
-
     /// Open the approval or management popup for the selected leaf node.
     /// Returns `true` if the user made a decision (approve/deny) on a pending item,
     /// `false` if cancelled, managing an existing permission, or toggling collapse.
@@ -314,154 +296,43 @@ impl PermissionTreeState {
                 preview_file_path,
                 ..
             } => {
-                let is_pending = matches!(status, PermStatus::Pending);
-                // Walk up to find tool and key
                 let (tool_name, key_name) = self.find_tool_key_for(idx);
-                let exe = match std::env::current_exe() {
-                    Ok(p) => p.to_string_lossy().to_string(),
-                    Err(_) => return false,
-                };
 
-                let cmd = match status {
-                    PermStatus::Pending => {
-                        let mut cmd = format!(
-                            "{} --session={} approve --tool {} --key {} --value {}",
-                            exe, self.session_id, tool_name, key_name, value
-                        );
-                        if let Some(p) = prompt
-                            && !p.is_empty()
-                        {
-                            let escaped = shell_escape(p);
-                            cmd.push_str(&format!(" --prompt '{}'", escaped));
-                        }
-                        if let Some(rid) = request_id {
-                            cmd.push_str(&format!(" --request-id {}", rid));
-                        }
-                        if let Some(pfp) = preview_file_path {
-                            let escaped = shell_escape(pfp);
-                            cmd.push_str(&format!(" --preview-file-path '{}'", escaped));
-                        }
-                        cmd
-                    }
+                match status {
+                    PermStatus::Pending => launch_approval_popup(
+                        &self.session_id,
+                        &tool_name,
+                        &key_name,
+                        value,
+                        prompt.as_deref(),
+                        request_id.as_deref(),
+                        preview_file_path.as_deref(),
+                    ),
                     PermStatus::Session | PermStatus::Project => {
-                        format!(
+                        // Manage (revoke) existing permission — use the old
+                        // inline popup path since launch_approval_popup is
+                        // for pending items only.
+                        let exe = match std::env::current_exe() {
+                            Ok(p) => p.to_string_lossy().to_string(),
+                            Err(_) => return false,
+                        };
+                        let cmd = format!(
                             "{} --session={} approve --manage --tool {} --key {} --value {}",
                             exe, self.session_id, tool_name, key_name, value
-                        )
-                    }
-                };
-
-                // Query tmux window size for dynamic popup sizing
-                let (max_w, max_h) = Command::new("tmux")
-                    .args(["display-message", "-p", "#{window_width} #{window_height}"])
-                    .output()
-                    .ok()
-                    .and_then(|out| {
-                        let s = String::from_utf8_lossy(&out.stdout);
-                        let mut parts = s.split_whitespace();
-                        let w: usize = parts.next()?.parse().ok()?;
-                        let h: usize = parts.next()?.parse().ok()?;
-                        Some((w * 80 / 100, h * 80 / 100))
-                    })
-                    .unwrap_or((60, 18));
-
-                // Dynamically size the tmux popup based on prompt length.
-                //
-                // Important: tmux display-popup draws a 1-char border on each
-                // side, so the usable area inside the popup is:
-                //   inner_width  = popup_width  - 2  (left + right border)
-                //   inner_height = popup_height - 2  (top + bottom border)
-                //
-                // Inside that inner area, the approve_ui layout uses:
-                //   - 16 fixed lines (title:3, blanks:3, options:10)
-                //   - remaining lines for the prompt text
-                //   - each prompt line has 2-char padding on each side, so
-                //     usable text width per line = inner_width - 4 = popup_width - 6
-                //
-                // So for N prompt lines: popup_height = 16 + N + 2 (border) = N + 18
-                // When preview_file_path is present, there is 1 extra row
-                // for [v] View in nvim.
-                //
-                // To grow width and height proportionally, we target ~25 chars
-                // of text per prompt line (a balanced rectangle):
-                //   inner_text_width = sqrt(25 * prompt_len)
-                //   popup_width = inner_text_width + 6  (+2 border, +2 indent, +2 right pad)
-                //
-                // Both dimensions are clamped to [60, max_w] and [20, max_h]
-                // (max = 80% of terminal). If the prompt still overflows,
-                // the user can scroll with j/k/arrows in the popup.
-                let prompt_len = prompt.as_ref().map(|p| p.len()).unwrap_or(0);
-                let has_preview = preview_file_path.is_some();
-                let preview_extra: usize = if has_preview { 1 } else { 0 };
-                let (popup_width, popup_height) = if prompt_len > 0 {
-                    let chars_per_line = 25.0_f64;
-                    // +6 = 2 for tmux border + 2 for left indent + 2 for right padding
-                    let w = (prompt_len as f64 * chars_per_line).sqrt().ceil() as usize + 6;
-                    let w = w.clamp(60, max_w);
-
-                    // Usable text width inside popup (subtract border + indent + right pad)
-                    let usable = w.saturating_sub(6);
-                    let prompt_lines = if usable > 0 {
-                        prompt_len.div_ceil(usable)
-                    } else {
-                        1
-                    };
-                    // +18 = 16 fixed UI lines + 2 for tmux border
-                    // +preview_extra = 1 when preview exists ([v] row)
-                    let h = (18 + preview_extra + prompt_lines).clamp(20, max_h);
-                    (w, h)
-                } else {
-                    (60, (20 + preview_extra).min(max_h))
-                };
-
-                // Loop: show popup, and if the user requests a preview view
-                // (exit code 10 = maximized popup via [v]), show it then
-                // relaunch the approval popup.
-                //
-                // Exit codes:
-                //   0  = decision made (approve/deny)
-                //   1  = cancelled (q/Esc)
-                //   10 = view preview in nvim
-                let mut decided = false;
-                loop {
-                    let popup_cmd = format!(
-                        "tmux display-popup -E -w {} -h {} \"{}\"",
-                        popup_width,
-                        popup_height,
-                        cmd.replace('"', "\\\"")
-                    );
-                    let exit_code = match Command::new("sh").args(["-c", &popup_cmd]).output() {
-                        Ok(out) => out.status.code().unwrap_or(0),
-                        Err(e) => {
-                            tracing::warn!("failed to launch approval popup: {}", e);
-                            break;
-                        }
-                    };
-                    match exit_code {
-                        10 => {
-                            // [v] View in maximized popup — open nvim in an 80% popup
-                            if let Some(pfp) = preview_file_path {
-                                let escaped = shell_escape(pfp);
-                                let nvim_popup = format!(
-                                    "tmux display-popup -E -w '80%' -h '80%' \"nvim -R '{}'\"",
-                                    escaped,
-                                );
-                                if let Err(e) =
-                                    Command::new("sh").args(["-c", &nvim_popup]).output()
-                                {
-                                    tracing::warn!("failed to launch nvim popup: {}", e);
-                                }
+                        );
+                        let popup_cmd = format!(
+                            "tmux display-popup -E -w 60 -h 20 \"{}\"",
+                            cmd.replace('"', "\\\"")
+                        );
+                        match Command::new("sh").args(["-c", &popup_cmd]).output() {
+                            Ok(out) => out.status.code() == Some(0),
+                            Err(e) => {
+                                tracing::warn!("failed to launch manage popup: {}", e);
+                                false
                             }
-                            // Loop: relaunch approval popup
                         }
-                        0 => {
-                            decided = is_pending;
-                            break;
-                        }
-                        _ => break, // Cancelled or error
                     }
                 }
-                decided
             }
             NodeKind::Tool { .. } | NodeKind::Key { .. } => {
                 // Toggle collapse for non-leaf
@@ -685,7 +556,7 @@ fn render_tree(
 // Server query
 // ---------------------------------------------------------------------------
 
-fn query_permission_state_sync(socket_path: &PathBuf) -> Option<PermissionState> {
+pub fn query_permission_state_sync(socket_path: &PathBuf) -> Option<PermissionState> {
     use std::io::{Read as _, Write as _};
     use std::os::unix::net::UnixStream as StdUnixStream;
 
@@ -715,6 +586,148 @@ fn query_permission_state_sync(socket_path: &PathBuf) -> Option<PermissionState>
         ServerMessage::PermissionState(state) => Some(state),
         _ => None,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Standalone approval helpers (used by both permission_ui and approve-next CLI)
+// ---------------------------------------------------------------------------
+
+/// Launch a tmux popup for a single pending approval.
+/// Returns `true` if the user made a decision (approve/deny), `false` if cancelled.
+pub fn launch_approval_popup(
+    session_id: &str,
+    tool: &str,
+    key: &str,
+    value: &str,
+    prompt: Option<&str>,
+    request_id: Option<&str>,
+    preview_file_path: Option<&str>,
+) -> bool {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p.to_string_lossy().to_string(),
+        Err(_) => return false,
+    };
+
+    let mut cmd = format!(
+        "{} --session={} approve --tool {} --key {} --value {}",
+        exe, session_id, tool, key, value
+    );
+    if let Some(p) = prompt
+        && !p.is_empty()
+    {
+        let escaped = shell_escape(p);
+        cmd.push_str(&format!(" --prompt '{}'", escaped));
+    }
+    if let Some(rid) = request_id {
+        cmd.push_str(&format!(" --request-id {}", rid));
+    }
+    if let Some(pfp) = preview_file_path {
+        let escaped = shell_escape(pfp);
+        cmd.push_str(&format!(" --preview-file-path '{}'", escaped));
+    }
+
+    // Query tmux window size for dynamic popup sizing
+    let (max_w, max_h) = Command::new("tmux")
+        .args(["display-message", "-p", "#{window_width} #{window_height}"])
+        .output()
+        .ok()
+        .and_then(|out| {
+            let s = String::from_utf8_lossy(&out.stdout);
+            let mut parts = s.split_whitespace();
+            let w: usize = parts.next()?.parse().ok()?;
+            let h: usize = parts.next()?.parse().ok()?;
+            Some((w * 80 / 100, h * 80 / 100))
+        })
+        .unwrap_or((60, 18));
+
+    let prompt_len = prompt.map(|p| p.len()).unwrap_or(0);
+    let has_preview = preview_file_path.is_some();
+    let preview_extra: usize = if has_preview { 1 } else { 0 };
+    let (popup_width, popup_height) = if prompt_len > 0 {
+        let chars_per_line = 25.0_f64;
+        let w = (prompt_len as f64 * chars_per_line).sqrt().ceil() as usize + 6;
+        let w = w.clamp(60, max_w);
+        let usable = w.saturating_sub(6);
+        let prompt_lines = if usable > 0 {
+            prompt_len.div_ceil(usable)
+        } else {
+            1
+        };
+        let h = (18 + preview_extra + prompt_lines).clamp(20, max_h);
+        (w, h)
+    } else {
+        (60, (20 + preview_extra).min(max_h))
+    };
+
+    let mut decided = false;
+    loop {
+        let popup_cmd = format!(
+            "tmux display-popup -E -w {} -h {} \"{}\"",
+            popup_width,
+            popup_height,
+            cmd.replace('"', "\\\"")
+        );
+        let exit_code = match Command::new("sh").args(["-c", &popup_cmd]).output() {
+            Ok(out) => out.status.code().unwrap_or(0),
+            Err(e) => {
+                tracing::warn!("failed to launch approval popup: {}", e);
+                break;
+            }
+        };
+        match exit_code {
+            10 => {
+                if let Some(pfp) = preview_file_path {
+                    let escaped = shell_escape(pfp);
+                    let nvim_popup = format!(
+                        "tmux display-popup -E -w '80%' -h '80%' \"nvim -R '{}'\"",
+                        escaped,
+                    );
+                    if let Err(e) = Command::new("sh").args(["-c", &nvim_popup]).output() {
+                        tracing::warn!("failed to launch nvim popup: {}", e);
+                    }
+                }
+            }
+            0 => {
+                decided = true;
+                break;
+            }
+            _ => break,
+        }
+    }
+    decided
+}
+
+/// Loop through all pending approvals, showing a popup for each.
+/// Returns `None` if the user cancelled a popup, `Some(n)` for `n` approvals made
+/// (0 means nothing was pending).
+pub fn approve_all_pending(session_id: &str, socket_path: &PathBuf) -> Option<usize> {
+    let mut count = 0;
+    loop {
+        let Some(state) = query_permission_state_sync(socket_path) else {
+            break;
+        };
+        let Some(pending) = state.pending.first() else {
+            break;
+        };
+        let decided = launch_approval_popup(
+            session_id,
+            &pending.tool,
+            &pending.key,
+            &pending.value,
+            Some(&pending.prompt),
+            Some(&pending.request_id),
+            pending
+                .preview_file_path
+                .as_ref()
+                .map(|p| p.to_string_lossy())
+                .as_deref(),
+        );
+        if !decided {
+            return None;
+        }
+        count += 1;
+    }
+    Some(count)
 }
 
 // ---------------------------------------------------------------------------
@@ -835,13 +848,14 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
                 KeyCode::Down | KeyCode::Char('j') => state.move_down(),
                 KeyCode::Up | KeyCode::Char('k') => state.move_up(),
                 KeyCode::Char(' ') => state.toggle_collapse(),
-                KeyCode::Enter | KeyCode::Char('o') => loop {
+                KeyCode::Enter | KeyCode::Char('o') => {
                     let decided = state.open_popup();
                     state.refresh_from_server(&socket_path);
-                    if !decided || !state.select_first_pending() {
-                        break;
+                    if decided {
+                        approve_all_pending(&state.session_id, &socket_path);
+                        state.refresh_from_server(&socket_path);
                     }
-                },
+                }
                 KeyCode::Char('f') => {
                     state.toggle_filter();
                     state.refresh_from_server(&socket_path);
