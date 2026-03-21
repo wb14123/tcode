@@ -44,3 +44,13 @@ Fix any warnings or formatting issues before considering the task complete.
 - At minimum, log the error with `tracing::error!` or `tracing::warn!`
 - Prefer returning `Result` to the caller so they can decide how to handle the error
 - This applies to both production code and fire-and-forget calls (e.g. broadcasting, file writes)
+
+### Avoid `unwrap()` and `expect()`
+
+- **Never** use `.unwrap()` in production code
+- **Prefer `?`** whenever the function can return `Result` or `Option`
+- Use `if let` / `match` / `let...else` when handling errors locally
+- Use `.unwrap_or()` / `.unwrap_or_default()` when a fallback value makes sense
+- **`expect("reason")`** is acceptable only for truly infallible cases (e.g. hardcoded string parses, `SystemTime::duration_since(UNIX_EPOCH)`, values verified on the preceding line)
+- In tests, prefer `-> anyhow::Result<()>` with `?` over `.unwrap()`
+- This codebase uses `parking_lot::Mutex` and `parking_lot::RwLock` (not `std::sync`) to avoid lock poisoning and the `.lock().unwrap()` pattern
