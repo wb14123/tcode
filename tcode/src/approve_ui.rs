@@ -33,8 +33,10 @@ pub struct ApproveArgs {
 
 /// Result of the approval UI interaction.
 pub enum ApproveResult {
-    /// User made a decision (approve/deny/cancel) — normal exit.
+    /// User made a decision (approve/deny) — normal exit.
     Done,
+    /// User cancelled without making a decision (q/Esc).
+    Cancelled,
     /// User wants to view the preview file in a maximized popup.
     ViewPopup,
 }
@@ -361,7 +363,7 @@ fn run_approve_loop(
                 KeyCode::Char('2') => Some(PermissionDecision::AllowSession),
                 KeyCode::Char('3') => Some(PermissionDecision::AllowProject),
                 KeyCode::Char('4') => Some(PermissionDecision::Deny),
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Done),
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Cancelled),
                 _ => None,
             };
             if let Some(decision) = decision {
@@ -424,7 +426,7 @@ fn run_manage_loop(
                     send_revoke(&args.socket_path, pk)?;
                     return Ok(ApproveResult::Done);
                 }
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Done),
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Cancelled),
                 _ => {}
             }
         }

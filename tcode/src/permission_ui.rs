@@ -278,10 +278,30 @@ impl PermissionTreeState {
         self.filter_pending_only = !self.filter_pending_only;
     }
 
+    /// Select the first pending value node in the visible list.
+    /// Returns `true` if a pending node was found and selected.
+    fn select_first_pending(&mut self) -> bool {
+        for (vis_idx, &arena_idx) in self.visible.iter().enumerate() {
+            if matches!(
+                &self.arena[arena_idx].kind,
+                NodeKind::Value {
+                    status: PermStatus::Pending,
+                    ..
+                }
+            ) {
+                self.selected = vis_idx;
+                return true;
+            }
+        }
+        false
+    }
+
     /// Open the approval or management popup for the selected leaf node.
-    fn open_popup(&mut self) {
+    /// Returns `true` if the user made a decision (approve/deny) on a pending item,
+    /// `false` if cancelled, managing an existing permission, or toggling collapse.
+    fn open_popup(&mut self) -> bool {
         let Some(&idx) = self.visible.get(self.selected) else {
-            return;
+            return false;
         };
         let node = &self.arena[idx];
 
@@ -294,11 +314,12 @@ impl PermissionTreeState {
                 preview_file_path,
                 ..
             } => {
+                let is_pending = matches!(status, PermStatus::Pending);
                 // Walk up to find tool and key
                 let (tool_name, key_name) = self.find_tool_key_for(idx);
                 let exe = match std::env::current_exe() {
                     Ok(p) => p.to_string_lossy().to_string(),
-                    Err(_) => return,
+                    Err(_) => return false,
                 };
 
                 let cmd = match status {
@@ -396,6 +417,12 @@ impl PermissionTreeState {
                 // Loop: show popup, and if the user requests a preview view
                 // (exit code 10 = maximized popup via [v]), show it then
                 // relaunch the approval popup.
+                //
+                // Exit codes:
+                //   0  = decision made (approve/deny)
+                //   1  = cancelled (q/Esc)
+                //   10 = view preview in nvim
+                let mut decided = false;
                 loop {
                     let popup_cmd = format!(
                         "tmux display-popup -E -w {} -h {} \"{}\"",
@@ -427,13 +454,19 @@ impl PermissionTreeState {
                             }
                             // Loop: relaunch approval popup
                         }
-                        _ => break, // Done (approved, denied, cancelled)
+                        0 => {
+                            decided = is_pending;
+                            break;
+                        }
+                        _ => break, // Cancelled or error
                     }
                 }
+                decided
             }
             NodeKind::Tool { .. } | NodeKind::Key { .. } => {
                 // Toggle collapse for non-leaf
                 self.toggle_collapse();
+                false
             }
         }
     }
@@ -802,10 +835,13 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
                 KeyCode::Down | KeyCode::Char('j') => state.move_down(),
                 KeyCode::Up | KeyCode::Char('k') => state.move_up(),
                 KeyCode::Char(' ') => state.toggle_collapse(),
-                KeyCode::Enter | KeyCode::Char('o') => {
-                    state.open_popup();
+                KeyCode::Enter | KeyCode::Char('o') => loop {
+                    let decided = state.open_popup();
                     state.refresh_from_server(&socket_path);
-                }
+                    if !decided || !state.select_first_pending() {
+                        break;
+                    }
+                },
                 KeyCode::Char('f') => {
                     state.toggle_filter();
                     state.refresh_from_server(&socket_path);

@@ -562,6 +562,7 @@ async fn main() -> Result<()> {
             let result = approve_ui::run_approve(args)?;
             match result {
                 approve_ui::ApproveResult::Done => Ok(()),
+                approve_ui::ApproveResult::Cancelled => std::process::exit(1),
                 approve_ui::ApproveResult::ViewPopup => std::process::exit(10),
             }
         }
