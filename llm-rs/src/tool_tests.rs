@@ -38,7 +38,7 @@ mod tests {
     }
 
     #[test]
-    fn test_tool_param_schema() {
+    fn test_tool_param_schema() -> anyhow::Result<()> {
         let tool = Tool::new(
             "test_tool",
             "A test tool",
@@ -52,13 +52,12 @@ mod tests {
         assert_eq!(tool.description, "A test tool");
 
         // Verify schema has expected properties
-        let schema_json = serde_json::to_value(&tool.param_schema).unwrap();
-        println!(
-            "Schema: {}",
-            serde_json::to_string_pretty(&schema_json).unwrap()
-        );
+        let schema_json = serde_json::to_value(&tool.param_schema)?;
+        println!("Schema: {}", serde_json::to_string_pretty(&schema_json)?);
 
-        let props = schema_json["properties"].as_object().unwrap();
+        let props = schema_json["properties"]
+            .as_object()
+            .expect("schema properties should be an object");
         assert!(props.contains_key("message"));
         assert!(props.contains_key("count"));
 
@@ -71,6 +70,7 @@ mod tests {
 
         let count_schema = &props["count"];
         assert_eq!(count_schema["description"].as_str(), Some("Optional count"));
+        Ok(())
     }
 
     #[tokio::test]
@@ -145,7 +145,10 @@ mod tests {
         let json_args = r#"not valid json"#.to_string();
         let mut stream = tool.execute(test_ctx(), json_args);
 
-        let result = stream.next().await.unwrap();
+        let result = stream
+            .next()
+            .await
+            .expect("stream should yield at least one item");
         assert!(result.starts_with("Error: Failed to parse tool arguments:"));
     }
 
@@ -164,7 +167,10 @@ mod tests {
         let json_args = r#"{"count": 5}"#.to_string();
         let mut stream = tool.execute(test_ctx(), json_args);
 
-        let result = stream.next().await.unwrap();
+        let result = stream
+            .next()
+            .await
+            .expect("stream should yield at least one item");
         assert!(result.starts_with("Error: Failed to parse tool arguments:"));
         assert!(result.contains("message"));
     }
@@ -183,7 +189,10 @@ mod tests {
         let json_args = r#"{"message": "test"}"#.to_string();
         let mut stream = tool.execute(test_ctx(), json_args);
 
-        let result = stream.next().await.unwrap();
+        let result = stream
+            .next()
+            .await
+            .expect("stream should yield at least one item");
         assert_eq!(result, "Error: something went wrong");
     }
 
@@ -272,7 +281,10 @@ mod tests {
         let json_args = r#"{"message": "test"}"#.to_string();
         let mut stream = tool.execute(test_ctx(), json_args);
 
-        let result = stream.next().await.unwrap();
+        let result = stream
+            .next()
+            .await
+            .expect("stream should yield a timeout error");
         assert!(
             result.contains("timed out"),
             "Expected timeout, got: {}",
@@ -305,14 +317,17 @@ mod tests {
         let mut stream = tool.execute(ctx, json_args);
 
         // Get first item
-        let first = stream.next().await.unwrap();
+        let first = stream.next().await.expect("stream should yield first item");
         assert_eq!(first, "first");
 
         // Cancel
         cancel_token.cancel();
 
         // Should get cancellation message
-        let cancelled = stream.next().await.unwrap();
+        let cancelled = stream
+            .next()
+            .await
+            .expect("stream should yield cancellation message");
         assert!(
             cancelled.contains("cancelled"),
             "Expected cancelled, got: {}",
@@ -403,11 +418,13 @@ mod tests {
         }
 
         #[test]
-        fn test_tool_macro_schema() {
+        fn test_tool_macro_schema() -> anyhow::Result<()> {
             let tool = search_code_tool();
 
-            let schema_json = serde_json::to_value(&tool.param_schema).unwrap();
-            let props = schema_json["properties"].as_object().unwrap();
+            let schema_json = serde_json::to_value(&tool.param_schema)?;
+            let props = schema_json["properties"]
+                .as_object()
+                .expect("schema properties should be an object");
 
             // Check field names preserved
             assert!(props.contains_key("query"));
@@ -422,6 +439,7 @@ mod tests {
                 props["limit"]["description"].as_str(),
                 Some("Maximum results to return")
             );
+            Ok(())
         }
 
         #[tokio::test]
@@ -513,12 +531,18 @@ mod tests {
 
             // Test success case
             let mut stream = tool.execute(test_ctx(), r#"{"should_fail": false}"#.to_string());
-            let result = stream.next().await.unwrap();
+            let result = stream
+                .next()
+                .await
+                .expect("stream should yield success result");
             assert_eq!(result, "success");
 
             // Test error case
             let mut stream = tool.execute(test_ctx(), r#"{"should_fail": true}"#.to_string());
-            let result = stream.next().await.unwrap();
+            let result = stream
+                .next()
+                .await
+                .expect("stream should yield error result");
             assert_eq!(result, "Error: intentional failure");
         }
 
@@ -534,18 +558,21 @@ mod tests {
         }
 
         #[tokio::test]
-        async fn test_tool_macro_with_tool_context() {
+        async fn test_tool_macro_with_tool_context() -> anyhow::Result<()> {
             let tool = ctx_aware_tool_tool();
 
             // ToolContext should not appear in the schema
-            let schema_json = serde_json::to_value(&tool.param_schema).unwrap();
-            let props = schema_json["properties"].as_object().unwrap();
+            let schema_json = serde_json::to_value(&tool.param_schema)?;
+            let props = schema_json["properties"]
+                .as_object()
+                .expect("schema properties should be an object");
             assert!(props.contains_key("data"));
             assert!(!props.contains_key("ctx"));
 
             let mut stream = tool.execute(test_ctx(), r#"{"data": "hello"}"#.to_string());
-            let result = stream.next().await.unwrap();
+            let result = stream.next().await.expect("stream should yield a result");
             assert_eq!(result, "data=hello, cancelled=false");
+            Ok(())
         }
     }
 }

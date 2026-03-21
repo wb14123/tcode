@@ -1,34 +1,37 @@
+use anyhow::Result;
 use llm_rs::llm::{LLMMessage, ReasoningEffort, StopReason};
 
 use crate::convert::*;
 use crate::types::*;
 
 #[test]
-fn test_convert_system_message() {
+fn test_convert_system_message() -> Result<()> {
     let msgs = vec![RequestMessage {
         role: "system".into(),
         content: Some("You are helpful.".into()),
         tool_call_id: None,
         tool_calls: None,
     }];
-    let result = convert_request_messages(&msgs).unwrap();
+    let result = convert_request_messages(&msgs)?;
     assert!(matches!(&result[0], LLMMessage::System(s) if s == "You are helpful."));
+    Ok(())
 }
 
 #[test]
-fn test_convert_user_message() {
+fn test_convert_user_message() -> Result<()> {
     let msgs = vec![RequestMessage {
         role: "user".into(),
         content: Some("Hello".into()),
         tool_call_id: None,
         tool_calls: None,
     }];
-    let result = convert_request_messages(&msgs).unwrap();
+    let result = convert_request_messages(&msgs)?;
     assert!(matches!(&result[0], LLMMessage::User(s) if s == "Hello"));
+    Ok(())
 }
 
 #[test]
-fn test_convert_assistant_message_with_tool_calls() {
+fn test_convert_assistant_message_with_tool_calls() -> Result<()> {
     let msgs = vec![RequestMessage {
         role: "assistant".into(),
         content: None,
@@ -42,7 +45,7 @@ fn test_convert_assistant_message_with_tool_calls() {
             },
         }]),
     }];
-    let result = convert_request_messages(&msgs).unwrap();
+    let result = convert_request_messages(&msgs)?;
     match &result[0] {
         LLMMessage::Assistant { tool_calls, .. } => {
             assert_eq!(tool_calls.len(), 1);
@@ -51,17 +54,18 @@ fn test_convert_assistant_message_with_tool_calls() {
         }
         other => panic!("expected Assistant, got {:?}", other),
     }
+    Ok(())
 }
 
 #[test]
-fn test_convert_tool_result_message() {
+fn test_convert_tool_result_message() -> Result<()> {
     let msgs = vec![RequestMessage {
         role: "tool".into(),
         content: Some("result data".into()),
         tool_call_id: Some("call_1".into()),
         tool_calls: None,
     }];
-    let result = convert_request_messages(&msgs).unwrap();
+    let result = convert_request_messages(&msgs)?;
     match &result[0] {
         LLMMessage::ToolResult {
             tool_call_id,
@@ -72,6 +76,7 @@ fn test_convert_tool_result_message() {
         }
         other => panic!("expected ToolResult, got {:?}", other),
     }
+    Ok(())
 }
 
 #[test]
@@ -99,7 +104,7 @@ fn test_convert_unknown_role() {
 }
 
 #[test]
-fn test_convert_request_tools() {
+fn test_convert_request_tools() -> Result<()> {
     let tools = vec![RequestTool {
         tool_type: "function".into(),
         function: RequestFunctionDef {
@@ -114,14 +119,15 @@ fn test_convert_request_tools() {
             })),
         },
     }];
-    let result = convert_request_tools(&tools).unwrap();
+    let result = convert_request_tools(&tools)?;
     assert_eq!(result.len(), 1);
     assert_eq!(result[0].name, "get_weather");
     assert_eq!(result[0].description, "Get current weather");
+    Ok(())
 }
 
 #[test]
-fn test_convert_request_tools_no_params() {
+fn test_convert_request_tools_no_params() -> Result<()> {
     let tools = vec![RequestTool {
         tool_type: "function".into(),
         function: RequestFunctionDef {
@@ -130,8 +136,9 @@ fn test_convert_request_tools_no_params() {
             parameters: None,
         },
     }];
-    let result = convert_request_tools(&tools).unwrap();
+    let result = convert_request_tools(&tools)?;
     assert_eq!(result[0].name, "noop");
+    Ok(())
 }
 
 #[test]

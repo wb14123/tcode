@@ -23,6 +23,15 @@ impl std::fmt::Display for AppError {
     }
 }
 
+impl std::error::Error for AppError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AppError::Internal(e) => e.source(),
+            _ => None,
+        }
+    }
+}
+
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
         let (status, error_type, message) = match self {

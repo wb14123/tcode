@@ -196,7 +196,7 @@ mod tests {
                     raw_value.is_array(),
                     "Expected raw to be an array, got: {raw_value:?}"
                 );
-                let arr = raw_value.as_array().unwrap();
+                let arr = raw_value.as_array().expect("raw should be an array");
                 assert!(
                     !arr.is_empty(),
                     "Expected raw array to have items for round-tripping"
@@ -316,11 +316,11 @@ mod tests {
 
         // Verify first turn has reasoning in raw for round-tripping
         assert!(raw.is_some(), "Expected raw for round-tripping, got None");
-        let raw_value = raw.as_ref().unwrap();
+        let raw_value = raw.as_ref().expect("raw should be present");
         assert!(raw_value.is_array(), "Expected raw to be an array");
         let has_reasoning = raw_value
             .as_array()
-            .unwrap()
+            .expect("raw should be an array")
             .iter()
             .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("reasoning"));
         assert!(

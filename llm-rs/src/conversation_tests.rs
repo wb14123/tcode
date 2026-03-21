@@ -14,7 +14,7 @@ mod tests {
     // ======== ConversationState serde round-trip ========
 
     #[test]
-    fn conversation_state_serde_roundtrip() {
+    fn conversation_state_serde_roundtrip() -> anyhow::Result<()> {
         let state = ConversationState {
             id: "test-conv-1".to_string(),
             model: "claude-opus-4-6".to_string(),
@@ -49,8 +49,8 @@ mod tests {
             subagent_depth: 0,
         };
 
-        let json = serde_json::to_string_pretty(&state).unwrap();
-        let deserialized: ConversationState = serde_json::from_str(&json).unwrap();
+        let json = serde_json::to_string_pretty(&state)?;
+        let deserialized: ConversationState = serde_json::from_str(&json)?;
 
         assert_eq!(deserialized.id, state.id);
         assert_eq!(deserialized.model, state.model);
@@ -67,6 +67,7 @@ mod tests {
             deserialized.chat_options.reasoning_effort,
             Some(ReasoningEffort::Medium)
         );
+        Ok(())
     }
 
     // ======== fill_cancelled_tool_results ========
