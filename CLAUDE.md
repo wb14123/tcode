@@ -19,6 +19,14 @@ If compilation fails and more context is needed, re-run without tail to see full
 - Use `cargo check` for quick syntax/type checking (fastest)
 - Only use `--release` when explicitly requested by the user for production builds
 
+### Code Quality (Required After Every Change)
+After every code change, run:
+```bash
+cargo fmt
+cargo clippy 2>&1 | tail -n 30
+```
+Fix any warnings or formatting issues before considering the task complete.
+
 ### Command Priority
 1. `cargo check` - Use for quick validation (fastest)
 2. `cargo build` - Use when actually need to run the binary

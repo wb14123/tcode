@@ -71,7 +71,11 @@ llm-rs/               Root workspace
 cargo check           # Quick type checking
 cargo build           # Debug build
 cargo test            # Run tests
+cargo fmt             # Format code
+cargo clippy          # Lint code
 ```
+
+Run `cargo fmt` and `cargo clippy` after each change to ensure consistent formatting and catch common issues.
 
 ## Running tcode
 
