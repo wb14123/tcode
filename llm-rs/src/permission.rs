@@ -458,10 +458,10 @@ impl ScopedPermissionManager {
 
     /// Remove a preview file if it exists.
     fn cleanup_preview_file(path: &Option<PathBuf>) {
-        if let Some(p) = path {
-            if let Err(e) = std::fs::remove_file(p) {
-                tracing::warn!("Failed to clean up preview file {}: {}", p.display(), e);
-            }
+        if let Some(p) = path
+            && let Err(e) = std::fs::remove_file(p)
+        {
+            tracing::warn!("Failed to clean up preview file {}: {}", p.display(), e);
         }
     }
 

@@ -34,7 +34,7 @@ fn walk_glob(search_dir: &Path, pattern: &str) -> Result<Vec<(PathBuf, SystemTim
                 continue;
             }
         };
-        if !entry.file_type().map_or(false, |ft| ft.is_file()) {
+        if !entry.file_type().is_some_and(|ft| ft.is_file()) {
             continue;
         }
         let mtime = match entry.metadata() {

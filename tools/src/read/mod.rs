@@ -39,7 +39,7 @@ fn is_binary_extension(path: &Path) -> bool {
 /// Check if file content appears to be binary by sampling bytes.
 /// Returns true if more than 30% of bytes are non-printable ASCII control characters.
 ///
-/// Only ASCII bytes (0x00–0x7F) are inspected. High bytes (0x80–0xFF) are skipped
+/// Only ASCII bytes (0x00-0x7F) are inspected. High bytes (0x80-0xFF) are skipped
 /// because they appear in valid UTF-8 multibyte sequences (e.g. Chinese, Arabic, emoji).
 /// Binary files are detected by their abundance of ASCII control characters (NUL, BEL, etc.)
 /// which rarely appear in real text of any language.
@@ -52,7 +52,7 @@ fn is_binary_content(data: &[u8]) -> bool {
         .filter(|&&b| {
             // Skip non-ASCII bytes — they're likely UTF-8 multibyte (valid text)
             b.is_ascii()
-                // Among ASCII bytes, flag control chars (0x00–0x1F, 0x7F)
+                // Among ASCII bytes, flag control chars (0x00-0x1F, 0x7F)
                 // except common whitespace (tab, newline, carriage return)
                 && !matches!(b, b'\t' | b'\n' | b'\r' | 0x20..=0x7E)
         })
@@ -158,6 +158,7 @@ fn format_line_xml(line_num: u64, content: &str, char_info: Option<(u64, u64, bo
 /// Try to emit a processed line into `batch`.
 /// Returns `Some(chars_used)` if a line was appended, `None` if the char cap
 /// prevented any output. `*was_truncated` is set in either truncation case.
+#[allow(clippy::too_many_arguments)]
 fn emit_line(
     line_content: &str,
     line_num: u64,

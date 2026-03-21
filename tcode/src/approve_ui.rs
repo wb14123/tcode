@@ -336,44 +336,44 @@ fn run_approve_loop(
             }
         })?;
 
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                if has_prompt {
-                    match key.code {
-                        KeyCode::Up | KeyCode::Char('k') => {
-                            scroll_offset = scroll_offset.saturating_sub(1);
-                            continue;
-                        }
-                        KeyCode::Down | KeyCode::Char('j') => {
-                            scroll_offset = scroll_offset.saturating_add(1);
-                            continue;
-                        }
-                        _ => {}
+        if event::poll(Duration::from_millis(200))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            if has_prompt {
+                match key.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        scroll_offset = scroll_offset.saturating_sub(1);
+                        continue;
                     }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        scroll_offset = scroll_offset.saturating_add(1);
+                        continue;
+                    }
+                    _ => {}
                 }
-                let decision = match key.code {
-                    KeyCode::Char('v') if has_preview => return Ok(ApproveResult::ViewPopup),
-                    KeyCode::Char('1') => Some(PermissionDecision::AllowOnce),
-                    KeyCode::Char('2') => Some(PermissionDecision::AllowSession),
-                    KeyCode::Char('3') => Some(PermissionDecision::AllowProject),
-                    KeyCode::Char('4') => Some(PermissionDecision::Deny),
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Done),
-                    _ => None,
+            }
+            let decision = match key.code {
+                KeyCode::Char('v') if has_preview => return Ok(ApproveResult::ViewPopup),
+                KeyCode::Char('1') => Some(PermissionDecision::AllowOnce),
+                KeyCode::Char('2') => Some(PermissionDecision::AllowSession),
+                KeyCode::Char('3') => Some(PermissionDecision::AllowProject),
+                KeyCode::Char('4') => Some(PermissionDecision::Deny),
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Done),
+                _ => None,
+            };
+            if let Some(decision) = decision {
+                let pk = make_key(args);
+                // AllowOnce targets specific invocation; others apply to all
+                let rid = if matches!(decision, PermissionDecision::AllowOnce) {
+                    args.request_id.clone()
+                } else {
+                    None
                 };
-                if let Some(decision) = decision {
-                    let pk = make_key(args);
-                    // AllowOnce targets specific invocation; others apply to all
-                    let rid = if matches!(decision, PermissionDecision::AllowOnce) {
-                        args.request_id.clone()
-                    } else {
-                        None
-                    };
-                    send_resolve(&args.socket_path, pk, decision, rid)?;
-                    return Ok(ApproveResult::Done);
-                }
+                send_resolve(&args.socket_path, pk, decision, rid)?;
+                return Ok(ApproveResult::Done);
             }
         }
     }
@@ -412,20 +412,20 @@ fn run_manage_loop(
             frame.render_widget(options, chunks[3]);
         })?;
 
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+        if event::poll(Duration::from_millis(200))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            match key.code {
+                KeyCode::Char('r') => {
+                    let pk = make_key(args);
+                    send_revoke(&args.socket_path, pk)?;
+                    return Ok(ApproveResult::Done);
                 }
-                match key.code {
-                    KeyCode::Char('r') => {
-                        let pk = make_key(args);
-                        send_revoke(&args.socket_path, pk)?;
-                        return Ok(ApproveResult::Done);
-                    }
-                    KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Done),
-                    _ => {}
-                }
+                KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Done),
+                _ => {}
             }
         }
     }

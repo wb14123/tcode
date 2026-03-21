@@ -24,6 +24,7 @@ pub fn locked_write(path: &Path, content: &[u8], pre_mtime: Option<SystemTime>) 
     let file = std::fs::OpenOptions::new()
         .write(true)
         .create(true)
+        .truncate(false)
         .open(path)
         .map_err(|e| anyhow!("Failed to open {} for writing: {}", path.display(), e))?;
 

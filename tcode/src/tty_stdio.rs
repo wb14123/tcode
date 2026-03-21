@@ -84,12 +84,12 @@ pub fn get_tty_stdio() -> (Stdio, Stdio, Stdio) {
 /// Write an error message to the original terminal stderr (before redirection).
 /// Falls back to /dev/tty if original fds aren't available.
 pub fn write_error_to_terminal(msg: &str) {
-    if let Some((_, _, stderr_fd)) = SAVED_FDS.get() {
-        if let Some(fd) = dup_fd(stderr_fd.as_fd()) {
-            let mut file = File::from(fd);
-            let _ = writeln!(file, "{}", msg);
-            return;
-        }
+    if let Some((_, _, stderr_fd)) = SAVED_FDS.get()
+        && let Some(fd) = dup_fd(stderr_fd.as_fd())
+    {
+        let mut file = File::from(fd);
+        let _ = writeln!(file, "{}", msg);
+        return;
     }
     // Fallback to /dev/tty
     if let Ok(mut tty) = File::create("/dev/tty") {

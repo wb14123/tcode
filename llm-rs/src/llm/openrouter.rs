@@ -243,7 +243,7 @@ impl LLM for OpenRouter {
                         });
                         let rd = raw_value
                             .get("reasoning_details")
-                            .and_then(|v| v.as_array().map(|arr| arr.clone()));
+                            .and_then(|v| v.as_array().cloned());
                         ChatMessage {
                             role: "assistant",
                             content,
@@ -419,27 +419,27 @@ impl LLM for OpenRouter {
                                     .or_else(|| {
                                         detail_json.get("summary").and_then(|v| v.as_str())
                                     });
-                                if let Some(text) = text {
-                                    if !text.is_empty() {
-                                        yield LLMEvent::ThinkingDelta(text.to_string());
-                                    }
+                                if let Some(text) = text
+                                    && !text.is_empty()
+                                {
+                                    yield LLMEvent::ThinkingDelta(text.to_string());
                                 }
                                 accumulated_reasoning_details.push(detail_json);
                             }
                         }
 
-                        if let Some(ref reasoning_text) = choice.delta.reasoning_content {
-                            if !reasoning_text.is_empty() {
-                                yield LLMEvent::ThinkingDelta(reasoning_text.clone());
-                                accumulated_reasoning_text.push_str(reasoning_text);
-                            }
+                        if let Some(ref reasoning_text) = choice.delta.reasoning_content
+                            && !reasoning_text.is_empty()
+                        {
+                            yield LLMEvent::ThinkingDelta(reasoning_text.clone());
+                            accumulated_reasoning_text.push_str(reasoning_text);
                         }
 
-                        if let Some(content) = choice.delta.content {
-                            if !content.is_empty() {
-                                accumulated_text.push_str(&content);
-                                yield LLMEvent::TextDelta(content);
-                            }
+                        if let Some(content) = choice.delta.content
+                            && !content.is_empty()
+                        {
+                            accumulated_text.push_str(&content);
+                            yield LLMEvent::TextDelta(content);
                         }
 
                         if let Some(tc_deltas) = choice.delta.tool_calls {

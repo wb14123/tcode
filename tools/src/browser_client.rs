@@ -179,10 +179,10 @@ impl BrowserClient {
 
         tracing::info!("Browser-server is not responding, attempting restart");
 
-        if config.socket_path.exists() {
-            if let Err(e) = std::fs::remove_file(&config.socket_path) {
-                tracing::warn!("Failed to remove stale browser-server socket: {e}");
-            }
+        if config.socket_path.exists()
+            && let Err(e) = std::fs::remove_file(&config.socket_path)
+        {
+            tracing::warn!("Failed to remove stale browser-server socket: {e}");
         }
 
         let log_path = config.socket_path.with_extension("log");

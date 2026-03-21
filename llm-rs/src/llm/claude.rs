@@ -364,24 +364,23 @@ fn convert_messages(msgs: &[LLMMessage]) -> (Option<Vec<SystemBlock>>, Vec<Claud
             } => {
                 if let Some(raw_value) = raw {
                     // Use raw content blocks if available for round-tripping
-                    if let Some(blocks) = raw_value.get("content") {
-                        if let Ok(mut content_blocks) =
+                    if let Some(blocks) = raw_value.get("content")
+                        && let Ok(mut content_blocks) =
                             serde_json::from_value::<Vec<ContentBlock>>(blocks.clone())
-                        {
-                            // Ensure tool_use blocks have the mcp_ prefix
-                            for block in &mut content_blocks {
-                                if let ContentBlock::ToolUse { name, .. } = block {
-                                    if !name.starts_with(TOOL_PREFIX) {
-                                        *name = format!("{}{}", TOOL_PREFIX, name);
-                                    }
-                                }
+                    {
+                        // Ensure tool_use blocks have the mcp_ prefix
+                        for block in &mut content_blocks {
+                            if let ContentBlock::ToolUse { name, .. } = block
+                                && !name.starts_with(TOOL_PREFIX)
+                            {
+                                *name = format!("{}{}", TOOL_PREFIX, name);
                             }
-                            claude_messages.push(ClaudeMessage {
-                                role: "assistant",
-                                content: ClaudeContent::Blocks(content_blocks),
-                            });
-                            continue;
                         }
+                        claude_messages.push(ClaudeMessage {
+                            role: "assistant",
+                            content: ClaudeContent::Blocks(content_blocks),
+                        });
+                        continue;
                     }
                 }
 
@@ -650,11 +649,11 @@ impl LLM for Claude {
                                         }
                                         "text" => {
                                             // Text block started, initial text may be present
-                                            if let Some(text) = parsed.content_block.text {
-                                                if !text.is_empty() {
-                                                    accumulated_text.push_str(&text);
-                                                    yield LLMEvent::TextDelta(text);
-                                                }
+                                            if let Some(text) = parsed.content_block.text
+                                                && !text.is_empty()
+                                            {
+                                                accumulated_text.push_str(&text);
+                                                yield LLMEvent::TextDelta(text);
                                             }
                                         }
                                         "thinking" => {
@@ -675,19 +674,19 @@ impl LLM for Claude {
                                 if let Ok(parsed) = serde_json::from_str::<ContentBlockDeltaData>(data) {
                                     match parsed.delta.delta_type.as_str() {
                                         "text_delta" => {
-                                            if let Some(text) = parsed.delta.text {
-                                                if !text.is_empty() {
-                                                    accumulated_text.push_str(&text);
-                                                    yield LLMEvent::TextDelta(text);
-                                                }
+                                            if let Some(text) = parsed.delta.text
+                                                && !text.is_empty()
+                                            {
+                                                accumulated_text.push_str(&text);
+                                                yield LLMEvent::TextDelta(text);
                                             }
                                         }
                                         "input_json_delta" => {
                                             // Accumulate partial JSON for tool_use input
-                                            if let Some(partial) = parsed.delta.partial_json {
-                                                if let Some(acc) = tool_blocks.get_mut(&parsed.index) {
-                                                    acc.input_json.push_str(&partial);
-                                                }
+                                            if let Some(partial) = parsed.delta.partial_json
+                                                && let Some(acc) = tool_blocks.get_mut(&parsed.index)
+                                            {
+                                                acc.input_json.push_str(&partial);
                                             }
                                         }
                                         "thinking_delta" => {
@@ -701,10 +700,10 @@ impl LLM for Claude {
                                         }
                                         "signature_delta" => {
                                             // Accumulate signature for thinking block
-                                            if let Some(sig) = parsed.delta.signature.as_ref() {
-                                                if let Some(acc) = thinking_blocks.get_mut(&parsed.index) {
-                                                    acc.signature.push_str(sig);
-                                                }
+                                            if let Some(sig) = parsed.delta.signature.as_ref()
+                                                && let Some(acc) = thinking_blocks.get_mut(&parsed.index)
+                                            {
+                                                acc.signature.push_str(sig);
                                             }
                                         }
                                         _ => {}
@@ -713,38 +712,38 @@ impl LLM for Claude {
                             }
                             "content_block_stop" => {
                                 // When a content block stops, finalize it
-                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data) {
-                                    if let Some(index) = parsed.get("index").and_then(|v| v.as_u64()) {
-                                        let index = index as usize;
-                                        // Check if this was a tool_use block
-                                        if let Some(acc) = tool_blocks.remove(&index) {
-                                            // Parse the accumulated JSON
-                                            let input: serde_json::Value =
-                                                serde_json::from_str(&acc.input_json)
-                                                    .unwrap_or(serde_json::json!({}));
+                                if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(data)
+                                    && let Some(index) = parsed.get("index").and_then(|v| v.as_u64())
+                                {
+                                    let index = index as usize;
+                                    // Check if this was a tool_use block
+                                    if let Some(acc) = tool_blocks.remove(&index) {
+                                        // Parse the accumulated JSON
+                                        let input: serde_json::Value =
+                                            serde_json::from_str(&acc.input_json)
+                                                .unwrap_or(serde_json::json!({}));
 
-                                            // Store for raw round-tripping
-                                            accumulated_content.push(ContentBlock::ToolUse {
-                                                id: acc.id.clone(),
-                                                name: acc.name.clone(),
-                                                input: input.clone(),
-                                            });
+                                        // Store for raw round-tripping
+                                        accumulated_content.push(ContentBlock::ToolUse {
+                                            id: acc.id.clone(),
+                                            name: acc.name.clone(),
+                                            input: input.clone(),
+                                        });
 
-                                            // Emit the tool call event (strip mcp_ prefix)
-                                            yield LLMEvent::ToolCall(ToolCall {
-                                                id: acc.id,
-                                                name: strip_tool_prefix(&acc.name),
-                                                arguments: acc.input_json,
-                                            });
-                                        }
-                                        // Check if this was a thinking block
-                                        if let Some(acc) = thinking_blocks.remove(&index) {
-                                            // Store for raw round-tripping (with signature for verification)
-                                            accumulated_content.push(ContentBlock::Thinking {
-                                                thinking: acc.thinking_text,
-                                                signature: acc.signature,
-                                            });
-                                        }
+                                        // Emit the tool call event (strip mcp_ prefix)
+                                        yield LLMEvent::ToolCall(ToolCall {
+                                            id: acc.id,
+                                            name: strip_tool_prefix(&acc.name),
+                                            arguments: acc.input_json,
+                                        });
+                                    }
+                                    // Check if this was a thinking block
+                                    if let Some(acc) = thinking_blocks.remove(&index) {
+                                        // Store for raw round-tripping (with signature for verification)
+                                        accumulated_content.push(ContentBlock::Thinking {
+                                            thinking: acc.thinking_text,
+                                            signature: acc.signature,
+                                        });
                                     }
                                 }
                             }

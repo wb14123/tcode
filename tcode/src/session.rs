@@ -35,10 +35,10 @@ pub fn list_sessions() -> io::Result<Vec<String>> {
     let mut sessions = vec![];
     for entry in fs::read_dir(base)? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            if let Some(name) = entry.file_name().to_str() {
-                sessions.push(name.to_string());
-            }
+        if entry.file_type()?.is_dir()
+            && let Some(name) = entry.file_name().to_str()
+        {
+            sessions.push(name.to_string());
         }
     }
     Ok(sessions)

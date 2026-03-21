@@ -630,6 +630,7 @@ async fn run_unified(cli: Cli, _lua_path: PathBuf) -> Result<()> {
 
 /// Shared entry point for unified mode: redirects stdio, initializes tracing,
 /// starts the server, creates tmux panes, and waits for the display to exit.
+#[allow(clippy::too_many_arguments)]
 async fn run_unified_with_session(
     session: Session,
     session_id: String,

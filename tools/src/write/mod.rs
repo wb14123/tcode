@@ -35,14 +35,14 @@ pub fn write(
         }
 
         // Check parent directory exists
-        if let Some(parent) = path.parent() {
-            if !parent.exists() {
-                yield Err(anyhow!(
-                    "Parent directory does not exist: {}. Create it first.",
-                    parent.display()
-                ));
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && !parent.exists()
+        {
+            yield Err(anyhow!(
+                "Parent directory does not exist: {}. Create it first.",
+                parent.display()
+            ));
+            return;
         }
 
         // Record mtime before permission check (which may block on user approval)

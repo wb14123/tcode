@@ -74,10 +74,10 @@ fn get_crate_path() -> proc_macro2::TokenStream {
 
 /// Check if a type path ends with `ToolContext`.
 fn is_tool_context_type(ty: &Type) -> bool {
-    if let Type::Path(type_path) = ty {
-        if let Some(segment) = type_path.path.segments.last() {
-            return segment.ident == "ToolContext";
-        }
+    if let Type::Path(type_path) = ty
+        && let Some(segment) = type_path.path.segments.last()
+    {
+        return segment.ident == "ToolContext";
     }
     false
 }
@@ -186,12 +186,12 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let mut tool_context_ident = None;
     let all_args: Vec<_> = input_fn.sig.inputs.iter().collect();
 
-    if let Some(FnArg::Typed(pat_type)) = all_args.first() {
-        if is_tool_context_type(&pat_type.ty) {
-            has_tool_context = true;
-            if let Pat::Ident(pat_ident) = &*pat_type.pat {
-                tool_context_ident = Some(pat_ident.ident.clone());
-            }
+    if let Some(FnArg::Typed(pat_type)) = all_args.first()
+        && is_tool_context_type(&pat_type.ty)
+    {
+        has_tool_context = true;
+        if let Pat::Ident(pat_ident) = &*pat_type.pat {
+            tool_context_ident = Some(pat_ident.ident.clone());
         }
     }
 
@@ -237,15 +237,13 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     // Also validate the ToolContext param itself (if present) isn't a complex pattern
-    if has_tool_context {
-        if let Some(FnArg::Receiver(receiver)) = all_args.first() {
-            return syn::Error::new(
-                receiver.span(),
-                "#[tool] cannot be used on methods with `self` parameter.",
-            )
-            .to_compile_error()
-            .into();
-        }
+    if has_tool_context && let Some(FnArg::Receiver(receiver)) = all_args.first() {
+        return syn::Error::new(
+            receiver.span(),
+            "#[tool] cannot be used on methods with `self` parameter.",
+        )
+        .to_compile_error()
+        .into();
     }
 
     // Generate struct fields with ALL attributes (doc + serde)
@@ -372,12 +370,11 @@ fn extract_doc_comments(attrs: &[Attribute]) -> String {
         .filter_map(|attr| {
             if attr.path().is_ident("doc") {
                 // Parse the doc attribute value
-                if let syn::Meta::NameValue(meta) = &attr.meta {
-                    if let syn::Expr::Lit(expr_lit) = &meta.value {
-                        if let syn::Lit::Str(lit_str) = &expr_lit.lit {
-                            return Some(lit_str.value());
-                        }
-                    }
+                if let syn::Meta::NameValue(meta) = &attr.meta
+                    && let syn::Expr::Lit(expr_lit) = &meta.value
+                    && let syn::Lit::Str(lit_str) = &expr_lit.lit
+                {
+                    return Some(lit_str.value());
                 }
             }
             None

@@ -121,10 +121,10 @@ pub struct ConversationState {
 pub fn fill_cancelled_tool_results(llm_msgs: &mut Vec<LLMMessage>) {
     // Find the last Assistant message with tool_calls
     let last_assistant_with_tools = llm_msgs.iter().enumerate().rev().find_map(|(i, msg)| {
-        if let LLMMessage::Assistant { tool_calls, .. } = msg {
-            if !tool_calls.is_empty() {
-                return Some((i, tool_calls.clone()));
-            }
+        if let LLMMessage::Assistant { tool_calls, .. } = msg
+            && !tool_calls.is_empty()
+        {
+            return Some((i, tool_calls.clone()));
         }
         None
     });
@@ -468,6 +468,7 @@ impl ConversationManager {
     /// memory until it ends.
     ///
     /// Returns `(conversation_id, client)`.
+    #[allow(clippy::too_many_arguments)]
     pub fn new_conversation(
         self: &Arc<Self>,
         llm: Box<dyn LLM>,
@@ -495,6 +496,7 @@ impl ConversationManager {
         )
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn new_conversation_with_id(
         self: &Arc<Self>,
         conversation_id: String,
@@ -823,10 +825,9 @@ fn find_tool_call_for_subagent(llm_msgs: &[LLMMessage], subagent_conv_id: &str) 
             tool_call_id,
             content,
         } = msg
+            && content.starts_with(&prefix)
         {
-            if content.starts_with(&prefix) {
-                return Some(tool_call_id.clone());
-            }
+            return Some(tool_call_id.clone());
         }
     }
     None
@@ -1302,12 +1303,12 @@ impl Conversation {
                             // the cancelled ToolResult in llm_msgs and re-call the LLM.
                             let mut found = false;
                             for msg in self.llm_msgs.iter_mut().rev() {
-                                if let LLMMessage::ToolResult { tool_call_id: id, content: c } = msg {
-                                    if *id == tool_call_id {
-                                        *c = content.to_string();
-                                        found = true;
-                                        break;
-                                    }
+                                if let LLMMessage::ToolResult { tool_call_id: id, content: c } = msg
+                                    && *id == tool_call_id
+                                {
+                                    *c = content.to_string();
+                                    found = true;
+                                    break;
                                 }
                             }
                             if found {

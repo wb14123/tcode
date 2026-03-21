@@ -91,7 +91,7 @@ fn create_browser() -> Result<Browser> {
         idle_browser_timeout: Duration::from_secs(600),
         ..LaunchOptions::default()
     };
-    Ok(Browser::new(launch_options)?)
+    Browser::new(launch_options)
 }
 
 fn ensure_checker_thread(idle_timeout: Duration) {

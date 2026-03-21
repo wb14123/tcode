@@ -307,11 +307,11 @@ impl PermissionTreeState {
                             "{} --session={} approve --tool {} --key {} --value {}",
                             exe, self.session_id, tool_name, key_name, value
                         );
-                        if let Some(p) = prompt {
-                            if !p.is_empty() {
-                                let escaped = shell_escape(p);
-                                cmd.push_str(&format!(" --prompt '{}'", escaped));
-                            }
+                        if let Some(p) = prompt
+                            && !p.is_empty()
+                        {
+                            let escaped = shell_escape(p);
+                            cmd.push_str(&format!(" --prompt '{}'", escaped));
                         }
                         if let Some(rid) = request_id {
                             cmd.push_str(&format!(" --request-id {}", rid));
@@ -337,7 +337,7 @@ impl PermissionTreeState {
                     .ok()
                     .and_then(|out| {
                         let s = String::from_utf8_lossy(&out.stdout);
-                        let mut parts = s.trim().split_whitespace();
+                        let mut parts = s.split_whitespace();
                         let w: usize = parts.next()?.parse().ok()?;
                         let h: usize = parts.next()?.parse().ok()?;
                         Some((w * 80 / 100, h * 80 / 100))
@@ -381,7 +381,7 @@ impl PermissionTreeState {
                     // Usable text width inside popup (subtract border + indent + right pad)
                     let usable = w.saturating_sub(6);
                     let prompt_lines = if usable > 0 {
-                        (prompt_len + usable - 1) / usable
+                        prompt_len.div_ceil(usable)
                     } else {
                         1
                     };
@@ -463,25 +463,25 @@ impl PermissionTreeState {
         // Fallback: try direct parent search
         if key_name.is_empty() || tool_name.is_empty() {
             for node in &self.arena {
-                if let NodeKind::Key { key } = &node.kind {
-                    if node.children.contains(&value_idx) {
-                        key_name = key.clone();
-                        // Find tool parent of this key node
-                        let key_idx = self
-                            .arena
-                            .iter()
-                            .position(|n| std::ptr::eq(n, node))
-                            .unwrap_or(0);
-                        for tool_node in &self.arena {
-                            if let NodeKind::Tool { name } = &tool_node.kind {
-                                if tool_node.children.contains(&key_idx) {
-                                    tool_name = name.clone();
-                                    break;
-                                }
-                            }
+                if let NodeKind::Key { key } = &node.kind
+                    && node.children.contains(&value_idx)
+                {
+                    key_name = key.clone();
+                    // Find tool parent of this key node
+                    let key_idx = self
+                        .arena
+                        .iter()
+                        .position(|n| std::ptr::eq(n, node))
+                        .unwrap_or(0);
+                    for tool_node in &self.arena {
+                        if let NodeKind::Tool { name } = &tool_node.kind
+                            && tool_node.children.contains(&key_idx)
+                        {
+                            tool_name = name.clone();
+                            break;
                         }
-                        break;
                     }
+                    break;
                 }
             }
         }
@@ -540,7 +540,7 @@ fn render_tree(
         let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
 
         // Flash: toggle every 3 frames (~600ms cycle at 200ms poll)
-        let flash_on = (state.frame_count / 3) % 2 == 0;
+        let flash_on = (state.frame_count / 3).is_multiple_of(2);
 
         let any_pending = state.has_pending();
 
@@ -788,30 +788,30 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
         render_tree(&mut terminal, &mut state, &mut list_state)?;
 
         // Handle keyboard input
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
+        if event::poll(Duration::from_millis(200))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            state.status_message = None;
+            match key.code {
+                KeyCode::Char('q') => break,
+                KeyCode::Down | KeyCode::Char('j') => state.move_down(),
+                KeyCode::Up | KeyCode::Char('k') => state.move_up(),
+                KeyCode::Char(' ') => state.toggle_collapse(),
+                KeyCode::Enter | KeyCode::Char('o') => {
+                    state.open_popup();
+                    state.refresh_from_server(&socket_path);
                 }
-                state.status_message = None;
-                match key.code {
-                    KeyCode::Char('q') => break,
-                    KeyCode::Down | KeyCode::Char('j') => state.move_down(),
-                    KeyCode::Up | KeyCode::Char('k') => state.move_up(),
-                    KeyCode::Char(' ') => state.toggle_collapse(),
-                    KeyCode::Enter | KeyCode::Char('o') => {
-                        state.open_popup();
-                        state.refresh_from_server(&socket_path);
-                    }
-                    KeyCode::Char('f') => {
-                        state.toggle_filter();
-                        state.refresh_from_server(&socket_path);
-                    }
-                    KeyCode::Char('R') => {
-                        state.refresh_from_server(&socket_path);
-                    }
-                    _ => {}
+                KeyCode::Char('f') => {
+                    state.toggle_filter();
+                    state.refresh_from_server(&socket_path);
                 }
+                KeyCode::Char('R') => {
+                    state.refresh_from_server(&socket_path);
+                }
+                _ => {}
             }
         }
     }

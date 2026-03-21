@@ -259,16 +259,13 @@ impl TreeState {
                 self.dir_to_node.insert(path.clone(), node_idx);
 
                 let display_file = path.join("display.jsonl");
-                if !self.file_trackers.contains_key(&display_file) {
-                    self.file_trackers.insert(
-                        display_file,
-                        FileTracker {
-                            offset: 0,
-                            line_buffer: String::new(),
-                            owner_node: node_idx,
-                        },
-                    );
-                }
+                self.file_trackers
+                    .entry(display_file)
+                    .or_insert_with(|| FileTracker {
+                        offset: 0,
+                        line_buffer: String::new(),
+                        owner_node: node_idx,
+                    });
             }
 
             // Recurse into this subagent dir
@@ -410,18 +407,17 @@ impl TreeState {
                 output_tokens,
                 ..
             } => {
-                if let Some(&idx) = self.tool_call_idx.get(tool_call_id) {
-                    if let NodeType::ToolCall {
+                if let Some(&idx) = self.tool_call_idx.get(tool_call_id)
+                    && let NodeType::ToolCall {
                         status,
                         input_tokens: it,
                         output_tokens: ot,
                         ..
                     } = &mut self.arena[idx].kind
-                    {
-                        *status = NodeStatus::from_end_status(end_status);
-                        *it = *input_tokens;
-                        *ot = *output_tokens;
-                    }
+                {
+                    *status = NodeStatus::from_end_status(end_status);
+                    *it = *input_tokens;
+                    *ot = *output_tokens;
                 }
             }
             Message::SubAgentStart {
@@ -466,16 +462,13 @@ impl TreeState {
                     if sa_dir.is_dir() {
                         self.dir_to_node.insert(sa_dir.clone(), node_idx);
                         let sa_display = sa_dir.join("display.jsonl");
-                        if !self.file_trackers.contains_key(&sa_display) {
-                            self.file_trackers.insert(
-                                sa_display,
-                                FileTracker {
-                                    offset: 0,
-                                    line_buffer: String::new(),
-                                    owner_node: node_idx,
-                                },
-                            );
-                        }
+                        self.file_trackers
+                            .entry(sa_display)
+                            .or_insert_with(|| FileTracker {
+                                offset: 0,
+                                line_buffer: String::new(),
+                                owner_node: node_idx,
+                            });
                     }
                 }
             }
@@ -486,18 +479,17 @@ impl TreeState {
                 output_tokens,
                 ..
             } => {
-                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
-                    if let NodeType::SubAgent {
+                if let Some(&idx) = self.conversation_idx.get(conversation_id)
+                    && let NodeType::SubAgent {
                         status,
                         input_tokens: it,
                         output_tokens: ot,
                         ..
                     } = &mut self.arena[idx].kind
-                    {
-                        *status = NodeStatus::from_end_status(end_status);
-                        *it = *input_tokens;
-                        *ot = *output_tokens;
-                    }
+                {
+                    *status = NodeStatus::from_end_status(end_status);
+                    *it = *input_tokens;
+                    *ot = *output_tokens;
                 }
             }
             Message::SubAgentTurnEnd {
@@ -507,77 +499,73 @@ impl TreeState {
                 output_tokens,
                 ..
             } => {
-                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
-                    if let NodeType::SubAgent {
+                if let Some(&idx) = self.conversation_idx.get(conversation_id)
+                    && let NodeType::SubAgent {
                         status,
                         input_tokens: it,
                         output_tokens: ot,
                         ..
                     } = &mut self.arena[idx].kind
-                    {
-                        *status = match end_status {
-                            MessageEndStatus::Cancelled => NodeStatus::Cancelled,
-                            _ => NodeStatus::Idle,
-                        };
-                        *it = *input_tokens;
-                        *ot = *output_tokens;
-                    }
+                {
+                    *status = match end_status {
+                        MessageEndStatus::Cancelled => NodeStatus::Cancelled,
+                        _ => NodeStatus::Idle,
+                    };
+                    *it = *input_tokens;
+                    *ot = *output_tokens;
                 }
             }
             Message::SubAgentContinue {
                 conversation_id, ..
             } => {
-                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
-                    if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
-                        *status = NodeStatus::Running;
-                    }
+                if let Some(&idx) = self.conversation_idx.get(conversation_id)
+                    && let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind
+                {
+                    *status = NodeStatus::Running;
                 }
             }
             Message::ToolRequestPermission { tool_call_id, .. } => {
-                if let Some(&idx) = self.tool_call_idx.get(tool_call_id) {
-                    if let NodeType::ToolCall { status, .. } = &mut self.arena[idx].kind {
-                        *status = NodeStatus::Permission;
-                    }
+                if let Some(&idx) = self.tool_call_idx.get(tool_call_id)
+                    && let NodeType::ToolCall { status, .. } = &mut self.arena[idx].kind
+                {
+                    *status = NodeStatus::Permission;
                 }
             }
             Message::ToolPermissionApproved { tool_call_id, .. } => {
-                if let Some(&idx) = self.tool_call_idx.get(tool_call_id) {
-                    if let NodeType::ToolCall { status, .. } = &mut self.arena[idx].kind {
-                        *status = NodeStatus::Running;
-                    }
+                if let Some(&idx) = self.tool_call_idx.get(tool_call_id)
+                    && let NodeType::ToolCall { status, .. } = &mut self.arena[idx].kind
+                {
+                    *status = NodeStatus::Running;
                 }
             }
             Message::SubAgentWaitingPermission {
                 conversation_id, ..
             } => {
-                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
-                    if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
-                        if !status.is_terminal() {
-                            *status = NodeStatus::Permission;
-                        }
-                    }
+                if let Some(&idx) = self.conversation_idx.get(conversation_id)
+                    && let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind
+                    && !status.is_terminal()
+                {
+                    *status = NodeStatus::Permission;
                 }
             }
             Message::SubAgentPermissionApproved {
                 conversation_id, ..
             } => {
-                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
-                    if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
-                        if matches!(status, NodeStatus::Permission) {
-                            *status = NodeStatus::Running;
-                        }
-                    }
+                if let Some(&idx) = self.conversation_idx.get(conversation_id)
+                    && let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind
+                    && matches!(status, NodeStatus::Permission)
+                {
+                    *status = NodeStatus::Running;
                 }
             }
             Message::SubAgentPermissionDenied {
                 conversation_id, ..
             } => {
-                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
-                    if let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind {
-                        if !status.is_terminal() {
-                            *status = NodeStatus::Denied;
-                        }
-                    }
+                if let Some(&idx) = self.conversation_idx.get(conversation_id)
+                    && let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind
+                    && !status.is_terminal()
+                {
+                    *status = NodeStatus::Denied;
                 }
             }
             // All other message types are ignored
@@ -974,21 +962,21 @@ fn summarize_tool_args(args: &str) -> String {
     };
     // Pick the most useful single field if present
     for key in &["command", "file_path", "pattern", "query", "url", "prompt"] {
-        if let Some(val) = map.get(*key) {
-            if let Some(s) = val.as_str() {
-                return s.to_string();
-            }
+        if let Some(val) = map.get(*key)
+            && let Some(s) = val.as_str()
+        {
+            return s.to_string();
         }
     }
     // Fallback: show all fields compactly
     let parts: Vec<String> = map
         .iter()
-        .filter_map(|(k, v)| {
+        .map(|(k, v)| {
             let s = match v {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            Some(format!("{}={}", k, s))
+            format!("{}={}", k, s)
         })
         .collect();
     parts.join(" ")
@@ -1225,31 +1213,31 @@ pub fn run_tree(session: Session) -> Result<()> {
         render_tree(&mut terminal, &mut state, &mut list_state)?;
 
         // 4. Handle keyboard input (poll with timeout)
-        if event::poll(Duration::from_millis(200))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind != KeyEventKind::Press {
-                    continue;
-                }
-                // Clear status message on any key press
-                state.status_message = None;
-                // Handle Ctrl-k before plain k (cancel vs move up)
-                if key.code == KeyCode::Char('k')
-                    && key
-                        .modifiers
-                        .contains(crossterm::event::KeyModifiers::CONTROL)
-                {
-                    state.cancel_selected();
-                } else {
-                    match key.code {
-                        KeyCode::Char('q') => break,
-                        KeyCode::Down | KeyCode::Char('j') => state.move_down(),
-                        KeyCode::Up | KeyCode::Char('k') => state.move_up(),
-                        KeyCode::Char(' ') => state.toggle_collapse(),
-                        KeyCode::Enter | KeyCode::Char('o') => state.open_detail(),
-                        KeyCode::Char('f') => state.toggle_filter(),
-                        KeyCode::Char('R') => state.full_refresh(),
-                        _ => {}
-                    }
+        if event::poll(Duration::from_millis(200))?
+            && let Event::Key(key) = event::read()?
+        {
+            if key.kind != KeyEventKind::Press {
+                continue;
+            }
+            // Clear status message on any key press
+            state.status_message = None;
+            // Handle Ctrl-k before plain k (cancel vs move up)
+            if key.code == KeyCode::Char('k')
+                && key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+            {
+                state.cancel_selected();
+            } else {
+                match key.code {
+                    KeyCode::Char('q') => break,
+                    KeyCode::Down | KeyCode::Char('j') => state.move_down(),
+                    KeyCode::Up | KeyCode::Char('k') => state.move_up(),
+                    KeyCode::Char(' ') => state.toggle_collapse(),
+                    KeyCode::Enter | KeyCode::Char('o') => state.open_detail(),
+                    KeyCode::Char('f') => state.toggle_filter(),
+                    KeyCode::Char('R') => state.full_refresh(),
+                    _ => {}
                 }
             }
         }

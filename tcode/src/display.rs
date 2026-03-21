@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
@@ -51,11 +51,11 @@ impl DisplayClient {
 }
 
 fn spawn_nvim(
-    lua_path: &PathBuf,
-    display_file: &PathBuf,
-    status_file: &PathBuf,
+    lua_path: &Path,
+    display_file: &Path,
+    status_file: &Path,
     session_id: &str,
-    exe_path: &PathBuf,
+    exe_path: &Path,
 ) -> Result<Child> {
     let lua_cmd = format!(
         "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}')",

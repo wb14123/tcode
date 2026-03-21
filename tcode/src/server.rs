@@ -60,6 +60,7 @@ pub struct Server {
 }
 
 impl Server {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         socket_path: PathBuf,
         display_file: PathBuf,
@@ -783,18 +784,17 @@ async fn handle_client_inner(
                                     .context("failed to broadcast UserRequestEnd")?;
 
                                 // Resolve: extract response and send ToolCallResolved to parent
-                                if let Some((parent_conv_id, tool_call_id)) = manager.get_subagent_parent(&conversation_id) {
-                                    if let Ok(Some(parent_client)) = manager.get_conversation(&parent_conv_id) {
-                                        if let Some(response) = client.extract_latest_response() {
-                                            let formatted = format_subagent_result(
-                                                &conversation_id, &response, &MessageEndStatus::Succeeded,
-                                            );
-                                            parent_client.send_tool_call_resolved(
-                                                tool_call_id, Arc::new(formatted),
-                                            ).await
-                                                .context("failed to send ToolCallResolved to parent")?;
-                                        }
-                                    }
+                                if let Some((parent_conv_id, tool_call_id)) = manager.get_subagent_parent(&conversation_id)
+                                    && let Ok(Some(parent_client)) = manager.get_conversation(&parent_conv_id)
+                                    && let Some(response) = client.extract_latest_response()
+                                {
+                                    let formatted = format_subagent_result(
+                                        &conversation_id, &response, &MessageEndStatus::Succeeded,
+                                    );
+                                    parent_client.send_tool_call_resolved(
+                                        tool_call_id, Arc::new(formatted),
+                                    ).await
+                                        .context("failed to send ToolCallResolved to parent")?;
                                 }
 
                                 send_msg(&mut sink, &ServerMessage::Ack).await?;
@@ -990,7 +990,7 @@ fn close_stale_in_dir(dir: &PathBuf) -> Pin<Box<dyn Future<Output = Result<()>> 
         }
 
         // Close stale tool calls
-        for (tool_call_id, _tool_name) in &open_tools {
+        for tool_call_id in open_tools.keys() {
             tracing::info!(tool_call_id, dir = ?dir, "Closing stale running tool call");
 
             let end_event = Message::ToolMessageEnd {

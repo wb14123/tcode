@@ -30,12 +30,12 @@ pub(crate) trait TreeNav {
 
     fn toggle_collapse(&mut self) {
         let sel = self.selected();
-        if let Some(&idx) = self.visible().get(sel) {
-            if !self.node_children(idx).is_empty() {
-                let new_val = !self.node_collapsed(idx);
-                self.set_node_collapsed(idx, new_val);
-                self.rebuild_visible();
-            }
+        if let Some(&idx) = self.visible().get(sel)
+            && !self.node_children(idx).is_empty()
+        {
+            let new_val = !self.node_collapsed(idx);
+            self.set_node_collapsed(idx, new_val);
+            self.rebuild_visible();
         }
     }
 

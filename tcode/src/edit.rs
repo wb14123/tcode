@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::mpsc;
 
 use anyhow::{Context, Result};
@@ -40,7 +40,7 @@ impl EditClient {
             let mut dir = self.session.session_dir().clone();
             while dir
                 .file_name()
-                .map_or(false, |n| n.to_string_lossy().starts_with("subagent-"))
+                .is_some_and(|n| n.to_string_lossy().starts_with("subagent-"))
             {
                 if let Some(parent) = dir.parent() {
                     dir = parent.to_path_buf();
@@ -126,12 +126,10 @@ impl EditClient {
                     }
                 }
                 Some(event) = file_events.recv() => {
-                    if is_msg_file_event(&event, &msg_file) {
-                        if let Some(content) = read_message_file(&msg_file).await {
-                            let msg = self.build_client_message(&content);
-                            let json = serde_json::to_vec(&msg)?;
-                            sink.send(Bytes::from(json)).await?;
-                        }
+                    if is_msg_file_event(&event, &msg_file) && let Some(content) = read_message_file(&msg_file).await {
+                        let msg = self.build_client_message(&content);
+                        let json = serde_json::to_vec(&msg)?;
+                        sink.send(Bytes::from(json)).await?;
                     }
                 }
             }
@@ -164,7 +162,7 @@ fn is_msg_file_event(event: &Event, msg_file: &PathBuf) -> bool {
         && event.paths.iter().any(|p| p == msg_file)
 }
 
-fn spawn_nvim(lua_path: &PathBuf, msg_file: &PathBuf, is_subagent: bool) -> Result<Child> {
+fn spawn_nvim(lua_path: &Path, msg_file: &Path, is_subagent: bool) -> Result<Child> {
     let lua_cmd = format!(
         "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_edit('{}', {})",
         lua_path.display(),

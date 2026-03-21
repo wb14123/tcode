@@ -145,10 +145,10 @@ async fn main() -> Result<()> {
             .await?;
 
         // Clean up socket file
-        if socket_path.exists() {
-            if let Err(e) = std::fs::remove_file(&socket_path) {
-                tracing::warn!("Failed to remove socket file on shutdown: {e}");
-            }
+        if socket_path.exists()
+            && let Err(e) = std::fs::remove_file(&socket_path)
+        {
+            tracing::warn!("Failed to remove socket file on shutdown: {e}");
         }
     }
 
@@ -187,6 +187,7 @@ impl axum::serve::Listener for TokioUnixListener {
     type Io = tokio::net::UnixStream;
     type Addr = std::sync::Arc<tokio::net::unix::SocketAddr>;
 
+    #[allow(clippy::manual_async_fn)]
     fn accept(&mut self) -> impl std::future::Future<Output = (Self::Io, Self::Addr)> + Send {
         async {
             loop {
