@@ -85,7 +85,7 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OAuthTokens> {
     let expires_in = json["expires_in"].as_u64().unwrap_or(3600);
     let expires_at = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock before UNIX epoch")
         .as_secs()
         + expires_in;
 

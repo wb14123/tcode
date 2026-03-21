@@ -275,8 +275,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
     let tool_fn_name = format_ident!("{}_tool", fn_name);
 
     // Generate handler body depending on whether ToolContext is present
-    let handler_body = if has_tool_context {
-        let ctx_ident = tool_context_ident.as_ref().unwrap();
+    let handler_body = if let Some(ctx_ident) = tool_context_ident.as_ref() {
         quote! {
             |#ctx_ident: #crate_path::tool::ToolContext, params: #params_struct_name| {
                 #fn_name(#ctx_ident, #(params.#field_names),*)

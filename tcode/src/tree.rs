@@ -226,10 +226,10 @@ impl TreeState {
                 Some(n) => n.to_string(),
                 None => continue,
             };
-            if !name.starts_with("subagent-") {
+            let Some(conversation_id) = name.strip_prefix("subagent-") else {
                 continue;
-            }
-            let conversation_id = name.strip_prefix("subagent-").unwrap().to_string();
+            };
+            let conversation_id = conversation_id.to_string();
 
             // Only create/register node if directory not already tracked
             if !self.dir_to_node.contains_key(&path) {

@@ -187,12 +187,20 @@ pub fn open_tab(url: &str) -> Result<TabGuard> {
         }
 
         // Try to open a new tab; if it fails, the browser may have crashed — restart once
-        let tab = match state.browser.as_ref().unwrap().new_tab() {
+        let browser = state
+            .browser
+            .as_ref()
+            .expect("browser was just ensured above");
+        let tab = match browser.new_tab() {
             Ok(tab) => tab,
             Err(_) => {
                 state.browser.take();
                 state.browser = Some(create_browser()?);
-                state.browser.as_ref().unwrap().new_tab()?
+                state
+                    .browser
+                    .as_ref()
+                    .expect("browser was just created")
+                    .new_tab()?
             }
         };
 

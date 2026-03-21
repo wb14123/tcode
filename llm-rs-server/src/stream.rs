@@ -64,7 +64,7 @@ pub fn streaming_response(
                         }],
                         usage: None,
                     };
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+                    yield Ok(Event::default().data(serde_json::to_string(&chunk).expect("ChatCompletionChunk is always serializable")));
                 }
                 LLMEvent::TextDelta(text) => {
                     let chunk = ChatCompletionChunk {
@@ -82,7 +82,7 @@ pub fn streaming_response(
                         }],
                         usage: None,
                     };
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+                    yield Ok(Event::default().data(serde_json::to_string(&chunk).expect("ChatCompletionChunk is always serializable")));
                 }
                 LLMEvent::ThinkingDelta(text) => {
                     let chunk = ChatCompletionChunk {
@@ -100,7 +100,7 @@ pub fn streaming_response(
                         }],
                         usage: None,
                     };
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+                    yield Ok(Event::default().data(serde_json::to_string(&chunk).expect("ChatCompletionChunk is always serializable")));
                 }
                 LLMEvent::ToolCall(tc) => {
                     let idx = tool_call_index;
@@ -128,7 +128,7 @@ pub fn streaming_response(
                         }],
                         usage: None,
                     };
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+                    yield Ok(Event::default().data(serde_json::to_string(&chunk).expect("ChatCompletionChunk is always serializable")));
                 }
                 LLMEvent::MessageEnd { stop_reason, input_tokens, output_tokens, reasoning_tokens, .. } => {
                     // Chunk with finish_reason
@@ -146,7 +146,7 @@ pub fn streaming_response(
                         }],
                         usage: None,
                     };
-                    yield Ok(Event::default().data(serde_json::to_string(&chunk).unwrap()));
+                    yield Ok(Event::default().data(serde_json::to_string(&chunk).expect("ChatCompletionChunk is always serializable")));
 
                     // Separate usage chunk (OpenAI sends usage with empty choices)
                     if include_usage {
@@ -158,7 +158,7 @@ pub fn streaming_response(
                             choices: vec![],
                             usage: Some(make_usage(input_tokens, output_tokens, reasoning_tokens)),
                         };
-                        yield Ok(Event::default().data(serde_json::to_string(&usage_chunk).unwrap()));
+                        yield Ok(Event::default().data(serde_json::to_string(&usage_chunk).expect("ChatCompletionChunk is always serializable")));
                     }
                 }
                 LLMEvent::Error(e) => {
