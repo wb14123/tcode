@@ -1,7 +1,9 @@
 use std::ops::Deref;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, LazyLock, Mutex};
+use std::sync::{Arc, LazyLock};
+
+use parking_lot::Mutex;
 use std::time::{Duration, Instant};
 
 use anyhow::Result;
@@ -40,7 +42,7 @@ pub fn chrome_data_dir() -> PathBuf {
 /// Configure the idle timeout for the shared browser.
 /// Must be called before the first `open_tab` to take effect.
 pub fn set_idle_timeout(timeout: Duration) {
-    let mut state = BROWSER_STATE.lock().unwrap();
+    let mut state = BROWSER_STATE.lock();
     state.idle_timeout = timeout;
 }
 
@@ -62,7 +64,7 @@ impl Drop for TabGuard {
         if let Err(e) = self.tab.close(false) {
             warn!("Failed to close tab: {e}");
         }
-        let mut state = BROWSER_STATE.lock().unwrap();
+        let mut state = BROWSER_STATE.lock();
         state.active_tabs = state.active_tabs.saturating_sub(1);
         state.last_activity = Instant::now();
     }
@@ -102,7 +104,7 @@ fn ensure_checker_thread(idle_timeout: Duration) {
         std::thread::spawn(move || {
             loop {
                 std::thread::sleep(Duration::from_secs(5));
-                let mut state = BROWSER_STATE.lock().unwrap();
+                let mut state = BROWSER_STATE.lock();
                 if state.browser.is_none() {
                     CHECKER_RUNNING.store(false, Ordering::SeqCst);
                     return;
@@ -121,7 +123,8 @@ fn ensure_checker_thread(idle_timeout: Duration) {
 /// Call this before process exit to prevent orphaned Chrome processes,
 /// since Rust does not run destructors on statics.
 pub fn shutdown_browser() {
-    if let Ok(mut state) = BROWSER_STATE.lock() {
+    {
+        let mut state = BROWSER_STATE.lock();
         state.browser.take();
     }
 }
@@ -176,7 +179,7 @@ pub async fn launch_interactive() -> Result<()> {
 /// it is automatically restarted.
 pub fn open_tab(url: &str) -> Result<TabGuard> {
     let tab = {
-        let mut state = BROWSER_STATE.lock().unwrap();
+        let mut state = BROWSER_STATE.lock();
 
         // Ensure browser exists
         if state.browser.is_none() {

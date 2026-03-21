@@ -1,8 +1,8 @@
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
-use std::sync::{Arc, RwLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
@@ -424,7 +424,7 @@ fn prepare_conversation(
     let (notify_tx, _) = broadcast::channel(100);
     let client = Arc::new(ConversationClient {
         msg_id_counter: AtomicI32::new(msg_id_start),
-        msgs: RwLock::new(Vec::new()),
+        msgs: parking_lot::RwLock::new(Vec::new()),
         input_channel_tx: input_tx,
         new_msg_notify_tx: notify_tx,
         tool_cancel_tokens: parking_lot::Mutex::new(HashMap::new()),
@@ -439,7 +439,7 @@ fn prepare_conversation(
 // ============================================================================
 
 pub struct ConversationManager {
-    conversations: RwLock<HashMap<String, (Arc<ConversationClient>, AbortHandle)>>,
+    conversations: parking_lot::RwLock<HashMap<String, (Arc<ConversationClient>, AbortHandle)>>,
     /// Maps subagent_conv_id → (parent_conv_id, tool_call_id).
     /// Used by the server to route `/done` recovery to the correct parent.
     subagent_parents: parking_lot::Mutex<HashMap<String, (String, String)>>,
@@ -453,7 +453,7 @@ impl ConversationManager {
         let permission_manager =
             Arc::new(crate::permission::PermissionManager::new(permissions_path));
         Arc::new(Self {
-            conversations: RwLock::new(HashMap::new()),
+            conversations: parking_lot::RwLock::new(HashMap::new()),
             subagent_parents: parking_lot::Mutex::new(HashMap::new()),
             permission_manager,
         })
@@ -578,7 +578,6 @@ impl ConversationManager {
 
         self.conversations
             .write()
-            .map_err(|e| anyhow::anyhow!("failed to acquire conversations write lock: {e}"))?
             .insert(conversation_id.clone(), (client.clone(), abort_handle));
         Ok((conversation_id, client))
     }
@@ -592,7 +591,6 @@ impl ConversationManager {
         Ok(self
             .conversations
             .read()
-            .map_err(|e| anyhow::anyhow!("failed to acquire conversations read lock: {e}"))?
             .get(conversation_id)
             .map(|x| x.0.clone()))
     }
@@ -2125,7 +2123,7 @@ async fn execute_continue_subagent(
 /// Use for the client to send chat messages and subscribe to the conversation's messages.
 pub struct ConversationClient {
     msg_id_counter: AtomicI32,
-    msgs: RwLock<Vec<Arc<Message>>>,
+    msgs: parking_lot::RwLock<Vec<Arc<Message>>>,
     input_channel_tx: mpsc::Sender<Message>,
     new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
     tool_cancel_tokens: parking_lot::Mutex<HashMap<String, CancellationToken>>,
@@ -2233,10 +2231,7 @@ impl ConversationClient {
     /// Used for conversation to notify a new message if available
     pub fn notify_msg(&self, msg: Message) -> Result<()> {
         let msg = Arc::new(msg);
-        self.msgs
-            .write()
-            .map_err(|e| anyhow::anyhow!("failed to acquire msgs write lock: {e}"))?
-            .push(Arc::clone(&msg));
+        self.msgs.write().push(Arc::clone(&msg));
         self.new_msg_notify_tx.send(msg).map_err(|e| {
             anyhow::anyhow!("failed to send msg to the notification broadcast: {e}")
         })?;
@@ -2245,7 +2240,7 @@ impl ConversationClient {
 
     /// Get a snapshot of all messages in the conversation.
     pub fn get_messages(&self) -> Vec<Arc<Message>> {
-        self.msgs.read().unwrap().clone()
+        self.msgs.read().clone()
     }
 
     /// Subscribe to the conversation's messages.
@@ -2256,7 +2251,7 @@ impl ConversationClient {
         &self,
     ) -> impl Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + use<> {
         // TODO: handle error and return error in stream
-        let msgs = self.msgs.read().unwrap();
+        let msgs = self.msgs.read();
         let tx = self.new_msg_notify_tx.subscribe();
         let stream = BroadcastStream::new(tx);
         tokio_stream::iter(msgs.clone().into_iter().map(Ok)).chain(stream)
@@ -2266,13 +2261,7 @@ impl ConversationClient {
     /// Walks backward from the last `AssistantMessageEnd`, collecting `AssistantMessageChunk`s
     /// until `AssistantMessageStart` is found.
     pub fn extract_latest_response(&self) -> Option<String> {
-        let msgs = match self.msgs.read() {
-            Ok(m) => m,
-            Err(e) => {
-                tracing::error!(error = %e, "msgs RwLock poisoned in extract_latest_response");
-                return None;
-            }
-        };
+        let msgs = self.msgs.read();
         let mut chunks = Vec::new();
         let mut found_end = false;
         for msg in msgs.iter().rev() {
@@ -2329,7 +2318,7 @@ impl ConversationClient {
         let (notify_tx, _) = broadcast::channel(100);
         ConversationClient {
             msg_id_counter: AtomicI32::new(0),
-            msgs: RwLock::new(Vec::new()),
+            msgs: parking_lot::RwLock::new(Vec::new()),
             input_channel_tx: input_tx,
             new_msg_notify_tx: notify_tx,
             tool_cancel_tokens: parking_lot::Mutex::new(HashMap::new()),

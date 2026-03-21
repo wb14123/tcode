@@ -316,6 +316,7 @@ dependencies = [
  "headless_chrome",
  "hyper",
  "hyper-util",
+ "parking_lot",
  "serde",
  "serde_json",
  "tokio",
