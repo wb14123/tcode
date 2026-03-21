@@ -52,7 +52,7 @@ async fn main() {
                     in_thinking = true;
                 }
                 print!("\x1b[2m{}\x1b[0m", text);
-                io::stdout().flush().unwrap();
+                io::stdout().flush().ok();
             }
             LLMEvent::TextDelta(text) => {
                 if in_thinking {
@@ -61,7 +61,7 @@ async fn main() {
                     in_thinking = false;
                 }
                 print!("{}", text);
-                io::stdout().flush().unwrap();
+                io::stdout().flush().ok();
             }
             LLMEvent::ToolCall(tool_call) => {
                 println!(

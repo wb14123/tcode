@@ -31,7 +31,7 @@ async fn main() {
 
     println!("User: What is Rust programming language in 2 sentences?");
     print!("Assistant: ");
-    io::stdout().flush().unwrap();
+    io::stdout().flush().ok();
 
     let mut stream = client.chat(model, &messages, &chat_options);
 
@@ -45,12 +45,12 @@ async fn main() {
             }
             LLMEvent::TextDelta(text) => {
                 print!("{}", text);
-                io::stdout().flush().unwrap();
+                io::stdout().flush().ok();
             }
             LLMEvent::ThinkingDelta(text) => {
                 // Dim color for thinking text
                 print!("\x1b[2m{}\x1b[0m", text);
-                io::stdout().flush().unwrap();
+                io::stdout().flush().ok();
             }
             LLMEvent::ToolCall(tool_call) => {
                 println!(

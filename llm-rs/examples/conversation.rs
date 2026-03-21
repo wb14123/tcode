@@ -139,15 +139,15 @@ fn print_message(msg: &Message) {
         }
         Message::AssistantMessageStart { .. } => {
             print!("\n<<< Assistant: ");
-            io::stdout().flush().unwrap();
+            io::stdout().flush().ok();
         }
         Message::AssistantMessageChunk { content, .. } => {
             print!("{}", content);
-            io::stdout().flush().unwrap();
+            io::stdout().flush().ok();
         }
         Message::AssistantThinkingChunk { content, .. } => {
             print!("[thinking: {}]", content);
-            io::stdout().flush().unwrap();
+            io::stdout().flush().ok();
         }
         Message::AssistantMessageEnd {
             input_tokens,

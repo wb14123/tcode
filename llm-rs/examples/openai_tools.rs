@@ -64,7 +64,7 @@ async fn main() {
 
     println!("User: What's the weather in Tokyo?");
     print!("Assistant: ");
-    io::stdout().flush().unwrap();
+    io::stdout().flush().ok();
 
     let mut stream = client.chat(&model, &messages, &ChatOptions::default());
     let mut pending_tool_calls = Vec::new();
@@ -74,11 +74,11 @@ async fn main() {
             LLMEvent::MessageStart { .. } => {}
             LLMEvent::TextDelta(text) => {
                 print!("{}", text);
-                io::stdout().flush().unwrap();
+                io::stdout().flush().ok();
             }
             LLMEvent::ThinkingDelta(text) => {
                 print!("[thinking: {}]", text);
-                io::stdout().flush().unwrap();
+                io::stdout().flush().ok();
             }
             LLMEvent::ToolCall(tool_call) => {
                 pending_tool_calls.push(tool_call);
