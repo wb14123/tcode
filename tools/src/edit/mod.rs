@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod edit_tests;
 mod exact_replacer;
-mod line_trimmed_replacer;
 
 use std::path::{Path, PathBuf};
 
@@ -11,7 +10,6 @@ use llm_rs_macros::tool;
 use uuid::Uuid;
 
 use exact_replacer::ExactReplacer;
-use line_trimmed_replacer::LineTrimmedReplacer;
 
 /// Build a tcodediff preview for the permission prompt.
 ///
@@ -103,18 +101,11 @@ pub fn edit(
             return;
         }
 
-        // Try ExactReplacer first, fall back to LineTrimmedReplacer
         let new_content = match ExactReplacer::replace(&content, &old_string, &new_string, replace_all) {
             Ok(result) => result,
-            Err(_simple_err) => {
-                match LineTrimmedReplacer::replace(&content, &old_string, &new_string, replace_all) {
-                    Ok(result) => result,
-                    Err(_trimmed_err) => {
-                        // Report the original (simple) error since it's more intuitive
-                        yield Err(_simple_err);
-                        return;
-                    }
-                }
+            Err(e) => {
+                yield Err(e);
+                return;
             }
         };
 
