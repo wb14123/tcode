@@ -7,7 +7,7 @@ use llm_rs::permission::ScopedPermissionManager;
 const FILE_READ_SCOPE: &str = "file_read";
 
 /// Shared permission scope for file write operations.
-pub const FILE_WRITE_SCOPE: &str = "file_write";
+const FILE_WRITE_SCOPE: &str = "file_write";
 
 /// Determine the directory to use for permission checks.
 ///
@@ -109,11 +109,15 @@ pub async fn check_file_read_permission(
 /// Check whether the caller has permission to write `path`.
 ///
 /// Writes always require explicit permission — even for paths inside cwd.
-/// Prompts with a content preview so the user can inspect the change.
+/// Prompts with a preview so the user can inspect the change. The caller
+/// controls what is shown via `preview_content` and `preview_type` (e.g. a
+/// file extension like `"rs"` for full-content previews, or `"tcodediff"`
+/// for diff previews).
 pub async fn check_file_write_permission(
     permission: &ScopedPermissionManager,
     path: &Path,
-    content: &str,
+    preview_content: &str,
+    preview_type: &str,
 ) -> Result<()> {
     let (canonical_path, exists) = canonicalize_path(path).await?;
 
@@ -128,7 +132,6 @@ pub async fn check_file_write_permission(
     } else {
         format!("Allow creating new file {}?", path.display())
     };
-    let file_extension = path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
 
     permission
         .ask_permission_with_preview(
@@ -136,8 +139,8 @@ pub async fn check_file_write_permission(
             &prompt,
             "path",
             &permission_dir_str,
-            content,
-            file_extension,
+            preview_content,
+            preview_type,
         )
         .await
 }

@@ -52,8 +52,9 @@ pub fn write(
         let pre_mtime = crate::file_write_util::record_mtime(path);
 
         // Permission check (may block on user approval with preview)
+        let file_extension = path.extension().and_then(|e| e.to_str()).unwrap_or("txt");
         if let Err(e) = crate::file_permission::check_file_write_permission(
-            &ctx.permission, path, &content,
+            &ctx.permission, path, &content, file_extension,
         ).await {
             yield Err(e);
             return;
