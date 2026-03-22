@@ -1,7 +1,33 @@
+mod block_anchor_replacer;
+mod context_aware_replacer;
+mod replace_helpers;
 #[cfg(test)]
 mod edit_tests;
+mod escape_normalized_replacer;
 mod exact_replacer;
+mod indentation_flexible_replacer;
+pub(crate) mod levenshtein;
 mod line_trimmed_replacer;
+mod multi_occurrence_replacer;
+mod trimmed_boundary_replacer;
+mod whitespace_normalized_replacer;
+
+#[cfg(test)]
+mod block_anchor_replacer_tests;
+#[cfg(test)]
+mod context_aware_replacer_tests;
+#[cfg(test)]
+mod escape_normalized_replacer_tests;
+#[cfg(test)]
+mod indentation_flexible_replacer_tests;
+#[cfg(test)]
+mod levenshtein_tests;
+#[cfg(test)]
+mod multi_occurrence_replacer_tests;
+#[cfg(test)]
+mod trimmed_boundary_replacer_tests;
+#[cfg(test)]
+mod whitespace_normalized_replacer_tests;
 
 use std::path::Path;
 
@@ -12,7 +38,6 @@ use uuid::Uuid;
 
 use crate::file_permission::FILE_WRITE_SCOPE;
 use exact_replacer::ExactReplacer;
-use line_trimmed_replacer::LineTrimmedReplacer;
 
 /// Performs exact string replacements in files.
 ///
@@ -76,18 +101,46 @@ pub fn edit(
             return;
         }
 
-        // Try ExactReplacer first, fall back to LineTrimmedReplacer
-        let new_content = match ExactReplacer::replace(&content, &old_string, &new_string, replace_all) {
-            Ok(result) => result,
-            Err(_simple_err) => {
-                match LineTrimmedReplacer::replace(&content, &old_string, &new_string, replace_all) {
-                    Ok(result) => result,
-                    Err(_trimmed_err) => {
-                        // Report the original (simple) error since it's more intuitive
-                        yield Err(_simple_err);
-                        return;
+        // Replacer cascade: try replacers in order until one succeeds.
+        // Only ExactReplacer is active. Fuzzy replacers are kept as implementations
+        // but disabled here because they risk matching the wrong code:
+        //   - LineTrimmedReplacer: loses indentation distinction
+        //   - BlockAnchorReplacer: common first/last lines cause false matches
+        //   - WhitespaceNormalizedReplacer: collapses structure, different line breaks can match
+        //   - IndentationFlexibleReplacer: low risk but still imprecise
+        //   - EscapeNormalizedReplacer: narrow use case
+        //   - TrimmedBoundaryReplacer: low risk but imprecise
+        //   - ContextAwareReplacer: 50% line threshold is dangerously loose
+        //   - MultiOccurrenceReplacer: redundant with ExactReplacer's replace_all
+        type ReplaceFn = fn(&str, &str, &str, bool) -> Result<String>;
+        let replacers: Vec<(&str, ReplaceFn)> = vec![
+            ("ExactReplacer", ExactReplacer::replace),
+        ];
+
+        let mut new_content: Option<String> = None;
+        let mut first_err: Option<anyhow::Error> = None;
+
+        for (name, replacer) in &replacers {
+            match replacer(&content, &old_string, &new_string, replace_all) {
+                Ok(result) => {
+                    tracing::debug!("Edit matched via {}", name);
+                    new_content = Some(result);
+                    break;
+                }
+                Err(e) => {
+                    if first_err.is_none() {
+                        first_err = Some(e);
                     }
                 }
+            }
+        }
+
+        let new_content = match new_content {
+            Some(c) => c,
+            None => {
+                // Report the first (ExactReplacer) error since it's most intuitive
+                yield Err(first_err.unwrap_or_else(|| anyhow!("No replacer could match old_string")));
+                return;
             }
         };
 
