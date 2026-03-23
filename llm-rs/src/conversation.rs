@@ -144,9 +144,19 @@ Otherwise it will create an infinite loop of subagent calls.";
 
 fn build_system_prompt(subagent_depth: usize) -> String {
     let role = if subagent_depth == 0 {
-        "You are a helpful assistant."
+        "You are the main agent coordinating the user's task. \
+         Your primary role is to understand the user's intent, plan the approach, \
+         and delegate work to subagents. Prefer using subagents for complex tasks: \
+         research, multi-file reads, implementation steps, debugging, and verification. \
+         Keep your own context window reserved for planning, coordination, and \
+         communicating results to the user."
     } else {
-        "You are a subagent spawned to perform a specific task."
+        "You are a subagent spawned to perform a specific task. \
+         Focus on completing the task you were given and returning a concise result. \
+         You can spawn your own subagents to break complex work into smaller pieces, \
+         but never spawn a subagent to do the same or similar task you were given — \
+         that just wastes tokens passing results upward. Only delegate genuine subtasks \
+         that are a smaller part of your assigned work."
     };
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
