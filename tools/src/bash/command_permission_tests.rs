@@ -126,3 +126,10 @@ fn hierarchical_lookup_base_command() {
     ];
     assert!(has_command_permission(&scoped, &tokens2));
 }
+
+#[test]
+fn permission_npm_match() {
+    assert!(command_matches_permission("npm", "npm install"));
+    assert!(command_matches_permission("npm", "npm run build"));
+    assert!(!command_matches_permission("npm", "npx create"));
+}

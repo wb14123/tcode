@@ -66,7 +66,7 @@ async fn main() {
     print!("Assistant: ");
     io::stdout().flush().ok();
 
-    let mut stream = client.chat(&model, &messages, &ChatOptions::default());
+    let mut stream = client.chat(model, &messages, &ChatOptions::default());
     let mut pending_tool_calls = Vec::new();
 
     while let Some(event) = stream.next().await {

@@ -29,8 +29,6 @@ use crate::tree_nav::TreeNav;
 // Helpers
 // ---------------------------------------------------------------------------
 
-
-
 // ---------------------------------------------------------------------------
 // Data types
 // ---------------------------------------------------------------------------
@@ -632,9 +630,12 @@ pub fn launch_approval_popup(
         exe,
         format!("--session={}", session_id),
         "approve".into(),
-        "--tool".into(), tool.into(),
-        "--key".into(), key.into(),
-        "--value".into(), value.into(),
+        "--tool".into(),
+        tool.into(),
+        "--key".into(),
+        key.into(),
+        "--value".into(),
+        value.into(),
     ];
     if let Some(p) = prompt
         && !p.is_empty()
@@ -735,33 +736,47 @@ pub fn launch_approval_popup(
                         match std::fs::read_to_string(pfp) {
                             Ok(diff_content) => {
                                 let mut lines = diff_content.lines();
-                                if let (Some(original), Some(tmp)) = (lines.next(), lines.next()) {
-                                    if let Err(e) = Command::new("tmux")
+                                if let (Some(original), Some(tmp)) = (lines.next(), lines.next())
+                                    && let Err(e) = Command::new("tmux")
                                         .args([
-                                            "display-popup", "-E",
-                                            "-w", "80%",
-                                            "-h", "80%",
+                                            "display-popup",
+                                            "-E",
+                                            "-w",
+                                            "80%",
+                                            "-h",
+                                            "80%",
                                             "--",
-                                            "nvim", "-R", "-d", original, tmp,
+                                            "nvim",
+                                            "-R",
+                                            "-d",
+                                            original,
+                                            tmp,
                                         ])
                                         .output()
-                                    {
-                                        tracing::warn!("failed to launch nvim diff popup: {}", e);
-                                    }
+                                {
+                                    tracing::warn!("failed to launch nvim diff popup: {}", e);
                                 }
                             }
                             Err(e) => {
                                 tracing::warn!("failed to read tcodediff file {}: {}", pfp, e);
                             }
                         }
-                    } else {
-                        if let Err(e) = Command::new("tmux")
-                            .args(["display-popup", "-E", "-w", "80%", "-h", "80%", "--",
-                                   "nvim", "-R", pfp])
-                            .output()
-                        {
-                            tracing::warn!("failed to launch nvim popup: {}", e);
-                        }
+                    } else if let Err(e) = Command::new("tmux")
+                        .args([
+                            "display-popup",
+                            "-E",
+                            "-w",
+                            "80%",
+                            "-h",
+                            "80%",
+                            "--",
+                            "nvim",
+                            "-R",
+                            pfp,
+                        ])
+                        .output()
+                    {
+                        tracing::warn!("failed to launch nvim popup: {}", e);
                     }
                 }
             }

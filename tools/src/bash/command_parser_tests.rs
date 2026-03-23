@@ -186,6 +186,9 @@ fn cat_with_redirect_has_output_file() {
         parsed.classification,
         CommandClassification::ReadCommand { .. }
     ));
+    if let CommandClassification::ReadCommand { paths } = &parsed.classification {
+        assert_eq!(paths, &[PathBuf::from("/etc/hosts")]);
+    }
     assert_eq!(
         parsed.redirections.output_files,
         vec![PathBuf::from("/tmp/hosts-copy")]
@@ -213,6 +216,104 @@ fn touch_is_write_command() {
 #[test]
 fn rm_is_not_whitelisted() {
     let parsed = parse_command("rm /tmp/somefile");
+    assert!(matches!(
+        parsed.classification,
+        CommandClassification::OtherSimple { .. }
+    ));
+}
+
+#[test]
+fn parser_diff_is_read() {
+    let parsed = parse_command("diff /tmp/a.txt /tmp/b.txt");
+    assert!(matches!(
+        parsed.classification,
+        CommandClassification::ReadCommand { .. }
+    ));
+    if let CommandClassification::ReadCommand { paths } = parsed.classification {
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")]
+        );
+    }
+}
+
+#[test]
+fn parser_backtick_substitution_is_complex() {
+    let parsed = parse_command("echo `whoami`");
+    assert!(matches!(
+        parsed.classification,
+        CommandClassification::Complex
+    ));
+}
+
+#[test]
+fn parser_cargo_build_is_other() {
+    let parsed = parse_command("cargo build");
+    assert!(matches!(
+        parsed.classification,
+        CommandClassification::OtherSimple { .. }
+    ));
+}
+
+#[test]
+fn extract_paths_skips_long_flags() {
+    let args: Vec<String> = vec!["--verbose".into(), "/tmp/file.txt".into()];
+    let paths = extract_paths_from_args(&args);
+    assert_eq!(paths, vec![PathBuf::from("/tmp/file.txt")]);
+}
+
+#[test]
+fn extract_paths_multiple() {
+    let args: Vec<String> = vec!["/tmp/a.txt".into(), "/tmp/b.txt".into()];
+    let paths = extract_paths_from_args(&args);
+    assert_eq!(
+        paths,
+        vec![PathBuf::from("/tmp/a.txt"), PathBuf::from("/tmp/b.txt")]
+    );
+}
+
+#[test]
+fn empty_command_is_complex() {
+    let parsed = parse_command("");
+    // An empty command may parse as an empty program — treat appropriately
+    // The classification depends on what tree-sitter produces for empty input
+    // It should either be complex or have no command name → complex fallback
+    assert!(matches!(
+        parsed.classification,
+        CommandClassification::Complex
+    ));
+}
+
+#[test]
+fn stat_is_read() {
+    let parsed = parse_command("stat /tmp/file");
+    assert!(matches!(
+        parsed.classification,
+        CommandClassification::ReadCommand { .. }
+    ));
+}
+
+#[test]
+fn wc_is_read() {
+    let parsed = parse_command("wc -l /tmp/file");
+    assert!(matches!(
+        parsed.classification,
+        CommandClassification::ReadCommand { .. }
+    ));
+}
+
+#[test]
+fn md5sum_is_read() {
+    let parsed = parse_command("md5sum /tmp/file");
+    assert!(matches!(
+        parsed.classification,
+        CommandClassification::ReadCommand { .. }
+    ));
+}
+
+#[test]
+fn chmod_is_not_whitelisted() {
+    let parsed = parse_command("chmod 755 /tmp/script.sh");
     assert!(matches!(
         parsed.classification,
         CommandClassification::OtherSimple { .. }

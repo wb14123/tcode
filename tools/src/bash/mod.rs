@@ -2,8 +2,6 @@ pub mod command_parser;
 pub mod command_permission;
 
 #[cfg(test)]
-mod bash_tests;
-#[cfg(test)]
 mod command_parser_tests;
 #[cfg(test)]
 mod command_permission_tests;
