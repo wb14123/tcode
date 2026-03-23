@@ -20,10 +20,11 @@ use uuid::Uuid;
 pub const SUBAGENT_RULES: &str = "\
 ## Subagent Management Rules
 
-1. **Prefer continuing over creating.** When a follow-up question relates \
-to work already done by an existing subagent, use `continue_subagent` \
-to query that subagent first. Only spawn a new subagent if the task is \
-genuinely independent of all prior subagent work.
+1. **Prefer continuing over creating.** Before spawning a new subagent, check \
+if an existing subagent could answer the question — especially if it's about \
+the process, sources, reasoning, or details behind that subagent's previous \
+output. Use `continue_subagent` to query it. Only spawn a new subagent if the \
+task is genuinely independent of all prior subagent work.
 
 2. **Ask, don't inspect.** When you need to know what a subagent did, how \
 it did it, or what data it saw, use `continue_subagent` to ask it directly.
@@ -44,17 +45,15 @@ word counts, exact sources, specific claims) exists somewhere in the \
 subagent chain, pursue it through `continue_subagent` rather than giving \
 estimates or hedging.
 
-6. **Before spawning a new subagent, check:** Could an existing subagent \
-answer this? If the question is about the process, sources, reasoning, \
-or details behind a previous subagent's output, continue that subagent.
-
-7. **Do not start unnecessary subagents.** Do not create a subagent just to \
-do something similar as the current task. It will create unnecessary nested \
-subagents and increase the context window.
-
-8. **Do not use subagent to avoid block.** If some operations are blocked, \
+6. **Do not use subagent to avoid block.** If some operations are blocked, \
 do not try to use subagent to try the same thing. It will be blocked as well \
 and the only thing you are doing is waste tokens.
+
+7. **Do not spawn a subagent just to relay a tool result.** Never spawn a \
+subagent just to call a tool (e.g. `read`, `web_fetch`, `grep`) and return \
+the raw result — that wastes tokens and loses the structured formatting of \
+tool outputs. Only use a subagent when it will process, filter, or summarize \
+the output.
 
 ## Subagent Usage for Coding Tasks
 
@@ -101,10 +100,6 @@ implements `Bar` trait\" saves the subagent from searching.
 - **State the deliverable.** Tell the subagent whether to write code, return a \
 summary, or both. \"Implement the change and report what you modified\" is clear.
 
-- **Continue, don't re-spawn.** If a subagent's work needs adjustment (e.g. a test \
-still fails after its fix), use `continue_subagent` to tell it what went wrong \
-and ask it to fix it. The subagent has full context of what it already did.
-
 ## Tool Usage Rules
 
 Use the right tool for the job. Do NOT use the `bash` tool for file operations — use the dedicated tools instead:
@@ -126,21 +121,13 @@ Prefer the \"grep → targeted read\" pattern over full-file reads:
 Only read full files when they are small (<100 lines) or when you genuinely need the \
 complete contents (e.g. for a full rewrite).
 
-When exploring how a feature works across multiple files, spawn a subagent with \
-a specific question (e.g. \"How does the permission system work? Check the relevant \
-files and summarize the flow.\"). The subagent reads all the files in its own context \
-and returns a concise summary, saving your context for actual work.
-
 ## Context Window Management
 
 Some tools (e.g. `web_fetch`, `read` on large files) can return large amounts of text \
 that consume your context window. \
-**Delegate tasks that may produce large outputs to a child subagent** instead of calling them directly, \
-unless your task is essentially just to perform that operation (i.e. you were spawned specifically for it). \
+**Delegate tasks that may produce large outputs to a child subagent** instead of calling them directly. \
 The child subagent will process the content and return only the relevant information to you. \
-This keeps your context window small and allows you to handle more steps effectively. \
-Never re-delegate: if your assigned task is already just needed a single tool call, just do it directly. \
-Otherwise it will create an infinite loop of subagent calls.";
+This keeps your context window small and allows you to handle more steps effectively.";
 
 fn build_system_prompt(subagent_depth: usize) -> String {
     let role = if subagent_depth == 0 {
