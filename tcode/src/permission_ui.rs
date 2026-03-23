@@ -29,10 +29,7 @@ use crate::tree_nav::TreeNav;
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Escape a string for safe inclusion in single-quoted shell arguments.
-fn shell_escape(s: &str) -> String {
-    s.replace('\'', "'\\''")
-}
+
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -336,16 +333,14 @@ impl PermissionTreeState {
                             Ok(p) => p.to_string_lossy().to_string(),
                             Err(_) => return false,
                         };
-                        let cmd = format!(
-                            "{} --session={} approve --manage --tool '{}' --key '{}' --value '{}'",
-                            exe,
-                            self.session_id,
-                            shell_escape(&tool_name),
-                            shell_escape(&key_name),
-                            shell_escape(value)
-                        );
                         match Command::new("tmux")
-                            .args(["display-popup", "-E", "-w", "60", "-h", "20", &cmd])
+                            .args(["display-popup", "-E", "-w", "60", "-h", "20", "--"])
+                            .arg(&exe)
+                            .arg(format!("--session={}", self.session_id))
+                            .args(["approve", "--manage"])
+                            .args(["--tool", &tool_name])
+                            .args(["--key", &key_name])
+                            .args(["--value", value])
                             .output()
                         {
                             Ok(out) => out.status.code() == Some(0),
@@ -633,29 +628,30 @@ pub fn launch_approval_popup(
         Err(_) => return false,
     };
 
-    let mut cmd = format!(
-        "{} --session={} approve --tool '{}' --key '{}' --value '{}'",
+    let mut cmd_args: Vec<String> = vec![
         exe,
-        session_id,
-        shell_escape(tool),
-        shell_escape(key),
-        shell_escape(value)
-    );
+        format!("--session={}", session_id),
+        "approve".into(),
+        "--tool".into(), tool.into(),
+        "--key".into(), key.into(),
+        "--value".into(), value.into(),
+    ];
     if let Some(p) = prompt
         && !p.is_empty()
     {
-        let escaped = shell_escape(p);
-        cmd.push_str(&format!(" --prompt '{}'", escaped));
+        cmd_args.push("--prompt".into());
+        cmd_args.push(p.into());
     }
     if let Some(rid) = request_id {
-        cmd.push_str(&format!(" --request-id '{}'", shell_escape(rid)));
+        cmd_args.push("--request-id".into());
+        cmd_args.push(rid.into());
     }
     if let Some(pfp) = preview_file_path {
-        let escaped = shell_escape(pfp);
-        cmd.push_str(&format!(" --preview-file-path '{}'", escaped));
+        cmd_args.push("--preview-file-path".into());
+        cmd_args.push(pfp.into());
     }
     if once_only {
-        cmd.push_str(" --once-only");
+        cmd_args.push("--once-only".into());
     }
 
     // Query tmux window size for dynamic popup sizing.
@@ -717,12 +713,12 @@ pub fn launch_approval_popup(
 
     let mut decided = false;
     loop {
-        // Call tmux directly (no intermediate shell) so `cmd` is never subject
-        // to shell expansion. tmux internally runs `sh -c <cmd>`, where the
-        // single-quoted arguments in `cmd` correctly protect backticks and
-        // dollar signs from expansion.
+        // Pass the command as separate arguments after "--" so tmux
+        // uses execvp directly, bypassing sh -c entirely. This avoids
+        // any shell-escaping concerns.
         let exit_code = match Command::new("tmux")
-            .args(["display-popup", "-E", "-w", &w_str, "-h", &h_str, &cmd])
+            .args(["display-popup", "-E", "-w", &w_str, "-h", &h_str, "--"])
+            .args(&cmd_args)
             .output()
         {
             Ok(out) => out.status.code().unwrap_or(0),
@@ -740,20 +736,13 @@ pub fn launch_approval_popup(
                             Ok(diff_content) => {
                                 let mut lines = diff_content.lines();
                                 if let (Some(original), Some(tmp)) = (lines.next(), lines.next()) {
-                                    let nvim_cmd = format!(
-                                        "nvim -R -d '{}' '{}'",
-                                        shell_escape(original),
-                                        shell_escape(tmp),
-                                    );
                                     if let Err(e) = Command::new("tmux")
                                         .args([
-                                            "display-popup",
-                                            "-E",
-                                            "-w",
-                                            "80%",
-                                            "-h",
-                                            "80%",
-                                            &nvim_cmd,
+                                            "display-popup", "-E",
+                                            "-w", "80%",
+                                            "-h", "80%",
+                                            "--",
+                                            "nvim", "-R", "-d", original, tmp,
                                         ])
                                         .output()
                                     {
@@ -766,9 +755,9 @@ pub fn launch_approval_popup(
                             }
                         }
                     } else {
-                        let nvim_cmd = format!("nvim -R '{}'", shell_escape(pfp));
                         if let Err(e) = Command::new("tmux")
-                            .args(["display-popup", "-E", "-w", "80%", "-h", "80%", &nvim_cmd])
+                            .args(["display-popup", "-E", "-w", "80%", "-h", "80%", "--",
+                                   "nvim", "-R", pfp])
                             .output()
                         {
                             tracing::warn!("failed to launch nvim popup: {}", e);
