@@ -132,9 +132,14 @@ complete contents (e.g. for a full rewrite).
 
 Some tools (e.g. `web_fetch`, `read` on large files) can return large amounts of text \
 that consume your context window. \
-**Delegate tasks that may produce large outputs to a child subagent** instead of calling them directly. \
-The child subagent will process the content and return only the relevant information to you. \
-This keeps your context window small and allows you to handle more steps effectively.";
+**Delegate tasks that may produce large outputs to a child subagent** instead of calling them directly, \
+**but only when the subagent can return something smaller than the raw output** (a summary, \
+extracted facts, a yes/no answer). If you need the verbatim content — e.g. to make \
+`edit` calls, to quote exact lines, or to copy code — a subagent cannot compress it, so \
+the full content lands in your context regardless. In that case, call the tool directly \
+and skip the subagent overhead. \
+Never re-delegate: if your assigned task is already just a single tool call, \
+just do it directly. Otherwise it will create an infinite loop of subagent calls.";
 
 fn build_system_prompt(subagent_depth: usize) -> String {
     let role = if subagent_depth == 0 {
