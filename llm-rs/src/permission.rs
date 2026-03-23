@@ -156,7 +156,24 @@ impl PermissionManager {
         decision: &PermissionDecision,
         request_id: Option<&str>,
     ) -> anyhow::Result<()> {
-        // Save to storage based on decision
+        let mut pending = self.pending_requests.lock();
+
+        // Enforce once_only: reject AllowSession/AllowProject when the pending
+        // request was marked once_only (only AllowOnce and Deny are valid).
+        if let Some(request) = pending.get(key)
+            && request.once_only
+            && matches!(
+                decision,
+                PermissionDecision::AllowSession | PermissionDecision::AllowProject
+            )
+        {
+            anyhow::bail!(
+                "cannot use {decision:?} for a once_only permission request; \
+                 only AllowOnce or Deny are permitted"
+            );
+        }
+
+        // Save to storage based on decision (independent of pending state)
         match decision {
             PermissionDecision::AllowSession => {
                 self.session_permissions.lock().insert(key.clone());
@@ -168,8 +185,7 @@ impl PermissionManager {
             PermissionDecision::AllowOnce | PermissionDecision::Deny => {}
         }
 
-        // Notify waiters
-        let mut pending = self.pending_requests.lock();
+        // Notify waiters if there's a pending request
         if let Some(request) = pending.get_mut(key) {
             match (decision, request_id) {
                 (PermissionDecision::AllowOnce, None) => {
