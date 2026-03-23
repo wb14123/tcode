@@ -7,8 +7,8 @@ use quick_xml::escape::escape;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
-const DEFAULT_LIMIT: u64 = 2000;
-const DEFAULT_MAX_READ_CHARS: u64 = 50_000;
+const DEFAULT_LIMIT: u64 = 500;
+const DEFAULT_MAX_READ_CHARS: u64 = 20_000;
 
 /// Binary file extensions that should be rejected without content inspection.
 const BINARY_EXTENSIONS: &[&str] = &[
@@ -234,10 +234,13 @@ async fn read_directory(path: &Path) -> Result<String> {
 ///
 /// Usage:
 /// - The file_path parameter should be an absolute path.
-/// - By default, this tool returns up to 2000 lines from the start of the file.
+/// - By default, this tool returns up to 500 lines from the start of the file.
 /// - The offset parameter is the line number to start from (1-indexed).
 /// - To read later sections, call this tool again with a larger offset.
-/// - Use the grep tool to find specific content in large files.
+/// - For files over ~200 lines, prefer using `grep` first to locate the relevant lines,
+///   then read only those lines with `offset` and `limit` to avoid consuming unnecessary context.
+/// - When you only need a small portion of a file (e.g. checking a function signature),
+///   use a smaller `max_read_chars` (e.g. 5000-10000) or a targeted `offset`+`limit`.
 /// - If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.
 /// - Call this tool in parallel when you know there are multiple files you want to read.
 /// - Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.
@@ -250,7 +253,7 @@ async fn read_directory(path: &Path) -> Result<String> {
 ///   Subdirectories have a trailing "/".
 ///
 /// Character cap:
-/// - By default, at most 50000 characters are read from the file. Use max_read_chars to adjust.
+/// - By default, at most 20000 characters are read from the file. Use max_read_chars to adjust (up to 50000).
 /// - If the character cap is reached mid-line, the last line is truncated. Its `<line>` tag will include `chars_start`, `chars_end`, and `truncated="true"` showing exactly which portion of the line was returned.
 ///
 /// Pagination:

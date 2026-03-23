@@ -44,6 +44,8 @@ fn build_tcodediff_preview(
 /// Usage:
 /// - You must use your `Read` tool at least once in the conversation before editing.
 ///   This tool will error if you attempt an edit without reading the file.
+/// - You do NOT need to re-read a file before each edit if you already have the relevant
+///   section in context. One read of the relevant section per file is sufficient.
 /// - When editing text from Read tool output, ensure you preserve the exact indentation
 ///   (tabs/spaces) as it appears in the line content (inside the `<line>` tags).
 ///   Never include XML tags or line number attributes in the old_string or new_string.

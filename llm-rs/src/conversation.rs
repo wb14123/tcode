@@ -67,9 +67,25 @@ Use the right tool for the job. Do NOT use the `bash` tool for file operations â
 
 The `bash` tool is for terminal operations: git, cargo, npm, docker, make, etc.
 
+## Efficient Code Reading
+
+Prefer the \"grep â†’ targeted read\" pattern over full-file reads:
+1. Use `grep` to find the relevant line numbers for what you need.
+2. Use `read` with `offset` and `limit` to read only the relevant section.
+3. If you need to understand the full structure of a large file, delegate to a subagent.
+
+Only read full files when they are small (<100 lines) or when you genuinely need the \
+complete contents (e.g. for a full rewrite).
+
+When exploring how a feature works across multiple files, spawn a subagent with \
+a specific question (e.g. \"How does the permission system work? Check the relevant \
+files and summarize the flow.\"). The subagent reads all the files in its own context \
+and returns a concise summary, saving your context for actual work.
+
 ## Context Window Management
 
-Some tools (e.g. `web_fetch`) can return large amounts of text that consume your context window. \
+Some tools (e.g. `web_fetch`, `read` on large files) can return large amounts of text \
+that consume your context window. \
 **Delegate tasks that may produce large outputs to a child subagent** instead of calling them directly, \
 unless your task is essentially just to perform that operation (i.e. you were spawned specifically for it). \
 The child subagent will process the content and return only the relevant information to you. \
