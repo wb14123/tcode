@@ -54,3 +54,9 @@ Fix any warnings or formatting issues before considering the task complete.
 - **`expect("reason")`** is acceptable only for truly infallible cases (e.g. hardcoded string parses, `SystemTime::duration_since(UNIX_EPOCH)`, values verified on the preceding line)
 - In tests, prefer `-> anyhow::Result<()>` with `?` over `.unwrap()`
 - This codebase uses `parking_lot::Mutex` and `parking_lot::RwLock` (not `std::sync`) to avoid lock poisoning and the `.lock().unwrap()` pattern
+
+## Discussion Before Code Changes
+
+- When discussing design, heuristics, or behavioral questions — **always talk to the user first** before writing code
+- Do NOT speculatively implement a fix during a discussion — wait for the user to confirm the approach
+- This is especially important for heuristic-based logic where multiple approaches exist and none is obviously correct

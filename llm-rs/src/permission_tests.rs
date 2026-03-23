@@ -29,8 +29,14 @@ mod tests {
     #[tokio::test]
     async fn register_and_resolve_allow_once() -> anyhow::Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let (request_id, rx) =
-            pm.register_request("web_fetch", "Allow?", "hostname", "example.com", None);
+        let (request_id, rx) = pm.register_request(
+            "web_fetch",
+            "Allow?",
+            "hostname",
+            "example.com",
+            None,
+            false,
+        );
         let key = make_key("web_fetch", "hostname", "example.com");
         pm.resolve(&key, &PermissionDecision::AllowOnce, Some(&request_id))?;
         assert!(rx.await?);
@@ -42,8 +48,14 @@ mod tests {
     #[tokio::test]
     async fn register_and_resolve_allow_session() -> anyhow::Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let (_request_id, rx) =
-            pm.register_request("web_fetch", "Allow?", "hostname", "example.com", None);
+        let (_request_id, rx) = pm.register_request(
+            "web_fetch",
+            "Allow?",
+            "hostname",
+            "example.com",
+            None,
+            false,
+        );
         let key = make_key("web_fetch", "hostname", "example.com");
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
         assert!(rx.await?);
@@ -56,7 +68,7 @@ mod tests {
     async fn register_and_resolve_deny() -> anyhow::Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
         let (_request_id, rx) =
-            pm.register_request("web_fetch", "Allow?", "hostname", "evil.com", None);
+            pm.register_request("web_fetch", "Allow?", "hostname", "evil.com", None, false);
         let key = make_key("web_fetch", "hostname", "evil.com");
         pm.resolve(&key, &PermissionDecision::Deny, None)?;
         assert!(!rx.await?);
@@ -68,10 +80,22 @@ mod tests {
     #[tokio::test]
     async fn dedup_multiple_waiters() -> anyhow::Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let (_rid1, rx1) =
-            pm.register_request("web_fetch", "Allow?", "hostname", "example.com", None);
-        let (_rid2, rx2) =
-            pm.register_request("web_fetch", "Allow?", "hostname", "example.com", None);
+        let (_rid1, rx1) = pm.register_request(
+            "web_fetch",
+            "Allow?",
+            "hostname",
+            "example.com",
+            None,
+            false,
+        );
+        let (_rid2, rx2) = pm.register_request(
+            "web_fetch",
+            "Allow?",
+            "hostname",
+            "example.com",
+            None,
+            false,
+        );
         let key = make_key("web_fetch", "hostname", "example.com");
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
         assert!(rx1.await?);
@@ -82,10 +106,22 @@ mod tests {
     #[tokio::test]
     async fn allow_once_targets_single_waiter() -> anyhow::Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let (rid1, rx1) =
-            pm.register_request("web_fetch", "Allow?", "hostname", "example.com", None);
-        let (_rid2, rx2) =
-            pm.register_request("web_fetch", "Allow?", "hostname", "example.com", None);
+        let (rid1, rx1) = pm.register_request(
+            "web_fetch",
+            "Allow?",
+            "hostname",
+            "example.com",
+            None,
+            false,
+        );
+        let (_rid2, rx2) = pm.register_request(
+            "web_fetch",
+            "Allow?",
+            "hostname",
+            "example.com",
+            None,
+            false,
+        );
         let key = make_key("web_fetch", "hostname", "example.com");
         // AllowOnce should only approve rid1, not rid2
         pm.resolve(&key, &PermissionDecision::AllowOnce, Some(&rid1))?;
@@ -100,8 +136,14 @@ mod tests {
     #[tokio::test]
     async fn allow_once_without_request_id_fails() {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let (_rid, _rx) =
-            pm.register_request("web_fetch", "Allow?", "hostname", "example.com", None);
+        let (_rid, _rx) = pm.register_request(
+            "web_fetch",
+            "Allow?",
+            "hostname",
+            "example.com",
+            None,
+            false,
+        );
         let key = make_key("web_fetch", "hostname", "example.com");
         let result = pm.resolve(&key, &PermissionDecision::AllowOnce, None);
         assert!(result.is_err());
@@ -110,8 +152,14 @@ mod tests {
     #[tokio::test]
     async fn revoke_removes_permission() -> anyhow::Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let (_request_id, rx) =
-            pm.register_request("web_fetch", "Allow?", "hostname", "example.com", None);
+        let (_request_id, rx) = pm.register_request(
+            "web_fetch",
+            "Allow?",
+            "hostname",
+            "example.com",
+            None,
+            false,
+        );
         let key = make_key("web_fetch", "hostname", "example.com");
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
         assert!(rx.await?);
@@ -124,8 +172,9 @@ mod tests {
     #[tokio::test]
     async fn close_all_pending_sends_false() -> anyhow::Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
-        let (_rid1, rx1) = pm.register_request("web_fetch", "Allow?", "hostname", "a.com", None);
-        let (_rid2, rx2) = pm.register_request("bash", "Allow?", "command", "git", None);
+        let (_rid1, rx1) =
+            pm.register_request("web_fetch", "Allow?", "hostname", "a.com", None, false);
+        let (_rid2, rx2) = pm.register_request("bash", "Allow?", "command", "git", None, false);
         pm.close_all_pending();
         assert!(!rx1.await?);
         assert!(!rx2.await?);
@@ -139,7 +188,7 @@ mod tests {
         let key = make_key("web_fetch", "hostname", "allowed.com");
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
         // Register a pending request
-        let (_rid, _rx) = pm.register_request("bash", "Allow?", "command", "git", None);
+        let (_rid, _rx) = pm.register_request("bash", "Allow?", "command", "git", None, false);
         let state = pm.snapshot();
         assert_eq!(state.session.len(), 1);
         assert_eq!(state.pending.len(), 1);

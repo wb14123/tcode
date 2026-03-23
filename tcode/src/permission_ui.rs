@@ -87,6 +87,7 @@ enum NodeKind {
         prompt: Option<String>,
         request_id: Option<String>,
         preview_file_path: Option<String>,
+        once_only: bool,
     },
 }
 
@@ -149,13 +150,14 @@ impl PermissionTreeState {
     fn rebuild_from_state(&mut self, state: &PermissionState) {
         self.arena.clear();
 
-        // Group all entries by tool -> key -> Vec<(value, status, prompt, request_id, preview_file_path)>
+        // Group all entries by tool -> key -> Vec<(value, status, prompt, request_id, preview_file_path, once_only)>
         type EntryTuple = (
             String,
             PermStatus,
             Option<String>,
             Option<String>,
             Option<String>,
+            bool,
         );
         let mut groups: HashMap<String, HashMap<String, Vec<EntryTuple>>> = HashMap::new();
 
@@ -173,6 +175,7 @@ impl PermissionTreeState {
                     p.preview_file_path
                         .as_ref()
                         .map(|p| p.to_string_lossy().to_string()),
+                    p.once_only,
                 ));
         }
         for k in &state.session {
@@ -181,7 +184,14 @@ impl PermissionTreeState {
                 .or_default()
                 .entry(k.key.clone())
                 .or_default()
-                .push((k.value.clone(), PermStatus::Session, None, None, None));
+                .push((
+                    k.value.clone(),
+                    PermStatus::Session,
+                    None,
+                    None,
+                    None,
+                    false,
+                ));
         }
         for k in &state.project {
             groups
@@ -189,7 +199,14 @@ impl PermissionTreeState {
                 .or_default()
                 .entry(k.key.clone())
                 .or_default()
-                .push((k.value.clone(), PermStatus::Project, None, None, None));
+                .push((
+                    k.value.clone(),
+                    PermStatus::Project,
+                    None,
+                    None,
+                    None,
+                    false,
+                ));
         }
 
         // Sort tools alphabetically, but put tools with pending items first
@@ -239,7 +256,7 @@ impl PermissionTreeState {
                     b_pending.cmp(&a_pending).then(a.0.cmp(&b.0))
                 });
 
-                for (value, status, prompt, request_id, preview_file_path) in values {
+                for (value, status, prompt, request_id, preview_file_path, once_only) in values {
                     if self.filter_pending_only && status != PermStatus::Pending {
                         continue;
                     }
@@ -251,6 +268,7 @@ impl PermissionTreeState {
                             prompt,
                             request_id,
                             preview_file_path,
+                            once_only,
                         },
                         depth: 2,
                         children: Vec::new(),
@@ -294,6 +312,7 @@ impl PermissionTreeState {
                 prompt,
                 request_id,
                 preview_file_path,
+                once_only,
                 ..
             } => {
                 let (tool_name, key_name) = self.find_tool_key_for(idx);
@@ -307,6 +326,7 @@ impl PermissionTreeState {
                         prompt.as_deref(),
                         request_id.as_deref(),
                         preview_file_path.as_deref(),
+                        *once_only,
                     ),
                     PermStatus::Session | PermStatus::Project => {
                         // Manage (revoke) existing permission — use the old
@@ -317,14 +337,17 @@ impl PermissionTreeState {
                             Err(_) => return false,
                         };
                         let cmd = format!(
-                            "{} --session={} approve --manage --tool {} --key {} --value {}",
-                            exe, self.session_id, tool_name, key_name, value
+                            "{} --session={} approve --manage --tool '{}' --key '{}' --value '{}'",
+                            exe,
+                            self.session_id,
+                            shell_escape(&tool_name),
+                            shell_escape(&key_name),
+                            shell_escape(value)
                         );
-                        let popup_cmd = format!(
-                            "tmux display-popup -E -w 60 -h 20 \"{}\"",
-                            cmd.replace('"', "\\\"")
-                        );
-                        match Command::new("sh").args(["-c", &popup_cmd]).output() {
+                        match Command::new("tmux")
+                            .args(["display-popup", "-E", "-w", "60", "-h", "20", &cmd])
+                            .output()
+                        {
                             Ok(out) => out.status.code() == Some(0),
                             Err(e) => {
                                 tracing::warn!("failed to launch manage popup: {}", e);
@@ -594,6 +617,7 @@ pub fn query_permission_state_sync(socket_path: &PathBuf) -> Option<PermissionSt
 
 /// Launch a tmux popup for a single pending approval.
 /// Returns `true` if the user made a decision (approve/deny), `false` if cancelled.
+#[allow(clippy::too_many_arguments)]
 pub fn launch_approval_popup(
     session_id: &str,
     tool: &str,
@@ -602,6 +626,7 @@ pub fn launch_approval_popup(
     prompt: Option<&str>,
     request_id: Option<&str>,
     preview_file_path: Option<&str>,
+    once_only: bool,
 ) -> bool {
     let exe = match std::env::current_exe() {
         Ok(p) => p.to_string_lossy().to_string(),
@@ -609,8 +634,12 @@ pub fn launch_approval_popup(
     };
 
     let mut cmd = format!(
-        "{} --session={} approve --tool {} --key {} --value {}",
-        exe, session_id, tool, key, value
+        "{} --session={} approve --tool '{}' --key '{}' --value '{}'",
+        exe,
+        session_id,
+        shell_escape(tool),
+        shell_escape(key),
+        shell_escape(value)
     );
     if let Some(p) = prompt
         && !p.is_empty()
@@ -619,14 +648,19 @@ pub fn launch_approval_popup(
         cmd.push_str(&format!(" --prompt '{}'", escaped));
     }
     if let Some(rid) = request_id {
-        cmd.push_str(&format!(" --request-id {}", rid));
+        cmd.push_str(&format!(" --request-id '{}'", shell_escape(rid)));
     }
     if let Some(pfp) = preview_file_path {
         let escaped = shell_escape(pfp);
         cmd.push_str(&format!(" --preview-file-path '{}'", escaped));
     }
+    if once_only {
+        cmd.push_str(" --once-only");
+    }
 
-    // Query tmux window size for dynamic popup sizing
+    // Query tmux window size for dynamic popup sizing.
+    // Width: 80% for aesthetics. Height: up to full window minus 2 (status bar)
+    // so long prompts aren't clipped.
     let (max_w, max_h) = Command::new("tmux")
         .args(["display-message", "-p", "#{window_width} #{window_height}"])
         .output()
@@ -636,38 +670,61 @@ pub fn launch_approval_popup(
             let mut parts = s.split_whitespace();
             let w: usize = parts.next()?.parse().ok()?;
             let h: usize = parts.next()?.parse().ok()?;
-            Some((w * 80 / 100, h * 80 / 100))
+            Some((w * 80 / 100, h.saturating_sub(2)))
         })
-        .unwrap_or((60, 18));
+        .unwrap_or((60, 24));
 
     let prompt_len = prompt.map(|p| p.len()).unwrap_or(0);
     let has_preview = preview_file_path.is_some();
     let preview_extra: usize = if has_preview { 1 } else { 0 };
     let (popup_width, popup_height) = if prompt_len > 0 {
+        // Target width: balance readability vs wrapping. Use at least 80% of
+        // max_w for long prompts so commands aren't excessively wrapped.
         let chars_per_line = 25.0_f64;
         let w = (prompt_len as f64 * chars_per_line).sqrt().ceil() as usize + 6;
         let w = w.clamp(60, max_w);
+        // For long prompts that would wrap into many lines at the computed width,
+        // widen the popup up to max_w to reduce wrapping.
         let usable = w.saturating_sub(6);
-        let prompt_lines = if usable > 0 {
+        let prompt_lines_at_w = if usable > 0 {
             prompt_len.div_ceil(usable)
         } else {
             1
         };
-        let h = (18 + preview_extra + prompt_lines).clamp(20, max_h);
+        let (w, prompt_lines) = if prompt_lines_at_w > 3 {
+            // Re-compute at max width to minimize wrapping
+            let wider_usable = max_w.saturating_sub(6);
+            let wider_lines = if wider_usable > 0 {
+                prompt_len.div_ceil(wider_usable)
+            } else {
+                1
+            };
+            (max_w, wider_lines)
+        } else {
+            (w, prompt_lines_at_w)
+        };
+        // Height: 2 (tmux border) + 16 (fixed UI rows) + preview_extra + prompt_lines.
+        // Don't cap at max_h — tmux silently clamps to window size, and the
+        // approval UI has scroll support for the prompt area when space is tight.
+        let h = (18 + preview_extra + prompt_lines).max(20);
         (w, h)
     } else {
         (60, (20 + preview_extra).min(max_h))
     };
 
+    let w_str = popup_width.to_string();
+    let h_str = popup_height.to_string();
+
     let mut decided = false;
     loop {
-        let popup_cmd = format!(
-            "tmux display-popup -E -w {} -h {} \"{}\"",
-            popup_width,
-            popup_height,
-            cmd.replace('"', "\\\"")
-        );
-        let exit_code = match Command::new("sh").args(["-c", &popup_cmd]).output() {
+        // Call tmux directly (no intermediate shell) so `cmd` is never subject
+        // to shell expansion. tmux internally runs `sh -c <cmd>`, where the
+        // single-quoted arguments in `cmd` correctly protect backticks and
+        // dollar signs from expansion.
+        let exit_code = match Command::new("tmux")
+            .args(["display-popup", "-E", "-w", &w_str, "-h", &h_str, &cmd])
+            .output()
+        {
             Ok(out) => out.status.code().unwrap_or(0),
             Err(e) => {
                 tracing::warn!("failed to launch approval popup: {}", e);
@@ -683,14 +740,22 @@ pub fn launch_approval_popup(
                             Ok(diff_content) => {
                                 let mut lines = diff_content.lines();
                                 if let (Some(original), Some(tmp)) = (lines.next(), lines.next()) {
-                                    let esc_orig = shell_escape(original);
-                                    let esc_tmp = shell_escape(tmp);
-                                    let nvim_popup = format!(
-                                        "tmux display-popup -E -w '80%' -h '80%' \"nvim -R -d '{}' '{}'\"",
-                                        esc_orig, esc_tmp,
+                                    let nvim_cmd = format!(
+                                        "nvim -R -d '{}' '{}'",
+                                        shell_escape(original),
+                                        shell_escape(tmp),
                                     );
-                                    if let Err(e) =
-                                        Command::new("sh").args(["-c", &nvim_popup]).output()
+                                    if let Err(e) = Command::new("tmux")
+                                        .args([
+                                            "display-popup",
+                                            "-E",
+                                            "-w",
+                                            "80%",
+                                            "-h",
+                                            "80%",
+                                            &nvim_cmd,
+                                        ])
+                                        .output()
                                     {
                                         tracing::warn!("failed to launch nvim diff popup: {}", e);
                                     }
@@ -701,12 +766,11 @@ pub fn launch_approval_popup(
                             }
                         }
                     } else {
-                        let escaped = shell_escape(pfp);
-                        let nvim_popup = format!(
-                            "tmux display-popup -E -w '80%' -h '80%' \"nvim -R '{}'\"",
-                            escaped,
-                        );
-                        if let Err(e) = Command::new("sh").args(["-c", &nvim_popup]).output() {
+                        let nvim_cmd = format!("nvim -R '{}'", shell_escape(pfp));
+                        if let Err(e) = Command::new("tmux")
+                            .args(["display-popup", "-E", "-w", "80%", "-h", "80%", &nvim_cmd])
+                            .output()
+                        {
                             tracing::warn!("failed to launch nvim popup: {}", e);
                         }
                     }
@@ -746,6 +810,7 @@ pub fn approve_all_pending(session_id: &str, socket_path: &PathBuf) -> Option<us
                 .as_ref()
                 .map(|p| p.to_string_lossy())
                 .as_deref(),
+            pending.once_only,
         );
         if !decided {
             return None;

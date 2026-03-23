@@ -1,3 +1,4 @@
+pub mod bash;
 pub mod browser_client;
 pub mod current_time;
 pub mod edit;
@@ -13,6 +14,7 @@ pub mod write;
 #[cfg(test)]
 mod file_permission_tests;
 
+pub use bash::bash_tool;
 pub use current_time::current_time_tool;
 pub use edit::edit_tool;
 pub use glob_tool::glob_tool;

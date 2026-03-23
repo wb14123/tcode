@@ -263,6 +263,9 @@ enum Commands {
         /// Path to a preview file (for "[v] View in nvim" support)
         #[arg(long)]
         preview_file_path: Option<String>,
+        /// Only offer "Allow once" and "Deny" (no session/project caching)
+        #[arg(long)]
+        once_only: bool,
     },
 }
 
@@ -557,6 +560,7 @@ async fn main() -> Result<()> {
             prompt,
             request_id,
             preview_file_path,
+            once_only,
         }) => {
             let session_id = require_session(cli.session)?;
             let session = Session::new(root_session_id(&session_id))?;
@@ -569,6 +573,7 @@ async fn main() -> Result<()> {
                 prompt,
                 request_id,
                 preview_file_path: preview_file_path.map(PathBuf::from),
+                once_only,
             };
             let result = approve_ui::run_approve(args)?;
             match result {

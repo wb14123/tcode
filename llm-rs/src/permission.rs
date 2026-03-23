@@ -45,6 +45,10 @@ pub struct PendingPermissionInfo {
     /// The file extension is used for syntax highlighting.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview_file_path: Option<PathBuf>,
+    /// When true, only "Allow once" and "Deny" should be offered — no
+    /// session/project caching.  Used for complex bash commands.
+    #[serde(default)]
+    pub once_only: bool,
 }
 
 /// Full snapshot of permission state, sent to UI on query.
@@ -60,6 +64,7 @@ struct PendingRequest {
     prompt: String,
     waiters: HashMap<String, oneshot::Sender<bool>>,
     preview_file_path: Option<PathBuf>,
+    once_only: bool,
 }
 
 /// On-disk format for project-level permissions.
@@ -111,6 +116,7 @@ impl PermissionManager {
         key: &str,
         value: &str,
         preview_file_path: Option<PathBuf>,
+        once_only: bool,
     ) -> (String, oneshot::Receiver<bool>) {
         let pk = PermissionKey {
             tool: tool.to_string(),
@@ -131,6 +137,7 @@ impl PermissionManager {
                     prompt: prompt.to_string(),
                     waiters,
                     preview_file_path,
+                    once_only,
                 },
             );
         }
@@ -238,6 +245,7 @@ impl PermissionManager {
                     value: k.value.clone(),
                     request_id,
                     preview_file_path: r.preview_file_path.clone(),
+                    once_only: r.once_only,
                 }
             })
             .collect();
@@ -373,7 +381,7 @@ impl ScopedPermissionManager {
             .await
     }
 
-    /// Like `ask_permission_for`, but writes `content` to a preview file under
+    /// Like `ask_permission_with_preview`, but writes `content` to a preview file under
     /// `session_dir/tool-file-preview/` so the UI can offer "[v] View in nvim".
     /// `file_extension` is used for syntax highlighting (e.g. "rs", "py").
     pub async fn ask_permission_with_preview(
@@ -396,6 +404,54 @@ impl ScopedPermissionManager {
             .await
     }
 
+    /// Always prompt the user and never cache the result. The approval UI will
+    /// only offer "Allow once" and "Deny". Used for complex bash commands where
+    /// caching a permission prefix is inherently unsafe.
+    pub async fn ask_permission_once(
+        &self,
+        scope: &str,
+        prompt: &str,
+        content: &str,
+        file_extension: &str,
+    ) -> anyhow::Result<()> {
+        let preview_path = match self.write_preview_file(content, file_extension) {
+            Ok(path) => Some(path),
+            Err(e) => {
+                tracing::warn!("Failed to write preview file: {}", e);
+                None
+            }
+        };
+
+        // Use the full command as key+value so each complex command gets its own
+        // pending entry, but we never check or store cached permissions.
+        let key = "command";
+        let value = content;
+
+        let (_request_id, rx) =
+            self.manager
+                .register_request(scope, prompt, key, value, preview_path.clone(), true);
+
+        // Notify UI that permission state changed (idempotent)
+        (self.notify_fn)();
+
+        self.approval_pending.store(true, Ordering::Release);
+        let allowed = rx.await.unwrap_or(false);
+        self.approval_pending.store(false, Ordering::Release);
+
+        Self::cleanup_preview_file(&preview_path);
+
+        if allowed {
+            (self.on_approved_fn)();
+            Ok(())
+        } else {
+            self.denied.store(true, Ordering::Relaxed);
+            Err(anyhow!(
+                "Permission denied: {} The user chose not to allow this action.",
+                prompt
+            ))
+        }
+    }
+
     /// Core permission-request flow shared by `ask_permission_for` and
     /// `ask_permission_with_preview`. Cleans up the preview file (if any)
     /// after the decision is received.
@@ -412,9 +468,14 @@ impl ScopedPermissionManager {
             return Ok(());
         }
 
-        let (_request_id, rx) =
-            self.manager
-                .register_request(scope, prompt, key, value, preview_file_path.clone());
+        let (_request_id, rx) = self.manager.register_request(
+            scope,
+            prompt,
+            key,
+            value,
+            preview_file_path.clone(),
+            false,
+        );
 
         // Notify UI that permission state changed (idempotent)
         (self.notify_fn)();

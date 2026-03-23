@@ -118,6 +118,7 @@ impl Server {
         // Build tools list including subagent tools
         let model_infos = self.llm.available_models();
         let mut tools_list: Vec<Arc<Tool>> = vec![
+            Arc::new(tools::bash_tool()),
             Arc::new(tools::current_time_tool()),
             Arc::new(tools::glob_tool()),
             Arc::new(tools::grep_tool()),

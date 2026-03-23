@@ -56,6 +56,17 @@ subagents and increase the context window.
 do not try to use subagent to try the same thing. It will be blocked as well \
 and the only thing you are doing is waste tokens.
 
+## Tool Usage Rules
+
+Use the right tool for the job. Do NOT use the `bash` tool for file operations — use the dedicated tools instead:
+- **Reading files:** Use the `read` tool, not `cat`, `head`, `tail`, or `less` via bash
+- **Writing files:** Use the `write` tool, not `echo`, `cat`, or heredoc via bash
+- **Editing files:** Use the `edit` tool, not `sed` or `awk` via bash
+- **Searching file contents:** Use the `grep` tool, not `grep` or `rg` commands via bash
+- **Finding files:** Use the `glob` tool, not `find` or `ls` via bash
+
+The `bash` tool is for terminal operations: git, cargo, npm, docker, make, etc.
+
 ## Context Window Management
 
 Some tools (e.g. `web_fetch`) can return large amounts of text that consume your context window. \
