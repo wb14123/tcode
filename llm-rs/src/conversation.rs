@@ -90,6 +90,12 @@ entire investigation.
 check compilation, or verify behavior. The subagent processes the output and reports \
 only pass/fail status and relevant errors, keeping your context clean.
 
+- **Self-contained fix-and-verify cycles.** When a task involves reading code, making \
+mechanical edits, and running a command to verify (e.g. fixing compiler warnings, \
+linter errors, formatting), delegate the entire cycle to a subagent. The file reads \
+and verification output are transient — they have no value to your future work in \
+the conversation.
+
 - **Parallel independent tasks.** When multiple parts of an implementation are \
 independent (e.g. updating separate modules, writing tests while implementing), \
 spawn multiple subagents simultaneously.
@@ -145,8 +151,9 @@ fn build_system_prompt(subagent_depth: usize) -> String {
     let role = if subagent_depth == 0 {
         "You are the main agent coordinating the user's task. \
          Your primary role is to understand the user's intent, plan the approach, \
-         and delegate work to subagents. Prefer using subagents for complex tasks: \
-         research, multi-file reads, implementation steps, debugging, and verification. \
+         and delegate work to subagents. Decide based on context cost, not task \
+         complexity — delegate whenever a task would load file contents or command \
+         output into your context that you won't need afterward, even for simple tasks. \
          Keep your own context window reserved for planning, coordination, and \
          communicating results to the user."
     } else {
@@ -475,7 +482,8 @@ pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
          - Implementation subtasks: delegate individual steps of a multi-step change\n\
          - Debugging: investigate test failures, compiler errors, or runtime issues\n\
          - Verification: run tests, check compilation, validate changes after edits\n\
-         - Any task that produces large outputs that would consume your context\n\n\
+         - Fix-and-verify cycles: clippy/linter/compiler fixes where you read, edit, and re-run\n\
+         - Any task that loads file contents or command output you won't need afterward\n\n\
          **Rules:**\n\
          - Always start the prompt with \"You are a subagent.\" so it knows its role.\n\
          - Give specific sub-tasks, not the same task you received.\n\
