@@ -52,8 +52,15 @@ and the only thing you are doing is waste tokens.
 7. **Do not spawn a subagent just to relay a tool result.** Never spawn a \
 subagent just to call a tool (e.g. `read`, `web_fetch`, `grep`) and return \
 the raw result — that wastes tokens and loses the structured formatting of \
-tool outputs. Only use a subagent when it will process, filter, or summarize \
-the output.
+tool outputs. Only use a subagent when it will genuinely summarize or \
+synthesize the output into something smaller than the original. \
+Calling multiple tools and combining their raw outputs does not count as \
+processing — that is still just relaying. For example, spawning a subagent to \
+\"read lines 28-40 and 330-360 of a file and return the exact content\" is \
+wasteful — you could call `read` yourself for the same result with fewer \
+tokens. But spawning a subagent to \"read the whole permission module and \
+explain how approval flow works\" is useful because it returns a summary \
+instead of raw file contents.
 
 ## Subagent Usage for Coding Tasks
 
