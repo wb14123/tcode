@@ -8,6 +8,7 @@ use crate::browser;
 /// Each thread navigates to a data URI with unique content, then reads it back
 /// via JS to confirm the tab loaded correctly.
 #[test]
+#[ignore = "requires Chrome/Chromium installed on the host"]
 fn parallel_open_tab() -> Result<()> {
     const NUM_TABS: usize = 4;
 
@@ -41,6 +42,7 @@ fn parallel_open_tab() -> Result<()> {
 
 /// After all TabGuards are dropped, active_tabs should be 0.
 #[test]
+#[ignore = "requires Chrome/Chromium installed on the host"]
 fn tab_guard_cleanup() -> Result<()> {
     {
         let tab = browser::open_tab("data:text/html,<p>cleanup-test</p>")?;
