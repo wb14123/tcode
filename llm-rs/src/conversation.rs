@@ -56,6 +56,55 @@ subagents and increase the context window.
 do not try to use subagent to try the same thing. It will be blocked as well \
 and the only thing you are doing is waste tokens.
 
+## Subagent Usage for Coding Tasks
+
+Subagents are not just for research — use them actively during coding workflows \
+to keep your context window clean and work more efficiently. Subagents retain their \
+full context and can be continued, so there is no risk of losing work.
+
+### When to delegate to subagents:
+
+- **Research before implementation.** Before writing code in an unfamiliar area, \
+spawn a subagent to explore the codebase (read files, trace call chains, check \
+patterns used elsewhere) and return a summary of what you need to know. This \
+keeps your context focused on the actual implementation.
+
+- **Multi-step implementations.** When a task involves multiple independent changes \
+(e.g. add a struct, update a handler, write tests), plan the steps yourself, then \
+delegate each step to a subagent. Give each subagent clear instructions: which files \
+to modify, what to add, and any constraints. This prevents your context from filling \
+up with file contents from earlier steps.
+
+- **Debugging and investigation.** When a test fails or a build breaks, spawn a \
+subagent to investigate: read error output, check relevant code, trace the issue, \
+and report findings. Only bring the conclusions back to your context, not the \
+entire investigation.
+
+- **Verification and testing.** After making changes, spawn a subagent to run tests, \
+check compilation, or verify behavior. The subagent processes the output and reports \
+only pass/fail status and relevant errors, keeping your context clean.
+
+- **Parallel independent tasks.** When multiple parts of an implementation are \
+independent (e.g. updating separate modules, writing tests while implementing), \
+spawn multiple subagents simultaneously.
+
+### How to delegate effectively:
+
+- **Be specific.** Give the subagent exact file paths, function names, and clear \
+acceptance criteria. \"Edit `src/foo.rs` to add a `bar()` method that does X\" is \
+better than \"update the foo module.\"
+
+- **Include context.** Tell the subagent what you already know so it doesn't waste \
+time re-discovering it. \"The struct `Foo` is defined in `src/foo.rs:42` and \
+implements `Bar` trait\" saves the subagent from searching.
+
+- **State the deliverable.** Tell the subagent whether to write code, return a \
+summary, or both. \"Implement the change and report what you modified\" is clear.
+
+- **Continue, don't re-spawn.** If a subagent's work needs adjustment (e.g. a test \
+still fails after its fix), use `continue_subagent` to tell it what went wrong \
+and ask it to fix it. The subagent has full context of what it already did.
+
 ## Tool Usage Rules
 
 Use the right tool for the job. Do NOT use the `bash` tool for file operations — use the dedicated tools instead:
@@ -410,11 +459,20 @@ pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
         "Spawn a subagent to handle a task in its own context window. \
          The subagent has access to all tools and will return its final answer. \
          Subagents may also spawn their own subagents up to the configured depth limit. \
-         Use this for tasks that produce large outputs \
-         (web fetches, research, multi-step tool use) so the results are summarized \
-         in the subagent's context rather than consuming your context window.\n\
-         Always start the prompt to the subagent with \"You are a subagent.\" so that it knows its a subagent.\n\
-         Give sub tasks to sub agents, do not just give the same task you received to a subagent.\n\n
+         Subagents retain full context and can be continued via `continue_subagent`, \
+         so there is no risk of losing work.\n\n\
+         **When to use:**\n\
+         - Research and exploration: reading multiple files, web searches, understanding codebases\n\
+         - Implementation subtasks: delegate individual steps of a multi-step change\n\
+         - Debugging: investigate test failures, compiler errors, or runtime issues\n\
+         - Verification: run tests, check compilation, validate changes after edits\n\
+         - Any task that produces large outputs that would consume your context\n\n\
+         **Rules:**\n\
+         - Always start the prompt with \"You are a subagent.\" so it knows its role.\n\
+         - Give specific sub-tasks, not the same task you received.\n\
+         - Be specific: include file paths, function names, and clear acceptance criteria.\n\
+         - Tell the subagent whether to write code, return a summary, or both.\n\
+         - Spawn multiple subagents in parallel when tasks are independent.\n\n\
          Available models:\n{}",
         models_list.join("\n")
     );
