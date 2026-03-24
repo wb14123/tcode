@@ -170,13 +170,29 @@ fn build_system_prompt(subagent_depth: usize) -> String {
             tracing::warn!("Failed to get current directory: {}", e);
             "unknown".to_string()
         });
-    format!(
+    let mut prompt = format!(
         "{role}\n\n{rules}\n\nCurrent directory: {cwd}\n\
          If you need the current date or time, use the `current_time` tool.",
         role = role,
         rules = SUBAGENT_RULES,
         cwd = cwd,
-    )
+    );
+
+    // Append CLAUDE.md content if the file exists in the current directory.
+    let claude_md_path = std::path::Path::new(&cwd).join("CLAUDE.md");
+    if claude_md_path.is_file() {
+        match std::fs::read_to_string(&claude_md_path) {
+            Ok(content) => {
+                prompt.push_str("\n\n");
+                prompt.push_str(&content);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to read CLAUDE.md: {}", e);
+            }
+        }
+    }
+
+    prompt
 }
 
 /// Lightweight metadata written alongside conversation state for quick access
