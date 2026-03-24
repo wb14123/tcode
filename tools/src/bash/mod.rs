@@ -197,47 +197,46 @@ async fn read_process_output(
     stderr: Option<tokio::process::ChildStderr>,
     output: &mut String,
 ) -> Result<()> {
-    let stdout_handle = tokio::spawn(async move {
-        let mut lines = Vec::new();
-        if let Some(stdout) = stdout {
-            let reader = BufReader::new(stdout);
-            let mut line_reader = reader.lines();
-            while let Ok(Some(line)) = line_reader.next_line().await {
-                lines.push(line);
-            }
-        }
-        lines
+    use tokio_stream::{StreamExt, wrappers::LinesStream};
+
+    let stdout_stream = stdout.map(|s| {
+        LinesStream::new(BufReader::new(s).lines()).map(|l| l.map_err(anyhow::Error::from))
+    });
+    let stderr_stream = stderr.map(|s| {
+        LinesStream::new(BufReader::new(s).lines()).map(|l| l.map_err(anyhow::Error::from))
     });
 
-    let stderr_handle = tokio::spawn(async move {
-        let mut lines = Vec::new();
-        if let Some(stderr) = stderr {
-            let reader = BufReader::new(stderr);
-            let mut line_reader = reader.lines();
-            while let Ok(Some(line)) = line_reader.next_line().await {
-                lines.push(line);
+    // Merge both streams to preserve real interleaving order of stdout/stderr
+    match (stdout_stream, stderr_stream) {
+        (Some(out), Some(err)) => {
+            let mut merged = StreamExt::merge(out, err);
+            while let Some(line) = merged.next().await {
+                let line = line?;
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&line);
             }
         }
-        lines
-    });
-
-    let (stdout_result, stderr_result) = tokio::join!(stdout_handle, stderr_handle);
-
-    let stdout_lines = stdout_result.map_err(|e| anyhow!("stdout task failed: {}", e))?;
-    let stderr_lines = stderr_result.map_err(|e| anyhow!("stderr task failed: {}", e))?;
-
-    for line in &stdout_lines {
-        if !output.is_empty() {
-            output.push('\n');
+        (Some(mut stream), None) => {
+            while let Some(line) = stream.next().await {
+                let line = line?;
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&line);
+            }
         }
-        output.push_str(line);
-    }
-
-    for line in &stderr_lines {
-        if !output.is_empty() {
-            output.push('\n');
+        (None, Some(mut stream)) => {
+            while let Some(line) = stream.next().await {
+                let line = line?;
+                if !output.is_empty() {
+                    output.push('\n');
+                }
+                output.push_str(&line);
+            }
         }
-        output.push_str(line);
+        (None, None) => {}
     }
 
     Ok(())
@@ -247,7 +246,14 @@ async fn read_process_output(
 /// if the process group is still alive.
 async fn kill_process_group(pid: Option<u32>) {
     let Some(pid) = pid else { return };
-    let pgid = nix::unistd::Pid::from_raw(pid as i32);
+    let pid_i32 = match i32::try_from(pid) {
+        Ok(v) => v,
+        Err(_) => {
+            tracing::warn!("PID {} overflows i32; cannot kill process group", pid);
+            return;
+        }
+    };
+    let pgid = nix::unistd::Pid::from_raw(pid_i32);
 
     // First attempt: graceful shutdown via SIGTERM
     if let Err(e) = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM) {
