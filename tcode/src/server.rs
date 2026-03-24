@@ -87,16 +87,41 @@ impl Server {
         }
     }
 
-    pub async fn run(self) -> Result<()> {
-        // Clean up existing socket file
-        if self.socket_path.exists() {
-            std::fs::remove_file(&self.socket_path).with_context(|| {
-                format!("Failed to remove existing socket {:?}", self.socket_path)
-            })?;
-        }
+    pub async fn run(
+        self,
+        ready_tx: Option<tokio::sync::oneshot::Sender<anyhow::Result<()>>>,
+    ) -> Result<()> {
+        let bind_result: Result<UnixListener> = (|| {
+            // Clean up existing socket file
+            if self.socket_path.exists() {
+                std::fs::remove_file(&self.socket_path).with_context(|| {
+                    format!("Failed to remove existing socket {:?}", self.socket_path)
+                })?;
+            }
 
-        let listener = UnixListener::bind(&self.socket_path)
-            .with_context(|| format!("Failed to bind Unix socket at {:?}", self.socket_path))?;
+            UnixListener::bind(&self.socket_path)
+                .with_context(|| format!("Failed to bind Unix socket at {:?}", self.socket_path))
+        })();
+
+        let listener = match bind_result {
+            Ok(l) => {
+                if let Some(tx) = ready_tx {
+                    let _ = tx.send(Ok(())); // receiver dropped = main is gone, not actionable
+                }
+                l
+            }
+            Err(e) => {
+                if let Some(tx) = ready_tx {
+                    // Send actual error to main; recover error if receiver dropped
+                    return match tx.send(Err(e)) {
+                        Ok(()) => Ok(()),
+                        Err(Err(e)) => Err(e),
+                        Err(Ok(())) => unreachable!(),
+                    };
+                }
+                return Err(e);
+            }
+        };
 
         // Create conversation manager (creates permission manager internally)
         // Store project-level permissions under ~/.tcode/projects/<sha256(cwd)>/

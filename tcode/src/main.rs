@@ -389,7 +389,7 @@ async fn main() -> Result<()> {
                 cli.subagent_max_iterations,
                 cli.max_subagent_depth,
             );
-            server.run().await
+            server.run(None).await
         }
         Some(Commands::Edit { conversation_id }) => {
             let session_id = require_session(cli.session)?;
@@ -695,13 +695,18 @@ async fn run_unified_with_session(
         max_subagent_depth,
     );
 
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let server_handle = tokio::spawn(async move {
-        if let Err(e) = server.run().await {
+        if let Err(e) = server.run(Some(ready_tx)).await {
             eprintln!("[Server] Error: {}", e);
         }
     });
 
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    match ready_rx.await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => return Err(e.context("Server failed to start")),
+        Err(_) => return Err(anyhow::anyhow!("Server task terminated unexpectedly")),
+    }
 
     // Capture current pane ID before splitting (for layout placement).
     // Use $TMUX_PANE env var instead of `tmux display-message` to avoid a race condition:
