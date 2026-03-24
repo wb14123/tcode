@@ -215,11 +215,11 @@ impl BrowserClient {
         {
             Ok(_) => {
                 for _ in 0..50 {
-                    tokio::time::sleep(Duration::from_millis(100)).await;
                     if self.health_check().await {
                         tracing::info!("Browser-server restarted successfully");
                         return;
                     }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
                 tracing::warn!("Browser-server failed to become ready within 5s after restart");
             }

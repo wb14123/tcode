@@ -76,16 +76,6 @@ async fn main() -> anyhow::Result<()> {
     // Subscribe to messages (this must be done before sending to receive all messages)
     let mut msg_stream = client.subscribe();
 
-    // Spawn a task to print messages as they arrive
-    tokio::spawn(async move {
-        while let Some(result) = msg_stream.next().await {
-            match result {
-                Ok(msg) => print_message(&msg),
-                Err(e) => eprintln!("[Stream error: {:?}]", e),
-            }
-        }
-    });
-
     // Print welcome message and hints
     println!("╔════════════════════════════════════════════════════════════╗");
     println!("║       Interactive Conversation with AI Assistant           ║");
@@ -123,8 +113,19 @@ async fn main() -> anyhow::Result<()> {
         // Send the message
         client.send_chat(input).await?;
 
-        // Wait for the response to complete
-        tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+        // Drive the stream until the full LLM turn is complete
+        while let Some(result) = msg_stream.next().await {
+            match result {
+                Ok(msg) => {
+                    let done = matches!(*msg, Message::AssistantRequestEnd { .. });
+                    print_message(&msg);
+                    if done {
+                        break;
+                    }
+                }
+                Err(e) => eprintln!("[Stream error: {:?}]", e),
+            }
+        }
         println!();
     }
 

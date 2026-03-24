@@ -261,8 +261,19 @@ async fn kill_process_group(pid: Option<u32>) {
         return;
     }
 
-    // Give the process group 2 seconds to exit on its own
-    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Poll every 50ms for up to 2 seconds for the process group to exit on its own
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        // killpg with signal=None probes whether the process group still exists;
+        // ESRCH means it is gone — no need to escalate.
+        if let Err(nix::errno::Errno::ESRCH) = nix::sys::signal::killpg(pgid, None) {
+            return;
+        }
+        if std::time::Instant::now() >= deadline {
+            break;
+        }
+    }
 
     // Escalate to SIGKILL if still alive (ESRCH means it already exited)
     match nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL) {
