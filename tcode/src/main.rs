@@ -703,13 +703,12 @@ async fn run_unified_with_session(
 
     tokio::time::sleep(Duration::from_millis(200)).await;
 
-    // Capture current pane ID before splitting (for layout placement)
-    let current_pane_id = Command::new("tmux")
-        .args(["display-message", "-p", "#{pane_id}"])
-        .output()
-        .ok()
-        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-        .unwrap_or_default();
+    // Capture current pane ID before splitting (for layout placement).
+    // Use $TMUX_PANE env var instead of `tmux display-message` to avoid a race condition:
+    // display-message returns whichever pane has *focus*, which may be in a different tab
+    // if the user switches away quickly after starting tcode.  $TMUX_PANE is set per-pane
+    // at shell creation and always refers to the pane this process is running in.
+    let current_pane_id = std::env::var("TMUX_PANE").unwrap_or_default();
 
     // Layout: left-right split first (50/50), then split each column vertically.
     // Left column:  Display (top 70%) + Edit (bottom 30%)
@@ -747,6 +746,8 @@ async fn run_unified_with_session(
             "-v",
             "-p",
             "30",
+            "-t",
+            &current_pane_id,
             "-P",
             "-F",
             "#{pane_id}",
