@@ -74,13 +74,12 @@ local thinking_state = {
   last_highlighted_row = nil,  -- track last highlighted row to avoid re-highlighting
 }
 
--- Treesitter markdown regions: only user/assistant message text is rendered as markdown.
--- We track line ranges and use set_included_regions() to restrict treesitter parsing.
-local md_regions = {}   -- list of {start_row, end_row} (0-indexed)
-local ts_parser = nil   -- treesitter LanguageTree, set in setup_display
-local assistant_md = { started = false, start_row = nil, region_idx = nil }
-local ts_batch_depth = 0  -- >0 means we're in a batch; defer treesitter parsing
-local ts_dirty = false    -- set when update_ts_regions was deferred
+-- Tool output is wrapped in a long backtick-fenced code block to prevent
+-- markdown/treesitter from interpreting partial HTML, XML, JSON, etc. as
+-- markdown syntax. We use 10 backticks so tool output containing ``` won't
+-- accidentally close the fence.
+local TC_FENCE = '``````````'
+local tc_fence_opened = {}  -- tool_call_id -> true once opening fence has been inserted
 
 --- Show a y/n confirmation popup at the cursor and execute callback on confirm.
 local function confirm_popup(prompt, on_confirm)
@@ -113,37 +112,6 @@ local function confirm_popup(prompt, on_confirm)
   vim.keymap.set('n', 'n', close_popup, { buffer = popup_buf, nowait = true })
   vim.keymap.set('n', 'q', close_popup, { buffer = popup_buf, nowait = true })
   vim.keymap.set('n', '<Esc>', close_popup, { buffer = popup_buf, nowait = true })
-end
-
-local function flush_ts_regions(buf)
-  if not ts_parser then return end
-  if not vim.api.nvim_buf_is_valid(buf) then return end
-  local regions = {}
-  local total_lines = vim.api.nvim_buf_line_count(buf)
-  for _, r in ipairs(md_regions) do
-    local sr = math.max(0, r[1])
-    local er = math.min(r[2], total_lines - 1)
-    if er >= sr then
-      local last_line = vim.api.nvim_buf_get_lines(buf, er, er + 1, false)[1] or ''
-      table.insert(regions, { { sr, 0, er, #last_line } })
-    end
-  end
-  pcall(function()
-    ts_parser:set_included_regions(regions)
-    ts_parser:parse(true)
-  end)
-  ts_dirty = false
-  -- Notify markdown rendering plugins (e.g. render-markdown.nvim) that the buffer
-  -- changed so they re-query the (now updated) treesitter regions and re-render.
-  pcall(vim.api.nvim_exec_autocmds, 'TextChanged', { buffer = buf })
-end
-
-local function update_ts_regions(buf)
-  if ts_batch_depth > 0 then
-    ts_dirty = true
-    return
-  end
-  flush_ts_regions(buf)
 end
 
 -- Render a label line with optional timestamp as virtual text
@@ -413,28 +381,10 @@ local function render_event(buf, ns, event)
   local variant, data = next(event)
   if not variant then return end
 
-  -- Auto-close an unclosed markdown region when a non-assistant event arrives
-  if assistant_md.started
-      and variant ~= 'AssistantMessageChunk'
-      and variant ~= 'AssistantMessageEnd'
-      and variant ~= 'AssistantThinkingChunk' then
-    if assistant_md.region_idx then
-      md_regions[assistant_md.region_idx][2] = vim.api.nvim_buf_line_count(buf) - 1
-      update_ts_regions(buf)
-    end
-    assistant_md.started = false
-    assistant_md.start_row = nil
-    assistant_md.region_idx = nil
-  end
-
   if variant == 'UserMessage' then
     render_label(buf, ns, '>>> USER', 'TCodeUser', data)
-    local start_row = vim.api.nvim_buf_line_count(buf)
     local content_lines = vim.split(data.content, '\n', { plain = true })
     append_lines(buf, content_lines)
-    local end_row = vim.api.nvim_buf_line_count(buf) - 1
-    table.insert(md_regions, { start_row, end_row })
-    update_ts_regions(buf)
 
   elseif variant == 'AssistantMessageStart' then
     render_label(buf, ns, '>>> ASSISTANT', 'TCodeAssistant', data)
@@ -461,26 +411,11 @@ local function render_event(buf, ns, event)
     if thinking_state.is_thinking then
       collapse_thinking(buf, ns)
     end
-    if not assistant_md.started then
-      assistant_md.start_row = vim.api.nvim_buf_line_count(buf) - 1
-      assistant_md.started = true
-      table.insert(md_regions, { assistant_md.start_row, assistant_md.start_row })
-      assistant_md.region_idx = #md_regions
-    end
     append_text(buf, data.content)
-    md_regions[assistant_md.region_idx][2] = vim.api.nvim_buf_line_count(buf) - 1
-    update_ts_regions(buf)
 
   elseif variant == 'AssistantMessageEnd' then
     if thinking_state.is_thinking then
       collapse_thinking(buf, ns)
-    end
-    if assistant_md.started then
-      md_regions[assistant_md.region_idx][2] = vim.api.nvim_buf_line_count(buf) - 1
-      update_ts_regions(buf)
-      assistant_md.started = false
-      assistant_md.start_row = nil
-      assistant_md.region_idx = nil
     end
     render_info(buf, ns, data, nil)
 
@@ -504,9 +439,12 @@ local function render_event(buf, ns, event)
         virt_text_pos = 'overlay',
       })
     end
-    append_lines(buf, { '' })
+    -- Wrap tool output in a fenced code block to prevent markdown parser from
+    -- interpreting partial HTML/XML, JSON, etc. as markdown syntax.
+    append_lines(buf, { TC_FENCE, '' })
     -- Place a range extmark covering label through current last line
     if data.tool_call_id then
+      tc_fence_opened[data.tool_call_id] = true
       local last_line = vim.api.nvim_buf_line_count(buf) - 1
       local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, label_line, 0, {
         end_row = last_line,
@@ -533,10 +471,19 @@ local function render_event(buf, ns, event)
   elseif variant == 'ToolMessageEnd' then
     local insert_row = nil
     if data.tool_call_id then
-      -- Find the end_row of this tool's extmark to insert within its section
+      -- Close the fenced code block for tool output
+      if tc_fence_opened[data.tool_call_id] then
+        local end_row = get_tc_extmark_end_row(buf, data.tool_call_id)
+        if end_row then
+          insert_lines_at(buf, end_row + 1, { TC_FENCE })
+          extend_tc_extmark(buf, data.tool_call_id, end_row + 1)
+        end
+        tc_fence_opened[data.tool_call_id] = nil
+      end
+      -- Find the row *after* the closing fence to insert info outside the code block
       local end_row = get_tc_extmark_end_row(buf, data.tool_call_id)
       if end_row then
-        insert_row = end_row
+        insert_row = end_row + 1
       end
       -- Update label with final status
       if tc_label_marks[data.tool_call_id] then
@@ -858,9 +805,6 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
 
       vim.bo[buf].modifiable = true
 
-      -- Batch mode: defer treesitter parsing until after all events are processed
-      ts_batch_depth = ts_batch_depth + 1
-
       for _, line in ipairs(lines) do
         if line ~= '' then
           local ok, event = pcall(vim.json.decode, line)
@@ -872,11 +816,6 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
             render_event(buf, ns, event)
           end
         end
-      end
-
-      ts_batch_depth = ts_batch_depth - 1
-      if ts_batch_depth == 0 and ts_dirty then
-        flush_ts_regions(buf)
       end
 
       if win ~= -1 and was_at_bottom then
@@ -943,19 +882,9 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
     '%#TCodeStatusLine# TCode: %{g:tcode_status} %=')
   local ns = vim.api.nvim_create_namespace('tcode')
 
-  -- Restrict treesitter markdown parsing to user/assistant message regions only.
-  -- get_parser() returns the cached LanguageTree for this buffer+language, which is
-  -- shared with any plugins (e.g. render-markdown.nvim) that also call get_parser().
-  -- set_included_regions() limits parsing (and thus plugin rendering) to message text,
-  -- preventing tool output (partial HTML, JSON, etc.) from being treated as markdown.
-  pcall(function()
-    ts_parser = vim.treesitter.get_parser(buf, 'markdown')
-    ts_parser:set_included_regions({})
-  end)
-
-  -- Set filetype *after* restricting treesitter regions so that plugins activated
-  -- by the FileType autocmd (e.g. render-markdown.nvim) share the region-restricted
-  -- parser and won't try to render tool output as markdown.
+  -- Mark the buffer as markdown so treesitter and plugins (e.g. render-markdown.nvim)
+  -- render the whole buffer. Tool output is wrapped in fenced code blocks to prevent
+  -- partial HTML/XML/JSON from corrupting the markdown parse.
   vim.bo[buf].filetype = 'markdown'
 
   local check_updates = create_jsonl_reader(M.display_file, buf, ns)
