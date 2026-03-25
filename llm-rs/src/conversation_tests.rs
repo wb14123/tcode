@@ -17,7 +17,7 @@ mod tests {
     fn conversation_state_serde_roundtrip() -> anyhow::Result<()> {
         let state = ConversationState {
             id: "test-conv-1".to_string(),
-            model: "claude-opus-4-5".to_string(),
+            model: "claude-opus-4-6".to_string(),
             llm_msgs: vec![
                 LLMMessage::System("You are helpful.".to_string()),
                 LLMMessage::User("Hello".to_string()),
