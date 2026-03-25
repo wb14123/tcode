@@ -63,14 +63,10 @@ fn walk_glob(search_dir: &Path, pattern: &str) -> Result<Vec<(PathBuf, SystemTim
     Ok(files)
 }
 
-/// Fast file pattern matching tool that works with any codebase size.
-/// Supports glob patterns like "**/*.js" or "src/**/*.ts".
-/// Returns matching file paths sorted by modification time.
-/// Use this tool when you need to find files by name patterns.
-/// When you are doing an open-ended search that may require multiple rounds of globbing
-/// and grepping, delegate to a subagent instead.
-/// You have the capability to call multiple tools in a single response. It is always
-/// better to speculatively perform multiple searches as a batch that are potentially useful.
+/// Fast file pattern matching. Supports glob patterns like "**/*.js" or "src/**/*.ts".
+/// Returns matching paths sorted by mod time. Use to find files by name.
+/// Delegate open-ended multi-round searches to a subagent.
+/// Batch multiple speculative searches in a single response for efficiency.
 #[tool]
 pub fn glob(
     ctx: ToolContext,

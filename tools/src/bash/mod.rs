@@ -18,34 +18,13 @@ use command_permission::check_bash_permission;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 
-/// Executes a given bash command with optional timeout, ensuring proper handling and security measures.
+/// Terminal operations only (git, npm, docker, etc.). NOT for file ops — use dedicated tools.
 ///
-/// IMPORTANT: This tool is for terminal operations like git, npm, docker, etc.
-/// DO NOT use it for file operations (reading, writing, editing, searching, finding files)
-/// - use the specialized tools for this instead.
-///
-/// Before executing the command, please follow these steps:
-///
-/// 1. Directory Verification:
-///    - If the command will create new directories or files, first use `ls` to verify
-///      the parent directory exists and is the correct location
-///
-/// 2. Command Execution:
-///    - Always quote file paths that contain spaces with double quotes
-///    - After ensuring proper quoting, execute the command.
-///    - Capture the output of the command.
-///
-/// Usage notes:
-///   - The command argument is required.
-///   - You can specify an optional timeout in milliseconds. If not specified, commands
-///     will time out after 120000ms (2 minutes).
-///   - It is very helpful if you write a clear, concise description of what this command
-///     does in 5-10 words.
-///   - AVOID using `cd <directory> && <command>`. Use the `workdir` parameter instead.
-///   - Avoid using Bash with `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, or
-///     `echo` — use dedicated tools instead.
-///   - When issuing multiple commands: use parallel tool calls for independent commands,
-///     '&&' for sequential dependent commands, ';' for sequential independent commands.
+/// - Before creating files/dirs, verify parent dir exists. Quote paths with spaces.
+/// - Optional timeout, default 120000ms (2 min). Always provide a 5-10 word description.
+/// - Use `workdir` instead of `cd <dir> && <command>`.
+/// - Never use bash for `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, `echo`.
+/// - Multiple commands: parallel tool calls for independent; `&&` for sequential dependent; `;` for sequential independent.
 #[tool]
 pub fn bash(
     ctx: ToolContext,

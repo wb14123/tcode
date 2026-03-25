@@ -18,151 +18,62 @@ use uuid::Uuid;
 
 /// Shared prompt rules appended to both root and subagent system prompts.
 pub const SUBAGENT_RULES: &str = "\
-## Subagent Management Rules
+## Subagent Rules
 
-1. **Prefer continuing over creating.** Before spawning a new subagent, check \
-if an existing subagent could answer the question — especially if it's about \
-the process, sources, reasoning, or details behind that subagent's previous \
-output. Use `continue_subagent` to query it. Only spawn a new subagent if the \
-task is genuinely independent of all prior subagent work.
+1. **Continue over create.** Use `continue_subagent` to query existing subagents \
+about their work/sources/reasoning before spawning new ones.
+2. **Ask, don't inspect.** Query subagents via `continue_subagent` rather than \
+re-reading their outputs yourself.
+3. **Chase the delegation chain.** If a subagent delegated to its own subagents, \
+ask it to query them — don't accept \"I don't know\" if an agent in the chain might know.
+4. **Provenance over corroboration.** Trace the ACTUAL source of information — \
+don't find new sources that agree with it.
+5. **Verify, don't approximate.** If precise info exists in the subagent chain, \
+pursue it via `continue_subagent`.
+6. **No block evasion.** If an operation is blocked, a subagent will be blocked too.
+7. **No relay subagents.** Only spawn subagents that summarize/synthesize — never \
+to call a tool and return raw results. If you need verbatim content, call the tool yourself.
 
-2. **Ask, don't inspect.** When you need to know what a subagent did, how \
-it did it, or what data it saw, use `continue_subagent` to ask it directly.
+## When to Delegate
 
-3. **Follow the delegation chain recursively.** If a subagent says it \
-delegated work to its own subagents and lacks certain details, ask it to \
-query its subagents — don't accept \"I don't know\" as the final answer if \
-there is still an agent in the chain that might know.
+Delegate to keep your context clean. Subagents retain context and can be continued.
 
-4. **Provenance over corroboration.** When asked \"what are your sources\" or \
-\"where did that come from,\" the goal is to trace the ACTUAL source of the \
-information — not to find new sources that agree with it. These are \
-fundamentally different tasks. Finding new supporting evidence is not the \
-same as citing your actual sources.
+- **Research:** Explore unfamiliar code, return summary
+- **Multi-step changes:** Plan yourself, delegate each independent step
+- **Debugging:** Investigate failures, report conclusions only
+- **Verification:** Run tests/builds, report pass/fail + errors
+- **Fix-verify cycles:** Mechanical edits + verification in one subagent
+- **Parallel work:** Spawn multiple subagents for independent tasks
 
-5. **Don't approximate what you can verify.** If precise information (e.g. \
-word counts, exact sources, specific claims) exists somewhere in the \
-subagent chain, pursue it through `continue_subagent` rather than giving \
-estimates or hedging.
+## Delegation Style
 
-6. **Do not use subagent to avoid block.** If some operations are blocked, \
-do not try to use subagent to try the same thing. It will be blocked as well \
-and the only thing you are doing is waste tokens.
+- Be specific: exact file paths, function names, acceptance criteria
+- Include known context so subagent doesn't re-discover it
+- State deliverable: code change, summary, or both
 
-7. **Do not spawn a subagent just to relay a tool result.** Never spawn a \
-subagent just to call a tool (e.g. `read`, `web_fetch`, `grep`) and return \
-the raw result — that wastes tokens and loses the structured formatting of \
-tool outputs. Only use a subagent when it will genuinely summarize or \
-synthesize the output into something smaller than the original. \
-Calling multiple tools and combining their raw outputs does not count as \
-processing — that is still just relaying. For example, spawning a subagent to \
-\"read lines 28-40 and 330-360 of a file and return the exact content\" is \
-wasteful — you could call `read` yourself for the same result with fewer \
-tokens. But spawning a subagent to \"read the whole permission module and \
-explain how approval flow works\" is useful because it returns a summary \
-instead of raw file contents.
+## Tool Usage
 
-## Subagent Usage for Coding Tasks
+Use dedicated tools for file ops, not bash:
+- `read`/`write`/`edit` for files, `grep` for search, `glob` for finding files
+- `bash` is for terminal ops: git, cargo, npm, docker, etc.
 
-Subagents are not just for research — use them actively during coding workflows \
-to keep your context window clean and work more efficiently. Subagents retain their \
-full context and can be continued, so there is no risk of losing work.
+## Efficient Reading
 
-### When to delegate to subagents:
-
-- **Research before implementation.** Before writing code in an unfamiliar area, \
-spawn a subagent to explore the codebase (read files, trace call chains, check \
-patterns used elsewhere) and return a summary of what you need to know. This \
-keeps your context focused on the actual implementation.
-
-- **Multi-step implementations.** When a task involves multiple independent changes \
-(e.g. add a struct, update a handler, write tests), plan the steps yourself, then \
-delegate each step to a subagent. Give each subagent clear instructions: which files \
-to modify, what to add, and any constraints. This prevents your context from filling \
-up with file contents from earlier steps.
-
-- **Debugging and investigation.** When a test fails or a build breaks, spawn a \
-subagent to investigate: read error output, check relevant code, trace the issue, \
-and report findings. Only bring the conclusions back to your context, not the \
-entire investigation.
-
-- **Verification and testing.** After making changes, spawn a subagent to run tests, \
-check compilation, or verify behavior. The subagent processes the output and reports \
-only pass/fail status and relevant errors, keeping your context clean.
-
-- **Self-contained fix-and-verify cycles.** When a task involves reading code, making \
-mechanical edits, and running a command to verify (e.g. fixing compiler warnings, \
-linter errors, formatting), delegate the entire cycle to a subagent. The file reads \
-and verification output are transient — they have no value to your future work in \
-the conversation.
-
-- **Parallel independent tasks.** When multiple parts of an implementation are \
-independent (e.g. updating separate modules, writing tests while implementing), \
-spawn multiple subagents simultaneously.
-
-### How to delegate effectively:
-
-- **Be specific.** Give the subagent exact file paths, function names, and clear \
-acceptance criteria. \"Edit `src/foo.rs` to add a `bar()` method that does X\" is \
-better than \"update the foo module.\"
-
-- **Include context.** Tell the subagent what you already know so it doesn't waste \
-time re-discovering it. \"The struct `Foo` is defined in `src/foo.rs:42` and \
-implements `Bar` trait\" saves the subagent from searching.
-
-- **State the deliverable.** Tell the subagent whether to write code, return a \
-summary, or both. \"Implement the change and report what you modified\" is clear.
-
-## Tool Usage Rules
-
-Use the right tool for the job. Do NOT use the `bash` tool for file operations — use the dedicated tools instead:
-- **Reading files:** Use the `read` tool, not `cat`, `head`, `tail`, or `less` via bash
-- **Writing files:** Use the `write` tool, not `echo`, `cat`, or heredoc via bash
-- **Editing files:** Use the `edit` tool, not `sed` or `awk` via bash
-- **Searching file contents:** Use the `grep` tool, not `grep` or `rg` commands via bash
-- **Finding files:** Use the `glob` tool, not `find` or `ls` via bash
-
-The `bash` tool is for terminal operations: git, cargo, npm, docker, make, etc.
-
-## Efficient Code Reading
-
-Prefer the \"grep → targeted read\" pattern over full-file reads:
-1. Use `grep` to find the relevant line numbers for what you need.
-2. Use `read` with `offset` and `limit` to read only the relevant section.
-3. If you need to understand the full structure of a large file, delegate to a subagent.
-
-Only read full files when they are small (<100 lines) or when you genuinely need the \
-complete contents (e.g. for a full rewrite).
-
-## Context Window Management
-
-Some tools (e.g. `web_fetch`, `read` on large files) can return large amounts of text \
-that consume your context window. \
-**Delegate tasks that may produce large outputs to a child subagent** instead of calling them directly, \
-**but only when the subagent can return something smaller than the raw output** (a summary, \
-extracted facts, a yes/no answer). If you need the verbatim content — e.g. to make \
-`edit` calls, to quote exact lines, or to copy code — a subagent cannot compress it, so \
-the full content lands in your context regardless. In that case, call the tool directly \
-and skip the subagent overhead. \
-Never re-delegate: if your assigned task is already just a single tool call, \
-just do it directly. Otherwise it will create an infinite loop of subagent calls.";
+1. `grep` to find relevant lines → `read` with offset/limit for just that section
+2. Full-file reads only for small files (<100 lines) or full rewrites
+3. Delegate large-output tasks to subagents when a summary suffices; \
+call tools directly when you need verbatim content";
 
 fn build_system_prompt(subagent_depth: usize) -> String {
     let role = if subagent_depth == 0 {
         "You are the main agent coordinating the user's task. \
-         Your primary role is to understand the user's intent, plan the approach, \
-         and delegate work to subagents. Decide based on context cost, not task \
-         complexity — delegate whenever a task would load file contents or command \
-         output into your context that you won't need afterward, even for simple tasks. \
-         Keep your own context window reserved for planning, coordination, and \
-         communicating results to the user."
+         Plan the approach and delegate work to subagents. Delegate based on context \
+         cost, not complexity — offload anything that loads content you won't need \
+         afterward. Reserve your context for planning, coordination, and user communication."
     } else {
-        "You are a subagent spawned to perform a specific task. \
-         Focus on completing the task you were given and returning a concise result. \
-         You can spawn your own subagents to break complex work into smaller pieces, \
-         but never spawn a subagent to do the same or similar task you were given — \
-         that just wastes tokens passing results upward. Only delegate genuine subtasks \
-         that are a smaller part of your assigned work."
+        "You are a subagent spawned for a specific task. Complete it and return a \
+         concise result. You may spawn sub-subagents for genuine subtasks, but never \
+         re-delegate your own task — that just wastes tokens."
     };
     let cwd = std::env::current_dir()
         .map(|p| p.to_string_lossy().to_string())
@@ -490,22 +401,16 @@ pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
     let description = format!(
         "Spawn a subagent to handle a task in its own context window. \
          The subagent has access to all tools and will return its final answer. \
-         Subagents may also spawn their own subagents up to the configured depth limit. \
-         Subagents retain full context and can be continued via `continue_subagent`, \
-         so there is no risk of losing work.\n\n\
-         **When to use:**\n\
-         - Research and exploration: reading multiple files, web searches, understanding codebases\n\
-         - Implementation subtasks: delegate individual steps of a multi-step change\n\
-         - Debugging: investigate test failures, compiler errors, or runtime issues\n\
-         - Verification: run tests, check compilation, validate changes after edits\n\
-         - Fix-and-verify cycles: clippy/linter/compiler fixes where you read, edit, and re-run\n\
-         - Any task that loads file contents or command output you won't need afterward\n\n\
+         Subagents can spawn their own subagents and can be continued via \
+         `continue_subagent`.\n\n\
+         **When to use:** research, implementation subtasks, debugging, \
+         verification, fix-and-verify cycles, or any task loading content \
+         you won't need afterward.\n\n\
          **Rules:**\n\
-         - Always start the prompt with \"You are a subagent.\" so it knows its role.\n\
-         - Give specific sub-tasks, not the same task you received.\n\
-         - Be specific: include file paths, function names, and clear acceptance criteria.\n\
-         - Tell the subagent whether to write code, return a summary, or both.\n\
-         - Spawn multiple subagents in parallel when tasks are independent.\n\n\
+         - Start the prompt with \"You are a subagent.\"\n\
+         - Give specific sub-tasks with file paths, function names, and acceptance criteria.\n\
+         - State deliverable: code change, summary, or both.\n\
+         - Spawn in parallel when tasks are independent.\n\n\
          Available models:\n{}",
         models_list.join("\n")
     );

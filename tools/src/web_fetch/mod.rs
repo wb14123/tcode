@@ -76,18 +76,11 @@ fn format_result(
     }
 }
 
-/// Fetch a web page and return cleaned HTML content extracted by Readability.
-///
+/// Fetch a web page and return cleaned content extracted by Readability.
 /// Default max_length is 20000 chars. Use skip_chars for pagination.
-/// For large pages: create separate sub agents each with a different skip_chars
-/// value to read different portions in parallel, and have each sub agent summarize
-/// its own chunk for better context management.
-///
-/// Note for LLM agent: When using this tool, you should prefer to create a new sub agent to get
-/// useful information instead of keep the whole page content in the main conversation.
-/// If the request is blocked, DO NOT try to use sub agent to fetch it again since it will fail as
-/// well. If you are given a task just to get info from the URL, do not try to use other ways
-/// to get the content if blocked, just say so in the response.
+/// For large pages, spawn parallel sub agents each with a different skip_chars value; have each summarize its chunk.
+/// Prefer using a sub agent to avoid keeping the full page in the main context.
+/// If blocked, do NOT retry via sub agent — it will also fail. Just say so.
 #[tool(timeout_ms = 300000)]
 pub fn web_fetch(
     ctx: ToolContext,

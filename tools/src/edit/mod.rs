@@ -41,22 +41,14 @@ fn build_tcodediff_preview(
 
 /// Performs exact string replacements in files.
 ///
-/// Usage:
-/// - You must use your `Read` tool at least once in the conversation before editing.
-///   This tool will error if you attempt an edit without reading the file.
-/// - You do NOT need to re-read a file before each edit if you already have the relevant
-///   section in context. One read of the relevant section per file is sufficient.
-/// - When editing text from Read tool output, ensure you preserve the exact indentation
-///   (tabs/spaces) as it appears in the line content (inside the `<line>` tags).
-///   Never include XML tags or line number attributes in the old_string or new_string.
-/// - ALWAYS prefer editing existing files in the codebase. NEVER write new files unless
-///   explicitly required.
+/// - Must use `Read` tool at least once before editing (tool will error otherwise).
+/// - No need to re-read before each edit if the relevant section is already in context.
+/// - Preserve exact indentation (tabs/spaces) from inside `<line>` tags; never include XML tags or line number attributes in old_string/new_string.
+/// - ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.
 /// - Only use emojis if the user explicitly requests it.
-/// - The edit will FAIL if `old_string` is not found in the file.
-/// - The edit will FAIL if `old_string` is not unique in the file. Either provide
-///   a larger string with more surrounding context to make it unique or use `replace_all`
-///   to change every instance of `old_string`.
-/// - Use `replace_all` for replacing and renaming strings across the file.
+/// - FAIL if `old_string` not found in the file.
+/// - FAIL if `old_string` not unique — provide more context or use `replace_all`.
+/// - Use `replace_all` for replacing/renaming across the file.
 #[tool]
 pub fn edit(
     ctx: ToolContext,

@@ -135,18 +135,11 @@ fn search_grep(
     Ok((all_file_matches, total_match_count))
 }
 
-/// Fast content search tool that works with any codebase size.
-/// Searches file contents using regular expressions.
-/// Supports full regex syntax (eg. "log.*Error", "function\s+\w+", etc.)
-/// Filter files by pattern with the include parameter (eg. "*.js", "*.{ts,tsx}")
-/// Returns file paths and line numbers with at least one match sorted by modification time.
-/// Results are capped at 100 matches. If truncated, refine your pattern or use the include
-/// parameter to narrow the search. Individual matching lines are truncated at 2000 characters.
-/// Use this tool when you need to find files containing specific patterns.
-/// If you need to identify/count the number of matches within files, use the Bash tool
-/// with `rg` (ripgrep) directly. Do NOT use `grep`.
-/// When you are doing an open-ended search that may require multiple rounds of globbing
-/// and grepping, delegate to a subagent instead.
+/// Fast regex content search. Supports full regex syntax (eg. "log.*Error", "function\s+\w+").
+/// Filter by file pattern via include (eg. "*.js", "*.{ts,tsx}").
+/// Returns file paths + line numbers sorted by mod time. Capped at 100 matches; lines truncated at 2000 chars.
+/// For counting/identifying matches within files, use Bash with `rg` — do NOT use `grep`.
+/// Delegate open-ended multi-round searches to a subagent.
 #[tool]
 pub fn grep(
     ctx: ToolContext,

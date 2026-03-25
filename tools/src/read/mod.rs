@@ -230,35 +230,22 @@ async fn read_directory(path: &Path) -> Result<String> {
     ))
 }
 
-/// Read a file or directory from the local filesystem. If the path does not exist, an error is returned.
+/// Read a file or directory from the local filesystem. Error if path doesn't exist.
 ///
-/// Usage:
-/// - The file_path parameter should be an absolute path.
-/// - By default, this tool returns up to 500 lines from the start of the file.
-/// - The offset parameter is the line number to start from (1-indexed).
-/// - To read later sections, call this tool again with a larger offset.
-/// - For files over ~200 lines, prefer using `grep` first to locate the relevant lines,
-///   then read only those lines with `offset` and `limit` to avoid consuming unnecessary context.
-/// - When you only need a small portion of a file (e.g. checking a function signature),
-///   use a smaller `max_read_chars` (e.g. 5000-10000) or a targeted `offset`+`limit`.
-/// - If you are unsure of the correct file path, use the glob tool to look up filenames by glob pattern.
-/// - Call this tool in parallel when you know there are multiple files you want to read.
-/// - Avoid tiny repeated slices (30 line chunks). If you need more context, read a larger window.
+/// - file_path must be absolute. Returns up to 500 lines from start by default.
+/// - offset is the 1-indexed line number to start from.
+/// - For files over ~200 lines, use `grep` first to locate lines, then read with offset/limit.
+/// - For small portions, use smaller `max_read_chars` (5000-10000) or targeted offset+limit.
+/// - Use glob tool if unsure of path. Call in parallel for multiple files.
+/// - Avoid tiny repeated slices (30 line chunks) — read a larger window instead.
 ///
-/// Output format:
-/// - Files are returned as XML with line numbers streamed incrementally.
-/// - Each line is wrapped in a `<line n="...">` tag with its 1-indexed line number.
-/// - When a line is read from an offset or truncated, the `<line>` tag includes `chars_start` and `chars_end` attributes showing the character range returned. If the line was truncated (by char cap or because it was too long to fully read), the tag also includes `truncated="true"`.
-/// - Directories are returned as: `<directory path="..."><entries>name\nsubdir/\n...</entries></directory>`
-///   Subdirectories have a trailing "/".
+/// Output: XML `<line n="...">` tags (1-indexed). Lines read from offset or truncated include
+/// `chars_start`/`chars_end`; truncated lines also include `truncated="true"`.
+/// Directories: `<directory path="..."><entries>name\nsubdir/\n...</entries></directory>` (subdirs trailing "/").
 ///
-/// Character cap:
-/// - By default, at most 20000 characters are read from the file. Use max_read_chars to adjust (up to 50000).
-/// - If the character cap is reached mid-line, the last line is truncated. Its `<line>` tag will include `chars_start`, `chars_end`, and `truncated="true"` showing exactly which portion of the line was returned.
-///
-/// Pagination:
-/// - Use offset and limit for line-based pagination.
-/// - Use first_line_offset to skip characters within the first returned line (for reading very long lines across multiple passes).
+/// Char cap: 20000 by default (max_read_chars adjustable up to 50000). Mid-line truncation adds
+/// `chars_start`, `chars_end`, `truncated="true"` to the line tag.
+/// Pagination: offset/limit for lines; first_line_offset to skip chars within the first line.
 #[tool]
 pub fn read(
     ctx: ToolContext,
