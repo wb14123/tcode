@@ -133,6 +133,9 @@ local function flush_ts_regions(buf)
     ts_parser:parse(true)
   end)
   ts_dirty = false
+  -- Notify markdown rendering plugins (e.g. render-markdown.nvim) that the buffer
+  -- changed so they re-query the (now updated) treesitter regions and re-render.
+  pcall(vim.api.nvim_exec_autocmds, 'TextChanged', { buffer = buf })
 end
 
 local function update_ts_regions(buf)
@@ -810,6 +813,7 @@ local function create_display_buffer(name, statusline)
   vim.wo.relativenumber = false
   vim.wo.signcolumn = 'no'
   vim.wo.statusline = statusline
+  vim.bo.filetype = 'markdown'
 
   return vim.api.nvim_get_current_buf()
 end
@@ -940,11 +944,13 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
     '%#TCodeStatusLine# TCode: %{g:tcode_status} %=')
   local ns = vim.api.nvim_create_namespace('tcode')
 
-  -- Use treesitter to render only user/assistant content as markdown.
-  -- set_included_regions() restricts parsing to tracked line ranges.
+  -- Restrict treesitter markdown parsing to user/assistant message regions only.
+  -- get_parser() returns the cached LanguageTree for this buffer+language, which is
+  -- shared with any plugins (e.g. render-markdown.nvim) that also call get_parser().
+  -- set_included_regions() limits parsing (and thus plugin rendering) to message text,
+  -- preventing tool output (partial HTML, JSON, etc.) from being treated as markdown.
   pcall(function()
     ts_parser = vim.treesitter.get_parser(buf, 'markdown')
-    vim.treesitter.start(buf, 'markdown')
     ts_parser:set_included_regions({})
   end)
 
