@@ -813,7 +813,6 @@ local function create_display_buffer(name, statusline)
   vim.wo.relativenumber = false
   vim.wo.signcolumn = 'no'
   vim.wo.statusline = statusline
-  vim.bo.filetype = 'markdown'
 
   return vim.api.nvim_get_current_buf()
 end
@@ -953,6 +952,11 @@ function M.setup_display(display_file, status_file, session_id, exe_path)
     ts_parser = vim.treesitter.get_parser(buf, 'markdown')
     ts_parser:set_included_regions({})
   end)
+
+  -- Set filetype *after* restricting treesitter regions so that plugins activated
+  -- by the FileType autocmd (e.g. render-markdown.nvim) share the region-restricted
+  -- parser and won't try to render tool output as markdown.
+  vim.bo[buf].filetype = 'markdown'
 
   local check_updates = create_jsonl_reader(M.display_file, buf, ns)
   M.display_watcher = watch_file(M.display_file, check_updates)
