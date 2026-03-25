@@ -38,7 +38,7 @@ enum Provider {
 impl Provider {
     fn default_model(&self) -> &'static str {
         match self {
-            Provider::Claude => "claude-opus-4-6",
+            Provider::Claude => "claude-opus-4-5",
             Provider::OpenAi => "gpt-5-nano",
             Provider::OpenRouter => "deepseek/deepseek-r1",
         }

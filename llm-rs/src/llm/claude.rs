@@ -469,7 +469,7 @@ impl LLM for Claude {
     fn available_models(&self) -> Vec<ModelInfo> {
         vec![
             ModelInfo {
-                id: "claude-opus-4-6".into(),
+                id: "claude-opus-4-5".into(),
                 description: "Most capable, best for complex tasks".into(),
             },
             ModelInfo {
