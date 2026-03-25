@@ -8,15 +8,15 @@ use crate::tty_stdio;
 
 pub struct DisplayClient {
     session: Session,
-    lua_path: PathBuf,
+    lua_dir: PathBuf,
     session_id: String,
 }
 
 impl DisplayClient {
-    pub fn new(session: Session, lua_path: PathBuf, session_id: String) -> Self {
+    pub fn new(session: Session, lua_dir: PathBuf, session_id: String) -> Self {
         Self {
             session,
-            lua_path,
+            lua_dir,
             session_id,
         }
     }
@@ -32,7 +32,7 @@ impl DisplayClient {
 
         // Spawn neovim
         let mut nvim = spawn_nvim(
-            &self.lua_path,
+            &self.lua_dir,
             &display_file,
             &status_file,
             &self.session_id,
@@ -51,7 +51,7 @@ impl DisplayClient {
 }
 
 fn spawn_nvim(
-    lua_path: &Path,
+    lua_dir: &Path,
     display_file: &Path,
     status_file: &Path,
     session_id: &str,
@@ -59,7 +59,7 @@ fn spawn_nvim(
 ) -> Result<Child> {
     let lua_cmd = format!(
         "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}')",
-        lua_path.display(),
+        lua_dir.display(),
         display_file.display(),
         status_file.display(),
         session_id,

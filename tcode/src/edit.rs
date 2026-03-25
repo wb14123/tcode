@@ -17,17 +17,17 @@ use crate::tty_stdio;
 
 pub struct EditClient {
     session: Session,
-    lua_path: PathBuf,
+    lua_dir: PathBuf,
     /// When set, messages are routed to a specific subagent conversation.
     /// `/done` sends `UserRequestEnd` instead of `SendMessage`.
     conversation_id: Option<String>,
 }
 
 impl EditClient {
-    pub fn new(session: Session, lua_path: PathBuf, conversation_id: Option<String>) -> Self {
+    pub fn new(session: Session, lua_dir: PathBuf, conversation_id: Option<String>) -> Self {
         Self {
             session,
-            lua_path,
+            lua_dir,
             conversation_id,
         }
     }
@@ -86,7 +86,7 @@ impl EditClient {
             .unwrap_or("unknown")
             .to_string();
         let mut nvim = spawn_nvim(
-            &self.lua_path,
+            &self.lua_dir,
             &msg_file,
             is_subagent,
             &session_id,
@@ -182,7 +182,7 @@ fn is_msg_file_event(event: &Event, msg_file: &PathBuf) -> bool {
 }
 
 fn spawn_nvim(
-    lua_path: &Path,
+    lua_dir: &Path,
     msg_file: &Path,
     is_subagent: bool,
     session_id: &str,
@@ -190,7 +190,7 @@ fn spawn_nvim(
 ) -> Result<Child> {
     let lua_cmd = format!(
         "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_edit('{}', {}, '{}', '{}')",
-        lua_path.display(),
+        lua_dir.display(),
         msg_file.display(),
         is_subagent,
         session_id,

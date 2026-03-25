@@ -8,15 +8,15 @@ use crate::tty_stdio;
 
 pub struct ToolCallDisplayClient {
     session: Session,
-    lua_path: PathBuf,
+    lua_dir: PathBuf,
     tool_call_id: String,
 }
 
 impl ToolCallDisplayClient {
-    pub fn new(session: Session, lua_path: PathBuf, tool_call_id: String) -> Self {
+    pub fn new(session: Session, lua_dir: PathBuf, tool_call_id: String) -> Self {
         Self {
             session,
-            lua_path,
+            lua_dir,
             tool_call_id,
         }
     }
@@ -44,7 +44,7 @@ impl ToolCallDisplayClient {
         let saved_termios = nix::sys::termios::tcgetattr(std::io::stdin()).ok();
 
         // Spawn neovim for tool call display
-        let mut nvim = spawn_nvim(&self.lua_path, &tool_call_file, &status_file)?;
+        let mut nvim = spawn_nvim(&self.lua_dir, &tool_call_file, &status_file)?;
         nvim.wait().await?;
 
         // Restore terminal settings as a safety net
@@ -57,10 +57,10 @@ impl ToolCallDisplayClient {
     }
 }
 
-fn spawn_nvim(lua_path: &Path, tool_call_file: &Path, status_file: &Path) -> Result<Child> {
+fn spawn_nvim(lua_dir: &Path, tool_call_file: &Path, status_file: &Path) -> Result<Child> {
     let lua_cmd = format!(
         "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_tool_call_display('{}', '{}')",
-        lua_path.display(),
+        lua_dir.display(),
         tool_call_file.display(),
         status_file.display()
     );

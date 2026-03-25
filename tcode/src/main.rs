@@ -13,7 +13,7 @@ mod tree_nav;
 mod tty_stdio;
 
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
@@ -269,28 +269,20 @@ enum Commands {
     },
 }
 
-fn get_lua_path() -> PathBuf {
-    // Try multiple locations for the lua directory
-    let candidates = [
-        // Next to executable (for installed builds)
-        std::env::current_exe()
-            .ok()
-            .and_then(|p| p.parent().map(|p| p.join("lua"))),
-        // In tcode directory (for development)
-        Some(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("lua")),
-        // Current directory fallback
-        std::env::current_dir().ok().map(|p| p.join("lua")),
-        std::env::current_dir().ok().map(|p| p.join("tcode/lua")),
-    ];
+/// Embedded Lua source, compiled into the binary.
+const TCODE_LUA: &str = include_str!("../lua/tcode.lua");
 
-    for candidate in candidates.into_iter().flatten() {
-        if candidate.join("tcode.lua").exists() {
-            return candidate;
-        }
-    }
-
-    // Final fallback
-    PathBuf::from("lua")
+/// Write the embedded Lua source to a cache directory and return the directory path.
+/// Uses `<session_dir>/lua/` so each session gets its own copy (avoids conflicts
+/// between concurrent sessions running different binary versions).
+fn ensure_lua_files(session_dir: &Path) -> Result<PathBuf> {
+    let lua_dir = session_dir.join("lua");
+    std::fs::create_dir_all(&lua_dir)
+        .with_context(|| format!("Failed to create lua cache directory {:?}", lua_dir))?;
+    let lua_file = lua_dir.join("tcode.lua");
+    std::fs::write(&lua_file, TCODE_LUA)
+        .with_context(|| format!("Failed to write embedded tcode.lua to {:?}", lua_file))?;
+    Ok(lua_dir)
 }
 
 fn is_in_tmux() -> bool {
@@ -354,7 +346,6 @@ fn run_shell_cmd(cmd: &str, context_msg: &str) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
-    let lua_path = get_lua_path();
 
     // Helper to require --session flag for subcommands
     let require_session = |opt: Option<String>| -> Result<String> {
@@ -364,7 +355,7 @@ async fn main() -> Result<()> {
     match cli.command {
         None => {
             // Unified startup: server + tmux panes (generates new session ID)
-            run_unified(cli, lua_path).await
+            run_unified(cli).await
         }
         Some(Commands::Serve) => {
             let session_id = require_session(cli.session.clone())?;
@@ -395,21 +386,24 @@ async fn main() -> Result<()> {
             let session_id = require_session(cli.session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
-            let client = EditClient::new(session, lua_path, conversation_id);
+            let lua_dir = ensure_lua_files(session.session_dir())?;
+            let client = EditClient::new(session, lua_dir, conversation_id);
             client.run().await
         }
         Some(Commands::Display) => {
             let session_id = require_session(cli.session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id.clone())?;
-            let client = DisplayClient::new(session, lua_path, session_id);
+            let lua_dir = ensure_lua_files(session.session_dir())?;
+            let client = DisplayClient::new(session, lua_dir, session_id);
             client.run().await
         }
         Some(Commands::ToolCall { tool_call_id }) => {
             let session_id = require_session(cli.session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
-            let client = ToolCallDisplayClient::new(session, lua_path, tool_call_id);
+            let lua_dir = ensure_lua_files(session.session_dir())?;
+            let client = ToolCallDisplayClient::new(session, lua_dir, tool_call_id);
             client.run().await
         }
         Some(Commands::CancelTool { tool_call_id }) => {
@@ -624,7 +618,7 @@ async fn run_browser() -> Result<()> {
     browser_server::browser::launch_interactive().await
 }
 
-async fn run_unified(cli: Cli, _lua_path: PathBuf) -> Result<()> {
+async fn run_unified(cli: Cli) -> Result<()> {
     if !is_in_tmux() {
         anyhow::bail!(
             "tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux."
