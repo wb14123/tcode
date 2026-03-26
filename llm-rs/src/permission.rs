@@ -6,7 +6,56 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use anyhow::anyhow;
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
+use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
+
+/// RAII guard that removes a waiter from `PermissionManager::pending_requests`
+/// when dropped. This ensures cleanup even if the permission-wait future is
+/// abandoned (e.g. by `CancellableStream` intercepting the cancel token at the
+/// outer poll level before the inner `select!` can run its cancel arm).
+/// Call `defuse()` on normal completion to prevent cleanup.
+struct PendingWaiterGuard {
+    manager: Arc<PermissionManager>,
+    tool: String,
+    key: String,
+    value: String,
+    request_id: String,
+    defused: bool,
+}
+
+impl PendingWaiterGuard {
+    fn new(
+        manager: Arc<PermissionManager>,
+        tool: &str,
+        key: &str,
+        value: &str,
+        request_id: &str,
+    ) -> Self {
+        Self {
+            manager,
+            tool: tool.to_string(),
+            key: key.to_string(),
+            value: value.to_string(),
+            request_id: request_id.to_string(),
+            defused: false,
+        }
+    }
+
+    /// Prevent the guard from removing the waiter on drop.
+    /// Called when the permission request completes normally (approved or denied).
+    fn defuse(&mut self) {
+        self.defused = true;
+    }
+}
+
+impl Drop for PendingWaiterGuard {
+    fn drop(&mut self) {
+        if !self.defused {
+            self.manager
+                .remove_waiter(&self.tool, &self.key, &self.value, &self.request_id);
+        }
+    }
+}
 
 /// Scope at which a permission was granted.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -234,7 +283,8 @@ impl PermissionManager {
     }
 
     /// Close all pending requests by sending `false` to all waiters.
-    /// Used on session resume to clean up stale requests.
+    /// Used on session resume and conversation/tool cancellation to clean up
+    /// stale requests.
     pub fn close_all_pending(&self) {
         let mut pending = self.pending_requests.lock();
         for (_key, request) in pending.drain() {
@@ -243,6 +293,27 @@ impl PermissionManager {
                     tracing::warn!("permission waiter dropped before close was sent");
                 }
             }
+        }
+    }
+
+    /// Remove a specific waiter from a pending request. If no waiters remain,
+    /// removes the entire pending entry. Used when a tool is cancelled while
+    /// waiting for permission.
+    pub fn remove_waiter(&self, tool: &str, key: &str, value: &str, request_id: &str) {
+        let pk = PermissionKey {
+            tool: tool.to_string(),
+            key: key.to_string(),
+            value: value.to_string(),
+        };
+        let mut pending = self.pending_requests.lock();
+        let should_remove = if let Some(entry) = pending.get_mut(&pk) {
+            entry.waiters.remove(request_id);
+            entry.waiters.is_empty()
+        } else {
+            false
+        };
+        if should_remove {
+            pending.remove(&pk);
         }
     }
 
@@ -323,6 +394,8 @@ pub struct ScopedPermissionManager {
     approval_pending: Arc<AtomicBool>,
     /// Session directory for writing preview files.
     session_dir: Option<PathBuf>,
+    /// Optional cancellation token to make permission waits cancel-aware.
+    cancel_token: Option<CancellationToken>,
 }
 
 impl ScopedPermissionManager {
@@ -342,6 +415,7 @@ impl ScopedPermissionManager {
             denied: Arc::new(AtomicBool::new(false)),
             approval_pending: Arc::new(AtomicBool::new(false)),
             session_dir,
+            cancel_token: None,
         }
     }
 
@@ -361,7 +435,13 @@ impl ScopedPermissionManager {
             denied: Arc::new(AtomicBool::new(false)),
             approval_pending: Arc::new(AtomicBool::new(false)),
             session_dir: None,
+            cancel_token: None,
         }
+    }
+
+    /// Set the cancellation token so permission waits can be interrupted on cancel.
+    pub fn set_cancel_token(&mut self, token: CancellationToken) {
+        self.cancel_token = Some(token);
     }
 
     /// Check if a permission exists without prompting.
@@ -393,7 +473,7 @@ impl ScopedPermissionManager {
         key: &str,
         value: &str,
     ) -> anyhow::Result<()> {
-        self.ask_permission_inner(scope, prompt, key, value, None)
+        self.ask_permission_inner(scope, prompt, key, value, None, false)
             .await
     }
 
@@ -416,7 +496,7 @@ impl ScopedPermissionManager {
                 None
             }
         };
-        self.ask_permission_inner(scope, prompt, key, value, preview_path)
+        self.ask_permission_inner(scope, prompt, key, value, preview_path, false)
             .await
     }
 
@@ -440,37 +520,15 @@ impl ScopedPermissionManager {
 
         // Use the full command as key+value so each complex command gets its own
         // pending entry, but we never check or store cached permissions.
-        let key = "command";
-        let value = content;
-
-        let (_request_id, rx) =
-            self.manager
-                .register_request(scope, prompt, key, value, preview_path.clone(), true);
-
-        // Notify UI that permission state changed (idempotent)
-        (self.notify_fn)();
-
-        self.approval_pending.store(true, Ordering::Release);
-        let allowed = rx.await.unwrap_or(false);
-        self.approval_pending.store(false, Ordering::Release);
-
-        Self::cleanup_preview_file(&preview_path);
-
-        if allowed {
-            (self.on_approved_fn)();
-            Ok(())
-        } else {
-            self.denied.store(true, Ordering::Relaxed);
-            Err(anyhow!(
-                "Permission denied: {} The user chose not to allow this action.",
-                prompt
-            ))
-        }
+        self.ask_permission_inner(scope, prompt, "command", content, preview_path, true)
+            .await
     }
 
-    /// Core permission-request flow shared by `ask_permission_for` and
-    /// `ask_permission_with_preview`. Cleans up the preview file (if any)
-    /// after the decision is received.
+    /// Core permission-request flow shared by `ask_permission_for`,
+    /// `ask_permission_with_preview`, and `ask_permission_once`.
+    /// Cleans up the preview file (if any) after the decision is received.
+    /// When `once_only` is true, skips the cached-permission check and marks
+    /// the request so the approval UI only offers "Allow once" / "Deny".
     async fn ask_permission_inner(
         &self,
         scope: &str,
@@ -478,26 +536,60 @@ impl ScopedPermissionManager {
         key: &str,
         value: &str,
         preview_file_path: Option<PathBuf>,
+        once_only: bool,
     ) -> anyhow::Result<()> {
-        if self.manager.has_permission(scope, key, value) {
+        if !once_only && self.manager.has_permission(scope, key, value) {
             Self::cleanup_preview_file(&preview_file_path);
             return Ok(());
         }
 
-        let (_request_id, rx) = self.manager.register_request(
+        let (request_id, rx) = self.manager.register_request(
             scope,
             prompt,
             key,
             value,
             preview_file_path.clone(),
-            false,
+            once_only,
         );
+
+        // Guard ensures the waiter is removed from pending_requests if this
+        // future is dropped (e.g. CancellableStream intercepting the cancel).
+        let mut guard =
+            PendingWaiterGuard::new(Arc::clone(&self.manager), scope, key, value, &request_id);
+
+        // If already cancelled, clean up immediately without notifying the UI
+        if self.cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+            // guard drops here and calls remove_waiter
+            Self::cleanup_preview_file(&preview_file_path);
+            return Err(anyhow!("Tool cancelled while waiting for permission"));
+        }
 
         // Notify UI that permission state changed (idempotent)
         (self.notify_fn)();
 
         self.approval_pending.store(true, Ordering::Release);
-        let allowed = rx.await.unwrap_or(false);
+
+        let allowed = if let Some(token) = &self.cancel_token {
+            tokio::select! {
+                biased;
+                _ = token.cancelled() => {
+                    // guard drops here and calls remove_waiter
+                    self.approval_pending.store(false, Ordering::Release);
+                    Self::cleanup_preview_file(&preview_file_path);
+                    // Return error without setting `denied` — this is a cancellation, not a denial.
+                    // The caller (execute_regular_tool) sends PermissionUpdated to refresh the UI.
+                    return Err(anyhow!("Tool cancelled while waiting for permission"));
+                }
+                result = rx => result.unwrap_or(false),
+            }
+        } else {
+            rx.await.unwrap_or(false)
+        };
+
+        // Normal completion — defuse the guard so it doesn't remove the waiter
+        // (the resolve() call already handled it).
+        guard.defuse();
+
         self.approval_pending.store(false, Ordering::Release);
 
         Self::cleanup_preview_file(&preview_file_path);

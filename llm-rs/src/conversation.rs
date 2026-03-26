@@ -1233,6 +1233,14 @@ impl Conversation {
                     // Cancelled with pending tools (external cancel, not user message)
                     self.fill_remaining_cancelled(false)?;
                     self.cancelled_tools.clear();
+                    // Clean up any pending permission requests so the permission UI
+                    // doesn't keep showing stale entries. Must happen before
+                    // AssistantMessageEnd/AssistantRequestEnd so the monitoring loop
+                    // (for subagents) can still forward the PermissionUpdated signal.
+                    self.env.permission_manager.close_all_pending();
+                    self.broadcast_msg(Message::PermissionUpdated {
+                        msg_id: self.next_msg_id(),
+                    })?;
                     self.broadcast_msg(Message::AssistantMessageEnd {
                         msg_id: self.next_msg_id(),
                         end_status: MessageEndStatus::Cancelled,
@@ -1251,6 +1259,10 @@ impl Conversation {
                             if !self.pending_tools.is_empty() {
                                 self.env.client.cancel_silent();
                                 self.fill_remaining_cancelled(true)?;
+                                self.env.permission_manager.close_all_pending();
+                                self.broadcast_msg(Message::PermissionUpdated {
+                                    msg_id: self.next_msg_id(),
+                                })?;
                                 self.env.client.reset_cancel_token();
                             }
                             self.cancelled_tools.clear();
@@ -1658,7 +1670,7 @@ async fn execute_regular_tool(
     let tc_id = tool_call.id.clone();
     let client_clone2 = Arc::clone(&env.client);
     let tc_id2 = tool_call.id.clone();
-    let scoped_pm = crate::permission::ScopedPermissionManager::new(
+    let mut scoped_pm = crate::permission::ScopedPermissionManager::new(
         &tool_call.name,
         Arc::clone(&env.permission_manager),
         Arc::new(move || {
@@ -1684,6 +1696,7 @@ async fn execute_regular_tool(
         }),
         env.state_dir.clone(),
     );
+    scoped_pm.set_cancel_token(cancel_token.clone());
     let scoped_pm_ref = scoped_pm.clone();
     let tool_ctx = ToolContext {
         cancel_token: cancel_token.clone(),
@@ -1737,6 +1750,16 @@ async fn execute_regular_tool(
     };
 
     env.client.unregister_tool_token(&tool_call.id);
+
+    // If the tool was cancelled (possibly while waiting for permission), notify
+    // the permission UI so it refreshes and drops any stale pending entries.
+    if end_status == MessageEndStatus::Cancelled
+        && let Err(e) = env.client.notify_msg(Message::PermissionUpdated {
+            msg_id: env.client.next_msg_id(),
+        })
+    {
+        tracing::error!(error = %e, "failed to send PermissionUpdated on cancel");
+    }
 
     // Send full result to main event loop
     loop_tx
