@@ -2,6 +2,8 @@ pub mod command_parser;
 pub mod command_permission;
 
 #[cfg(test)]
+mod bash_tests;
+#[cfg(test)]
 mod command_parser_tests;
 #[cfg(test)]
 mod command_permission_tests;
@@ -43,6 +45,17 @@ pub fn bash(
     async_stream::stream! {
         if command.trim().is_empty() {
             yield Err(anyhow!("command must not be empty"));
+            return;
+        }
+
+        // Reject commands that start with `cd` — each command runs in its own
+        // shell subprocess, so `cd` has no lasting effect and is always a mistake.
+        if starts_with_cd(&command) {
+            yield Err(anyhow!(
+                "Do not use `cd` in commands — each command runs in its own shell, \
+                 so `cd` has no lasting effect. Use the `workdir` parameter to set \
+                 the working directory instead."
+            ));
             return;
         }
 
@@ -269,4 +282,15 @@ async fn kill_process_group(pid: Option<u32>) {
             tracing::warn!("Failed to SIGKILL process group {}: {}", pid, e);
         }
     }
+}
+
+/// Check if a command starts with `cd` as the first token.
+fn starts_with_cd(command: &str) -> bool {
+    let trimmed = command.trim_start();
+    trimmed == "cd"
+        || trimmed.starts_with("cd ")
+        || trimmed.starts_with("cd\t")
+        || trimmed.starts_with("cd;")
+        || trimmed.starts_with("cd&")
+        || trimmed.starts_with("cd\n")
 }
