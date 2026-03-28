@@ -155,12 +155,7 @@ pub fn bash(
                     yield Ok(output.clone());
                 }
 
-                let exit_str = "null";
-                let metadata = format!(
-                    "\n<bash_metadata>\nexit_code: {}\ndescription: {}\nerror: {}\n</bash_metadata>",
-                    exit_str, description, e
-                );
-                yield Ok(metadata);
+                yield Ok(format_metadata("null", &description, Some(&e)));
                 return;
             }
         };
@@ -175,11 +170,7 @@ pub fn bash(
             Some(code) => code.to_string(),
             None => "null".to_string(),
         };
-        let metadata = format!(
-            "\n<bash_metadata>\nexit_code: {}\ndescription: {}\n</bash_metadata>",
-            exit_str, description
-        );
-        yield Ok(metadata);
+        yield Ok(format_metadata(&exit_str, &description, None));
     }
 }
 
@@ -189,46 +180,36 @@ async fn read_process_output(
     stderr: Option<tokio::process::ChildStderr>,
     output: &mut String,
 ) -> Result<()> {
-    use tokio_stream::{StreamExt, wrappers::LinesStream};
+    use tokio_stream::StreamExt;
 
-    let stdout_stream = stdout.map(|s| {
-        LinesStream::new(BufReader::new(s).lines()).map(|l| l.map_err(anyhow::Error::from))
-    });
-    let stderr_stream = stderr.map(|s| {
-        LinesStream::new(BufReader::new(s).lines()).map(|l| l.map_err(anyhow::Error::from))
-    });
+    fn lines_stream<R: tokio::io::AsyncBufRead + Unpin + Send>(
+        reader: R,
+    ) -> impl tokio_stream::Stream<Item = Result<String>> + Send {
+        tokio_stream::wrappers::LinesStream::new(reader.lines())
+            .map(|l| l.map_err(anyhow::Error::from))
+    }
 
-    // Merge both streams to preserve real interleaving order of stdout/stderr
-    match (stdout_stream, stderr_stream) {
-        (Some(out), Some(err)) => {
-            let mut merged = StreamExt::merge(out, err);
-            while let Some(line) = merged.next().await {
-                let line = line?;
-                if !output.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str(&line);
+    let stdout_stream = stdout.map(|s| lines_stream(BufReader::new(s)));
+    let stderr_stream = stderr.map(|s| lines_stream(BufReader::new(s)));
+
+    // Build a merged stream from whichever of stdout/stderr are available.
+    let combined: Option<
+        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<String>> + Send + '_>>,
+    > = match (stdout_stream, stderr_stream) {
+        (Some(out), Some(err)) => Some(Box::pin(StreamExt::merge(out, err))),
+        (Some(s), None) => Some(Box::pin(s)),
+        (None, Some(s)) => Some(Box::pin(s)),
+        (None, None) => None,
+    };
+
+    if let Some(mut stream) = combined {
+        while let Some(line) = stream.next().await {
+            let line = line?;
+            if !output.is_empty() {
+                output.push('\n');
             }
+            output.push_str(&line);
         }
-        (Some(mut stream), None) => {
-            while let Some(line) = stream.next().await {
-                let line = line?;
-                if !output.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str(&line);
-            }
-        }
-        (None, Some(mut stream)) => {
-            while let Some(line) = stream.next().await {
-                let line = line?;
-                if !output.is_empty() {
-                    output.push('\n');
-                }
-                output.push_str(&line);
-            }
-        }
-        (None, None) => {}
     }
 
     Ok(())
@@ -281,6 +262,20 @@ async fn kill_process_group(pid: Option<u32>) {
         Err(e) => {
             tracing::warn!("Failed to SIGKILL process group {}: {}", pid, e);
         }
+    }
+}
+
+/// Format the `<bash_metadata>` block appended to every tool response.
+fn format_metadata(exit_code: &str, description: &str, error: Option<&anyhow::Error>) -> String {
+    match error {
+        Some(e) => format!(
+            "\n<bash_metadata>\nexit_code: {}\ndescription: {}\nerror: {}\n</bash_metadata>",
+            exit_code, description, e
+        ),
+        None => format!(
+            "\n<bash_metadata>\nexit_code: {}\ndescription: {}\n</bash_metadata>",
+            exit_code, description
+        ),
     }
 }
 
