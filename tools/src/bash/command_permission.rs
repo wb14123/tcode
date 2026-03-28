@@ -3,8 +3,11 @@ use std::path::Path;
 use anyhow::Result;
 use llm_rs::permission::ScopedPermissionManager;
 
-use super::command_parser::{CommandClassification, parse_command};
-use crate::file_permission::{check_file_read_permission, check_file_write_permission};
+use super::command_parser::{CommandClassification, parse_command, try_decompose_complex};
+use crate::file_permission::{
+    check_file_read_permission, check_file_write_permission, has_file_read_permission,
+    has_file_write_permission,
+};
 
 pub(crate) const BASH_SCOPE: &str = "bash";
 
@@ -34,8 +37,11 @@ pub async fn check_bash_permission(
     }
 
     match &parsed.classification {
-        // Layer 4: complex → always prompt, never cache
+        // Layer 4: complex → try decomposition fast-path, otherwise always prompt
         CommandClassification::Complex => {
+            if try_decomposed_permission(permission, command, workdir).await {
+                return Ok(());
+            }
             prompt_complex_command_permission(permission, command, workdir).await
         }
         // Layer 1: read-only commands → check file read permission per path
@@ -80,6 +86,105 @@ pub(crate) fn has_command_permission(
         }
     }
     false
+}
+
+/// Attempt to auto-approve a complex command by decomposing it into sub-commands
+/// and checking if ALL parts already have stored permissions.
+///
+/// Returns `true` if every sub-command (and any top-level redirections) is already
+/// approved — the complex command can proceed without prompting.
+/// Returns `false` if decomposition fails or any part lacks a stored permission —
+/// the caller should fall back to prompting for the whole complex command.
+async fn try_decomposed_permission(
+    permission: &ScopedPermissionManager,
+    command: &str,
+    workdir: Option<&Path>,
+) -> bool {
+    let decomposed = match try_decompose_complex(command) {
+        Some(d) => d,
+        None => return false,
+    };
+
+    // Check top-level redirections (e.g., pipeline-level `> file`)
+    for path in &decomposed.redirections.input_files {
+        if !has_file_read_permission(permission, path, false).await {
+            return false;
+        }
+    }
+    for path in &decomposed.redirections.output_files {
+        if !has_file_write_permission(permission, path).await {
+            return false;
+        }
+    }
+
+    // Check each sub-command using the same logic as the non-Complex branches
+    for sub_cmd in &decomposed.sub_commands {
+        if !has_simple_command_permission(permission, sub_cmd, workdir).await {
+            return false;
+        }
+    }
+
+    true
+}
+
+/// Check if a single (non-Complex) sub-command already has stored permission,
+/// without prompting. Returns `true` if approved, `false` if not.
+///
+/// This mirrors the non-Complex branches of `check_bash_permission` but
+/// only checks — never prompts.
+async fn has_simple_command_permission(
+    permission: &ScopedPermissionManager,
+    sub_command: &str,
+    workdir: Option<&Path>,
+) -> bool {
+    let parsed = parse_command(sub_command);
+
+    // Check redirect file permissions for this sub-command
+    for path in &parsed.redirections.input_files {
+        if !has_file_read_permission(permission, path, false).await {
+            return false;
+        }
+    }
+    for path in &parsed.redirections.output_files {
+        if !has_file_write_permission(permission, path).await {
+            return false;
+        }
+    }
+
+    match &parsed.classification {
+        CommandClassification::Complex => {
+            // Should not happen — try_decompose_complex already verified all
+            // sub-commands parse as non-Complex. But if it does, fail safely.
+            false
+        }
+        CommandClassification::ReadCommand { paths } => {
+            if let Some(dir) = workdir
+                && !has_file_read_permission(permission, dir, true).await
+            {
+                return false;
+            }
+            for path in paths {
+                if !has_file_read_permission(permission, path, false).await {
+                    return false;
+                }
+            }
+            true
+        }
+        CommandClassification::WriteCommand { paths } => {
+            if let Some(dir) = workdir
+                && !has_file_write_permission(permission, dir).await
+            {
+                return false;
+            }
+            for path in paths {
+                if !has_file_write_permission(permission, path).await {
+                    return false;
+                }
+            }
+            true
+        }
+        CommandClassification::OtherSimple { tokens } => has_command_permission(permission, tokens),
+    }
 }
 
 /// Check command permission using hierarchical prefix matching.
