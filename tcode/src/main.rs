@@ -184,6 +184,10 @@ struct Cli {
     #[arg(long, default_value_t = 10)]
     max_subagent_depth: usize,
 
+    /// Allow LLM to select model for subagents (default: use parent model)
+    #[arg(long)]
+    subagent_model_selection: bool,
+
     /// Connect to an existing remote browser-server (TCP mode)
     #[arg(long)]
     browser_server_url: Option<String>,
@@ -384,6 +388,7 @@ async fn main() -> Result<()> {
                 chat_options,
                 cli.subagent_max_iterations,
                 cli.max_subagent_depth,
+                cli.subagent_model_selection,
                 token_manager,
             );
             server.run(None).await
@@ -451,6 +456,7 @@ async fn main() -> Result<()> {
                 chat_options,
                 cli.subagent_max_iterations,
                 cli.max_subagent_depth,
+                cli.subagent_model_selection,
                 cli.browser_server_url,
                 cli.browser_server_token,
                 token_manager,
@@ -645,6 +651,7 @@ async fn run_unified(cli: Cli) -> Result<()> {
         chat_options,
         cli.subagent_max_iterations,
         cli.max_subagent_depth,
+        cli.subagent_model_selection,
         cli.browser_server_url,
         cli.browser_server_token,
         token_manager,
@@ -664,6 +671,7 @@ async fn run_unified_with_session(
     chat_options: ChatOptions,
     subagent_max_iterations: usize,
     max_subagent_depth: usize,
+    subagent_model_selection: bool,
     browser_server_url: Option<String>,
     browser_server_token: Option<String>,
     token_manager: Option<claude_auth::TokenManager>,
@@ -697,6 +705,7 @@ async fn run_unified_with_session(
         chat_options,
         subagent_max_iterations,
         max_subagent_depth,
+        subagent_model_selection,
         token_manager,
     );
 

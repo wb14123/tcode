@@ -58,6 +58,7 @@ pub struct Server {
     chat_options: ChatOptions,
     subagent_max_iterations: usize,
     max_subagent_depth: usize,
+    subagent_model_selection: bool,
     token_manager: Option<auth::TokenManager>,
 }
 
@@ -75,6 +76,7 @@ impl Server {
         chat_options: ChatOptions,
         subagent_max_iterations: usize,
         max_subagent_depth: usize,
+        subagent_model_selection: bool,
         token_manager: Option<auth::TokenManager>,
     ) -> Self {
         Self {
@@ -89,6 +91,7 @@ impl Server {
             chat_options,
             subagent_max_iterations,
             max_subagent_depth,
+            subagent_model_selection,
             token_manager,
         }
     }
@@ -150,7 +153,14 @@ impl Server {
         let manager = ConversationManager::new(permissions_path);
 
         // Build tools list including subagent tools
-        let model_infos = self.llm.available_models();
+        let model_infos = if self.subagent_model_selection {
+            self.llm.available_models()
+        } else {
+            vec![llm_rs::llm::ModelInfo {
+                id: self.model.clone(),
+                description: "Same model as parent conversation".into(),
+            }]
+        };
         let mut tools_list: Vec<Arc<Tool>> = vec![
             Arc::new(tools::bash_tool()),
             Arc::new(tools::current_time_tool()),
