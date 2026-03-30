@@ -133,6 +133,8 @@ struct TreeState {
     tool_call_idx: HashMap<String, usize>,
     /// conversation_id → node index.
     conversation_idx: HashMap<String, usize>,
+    /// Maps tool_call_id → node arena index for subagent nodes created by SubAgentInputStart.
+    subagent_tc_idx: HashMap<String, usize>,
     /// Session root directory.
     session_dir: PathBuf,
     /// Session ID (for display).
@@ -152,6 +154,7 @@ impl TreeState {
             dir_to_node: HashMap::new(),
             tool_call_idx: HashMap::new(),
             conversation_idx: HashMap::new(),
+            subagent_tc_idx: HashMap::new(),
             session_dir: session_dir.clone(),
             session_id: session_id.clone(),
             status_message: None,
@@ -191,6 +194,7 @@ impl TreeState {
         self.arena.truncate(1);
         self.tool_call_idx.clear();
         self.conversation_idx.clear();
+        self.subagent_tc_idx.clear();
         // Keep only the root dir mapping
         let root_dir = self.session_dir.clone();
         self.dir_to_node.clear();
@@ -463,12 +467,72 @@ impl TreeState {
                 }
             }
             Message::SubAgentStart {
+                tool_call_id,
                 conversation_id,
                 description,
                 ..
             } => {
-                // The subagent node may already exist from directory discovery
-                if let Some(&idx) = self.conversation_idx.get(conversation_id) {
+                // First check if we have a node pre-created by SubAgentInputStart
+                if let Some(idx) = self.subagent_tc_idx.remove(tool_call_id) {
+                    // If discover_subagent_dirs already created a duplicate node for this
+                    // conversation_id, clean it up: remove from parent's children and
+                    // repoint its mappings to the node we're keeping.
+                    if let Some(&dup_idx) = self.conversation_idx.get(conversation_id)
+                        && dup_idx != idx
+                    {
+                        // Remove duplicate from its parent's children
+                        for node in self.arena.iter_mut() {
+                            node.children.retain(|&c| c != dup_idx);
+                        }
+                        // Repoint file_trackers that referenced the duplicate
+                        for tracker in self.file_trackers.values_mut() {
+                            if tracker.owner_node == dup_idx {
+                                tracker.owner_node = idx;
+                            }
+                        }
+                        // Repoint dir_to_node entries
+                        for v in self.dir_to_node.values_mut() {
+                            if *v == dup_idx {
+                                *v = idx;
+                            }
+                        }
+                        // Transfer children from duplicate to this node
+                        let dup_children: Vec<usize> =
+                            self.arena[dup_idx].children.drain(..).collect();
+                        self.arena[idx].children.extend(dup_children);
+                    }
+
+                    // Update the existing node with the now-known conversation_id and description
+                    if let NodeType::SubAgent {
+                        description: desc,
+                        conversation_id: cid,
+                        status,
+                        ..
+                    } = &mut self.arena[idx].kind
+                    {
+                        *desc = description.clone();
+                        *cid = conversation_id.clone();
+                        *status = NodeStatus::Running;
+                    }
+                    self.conversation_idx.insert(conversation_id.clone(), idx);
+
+                    // Register the subagent directory and display file if they exist
+                    let sa_dir = dir.join(format!("subagent-{}", conversation_id));
+                    if sa_dir.is_dir() {
+                        self.dir_to_node.insert(sa_dir.clone(), idx);
+                        let sa_display = sa_dir.join("display.jsonl");
+                        // Use and_modify to ensure we overwrite any tracker
+                        // that discover_subagent_dirs created pointing to the duplicate node
+                        self.file_trackers
+                            .entry(sa_display)
+                            .and_modify(|t| t.owner_node = idx)
+                            .or_insert_with(|| FileTracker {
+                                offset: 0,
+                                line_buffer: String::new(),
+                                owner_node: idx,
+                            });
+                    }
+                } else if let Some(&idx) = self.conversation_idx.get(conversation_id) {
                     // Update description and status
                     if let NodeType::SubAgent {
                         description: desc,
@@ -609,6 +673,36 @@ impl TreeState {
                 {
                     *status = NodeStatus::Denied;
                 }
+            }
+            Message::SubAgentInputStart {
+                tool_call_id,
+                tool_name,
+                ..
+            } => {
+                if tool_name == "subagent" {
+                    // Create a SubAgent node with Generating status as a placeholder.
+                    // conversation_id is not yet known; it will be filled in by SubAgentStart.
+                    let depth = self.arena[owner_node].depth + 1;
+                    let node_idx = self.arena.len();
+                    self.arena.push(TreeNode {
+                        kind: NodeType::SubAgent {
+                            conversation_id: String::new(),
+                            description: String::new(),
+                            status: NodeStatus::Generating,
+                            input_tokens: 0,
+                            output_tokens: 0,
+                        },
+                        depth,
+                        children: Vec::new(),
+                        collapsed: false,
+                    });
+                    self.arena[owner_node].children.push(node_idx);
+                    self.subagent_tc_idx.insert(tool_call_id.clone(), node_idx);
+                }
+                // For continue_subagent: do nothing — the existing node stays at [idle]
+            }
+            Message::SubAgentInputChunk { .. } => {
+                // Subagent input chunks don't affect the tree
             }
             // All other message types are ignored
             _ => {}

@@ -850,6 +850,19 @@ fn run_event_writer(
                         .context("Failed to append subagent permission denied to display")?;
                 }
 
+                Message::SubAgentInputStart { .. } => {
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append subagent input start to display")?;
+                }
+
+                Message::SubAgentInputChunk { .. } => {
+                    // Just write to display.jsonl — no per-tool-call file for subagent inputs
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append subagent input chunk to display")?;
+                }
+
                 _ => {
                     // All other events: write to main display only
                     append_event(&display_file, &event)

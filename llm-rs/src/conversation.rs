@@ -259,8 +259,27 @@ pub enum Message {
         output_tokens: i32,
     },
 
+    /// Fired when a subagent tool call input is beginning to stream (before the conversation is
+    /// created). Allows the UI to show a pending node immediately.
+    SubAgentInputStart {
+        msg_id: MessageID,
+        tool_call_index: usize,
+        tool_call_id: String,
+        tool_name: String,
+        created_at: u64,
+    },
+
+    /// A partial chunk of subagent tool call input (task text).
+    SubAgentInputChunk {
+        msg_id: MessageID,
+        tool_call_index: usize,
+        tool_name: String,
+        content: Arc<String>,
+    },
+
     SubAgentStart {
         msg_id: MessageID,
+        tool_call_id: String,
         conversation_id: String,
         description: String,
     },
@@ -287,6 +306,7 @@ pub enum Message {
     /// A sub-agent is being resumed with a follow-up message.
     SubAgentContinue {
         msg_id: MessageID,
+        tool_call_id: String,
         conversation_id: String,
         description: String,
     },
@@ -1453,25 +1473,44 @@ impl Conversation {
                 }
                 LLMEvent::ToolCallStart { index, id, name } => {
                     tool_call_names.insert(index, name.clone());
-                    self.broadcast_msg(Message::AssistantToolCallStart {
-                        msg_id: self.next_msg_id(),
-                        tool_call_index: index,
-                        tool_call_id: id,
-                        tool_name: name,
-                        created_at: now_millis(),
-                    })?;
+                    if name == "subagent" || name == "continue_subagent" {
+                        self.broadcast_msg(Message::SubAgentInputStart {
+                            msg_id: self.next_msg_id(),
+                            tool_call_index: index,
+                            tool_call_id: id,
+                            tool_name: name,
+                            created_at: now_millis(),
+                        })?;
+                    } else {
+                        self.broadcast_msg(Message::AssistantToolCallStart {
+                            msg_id: self.next_msg_id(),
+                            tool_call_index: index,
+                            tool_call_id: id,
+                            tool_name: name,
+                            created_at: now_millis(),
+                        })?;
+                    }
                 }
                 LLMEvent::ToolCallDelta {
                     index,
                     partial_json,
                 } => {
                     let tool_name = tool_call_names.get(&index).cloned().unwrap_or_default();
-                    self.broadcast_msg(Message::AssistantToolCallArgChunk {
-                        msg_id: self.next_msg_id(),
-                        tool_call_index: index,
-                        tool_name,
-                        content: Arc::new(partial_json),
-                    })?;
+                    if tool_name == "subagent" || tool_name == "continue_subagent" {
+                        self.broadcast_msg(Message::SubAgentInputChunk {
+                            msg_id: self.next_msg_id(),
+                            tool_call_index: index,
+                            tool_name,
+                            content: Arc::new(partial_json),
+                        })?;
+                    } else {
+                        self.broadcast_msg(Message::AssistantToolCallArgChunk {
+                            msg_id: self.next_msg_id(),
+                            tool_call_index: index,
+                            tool_name,
+                            content: Arc::new(partial_json),
+                        })?;
+                    }
                 }
                 LLMEvent::MessageEnd {
                     stop_reason,
@@ -2003,6 +2042,7 @@ async fn execute_subagent(
     env.client
         .notify_msg(Message::SubAgentStart {
             msg_id: env.client.next_msg_id(),
+            tool_call_id: tool_call.id.clone(),
             conversation_id: subagent_conv_id.clone(),
             description: task_preview,
         })
@@ -2155,6 +2195,7 @@ async fn execute_continue_subagent(
     env.client
         .notify_msg(Message::SubAgentContinue {
             msg_id: env.client.next_msg_id(),
+            tool_call_id: tool_call.id.clone(),
             conversation_id: params.conversation_id.clone(),
             description: msg_preview,
         })

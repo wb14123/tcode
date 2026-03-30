@@ -63,6 +63,7 @@ local tc_label_marks = {}  -- tool_call_id -> { extmark_id, ns, tool_name }
 local sa_ns = vim.api.nvim_create_namespace('tcode_sa_id')
 local sa_extmark_ids = {}  -- extmark_id -> conversation_id
 local sa_label_marks = {}  -- conversation_id -> { extmark_id, ns, description }
+local sa_input_marks = {}  -- tool_call_id -> { extmark_id, ns, tool_name }
 
 -- Thinking token state: track streaming thinking and collapsed entries
 local thinking_ns = vim.api.nvim_create_namespace('tcode_thinking')
@@ -791,19 +792,115 @@ local function render_event(buf, ns, event)
       vim.api.nvim_buf_add_highlight(buf, ns, hl_group, start_row + i, 0, -1)
     end
 
+  elseif variant == 'SubAgentInputStart' then
+    -- Close any open thinking first
+    collapse_thinking(buf, ns)
+
+    local tool_name = data.tool_name or ''
+    local tool_call_id = data.tool_call_id or ''
+    local tool_call_index = data.tool_call_index or 0
+
+    -- Render the subagent label line (same style as SubAgentStart but with [generating])
+    local label_line, label_extmark = render_label(buf, ns, '>>> SUB-AGENT: [generating]', 'TCodeTool', data)
+
+    -- Store in a pending map keyed by tool_call_id
+    sa_input_marks[tool_call_id] = {
+      extmark_id = label_extmark, ns = ns,
+      tool_name = tool_name,
+    }
+
+    -- Open args fenced code block (same as AssistantToolCallStart)
+    append_lines(buf, { TC_FENCE, '' })
+    local args_start_row = vim.api.nvim_buf_line_count(buf) - 1
+
+    -- Store generation state (reuse tool_call_gen_state keyed by tool_call_id)
+    tool_call_gen_state[tool_call_id] = {
+      start_row = label_line,
+      args_start_row = args_start_row,
+      content_parts = {},
+      tool_name = tool_name,
+      tool_call_index = tool_call_index,
+      last_highlighted_row = nil,
+      is_subagent = true,
+    }
+    tool_call_index_map[tool_call_index] = tool_call_id
+
+  elseif variant == 'SubAgentInputChunk' then
+    -- Same logic as AssistantToolCallArgChunk
+    local tool_call_index = data.tool_call_index or 0
+    local tool_call_id = tool_call_index_map[tool_call_index]
+    if tool_call_id and tool_call_gen_state[tool_call_id] then
+      local state = tool_call_gen_state[tool_call_id]
+      local content = tostring(data.content)
+      append_text(buf, content)
+      table.insert(state.content_parts, content)
+      -- Highlight with TCodeToolArgs
+      local current_last_row = vim.api.nvim_buf_line_count(buf) - 1
+      local start_hl = state.last_highlighted_row and (state.last_highlighted_row + 1) or state.args_start_row
+      for row = start_hl, current_last_row do
+        vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', row, 0, -1)
+      end
+      state.last_highlighted_row = current_last_row
+    end
+
   elseif variant == 'SubAgentStart' then
     local description = data.description or ''
-    local label_line, label_extmark = render_label(buf, ns, '>>> SUB-AGENT: [running] ' .. description, 'TCodeTool', data)
-    append_lines(buf, { '' })
-    -- Place a range extmark covering label through current last line
-    if data.conversation_id then
-      sa_label_marks[data.conversation_id] = { extmark_id = label_extmark, ns = ns, description = description }
+    local tool_call_id = data.tool_call_id
+    local conv_id = data.conversation_id
+
+    -- Check if we have a pending input label from SubAgentInputStart
+    local pending = tool_call_id and sa_input_marks[tool_call_id]
+    if pending then
+      -- Close/collapse the args fence from SubAgentInputStart if still open
+      if tool_call_gen_state[tool_call_id] then
+        local gen_state = tool_call_gen_state[tool_call_id]
+        if not gen_state.fence_closed then
+          append_lines(buf, { TC_FENCE })
+          collapse_tool_call_args(buf, tool_call_id)
+          gen_state.fence_closed = true
+        end
+        tool_call_gen_state[tool_call_id] = nil
+      end
+
+      -- Update existing label from [generating] to [running] description
+      local virt = {
+        { '>>> SUB-AGENT: ', 'TCodeTool' },
+        { '[running]', 'TCodeTool' },
+        { ' ' .. description, 'TCodeTool' },
+      }
+      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, pending.ns, pending.extmark_id, {})
+      if mark_pos and mark_pos[1] then
+        vim.api.nvim_buf_set_extmark(buf, pending.ns, mark_pos[1], mark_pos[2], {
+          id = pending.extmark_id,
+          virt_text = virt,
+          virt_text_pos = 'overlay',
+        })
+      end
+
+      -- Transfer to sa_label_marks for future updates (SubAgentTurnEnd, SubAgentEnd, etc.)
+      sa_label_marks[conv_id] = { extmark_id = pending.extmark_id, ns = pending.ns, description = description }
+      sa_input_marks[tool_call_id] = nil
+
+      -- Set up the sa_ns range extmark
+      append_lines(buf, { '' })
+      local label_line = mark_pos and mark_pos[1] or (vim.api.nvim_buf_line_count(buf) - 2)
       local last_line = vim.api.nvim_buf_line_count(buf) - 1
       local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_line, 0, {
-        end_row = last_line,
-        end_col = 0,
+        end_row = last_line, end_col = 0,
       })
-      sa_extmark_ids[mark_id] = data.conversation_id
+      sa_extmark_ids[mark_id] = conv_id
+    else
+      -- No pending input (e.g., resumed session) — create label from scratch (existing logic)
+      local label_line, label_extmark = render_label(buf, ns, '>>> SUB-AGENT: [running] ' .. description, 'TCodeTool', data)
+      append_lines(buf, { '' })
+      if conv_id then
+        sa_label_marks[conv_id] = { extmark_id = label_extmark, ns = ns, description = description }
+        local last_line = vim.api.nvim_buf_line_count(buf) - 1
+        local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_line, 0, {
+          end_row = last_line, end_col = 0,
+        })
+        sa_extmark_ids[mark_id] = conv_id
+      end
     end
 
   elseif variant == 'SubAgentEnd' then
@@ -888,6 +985,23 @@ local function render_event(buf, ns, event)
     end
 
   elseif variant == 'SubAgentContinue' then
+    local tool_call_id = data.tool_call_id
+
+    -- Clean up any pending input state from SubAgentInputStart
+    if tool_call_id and sa_input_marks[tool_call_id] then
+      -- Close/collapse the args fence
+      if tool_call_gen_state[tool_call_id] then
+        local gen_state = tool_call_gen_state[tool_call_id]
+        if not gen_state.fence_closed then
+          append_lines(buf, { TC_FENCE })
+          collapse_tool_call_args(buf, tool_call_id)
+          gen_state.fence_closed = true
+        end
+        tool_call_gen_state[tool_call_id] = nil
+      end
+      sa_input_marks[tool_call_id] = nil
+    end
+
     -- Update existing label to show running again
     if data.conversation_id and sa_label_marks[data.conversation_id] then
       local info = sa_label_marks[data.conversation_id]

@@ -260,5 +260,11 @@ fn print_message(msg: &Message) {
             print!("{}", content);
             io::stdout().flush().ok();
         }
+        Message::SubAgentInputStart { tool_name, .. } => {
+            eprintln!("  [subagent input start: {}]", tool_name);
+        }
+        Message::SubAgentInputChunk { content, .. } => {
+            eprint!("{}", content);
+        }
     }
 }
