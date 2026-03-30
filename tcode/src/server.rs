@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use std::future::Future;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 
@@ -50,6 +50,7 @@ pub struct Server {
     socket_path: PathBuf,
     display_file: PathBuf,
     status_file: PathBuf,
+    usage_file: PathBuf,
     session_dir: PathBuf,
     conversation_state_file: PathBuf,
     llm: Box<dyn LLM>,
@@ -57,6 +58,7 @@ pub struct Server {
     chat_options: ChatOptions,
     subagent_max_iterations: usize,
     max_subagent_depth: usize,
+    token_manager: Option<auth::TokenManager>,
 }
 
 impl Server {
@@ -65,6 +67,7 @@ impl Server {
         socket_path: PathBuf,
         display_file: PathBuf,
         status_file: PathBuf,
+        usage_file: PathBuf,
         session_dir: PathBuf,
         conversation_state_file: PathBuf,
         llm: Box<dyn LLM>,
@@ -72,11 +75,13 @@ impl Server {
         chat_options: ChatOptions,
         subagent_max_iterations: usize,
         max_subagent_depth: usize,
+        token_manager: Option<auth::TokenManager>,
     ) -> Self {
         Self {
             socket_path,
             display_file,
             status_file,
+            usage_file,
             session_dir,
             conversation_state_file,
             llm,
@@ -84,6 +89,7 @@ impl Server {
             chat_options,
             subagent_max_iterations,
             max_subagent_depth,
+            token_manager,
         }
     }
 
@@ -122,6 +128,9 @@ impl Server {
                 return Err(e);
             }
         };
+
+        let token_manager = self.token_manager.clone();
+        let usage_file = self.usage_file.clone();
 
         // Create conversation manager (creates permission manager internally)
         // Store project-level permissions under ~/.tcode/projects/<sha256(cwd)>/
@@ -290,6 +299,26 @@ impl Server {
         let shutdown_tx = Arc::new(shutdown_tx);
         let socket_path = self.socket_path.clone();
 
+        // Periodic usage polling (OAuth only, every 5 min)
+        if let Some(ref tm) = token_manager {
+            let tm = tm.clone();
+            let uf = usage_file.clone();
+            let mut usage_rx = shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                // Initial fetch
+                write_usage_file(&tm, &uf).await;
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = usage_rx.recv() => break,
+                        _ = tokio::time::sleep(tokio::time::Duration::from_secs(300)) => {
+                            write_usage_file(&tm, &uf).await;
+                        }
+                    }
+                }
+            });
+        }
+
         // Accept loop
         let mut shutdown_rx = shutdown_tx.subscribe();
         loop {
@@ -320,6 +349,34 @@ impl Server {
     }
 }
 
+/// Fetch subscription usage and write a human-readable summary to the usage file.
+async fn write_usage_file(tm: &auth::TokenManager, usage_file: &Path) {
+    let result: Result<()> = async {
+        let token = tm
+            .get_access_token()
+            .await
+            .context("Failed to get access token")?;
+        let usage = auth::usage::fetch_usage(tm.client(), &token).await?;
+        let five_hour = usage.five_hour.context("No five_hour usage window")?;
+        let mut text = format!("{:.0}% used", five_hour.utilization);
+        if let Some(resets_in) = five_hour
+            .resets_at
+            .as_deref()
+            .and_then(auth::usage::format_resets_in)
+        {
+            text.push_str(&format!(", resets in {}", resets_in));
+        }
+        tokio::fs::write(usage_file, &text)
+            .await
+            .context("Failed to write usage file")?;
+        Ok(())
+    }
+    .await;
+    if let Err(e) = result {
+        tracing::warn!("Failed to update usage file: {}", e);
+    }
+}
+
 /// Reusable event writer that processes conversation events and writes them to display files.
 /// Used for both the main conversation (manager = Some) and subagent conversations (manager = None).
 /// When manager is Some, SubAgentStart events trigger creation of sub-session directories
@@ -327,6 +384,7 @@ impl Server {
 type EventStream =
     Pin<Box<dyn Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + Send>>;
 
+#[allow(clippy::too_many_arguments)]
 fn run_event_writer(
     mut events: EventStream,
     display_file: PathBuf,
@@ -371,13 +429,6 @@ fn run_event_writer(
                     .await
                     .context("Failed to write status file")?;
             }
-            if matches!(&*event, Message::AssistantMessageEnd { .. }) {
-                is_thinking = false;
-                tokio::fs::write(&status_file, "Ready")
-                    .await
-                    .context("Failed to write status file")?;
-            }
-
             match &*event {
                 Message::ToolMessageStart {
                     tool_call_id,
@@ -731,6 +782,13 @@ fn run_event_writer(
                     append_event(&display_file, &event)
                         .await
                         .context("Failed to append display event")?;
+
+                    if matches!(&*event, Message::AssistantMessageEnd { .. }) {
+                        is_thinking = false;
+                        tokio::fs::write(&status_file, "Ready")
+                            .await
+                            .context("Failed to write status file")?;
+                    }
                 }
             }
         }

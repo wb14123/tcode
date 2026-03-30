@@ -109,7 +109,7 @@ fn build_chat_options(_cli: &Cli) -> ChatOptions {
 }
 
 /// Create an LLM instance from CLI options
-fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String)> {
+fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String, Option<claude_auth::TokenManager>)> {
     let provider = cli.provider;
     let model = cli
         .model
@@ -120,29 +120,33 @@ fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String)> {
         .clone()
         .unwrap_or_else(|| provider.default_base_url().to_string());
 
-    let llm: Box<dyn LLM> = match provider {
+    let (llm, token_manager): (Box<dyn LLM>, Option<claude_auth::TokenManager>) = match provider {
         Provider::Claude => {
             // Try API key first, fall back to OAuth
             if let Ok(api_key) = get_api_key(cli, provider) {
-                Box::new(Claude::with_base_url(&api_key, &base_url))
+                (Box::new(Claude::with_base_url(&api_key, &base_url)), None)
             } else {
                 let manager = claude_auth::load_token_manager().ok_or_else(|| {
                     anyhow!("No Claude authentication found. Set ANTHROPIC_API_KEY env, use --api-key, or run 'tcode claude-auth' to authenticate via OAuth.")
                 })?;
-                Box::new(Claude::with_token_provider(manager, &base_url))
+                let llm = Box::new(Claude::with_token_provider(manager.clone(), &base_url));
+                (llm, Some(manager))
             }
         }
         Provider::OpenAi => {
             let api_key = get_api_key(cli, provider)?;
-            Box::new(OpenAI::with_base_url(&api_key, &base_url))
+            (Box::new(OpenAI::with_base_url(&api_key, &base_url)), None)
         }
         Provider::OpenRouter => {
             let api_key = get_api_key(cli, provider)?;
-            Box::new(OpenRouter::with_base_url(&api_key, &base_url))
+            (
+                Box::new(OpenRouter::with_base_url(&api_key, &base_url)),
+                None,
+            )
         }
     };
 
-    Ok((llm, model))
+    Ok((llm, model, token_manager))
 }
 
 #[derive(Parser)]
@@ -365,13 +369,14 @@ async fn main() -> Result<()> {
                 cli.browser_server_token.clone(),
             )
             .await?;
-            let (llm, model) = create_llm(&cli)?;
+            let (llm, model, token_manager) = create_llm(&cli)?;
             let chat_options = build_chat_options(&cli);
             let session = Session::new(session_id)?;
             let server = Server::new(
                 session.socket_path(),
                 session.display_file(),
                 session.status_file(),
+                session.usage_file(),
                 session.session_dir().clone(),
                 session.conversation_state_file(),
                 llm,
@@ -379,6 +384,7 @@ async fn main() -> Result<()> {
                 chat_options,
                 cli.subagent_max_iterations,
                 cli.max_subagent_depth,
+                token_manager,
             );
             server.run(None).await
         }
@@ -435,7 +441,7 @@ async fn main() -> Result<()> {
                     session_id
                 );
             }
-            let (llm, model) = create_llm(&cli)?;
+            let (llm, model, token_manager) = create_llm(&cli)?;
             let chat_options = build_chat_options(&cli);
             run_unified_with_session(
                 session,
@@ -447,6 +453,7 @@ async fn main() -> Result<()> {
                 cli.max_subagent_depth,
                 cli.browser_server_url,
                 cli.browser_server_token,
+                token_manager,
                 "Attaching to session",
             )
             .await
@@ -627,7 +634,7 @@ async fn run_unified(cli: Cli) -> Result<()> {
 
     let session_id = session::generate_session_id();
     let session = Session::new(session_id.clone())?;
-    let (llm, model) = create_llm(&cli)?;
+    let (llm, model, token_manager) = create_llm(&cli)?;
     let chat_options = build_chat_options(&cli);
 
     run_unified_with_session(
@@ -640,6 +647,7 @@ async fn run_unified(cli: Cli) -> Result<()> {
         cli.max_subagent_depth,
         cli.browser_server_url,
         cli.browser_server_token,
+        token_manager,
         "Session",
     )
     .await
@@ -658,6 +666,7 @@ async fn run_unified_with_session(
     max_subagent_depth: usize,
     browser_server_url: Option<String>,
     browser_server_token: Option<String>,
+    token_manager: Option<claude_auth::TokenManager>,
     label: &str,
 ) -> Result<()> {
     let original_stdout =
@@ -680,6 +689,7 @@ async fn run_unified_with_session(
         socket_path,
         session.display_file(),
         session.status_file(),
+        session.usage_file(),
         session.session_dir().clone(),
         session.conversation_state_file(),
         llm,
@@ -687,6 +697,7 @@ async fn run_unified_with_session(
         chat_options,
         subagent_max_iterations,
         max_subagent_depth,
+        token_manager,
     );
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

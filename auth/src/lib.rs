@@ -3,6 +3,8 @@
 //! Handles loading, refreshing, and persisting OAuth tokens from
 //! `~/.tcode/auth/claude_tokens.json`.
 
+pub mod usage;
+
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -35,8 +37,7 @@ impl OAuthTokens {
 
 /// Refresh the access token using the refresh token.
 /// Returns new tokens with updated access_token and potentially new refresh_token.
-pub async fn refresh_tokens(refresh_token: &str) -> Result<OAuthTokens> {
-    let client = reqwest::Client::new();
+pub async fn refresh_tokens(client: &reqwest::Client, refresh_token: &str) -> Result<OAuthTokens> {
     let response = client
         .post("https://console.anthropic.com/v1/oauth/token")
         .json(&serde_json::json!({
@@ -87,6 +88,7 @@ pub async fn refresh_tokens(refresh_token: &str) -> Result<OAuthTokens> {
 pub struct TokenManager {
     tokens: Arc<RwLock<OAuthTokens>>,
     storage_path: PathBuf,
+    client: reqwest::Client,
 }
 
 impl TokenManager {
@@ -95,6 +97,7 @@ impl TokenManager {
         Self {
             tokens: Arc::new(RwLock::new(tokens)),
             storage_path: path,
+            client: reqwest::Client::new(),
         }
     }
 
@@ -105,6 +108,11 @@ impl TokenManager {
             .join(".tcode")
             .join("auth")
             .join("claude_tokens.json")
+    }
+
+    /// Return a reference to the shared HTTP client.
+    pub fn client(&self) -> &reqwest::Client {
+        &self.client
     }
 
     /// Load tokens from a file, or return None if file doesn't exist or is invalid.
@@ -137,7 +145,7 @@ impl TokenManager {
             // Double-check after acquiring write lock (another task may have refreshed)
             if tokens.is_expired_or_expiring() {
                 tracing::info!("Access token expired or expiring, refreshing...");
-                let new_tokens = refresh_tokens(&tokens.refresh_token).await?;
+                let new_tokens = refresh_tokens(&self.client, &tokens.refresh_token).await?;
                 *tokens = new_tokens;
                 // Release lock before saving
                 drop(tokens);

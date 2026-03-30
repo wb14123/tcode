@@ -161,6 +161,7 @@ name = "auth"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "chrono",
  "dirs",
  "llm-rs",
  "reqwest 0.13.1",
