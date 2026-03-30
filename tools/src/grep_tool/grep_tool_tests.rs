@@ -148,6 +148,22 @@ fn multiple_matches_in_single_file() -> Result<()> {
 }
 
 #[test]
+fn single_file_path_works() -> Result<()> {
+    let dir = temp_dir();
+    let file = dir.join("target.txt");
+    std::fs::write(&file, "alpha\nbeta\ngamma\n")?;
+    std::fs::write(dir.join("other.txt"), "alpha other\n")?;
+
+    let (results, total) = search_grep(&file, "alpha", None)?;
+    assert_eq!(total, 1);
+    assert_eq!(results.len(), 1);
+    assert!(results[0].path.to_string_lossy().ends_with("target.txt"));
+
+    std::fs::remove_dir_all(&dir)?;
+    Ok(())
+}
+
+#[test]
 fn regex_pattern_works() -> Result<()> {
     let dir = temp_dir();
     std::fs::write(

@@ -27,7 +27,7 @@ struct FileMatches {
     lines: Vec<MatchLine>,
 }
 
-/// Perform content search across files in `search_dir`.
+/// Perform content search across files in `search_dir` (or a single file).
 /// Synchronous — intended to run inside `spawn_blocking`.
 fn search_grep(
     search_dir: &Path,
@@ -140,12 +140,13 @@ fn search_grep(
 /// Returns file paths + line numbers sorted by mod time. Capped at 100 matches; lines truncated at 2000 chars.
 /// For counting/identifying matches within files, use Bash with `rg` — do NOT use `grep`.
 /// Delegate open-ended multi-round searches to a subagent.
+/// Path can be a directory (recursive search) or a single file.
 #[tool]
 pub fn grep(
     ctx: ToolContext,
     /// Regex pattern to search for in file contents
     pattern: String,
-    /// Directory to search in (defaults to current working directory)
+    /// Directory or file to search in (defaults to current working directory)
     #[serde(default)]
     path: Option<String>,
     /// File glob filter (e.g. "*.js", "*.{ts,tsx}")
@@ -166,20 +167,16 @@ pub fn grep(
             None => cwd,
         };
 
-        match tokio::fs::metadata(&search_dir).await {
-            Ok(m) if m.is_dir() => {}
-            Ok(_) => {
-                yield Err(anyhow!("Search path is not a directory: {}", search_dir.display()));
-                return;
-            }
+        let is_dir = match tokio::fs::metadata(&search_dir).await {
+            Ok(m) => m.is_dir(),
             Err(e) => {
                 yield Err(anyhow!("Failed to access search path {}: {}", search_dir.display(), e));
                 return;
             }
-        }
+        };
 
         if let Err(e) = crate::file_permission::check_file_read_permission(
-            &ctx.permission, &search_dir, true,
+            &ctx.permission, &search_dir, is_dir,
         ).await {
             yield Err(e);
             return;
