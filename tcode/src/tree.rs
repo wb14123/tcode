@@ -29,6 +29,7 @@ use crate::tree_nav::TreeNav;
 
 #[derive(Debug, Clone)]
 enum NodeStatus {
+    Generating,
     Running,
     Idle,
     Succeeded,
@@ -41,6 +42,7 @@ enum NodeStatus {
 impl NodeStatus {
     fn label(&self) -> &'static str {
         match self {
+            NodeStatus::Generating => "generating",
             NodeStatus::Running => "running",
             NodeStatus::Idle => "idle",
             NodeStatus::Succeeded => "done",
@@ -53,6 +55,7 @@ impl NodeStatus {
 
     fn color(&self) -> Color {
         match self {
+            NodeStatus::Generating => Color::Yellow,
             NodeStatus::Running => Color::Yellow,
             NodeStatus::Idle => Color::DarkGray,
             NodeStatus::Succeeded => Color::Green,
@@ -373,14 +376,53 @@ impl TreeState {
     /// Process a single Message event, updating tree nodes.
     fn process_event(&mut self, dir: &Path, owner_node: usize, msg: &Message) {
         match msg {
+            Message::AssistantToolCallStart {
+                tool_call_id,
+                tool_name,
+                ..
+            } => {
+                if self.tool_call_idx.contains_key(tool_call_id) {
+                    return; // Already tracked
+                }
+                let depth = self.arena[owner_node].depth + 1;
+                let node_idx = self.arena.len();
+                self.arena.push(TreeNode {
+                    kind: NodeType::ToolCall {
+                        tool_call_id: tool_call_id.clone(),
+                        tool_name: tool_name.clone(),
+                        tool_args: String::new(),
+                        status: NodeStatus::Generating,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    },
+                    depth,
+                    children: Vec::new(),
+                    collapsed: false,
+                });
+                self.arena[owner_node].children.push(node_idx);
+                self.tool_call_idx.insert(tool_call_id.clone(), node_idx);
+            }
             Message::ToolMessageStart {
                 tool_call_id,
                 tool_name,
                 tool_args,
                 ..
             } => {
-                if self.tool_call_idx.contains_key(tool_call_id) {
-                    return; // Already tracked
+                if let Some(&idx) = self.tool_call_idx.get(tool_call_id) {
+                    // Node already exists (created by AssistantToolCallStart),
+                    // update status from Generating to Running and fill in tool_args.
+                    if let NodeType::ToolCall {
+                        status,
+                        tool_args: existing_args,
+                        ..
+                    } = &mut self.arena[idx].kind
+                    {
+                        *status = NodeStatus::Running;
+                        if existing_args.is_empty() && !tool_args.is_empty() {
+                            *existing_args = tool_args.clone();
+                        }
+                    }
+                    return;
                 }
                 let depth = self.arena[owner_node].depth + 1;
                 let node_idx = self.arena.len();
@@ -578,7 +620,10 @@ impl TreeState {
         match &self.arena[idx].kind {
             NodeType::Root { .. } => false,
             NodeType::ToolCall { status, .. } | NodeType::SubAgent { status, .. } => {
-                matches!(status, NodeStatus::Running | NodeStatus::Permission)
+                matches!(
+                    status,
+                    NodeStatus::Generating | NodeStatus::Running | NodeStatus::Permission
+                )
             }
         }
     }
@@ -609,7 +654,7 @@ impl TreeState {
         let is_active = match &node.kind {
             NodeType::Root { .. } => true,
             NodeType::ToolCall { status, .. } | NodeType::SubAgent { status, .. } => {
-                matches!(status, NodeStatus::Running)
+                matches!(status, NodeStatus::Generating | NodeStatus::Running)
             }
         };
         if is_active {
