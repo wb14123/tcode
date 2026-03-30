@@ -74,6 +74,24 @@ local thinking_state = {
   last_highlighted_row = nil,  -- track last highlighted row to avoid re-highlighting
 }
 
+-- Tool call argument generation state, keyed by tool_call_id
+local tool_call_gen_state = {}
+-- Each entry: {
+--   start_row = nil,        -- row of ">>> TOOL: <name>" line
+--   args_start_row = nil,   -- row where args content starts (after opening fence)
+--   content_parts = {},     -- accumulated raw chunks
+--   tool_name = "",
+--   tool_call_index = 0,
+--   last_highlighted_row = nil,
+-- }
+
+-- Maps tool_call_index -> tool_call_id (to look up state from ArgChunk events)
+local tool_call_index_map = {}
+
+-- For expand/collapse after generation is done, keyed by extmark id
+local tool_call_gen_entries = {}
+-- Each entry: { content = "full args text", expanded = false }
+
 -- Tool output is wrapped in a long backtick-fenced code block to prevent
 -- markdown/treesitter from interpreting partial HTML, XML, JSON, etc. as
 -- markdown syntax. We use 10 backticks so tool output containing ``` won't
@@ -375,6 +393,133 @@ local function toggle_thinking(buf, mark_id)
   vim.bo[buf].modifiable = false
 end
 
+-- Collapse streaming tool call args into a short preview with expand hint
+-- Count visual (displayed) lines for a set of buffer lines, accounting for wrap.
+local function count_visual_lines(buf, lines)
+  local win = vim.fn.bufwinid(buf)
+  local width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
+  local total = 0
+  for _, line in ipairs(lines) do
+    total = total + math.max(1, math.ceil(#line / width))
+  end
+  return total
+end
+
+local function collapse_tool_call_args(buf, tool_call_id)
+  local state = tool_call_gen_state[tool_call_id]
+  if not state then return end
+
+  local full_content = table.concat(state.content_parts)
+  local content_lines = vim.split(full_content, '\n', { plain = true })
+  local line_count = #content_lines
+
+  -- Decide based on visual (wrapped) line count, not raw buffer lines.
+  local visual_count = count_visual_lines(buf, content_lines)
+  if visual_count <= 2 then return end
+
+  -- Get the row range of the content (between opening fence and closing fence)
+  local args_start = state.args_start_row
+  local args_end = args_start + line_count - 1  -- last content row
+
+  -- Compute how much text fits in ~2 visual rows
+  local win = vim.fn.bufwinid(buf)
+  local width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
+  local keep_chars = width * 2
+
+  -- Build the truncated preview: take characters up to keep_chars, on a single line
+  local flat = full_content:gsub('\n', '\\n')
+  local preview = flat:sub(1, keep_chars)
+  local kept_visual = math.max(1, math.ceil(#preview / width))
+  local hidden_visual = visual_count - kept_visual
+
+  -- Replace all content lines with the single truncated preview line
+  vim.api.nvim_buf_set_lines(buf, args_start, args_end + 1, false, { preview })
+  vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', args_start, 0, -1)
+
+  local mark_id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, args_start, 0, {
+    virt_lines = { { { '[... press o to expand ' .. hidden_visual .. ' more lines]', 'TCodeTokens' } } },
+  })
+
+  -- Store for expand/collapse toggle
+  tool_call_gen_entries[mark_id] = {
+    content = full_content,
+    expanded = false,
+  }
+end
+
+-- Find a tool call args extmark at the given buffer line (0-indexed)
+local function find_tool_args_at_line(buf, line)
+  local marks = vim.api.nvim_buf_get_extmarks(buf, thinking_ns, { line, 0 }, { line, -1 }, {})
+  for _, mark in ipairs(marks) do
+    if tool_call_gen_entries[mark[1]] then
+      return mark[1]
+    end
+  end
+  return nil
+end
+
+-- Toggle tool call args expand/collapse inline
+local function toggle_tool_call_args(buf, mark_id)
+  local entry = tool_call_gen_entries[mark_id]
+  if not entry then return end
+
+  vim.bo[buf].modifiable = true
+
+  local pos = vim.api.nvim_buf_get_extmark_by_id(buf, thinking_ns, mark_id, {})
+  if not pos or #pos == 0 then
+    vim.bo[buf].modifiable = false
+    return
+  end
+  local mark_row = pos[1]
+
+  local content_lines = vim.split(entry.content, '\n', { plain = true })
+  local visual_count = count_visual_lines(buf, content_lines)
+
+  local win = vim.fn.bufwinid(buf)
+  local width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
+
+  if entry.expanded then
+    -- Collapse: replace full content lines with a single truncated preview line
+    local first_line_row = mark_row - #content_lines + 1
+    local keep_chars = width * 2
+    local flat = entry.content:gsub('\n', '\\n')
+    local preview = flat:sub(1, keep_chars)
+    local kept_visual = math.max(1, math.ceil(#preview / width))
+    local hidden_visual = visual_count - kept_visual
+
+    vim.api.nvim_buf_set_lines(buf, first_line_row, first_line_row + #content_lines, false, { preview })
+    vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', first_line_row, 0, -1)
+
+    vim.api.nvim_buf_set_extmark(buf, thinking_ns, first_line_row, 0, {
+      id = mark_id,
+      virt_lines = { { { '[... press o to expand ' .. hidden_visual .. ' more lines]', 'TCodeTokens' } } },
+    })
+
+    entry.expanded = false
+  else
+    -- Expand: replace single preview line with all original content lines
+    -- The extmark is on mark_row (the single preview line when collapsed)
+    local first_line_row = mark_row
+    vim.api.nvim_buf_set_lines(buf, first_line_row, first_line_row + 1, false, content_lines)
+
+    -- Highlight all lines
+    for i = 0, #content_lines - 1 do
+      vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', first_line_row + i, 0, -1)
+    end
+
+    -- Update extmark to show collapse hint (on the last line of full content)
+    local last_content_row = first_line_row + #content_lines - 1
+    vim.api.nvim_buf_set_extmark(buf, thinking_ns, last_content_row, 0, {
+      id = mark_id,
+      virt_lines = { { { '[... press o to collapse]', 'TCodeTokens' } } },
+    })
+
+    entry.expanded = true
+  end
+
+  vim.bo[buf].modifiable = false
+end
+
 -- Render a single JSONL event into the buffer with extmarks
 -- Serde externally-tagged enums: {"VariantName": {fields...}}
 local function render_event(buf, ns, event)
@@ -414,43 +559,143 @@ local function render_event(buf, ns, event)
     append_text(buf, data.content)
 
   elseif variant == 'AssistantMessageEnd' then
+    -- Close the args fence on any still-generating tool calls, but keep the
+    -- state so that the upcoming ToolMessageStart can find it and reuse the
+    -- existing label line instead of creating a duplicate.
+    for tool_call_id, gen_state in pairs(tool_call_gen_state) do
+      if not gen_state.fence_closed then
+        append_lines(buf, { TC_FENCE })
+        collapse_tool_call_args(buf, tool_call_id)
+        gen_state.fence_closed = true
+      end
+    end
+    -- Do NOT clear tool_call_gen_state here — ToolMessageStart still needs it.
+    -- It will be cleaned up per-entry inside the ToolMessageStart handler.
     if thinking_state.is_thinking then
       collapse_thinking(buf, ns)
     end
     render_info(buf, ns, data, nil)
 
+  elseif variant == 'AssistantToolCallStart' then
+    -- Close any open thinking first
+    collapse_thinking(buf, ns)
+
+    local tool_name = data.tool_name or ''
+    local tool_call_id = data.tool_call_id or ''
+    local tool_call_index = data.tool_call_index or 0
+
+    -- Render the tool label line
+    local label_line, label_extmark = render_label(buf, ns, '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
+
+    -- Store label info for status updates
+    tc_tool_names[tool_call_id] = tool_name
+    tc_label_marks[tool_call_id] = {
+      extmark_id = label_extmark, ns = ns,
+      tool_name = tool_name, created_at = data.created_at,
+    }
+
+    -- Show [generating] status with cancel hint
+    update_tc_label(buf, tool_call_id, 'generating', 'TCodeTool', true)
+
+    -- Open args fenced code block
+    append_lines(buf, { TC_FENCE, '' })
+    local args_start_row = vim.api.nvim_buf_line_count(buf) - 1
+
+    -- Store generation state
+    tool_call_gen_state[tool_call_id] = {
+      start_row = label_line,
+      args_start_row = args_start_row,
+      content_parts = {},
+      tool_name = tool_name,
+      tool_call_index = tool_call_index,
+      last_highlighted_row = nil,
+    }
+    tool_call_index_map[tool_call_index] = tool_call_id
+
+  elseif variant == 'AssistantToolCallArgChunk' then
+    local tool_call_index = data.tool_call_index or 0
+    local tool_call_id = tool_call_index_map[tool_call_index]
+    if tool_call_id and tool_call_gen_state[tool_call_id] then
+      local state = tool_call_gen_state[tool_call_id]
+      local content = tostring(data.content)
+
+      -- Append text to buffer (streams into the open fence block)
+      append_text(buf, content)
+      table.insert(state.content_parts, content)
+
+      -- Highlight new lines with TCodeToolArgs (same pattern as thinking chunks)
+      local current_last_row = vim.api.nvim_buf_line_count(buf) - 1
+      local start_hl = state.last_highlighted_row and (state.last_highlighted_row + 1) or state.args_start_row
+      for row = start_hl, current_last_row do
+        vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', row, 0, -1)
+      end
+      state.last_highlighted_row = current_last_row
+    end
+
   elseif variant == 'ToolMessageStart' then
     local tool_name = data.tool_name or ''
-    local label_line, label_extmark = render_label(buf, ns, '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
-    -- Store tool name, created_at, and label extmark for status updates
-    if data.tool_call_id then
-      tc_tool_names[data.tool_call_id] = tool_name
-      tc_label_marks[data.tool_call_id] = {
-        extmark_id = label_extmark, ns = ns,
-        tool_name = tool_name, created_at = data.created_at,
-      }
-      update_tc_label(buf, data.tool_call_id, 'running', 'TCodeTool', true)
-    end
-    if data.tool_args and data.tool_args ~= '' and data.tool_args ~= '{}' then
-      append_lines(buf, { '' })
-      local args_line = vim.api.nvim_buf_line_count(buf) - 1
-      vim.api.nvim_buf_set_extmark(buf, ns, args_line, 0, {
-        virt_text = { { data.tool_args, 'TCodeTokens' } },
-        virt_text_pos = 'overlay',
-      })
-    end
-    -- Wrap tool output in a fenced code block to prevent markdown parser from
-    -- interpreting partial HTML/XML, JSON, etc. as markdown syntax.
-    append_lines(buf, { TC_FENCE, '' })
-    -- Place a range extmark covering label through current last line
-    if data.tool_call_id then
-      tc_fence_opened[data.tool_call_id] = true
+    local tool_call_id = data.tool_call_id or ''
+
+    -- Check if we already have a generating state for this tool call
+    local gen_state = tool_call_gen_state[tool_call_id]
+
+    if gen_state then
+      -- We were streaming args — close the args fence (if not already closed
+      -- by AssistantMessageEnd) and transition to [running].
+      if not gen_state.fence_closed then
+        append_lines(buf, { TC_FENCE })
+        collapse_tool_call_args(buf, tool_call_id)
+      end
+
+      -- Update label from [generating] to [running]
+      update_tc_label(buf, tool_call_id, 'running', 'TCodeTool', true)
+
+      -- Open the tool output fenced code block
+      append_lines(buf, { TC_FENCE, '' })
+      tc_fence_opened[tool_call_id] = true
+
+      -- Create/update the range extmark for tool call navigation
       local last_line = vim.api.nvim_buf_line_count(buf) - 1
-      local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, label_line, 0, {
-        end_row = last_line,
-        end_col = 0,
+      local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, gen_state.start_row, 0, {
+        end_row = last_line, end_col = 0,
       })
-      tc_extmark_ids[mark_id] = data.tool_call_id
+      tc_extmark_ids[mark_id] = tool_call_id
+
+      -- Clean up gen state
+      tool_call_gen_state[tool_call_id] = nil
+    else
+      -- Fallback: no streaming args (provider doesn't support it or missed events)
+      -- Keep the original behavior
+      local label_line, label_extmark = render_label(buf, ns, '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
+      if data.tool_call_id then
+        tc_tool_names[data.tool_call_id] = tool_name
+        tc_label_marks[data.tool_call_id] = {
+          extmark_id = label_extmark, ns = ns,
+          tool_name = tool_name, created_at = data.created_at,
+        }
+        update_tc_label(buf, data.tool_call_id, 'running', 'TCodeTool', true)
+      end
+      if data.tool_args and data.tool_args ~= '' and data.tool_args ~= '{}' then
+        append_lines(buf, { '' })
+        local args_line = vim.api.nvim_buf_line_count(buf) - 1
+        vim.api.nvim_buf_set_extmark(buf, ns, args_line, 0, {
+          virt_text = { { data.tool_args, 'TCodeTokens' } },
+          virt_text_pos = 'overlay',
+        })
+      end
+      -- Wrap tool output in a fenced code block to prevent markdown parser from
+      -- interpreting partial HTML/XML, JSON, etc. as markdown syntax.
+      append_lines(buf, { TC_FENCE, '' })
+      -- Place a range extmark covering label through current last line
+      if data.tool_call_id then
+        tc_fence_opened[data.tool_call_id] = true
+        local last_line = vim.api.nvim_buf_line_count(buf) - 1
+        local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, label_line, 0, {
+          end_row = last_line,
+          end_col = 0,
+        })
+        tc_extmark_ids[mark_id] = data.tool_call_id
+      end
     end
 
   elseif variant == 'ToolOutputChunk' then
@@ -730,6 +975,7 @@ local function setup_highlights(statusline_fg, statusline_ctermfg)
   vim.api.nvim_set_hl(0, 'TCodeAssistant', { fg = '#98c379', bold = true, ctermfg = 114 })
   vim.api.nvim_set_hl(0, 'TCodeTool', { fg = '#e5c07b', bold = true, ctermfg = 180 })
   vim.api.nvim_set_hl(0, 'TCodeThinking', { fg = '#7c8495', italic = true, ctermfg = 245 })
+  vim.api.nvim_set_hl(0, 'TCodeToolArgs', { fg = '#7c8495', italic = true, ctermfg = 245 })
   vim.api.nvim_set_hl(0, 'TCodeTokens', { fg = '#5c6370', italic = true, ctermfg = 242 })
   vim.api.nvim_set_hl(0, 'TCodeSuccess', { fg = '#98c379', bold = true, ctermfg = 114 })
   vim.api.nvim_set_hl(0, 'TCodeError', { fg = '#e06c75', bold = true, ctermfg = 168 })
@@ -948,6 +1194,13 @@ function M.setup_display(display_file, status_file, usage_file, session_id, exe_
     local thinking_mark = find_thinking_at_line(buf, cursor_line)
     if thinking_mark then
       toggle_thinking(buf, thinking_mark)
+      return
+    end
+
+    -- Priority 2: tool call args extmark → toggle expand/collapse
+    local tool_args_mark = find_tool_args_at_line(buf, cursor_line)
+    if tool_args_mark then
+      toggle_tool_call_args(buf, tool_args_mark)
       return
     end
 

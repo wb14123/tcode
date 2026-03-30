@@ -252,5 +252,13 @@ fn print_message(msg: &Message) {
         } => {
             println!("    [SubAgentPermissionDenied: {}]", conversation_id);
         }
+        Message::AssistantToolCallStart { tool_name, .. } => {
+            print!("\n    [Tool call starting: {}]", tool_name);
+            io::stdout().flush().ok();
+        }
+        Message::AssistantToolCallArgChunk { content, .. } => {
+            print!("{}", content);
+            io::stdout().flush().ok();
+        }
     }
 }

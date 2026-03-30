@@ -60,6 +60,8 @@ mod tests {
                 LLMEvent::TextDelta(_) => "TextDelta",
                 LLMEvent::ThinkingDelta(_) => "ThinkingDelta",
                 LLMEvent::ToolCall(_) => "ToolCall",
+                LLMEvent::ToolCallStart { .. } => "ToolCallStart",
+                LLMEvent::ToolCallDelta { .. } => "ToolCallDelta",
                 LLMEvent::MessageEnd { .. } => "MessageEnd",
                 LLMEvent::Error(_) => "Error",
             })

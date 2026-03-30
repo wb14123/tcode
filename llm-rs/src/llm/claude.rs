@@ -638,11 +638,19 @@ impl LLM for Claude {
                                     match parsed.content_block.block_type.as_str() {
                                         "tool_use" => {
                                             // Start tracking a new tool_use block
+                                            let id = parsed.content_block.id.unwrap_or_default();
+                                            let raw_name = parsed.content_block.name.unwrap_or_default();
+                                            let name = strip_tool_prefix(&raw_name);
+                                            yield LLMEvent::ToolCallStart {
+                                                index: parsed.index,
+                                                id: id.clone(),
+                                                name: name.clone(),
+                                            };
                                             tool_blocks.insert(
                                                 parsed.index,
                                                 ToolBlockAccumulator {
-                                                    id: parsed.content_block.id.unwrap_or_default(),
-                                                    name: parsed.content_block.name.unwrap_or_default(),
+                                                    id,
+                                                    name: raw_name,
                                                     input_json: String::new(),
                                                 },
                                             );
@@ -687,6 +695,10 @@ impl LLM for Claude {
                                                 && let Some(acc) = tool_blocks.get_mut(&parsed.index)
                                             {
                                                 acc.input_json.push_str(&partial);
+                                                yield LLMEvent::ToolCallDelta {
+                                                    index: parsed.index,
+                                                    partial_json: partial,
+                                                };
                                             }
                                         }
                                         "thinking_delta" => {

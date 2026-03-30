@@ -444,8 +444,10 @@ impl LLM for OpenRouter {
 
                         if let Some(tc_deltas) = choice.delta.tool_calls {
                             for tc_delta in tc_deltas {
+                                let index = tc_delta.index;
+                                let is_new = !tool_calls.contains_key(&index);
                                 let entry = tool_calls
-                                    .entry(tc_delta.index)
+                                    .entry(index)
                                     .or_insert_with(|| (String::new(), String::new(), String::new()));
 
                                 if let Some(id) = tc_delta.id {
@@ -455,9 +457,29 @@ impl LLM for OpenRouter {
                                     if let Some(name) = func.name {
                                         entry.1 = name;
                                     }
+                                    // Emit ToolCallStart before the first delta so
+                                    // the renderer can set up state for this tool call.
+                                    if is_new {
+                                        yield LLMEvent::ToolCallStart {
+                                            index,
+                                            id: entry.0.clone(),
+                                            name: entry.1.clone(),
+                                        };
+                                    }
                                     if let Some(args) = func.arguments {
                                         entry.2.push_str(&args);
+                                        yield LLMEvent::ToolCallDelta {
+                                            index,
+                                            partial_json: args,
+                                        };
                                     }
+                                } else if is_new {
+                                    // First delta has id but no function block — emit start anyway.
+                                    yield LLMEvent::ToolCallStart {
+                                        index,
+                                        id: entry.0.clone(),
+                                        name: entry.1.clone(),
+                                    };
                                 }
                             }
                         }

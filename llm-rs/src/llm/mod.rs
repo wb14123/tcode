@@ -143,6 +143,16 @@ pub enum LLMEvent {
         raw: Option<serde_json::Value>,
     },
 
+    /// A tool call block has started streaming (name and id are known, args not yet complete).
+    ToolCallStart {
+        index: usize,
+        id: String,
+        name: String,
+    },
+
+    /// A partial JSON fragment of a tool call's arguments.
+    ToolCallDelta { index: usize, partial_json: String },
+
     /// Error occurred during generation.
     /// Maps to Claude's error event or OpenAI error responses.
     Error(String),

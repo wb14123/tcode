@@ -297,6 +297,23 @@ pub enum Message {
         total_output_tokens: i32,
     },
 
+    /// A tool call block has started streaming; name and id are now known.
+    AssistantToolCallStart {
+        msg_id: MessageID,
+        tool_call_index: usize,
+        tool_call_id: String,
+        tool_name: String,
+        created_at: u64,
+    },
+
+    /// A partial JSON fragment of a tool call's arguments arrived.
+    AssistantToolCallArgChunk {
+        msg_id: MessageID,
+        tool_call_index: usize,
+        tool_name: String,
+        content: Arc<String>,
+    },
+
     /// Broadcast by subagent when the user types `/done` in its interactive edit window.
     /// Monitored by the parent's tool task to recover a cancelled subagent result.
     UserRequestEnd {
@@ -1384,6 +1401,7 @@ impl Conversation {
                 .chat(self.model.as_str(), &self.llm_msgs, &self.env.chat_options);
         let mut accumulated_text = String::new();
         let mut pending_tool_calls = Vec::new();
+        let mut tool_call_names: HashMap<usize, String> = HashMap::new();
 
         self.broadcast_msg(Message::AssistantMessageStart {
             msg_id: self.next_msg_id(),
@@ -1432,6 +1450,28 @@ impl Conversation {
                 }
                 LLMEvent::ToolCall(tool_call) => {
                     pending_tool_calls.push(tool_call);
+                }
+                LLMEvent::ToolCallStart { index, id, name } => {
+                    tool_call_names.insert(index, name.clone());
+                    self.broadcast_msg(Message::AssistantToolCallStart {
+                        msg_id: self.next_msg_id(),
+                        tool_call_index: index,
+                        tool_call_id: id,
+                        tool_name: name,
+                        created_at: now_millis(),
+                    })?;
+                }
+                LLMEvent::ToolCallDelta {
+                    index,
+                    partial_json,
+                } => {
+                    let tool_name = tool_call_names.get(&index).cloned().unwrap_or_default();
+                    self.broadcast_msg(Message::AssistantToolCallArgChunk {
+                        msg_id: self.next_msg_id(),
+                        tool_call_index: index,
+                        tool_name,
+                        content: Arc::new(partial_json),
+                    })?;
                 }
                 LLMEvent::MessageEnd {
                     stop_reason,

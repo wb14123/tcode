@@ -167,6 +167,9 @@ pub fn streaming_response(
                     });
                     yield Ok(Event::default().data(err.to_string()));
                 }
+                LLMEvent::ToolCallStart { .. } | LLMEvent::ToolCallDelta { .. } => {
+                    // Not forwarded in the Chat Completions SSE path
+                }
             }
         }
 
@@ -217,6 +220,9 @@ pub async fn non_streaming_response(
             }
             LLMEvent::Error(e) => {
                 return Err(AppError::LLMError(e));
+            }
+            LLMEvent::ToolCallStart { .. } | LLMEvent::ToolCallDelta { .. } => {
+                // Not used in non-streaming path
             }
         }
     }

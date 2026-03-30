@@ -79,6 +79,7 @@ async fn main() {
             LLMEvent::Error(err) => {
                 eprintln!("\nError: {}", err);
             }
+            LLMEvent::ToolCallStart { .. } | LLMEvent::ToolCallDelta { .. } => {}
         }
     }
 }
