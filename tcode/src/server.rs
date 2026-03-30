@@ -397,6 +397,8 @@ fn run_event_writer(
     Box::pin(async move {
         let mut tool_calls: HashMap<String, ToolCallState> = HashMap::new();
         let mut subagents: HashMap<String, SubAgentState> = HashMap::new();
+        // Maps tool_call_index -> tool_call_id for AssistantToolCallArgChunk routing
+        let mut tool_call_index_map: HashMap<usize, String> = HashMap::new();
         let mut is_thinking = false;
 
         tracing::info!("event_writer started");
@@ -430,6 +432,68 @@ fn run_event_writer(
                     .context("Failed to write status file")?;
             }
             match &*event {
+                Message::AssistantToolCallStart {
+                    tool_call_id,
+                    tool_call_index,
+                    tool_name,
+                    ..
+                } => {
+                    tracing::info!(
+                        tool_call_id,
+                        tool_call_index,
+                        tool_name,
+                        "AssistantToolCallStart received"
+                    );
+
+                    // Create per-tool-call files early so the detail window can
+                    // stream args as they arrive.
+                    let tc_file = session_dir.join(format!("tool-call-{}.jsonl", tool_call_id));
+                    let tc_status =
+                        session_dir.join(format!("tool-call-{}-status.txt", tool_call_id));
+                    tokio::fs::write(&tc_file, "")
+                        .await
+                        .context("Failed to create tool call file")?;
+                    tokio::fs::write(&tc_status, "Generating")
+                        .await
+                        .context("Failed to create tool call status file")?;
+
+                    tool_calls.insert(
+                        tool_call_id.clone(),
+                        ToolCallState {
+                            file_path: tc_file.clone(),
+                            status_file_path: tc_status,
+                            tool_name: tool_name.clone(),
+                            accumulated_preview: String::new(),
+                        },
+                    );
+                    tool_call_index_map.insert(*tool_call_index, tool_call_id.clone());
+
+                    // Write to both main display and per-tool-call file
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append display event")?;
+                    append_event(&tc_file, &event)
+                        .await
+                        .context("Failed to append tool call start event")?;
+                }
+
+                Message::AssistantToolCallArgChunk {
+                    tool_call_index, ..
+                } => {
+                    if let Some(tool_call_id) = tool_call_index_map.get(tool_call_index)
+                        && let Some(state) = tool_calls.get(tool_call_id)
+                    {
+                        // Write to per-tool-call file for streaming display
+                        append_event(&state.file_path, &event)
+                            .await
+                            .context("Failed to append tool call arg chunk")?;
+                    }
+                    // Always write to main display
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append display event")?;
+                }
+
                 Message::ToolMessageStart {
                     tool_call_id,
                     tool_name,
@@ -443,16 +507,34 @@ fn run_event_writer(
                         "ToolMessageStart received"
                     );
 
-                    // Create per-tool-call files
+                    // If AssistantToolCallStart already created the per-tool-call
+                    // files and state, just append the event and update status.
+                    // Otherwise create them now (fallback for providers that don't
+                    // stream tool call args).
                     let tc_file = session_dir.join(format!("tool-call-{}.jsonl", tool_call_id));
-                    let tc_status =
-                        session_dir.join(format!("tool-call-{}-status.txt", tool_call_id));
-                    tokio::fs::write(&tc_file, "")
-                        .await
-                        .context("Failed to create tool call file")?;
-                    tokio::fs::write(&tc_status, "Running")
-                        .await
-                        .context("Failed to create tool call status file")?;
+                    if !tool_calls.contains_key(tool_call_id.as_str()) {
+                        let tc_status =
+                            session_dir.join(format!("tool-call-{}-status.txt", tool_call_id));
+                        tokio::fs::write(&tc_file, "")
+                            .await
+                            .context("Failed to create tool call file")?;
+                        tokio::fs::write(&tc_status, "Running")
+                            .await
+                            .context("Failed to create tool call status file")?;
+                        tool_calls.insert(
+                            tool_call_id.clone(),
+                            ToolCallState {
+                                file_path: tc_file.clone(),
+                                status_file_path: tc_status,
+                                tool_name: tool_name.clone(),
+                                accumulated_preview: String::new(),
+                            },
+                        );
+                    } else if let Some(state) = tool_calls.get(tool_call_id) {
+                        tokio::fs::write(&state.status_file_path, "Running")
+                            .await
+                            .context("Failed to update tool call status to Running")?;
+                    }
 
                     // Write event to both main display and per-tool-call file
                     append_event(&display_file, &event)
@@ -462,15 +544,6 @@ fn run_event_writer(
                         .await
                         .context("Failed to append tool call event")?;
 
-                    tool_calls.insert(
-                        tool_call_id.clone(),
-                        ToolCallState {
-                            file_path: tc_file,
-                            status_file_path: tc_status,
-                            tool_name: tool_name.clone(),
-                            accumulated_preview: String::new(),
-                        },
-                    );
                     tool_clients
                         .lock()
                         .insert(tool_call_id.clone(), Arc::clone(&conv_client));
@@ -785,6 +858,9 @@ fn run_event_writer(
 
                     if matches!(&*event, Message::AssistantMessageEnd { .. }) {
                         is_thinking = false;
+                        // Tool call indices are only valid within a single assistant
+                        // turn — clear the map so stale entries don't accumulate.
+                        tool_call_index_map.clear();
                         tokio::fs::write(&status_file, "Ready")
                             .await
                             .context("Failed to write status file")?;

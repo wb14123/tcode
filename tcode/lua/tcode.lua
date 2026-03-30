@@ -676,12 +676,18 @@ local function render_event(buf, ns, event)
         update_tc_label(buf, data.tool_call_id, 'running', 'TCodeTool', true)
       end
       if data.tool_args and data.tool_args ~= '' and data.tool_args ~= '{}' then
-        append_lines(buf, { '' })
-        local args_line = vim.api.nvim_buf_line_count(buf) - 1
-        vim.api.nvim_buf_set_extmark(buf, ns, args_line, 0, {
-          virt_text = { { data.tool_args, 'TCodeTokens' } },
-          virt_text_pos = 'overlay',
-        })
+        -- Render tool input as real text lines (not virtual text) so the full
+        -- content is visible and scrollable, wrapped in a fenced code block.
+        local args_lines = vim.split(data.tool_args, '\n', { plain = true })
+        append_lines(buf, { TC_FENCE })
+        append_lines(buf, args_lines)
+        -- Highlight the args lines with TCodeToolArgs
+        local args_end = vim.api.nvim_buf_line_count(buf) - 1
+        local args_start = args_end - #args_lines + 1
+        for row = args_start, args_end do
+          vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', row, 0, -1)
+        end
+        append_lines(buf, { TC_FENCE })
       end
       -- Wrap tool output in a fenced code block to prevent markdown parser from
       -- interpreting partial HTML/XML, JSON, etc. as markdown syntax.
@@ -1356,7 +1362,10 @@ function M.setup_tool_call_display(tool_call_file, status_file)
   local ns = vim.api.nvim_create_namespace('tcode_tc')
 
   local check_updates = create_jsonl_reader(M.tc_file, buf, ns, function(variant, data)
-    if variant == 'ToolMessageStart' then
+    if variant == 'AssistantToolCallStart' then
+      vim.g.tcode_tc_status = 'Generating: ' .. (data.tool_name or '')
+      vim.cmd('redrawstatus')
+    elseif variant == 'ToolMessageStart' then
       vim.g.tcode_tc_status = 'Running: ' .. (data.tool_name or '')
       vim.cmd('redrawstatus')
     elseif variant == 'ToolMessageEnd' then
