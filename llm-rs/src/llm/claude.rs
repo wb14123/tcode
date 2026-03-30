@@ -116,6 +116,12 @@ impl Claude {
 // Request types
 // ============================================================================
 
+#[derive(Clone, Serialize)]
+struct CacheControl {
+    #[serde(rename = "type")]
+    cache_type: &'static str,
+}
+
 #[derive(Serialize)]
 struct MessagesRequest<'a> {
     model: &'a str,
@@ -128,6 +134,8 @@ struct MessagesRequest<'a> {
     tools: Option<Vec<ClaudeToolDefinition>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    cache_control: Option<CacheControl>,
 }
 
 /// System prompt content block for Claude API.
@@ -223,9 +231,12 @@ struct UsageInfo {
     input_tokens: i32,
     #[serde(default)]
     output_tokens: i32,
-    /// Tokens used for extended thinking (reasoning tokens)
+    /// Tokens charged for writing new cache entries
     #[serde(default)]
     cache_creation_input_tokens: i32,
+    /// Tokens served from cache (charged at ~10% rate)
+    #[serde(default)]
+    cache_read_input_tokens: i32,
 }
 
 /// Content block start event payload.
@@ -557,6 +568,7 @@ impl LLM for Claude {
                 stream: true,
                 tools: tool_defs,
                 thinking,
+                cache_control: Some(CacheControl { cache_type: "ephemeral" }),
             };
 
             let url = if use_oauth {
@@ -605,7 +617,9 @@ impl LLM for Claude {
 
             // Track thinking blocks being built (by index)
             let mut thinking_blocks: HashMap<usize, ThinkingBlockAccumulator> = HashMap::new();
-            let mut reasoning_tokens = 0i32;
+            let reasoning_tokens = 0i32;
+            let mut cache_creation_input_tokens = 0i32;
+            let mut cache_read_input_tokens = 0i32;
 
             let mut sse_events = sse::sse_stream(response);
 
@@ -626,6 +640,8 @@ impl LLM for Claude {
                                 if let Ok(parsed) = serde_json::from_str::<MessageStartData>(data) {
                                     if let Some(usage) = parsed.message.usage {
                                         input_tokens = usage.input_tokens;
+                                        cache_creation_input_tokens += usage.cache_creation_input_tokens;
+                                        cache_read_input_tokens += usage.cache_read_input_tokens;
                                     }
                                     if !emitted_start {
                                         yield LLMEvent::MessageStart { input_tokens };
@@ -763,10 +779,8 @@ impl LLM for Claude {
                                 if let Ok(parsed) = serde_json::from_str::<MessageDeltaData>(data) {
                                     if let Some(usage) = parsed.usage {
                                         output_tokens = usage.output_tokens;
-                                        // Track reasoning tokens from cache_creation_input_tokens
-                                        if usage.cache_creation_input_tokens > 0 {
-                                            reasoning_tokens = usage.cache_creation_input_tokens;
-                                        }
+                                        cache_creation_input_tokens += usage.cache_creation_input_tokens;
+                                        cache_read_input_tokens += usage.cache_read_input_tokens;
                                     }
                                     if let Some(reason) = parsed.delta.stop_reason {
                                         stop_reason = Some(match reason.as_str() {
@@ -798,6 +812,8 @@ impl LLM for Claude {
                                     input_tokens,
                                     output_tokens,
                                     reasoning_tokens,
+                                    cache_creation_input_tokens,
+                                    cache_read_input_tokens,
                                     raw: Some(raw),
                                 };
                                 return;
@@ -835,6 +851,8 @@ impl LLM for Claude {
                 input_tokens,
                 output_tokens,
                 reasoning_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
                 raw: Some(raw),
             };
         })

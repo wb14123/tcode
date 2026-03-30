@@ -139,6 +139,10 @@ pub enum LLMEvent {
         output_tokens: i32,
         /// Reasoning tokens used (subset of output_tokens). 0 if not reported.
         reasoning_tokens: i32,
+        /// Tokens charged for writing new cache entries (Claude only).
+        cache_creation_input_tokens: i32,
+        /// Tokens served from cache at reduced rate (Claude only).
+        cache_read_input_tokens: i32,
         /// Raw provider response for round-tripping.
         raw: Option<serde_json::Value>,
     },

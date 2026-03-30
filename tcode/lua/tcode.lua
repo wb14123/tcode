@@ -200,13 +200,19 @@ local function render_info(buf, ns, data, token_prefix, insert_at)
   if data.input_tokens and data.output_tokens then
     local has_tokens = not token_prefix or (data.input_tokens > 0 or data.output_tokens > 0)
     if has_tokens then
-      local fmt = token_prefix
-        and string.format('[%s: %%d in / %%d out tokens]', token_prefix)
-        or '[%d in / %d out tokens]'
-      table.insert(virt_parts, {
-        string.format(fmt, data.input_tokens, data.output_tokens),
-        'TCodeTokens',
-      })
+      local text
+      if data.cache_read_input_tokens and data.cache_read_input_tokens > 0 then
+        local fmt = token_prefix
+          and string.format('[%s: %%d in (%%d cached) / %%d out tokens]', token_prefix)
+          or '[%d in (%d cached) / %d out tokens]'
+        text = string.format(fmt, data.input_tokens, data.cache_read_input_tokens, data.output_tokens)
+      else
+        local fmt = token_prefix
+          and string.format('[%s: %%d in / %%d out tokens]', token_prefix)
+          or '[%d in / %d out tokens]'
+        text = string.format(fmt, data.input_tokens, data.output_tokens)
+      end
+      table.insert(virt_parts, { text, 'TCodeTokens' })
     end
   end
   if data.end_status and data.end_status ~= 'Succeeded' then
@@ -1078,11 +1084,16 @@ local function render_event(buf, ns, event)
     append_lines(buf, { '', '' })
     local info_line = vim.api.nvim_buf_line_count(buf) - 1
     if data.total_input_tokens and data.total_output_tokens then
+      local text
+      if data.total_cache_read_tokens and data.total_cache_read_tokens > 0 then
+        text = string.format('[Total: %d in (%d cached) / %d out tokens]',
+          data.total_input_tokens, data.total_cache_read_tokens, data.total_output_tokens)
+      else
+        text = string.format('[Total: %d in / %d out tokens]',
+          data.total_input_tokens, data.total_output_tokens)
+      end
       vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
-        virt_text = { {
-          string.format('[Total: %d in / %d out tokens]', data.total_input_tokens, data.total_output_tokens),
-          'TCodeTokens',
-        } },
+        virt_text = { { text, 'TCodeTokens' } },
         virt_text_pos = 'overlay',
       })
     end

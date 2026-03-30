@@ -127,6 +127,10 @@ pub struct ConversationState {
     pub msg_id_counter: i32,
     pub total_input_tokens: i32,
     pub total_output_tokens: i32,
+    #[serde(default)]
+    pub total_cache_creation_tokens: i32,
+    #[serde(default)]
+    pub total_cache_read_tokens: i32,
     pub single_turn: bool,
     pub subagent_depth: usize,
 }
@@ -234,6 +238,8 @@ pub enum Message {
         input_tokens: i32,
         output_tokens: i32,
         reasoning_tokens: i32,
+        cache_creation_input_tokens: i32,
+        cache_read_input_tokens: i32,
     },
 
     ToolMessageStart {
@@ -301,6 +307,8 @@ pub enum Message {
         response: Arc<String>,
         input_tokens: i32,
         output_tokens: i32,
+        cache_creation_input_tokens: i32,
+        cache_read_input_tokens: i32,
     },
 
     /// A sub-agent is being resumed with a follow-up message.
@@ -315,6 +323,8 @@ pub enum Message {
     AssistantRequestEnd {
         total_input_tokens: i32,
         total_output_tokens: i32,
+        total_cache_creation_tokens: i32,
+        total_cache_read_tokens: i32,
     },
 
     /// A tool call block has started streaming; name and id are now known.
@@ -581,6 +591,8 @@ impl ConversationManager {
             input_channel_rx: input_rx,
             total_input_tokens: 0,
             total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
             single_turn,
             pending_tools: HashSet::new(),
             cancelled_tools: HashSet::new(),
@@ -726,6 +738,8 @@ impl ConversationManager {
             input_channel_rx: input_rx,
             total_input_tokens: state.total_input_tokens,
             total_output_tokens: state.total_output_tokens,
+            total_cache_creation_tokens: state.total_cache_creation_tokens,
+            total_cache_read_tokens: state.total_cache_read_tokens,
             single_turn: state.single_turn,
             pending_tools: HashSet::new(),
             cancelled_tools: HashSet::new(),
@@ -923,6 +937,8 @@ struct SubagentResponse {
     text: String,
     input_tokens: i32,
     output_tokens: i32,
+    cache_creation_input_tokens: i32,
+    cache_read_input_tokens: i32,
     end_status: MessageEndStatus,
 }
 
@@ -941,6 +957,8 @@ async fn collect_subagent_response(
         text: String::new(),
         input_tokens: 0,
         output_tokens: 0,
+        cache_creation_input_tokens: 0,
+        cache_read_input_tokens: 0,
         end_status: MessageEndStatus::Succeeded,
     };
     let mut cancel_sent = false;
@@ -983,9 +1001,13 @@ async fn collect_subagent_response(
             Message::AssistantRequestEnd {
                 total_input_tokens,
                 total_output_tokens,
+                total_cache_creation_tokens,
+                total_cache_read_tokens,
             } => {
                 resp.input_tokens = *total_input_tokens;
                 resp.output_tokens = *total_output_tokens;
+                resp.cache_creation_input_tokens = *total_cache_creation_tokens;
+                resp.cache_read_input_tokens = *total_cache_read_tokens;
 
                 // Publish first-turn result to parent
                 let text = match Conversation::broadcast_subagent_turn_end(
@@ -1146,6 +1168,8 @@ pub struct Conversation {
     /// Accumulated token usage.
     total_input_tokens: i32,
     total_output_tokens: i32,
+    total_cache_creation_tokens: i32,
+    total_cache_read_tokens: i32,
 
     /// When true, the conversation exits after one user message + LLM response cycle.
     single_turn: bool,
@@ -1193,6 +1217,8 @@ impl Conversation {
             msg_id_counter: self.env.client.msg_id_counter_value(),
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
+            total_cache_creation_tokens: self.total_cache_creation_tokens,
+            total_cache_read_tokens: self.total_cache_read_tokens,
             single_turn: self.single_turn,
             subagent_depth: self.env.subagent_depth,
         }
@@ -1244,6 +1270,8 @@ impl Conversation {
             response: Arc::new(result_text.clone()),
             input_tokens: response.input_tokens,
             output_tokens: response.output_tokens,
+            cache_creation_input_tokens: response.cache_creation_input_tokens,
+            cache_read_input_tokens: response.cache_read_input_tokens,
         })?;
 
         Ok(result_text)
@@ -1285,6 +1313,8 @@ impl Conversation {
                         input_tokens: 0,
                         output_tokens: 0,
                         reasoning_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                     })?;
                     self.finish_turn()?;
                 }
@@ -1439,6 +1469,8 @@ impl Conversation {
                         input_tokens: 0,
                         output_tokens: 0,
                         reasoning_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                     })?;
                     self.llm_calls += 1;
                     return Ok(());
@@ -1517,10 +1549,14 @@ impl Conversation {
                     input_tokens,
                     output_tokens,
                     reasoning_tokens,
+                    cache_creation_input_tokens,
+                    cache_read_input_tokens,
                     raw,
                 } => {
                     self.total_input_tokens += input_tokens;
                     self.total_output_tokens += output_tokens;
+                    self.total_cache_creation_tokens += cache_creation_input_tokens;
+                    self.total_cache_read_tokens += cache_read_input_tokens;
 
                     let (end_status, error) = if stop_reason == StopReason::MaxTokens {
                         (
@@ -1538,6 +1574,8 @@ impl Conversation {
                         input_tokens,
                         output_tokens,
                         reasoning_tokens,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
                     })?;
 
                     if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
@@ -1566,6 +1604,8 @@ impl Conversation {
                         input_tokens: 0,
                         output_tokens: 0,
                         reasoning_tokens: 0,
+                        cache_creation_input_tokens: 0,
+                        cache_read_input_tokens: 0,
                     })?;
                     self.llm_calls += 1;
                     return Ok(());
@@ -1588,6 +1628,8 @@ impl Conversation {
             self.broadcast_msg(Message::AssistantRequestEnd {
                 total_input_tokens: self.total_input_tokens,
                 total_output_tokens: self.total_output_tokens,
+                total_cache_creation_tokens: self.total_cache_creation_tokens,
+                total_cache_read_tokens: self.total_cache_read_tokens,
             })?;
         }
         self.env.client.reset_cancel_token();
@@ -2213,6 +2255,8 @@ async fn execute_continue_subagent(
                 response: Arc::new(error.clone()),
                 input_tokens: 0,
                 output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             })
             .context("failed to broadcast SubAgentTurnEnd")?;
         loop_tx

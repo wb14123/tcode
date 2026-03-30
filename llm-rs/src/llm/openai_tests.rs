@@ -175,6 +175,7 @@ mod tests {
             output_tokens: _,
             reasoning_tokens: _,
             raw,
+            ..
         }) = events
             .iter()
             .find(|e| matches!(e, LLMEvent::MessageEnd { .. }))

@@ -41,6 +41,8 @@ async fn test_non_streaming_text_response() -> Result<()> {
             input_tokens: 10,
             output_tokens: 5,
             reasoning_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
             raw: None,
         },
     ]);
@@ -82,6 +84,8 @@ async fn test_non_streaming_tool_call_response() -> Result<()> {
             input_tokens: 15,
             output_tokens: 20,
             reasoning_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
             raw: None,
         },
     ]);
@@ -120,6 +124,8 @@ async fn test_streaming_response() -> Result<()> {
             input_tokens: 5,
             output_tokens: 1,
             reasoning_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
             raw: None,
         },
     ]);

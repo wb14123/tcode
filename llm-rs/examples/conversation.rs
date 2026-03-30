@@ -154,11 +154,20 @@ fn print_message(msg: &Message) {
             input_tokens,
             output_tokens,
             reasoning_tokens,
+            cache_creation_input_tokens,
+            cache_read_input_tokens,
             ..
         } => {
+            let cache_info = if *cache_read_input_tokens > 0 {
+                format!(" ({} cached)", cache_read_input_tokens)
+            } else if *cache_creation_input_tokens > 0 {
+                format!(" ({} cache created)", cache_creation_input_tokens)
+            } else {
+                String::new()
+            };
             println!(
-                "\n    [tokens: {} in, {} out, {} reasoning]",
-                input_tokens, output_tokens, reasoning_tokens
+                "\n    [tokens: {} in{}, {} out, {} reasoning]",
+                input_tokens, cache_info, output_tokens, reasoning_tokens
             );
         }
         Message::ToolMessageStart {
@@ -211,6 +220,7 @@ fn print_message(msg: &Message) {
         Message::AssistantRequestEnd {
             total_input_tokens,
             total_output_tokens,
+            ..
         } => {
             println!(
                 "\n--- Total tokens: {} input, {} output ---",

@@ -1225,6 +1225,8 @@ fn close_stale_in_dir(dir: &PathBuf) -> Pin<Box<dyn Future<Output = Result<()>> 
                 response: Arc::new(String::new()),
                 input_tokens: 0,
                 output_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
             };
 
             append_event(&display_file, &end_event)

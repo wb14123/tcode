@@ -45,6 +45,8 @@ mod tests {
             msg_id_counter: 42,
             total_input_tokens: 1000,
             total_output_tokens: 500,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
             single_turn: false,
             subagent_depth: 0,
         };

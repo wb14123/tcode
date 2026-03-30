@@ -383,6 +383,8 @@ impl LLM for OpenRouter {
                             input_tokens,
                             output_tokens,
                             reasoning_tokens,
+                            cache_creation_input_tokens: 0,
+                            cache_read_input_tokens: 0,
                             raw: Some(raw_msg),
                         };
                         return;
@@ -546,6 +548,8 @@ impl LLM for OpenRouter {
                 input_tokens,
                 output_tokens,
                 reasoning_tokens,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
                 raw: Some(raw_msg),
             };
         })
