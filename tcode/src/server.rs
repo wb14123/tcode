@@ -410,6 +410,19 @@ fn format_token_count(n: i32) -> String {
     }
 }
 
+/// Write accumulated token usage to a file for the nvim status bar.
+///
+/// The Anthropic API splits input tokens into three non-overlapping buckets:
+/// - `input_tokens`: tokens NOT involved in any cache (not read from, not written to)
+/// - `cache_creation_input_tokens`: tokens fully processed AND written to a new cache entry (1.25x cost)
+/// - `cache_read_input_tokens`: tokens served from an existing cache (0.1x cost, cheapest)
+///
+/// Total actual input = input_tokens + cache_creation_input_tokens + cache_read_input_tokens
+///
+/// We display:
+/// - "in" = input_tokens + cache_creation_input_tokens (all tokens actually processed by the model)
+/// - "cache read" = cache_read_input_tokens (tokens cheaply served from cache, not reprocessed)
+/// - "out" = output_tokens
 async fn write_token_usage(
     path: &Path,
     input: i32,
@@ -417,18 +430,20 @@ async fn write_token_usage(
     cache_creation: i32,
     cache_read: i32,
 ) -> Result<()> {
-    let cache_total = cache_creation + cache_read;
-    let content = if cache_total > 0 {
+    // input + cache_creation = all tokens the model actually processed
+    // cache_read = tokens served from cache without reprocessing
+    let processed_input = input + cache_creation;
+    let content = if cache_read > 0 {
         format!(
-            "{} in ({} cached) / {} out",
-            format_token_count(input),
-            format_token_count(cache_total),
+            "{} in / {} cache read / {} out tokens",
+            format_token_count(processed_input),
+            format_token_count(cache_read),
             format_token_count(output)
         )
     } else {
         format!(
-            "{} in / {} out",
-            format_token_count(input),
+            "{} in / {} out tokens",
+            format_token_count(processed_input),
             format_token_count(output)
         )
     };

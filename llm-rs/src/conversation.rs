@@ -1321,13 +1321,21 @@ pub struct Conversation {
     /// Event loop receiver. Receives user messages and tool completion signals.
     input_channel_rx: mpsc::Receiver<Message>,
 
-    /// Accumulated token usage.
+    /// Accumulated token usage for this conversation only.
+    ///
+    /// Anthropic API token semantics (three non-overlapping input buckets):
+    /// - `input_tokens`: tokens NOT involved in any cache (not read from, not written to)
+    /// - `cache_creation_tokens`: tokens fully processed AND written to a new cache entry (1.25x cost)
+    /// - `cache_read_tokens`: tokens served from an existing cache (0.1x cost, cheapest)
+    ///
+    /// Total processed input = input_tokens + cache_creation_tokens (all tokens the model computed over)
+    /// Total from cache = cache_read_tokens (tokens served from cache without reprocessing)
     total_input_tokens: i32,
     total_output_tokens: i32,
     total_cache_creation_tokens: i32,
     total_cache_read_tokens: i32,
 
-    /// Aggregate token usage (own + all subagent descendants).
+    /// Aggregate token usage (own + all subagent descendants). Same field semantics as above.
     aggregate_input_tokens: i32,
     aggregate_output_tokens: i32,
     aggregate_cache_creation_tokens: i32,
