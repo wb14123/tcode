@@ -1484,8 +1484,8 @@ impl Conversation {
             };
 
             match event {
-                LLMEvent::MessageStart { input_tokens } => {
-                    self.total_input_tokens += input_tokens;
+                LLMEvent::MessageStart { .. } => {
+                    // Token accounting is done in MessageEnd to avoid double-counting.
                 }
                 LLMEvent::TextDelta(text) => {
                     accumulated_text.push_str(&text);

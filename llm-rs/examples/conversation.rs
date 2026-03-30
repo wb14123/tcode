@@ -158,16 +158,15 @@ fn print_message(msg: &Message) {
             cache_read_input_tokens,
             ..
         } => {
+            let new_input = input_tokens + cache_creation_input_tokens;
             let cache_info = if *cache_read_input_tokens > 0 {
                 format!(" ({} cached)", cache_read_input_tokens)
-            } else if *cache_creation_input_tokens > 0 {
-                format!(" ({} cache created)", cache_creation_input_tokens)
             } else {
                 String::new()
             };
             println!(
                 "\n    [tokens: {} in{}, {} out, {} reasoning]",
-                input_tokens, cache_info, output_tokens, reasoning_tokens
+                new_input, cache_info, output_tokens, reasoning_tokens
             );
         }
         Message::ToolMessageStart {
