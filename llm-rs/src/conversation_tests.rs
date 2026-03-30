@@ -49,6 +49,10 @@ mod tests {
             total_cache_read_tokens: 0,
             single_turn: false,
             subagent_depth: 0,
+            aggregate_input_tokens: 0,
+            aggregate_output_tokens: 0,
+            aggregate_cache_creation_tokens: 0,
+            aggregate_cache_read_tokens: 0,
         };
 
         let json = serde_json::to_string_pretty(&state)?;

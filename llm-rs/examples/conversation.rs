@@ -275,5 +275,16 @@ fn print_message(msg: &Message) {
         Message::SubAgentInputChunk { content, .. } => {
             eprint!("{}", content);
         }
+        Message::SubAgentTokenRollup { .. } => {}
+        Message::AggregateTokenUpdate {
+            aggregate_input_tokens,
+            aggregate_output_tokens,
+            ..
+        } => {
+            println!(
+                "    [Aggregate tokens: {} input, {} output]",
+                aggregate_input_tokens, aggregate_output_tokens
+            );
+        }
     }
 }

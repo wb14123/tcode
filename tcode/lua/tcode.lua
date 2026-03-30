@@ -1247,21 +1247,24 @@ end
 -- @param display_file: Path to file where display content is written (JSONL)
 -- @param status_file: Path to file where status messages are written
 -- @param usage_file: Path to file where subscription usage is written
+-- @param token_usage_file: Path to file where token usage is written
 -- @param session_id: Session ID for spawning tool call windows
 -- @param exe_path: Path to tcode executable
-function M.setup_display(display_file, status_file, usage_file, session_id, exe_path)
+function M.setup_display(display_file, status_file, usage_file, token_usage_file, session_id, exe_path)
   M.display_file = display_file or '/tmp/tcode-display.jsonl'
   M.status_file = status_file or '/tmp/tcode-status.txt'
   M.usage_file = usage_file
+  M.token_usage_file = token_usage_file
   M.session_id = session_id
   M.exe_path = exe_path
 
   vim.g.tcode_status = 'Connecting...'
   vim.g.tcode_usage = ''
+  vim.g.tcode_token_usage = ''
 
   setup_highlights('#98c379', 114)
   local buf = create_display_buffer('[TCode Display]',
-    '%#TCodeStatusLine# TCode: %{g:tcode_status}%=%{g:tcode_usage} ')
+    '%#TCodeStatusLine# TCode: %{g:tcode_status}%=%{g:tcode_token_usage}  %{g:tcode_usage} ')
   local ns = vim.api.nvim_create_namespace('tcode')
 
   -- Mark the buffer as markdown so treesitter and plugins (e.g. render-markdown.nvim)
@@ -1307,6 +1310,33 @@ function M.setup_display(display_file, status_file, usage_file, session_id, exe_
     try_watch_usage()
   end
 
+  -- Watch token usage file for token count updates.
+  -- The file may not exist yet, so retry until it appears.
+  if M.token_usage_file then
+    local token_usage_callback = function(token_usage)
+      if token_usage and token_usage ~= '' then
+        vim.g.tcode_token_usage = token_usage
+      else
+        vim.g.tcode_token_usage = ''
+      end
+      vim.cmd('redrawstatus')
+    end
+    local token_usage_retries = 0
+    local function try_watch_token_usage()
+      local ok, watcher = pcall(create_status_watcher, M.token_usage_file, token_usage_callback)
+      if ok then
+        M.token_usage_watcher = watcher
+      else
+        token_usage_retries = token_usage_retries + 1
+        if token_usage_retries < 10 then
+          -- File doesn't exist yet; retry in 2 seconds
+          vim.defer_fn(try_watch_token_usage, 2000)
+        end
+      end
+    end
+    try_watch_token_usage()
+  end
+
   -- Clean up watchers when buffer is deleted
   vim.api.nvim_create_autocmd('BufDelete', {
     buffer = buf,
@@ -1314,6 +1344,7 @@ function M.setup_display(display_file, status_file, usage_file, session_id, exe_
       if M.display_watcher then M.display_watcher.stop(); M.display_watcher = nil end
       if M.status_watcher then M.status_watcher.stop(); M.status_watcher = nil end
       if M.usage_watcher then M.usage_watcher.stop(); M.usage_watcher = nil end
+      if M.token_usage_watcher then M.token_usage_watcher.stop(); M.token_usage_watcher = nil end
     end,
   })
 

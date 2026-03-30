@@ -131,6 +131,14 @@ pub struct ConversationState {
     pub total_cache_creation_tokens: i32,
     #[serde(default)]
     pub total_cache_read_tokens: i32,
+    #[serde(default)]
+    pub aggregate_input_tokens: i32,
+    #[serde(default)]
+    pub aggregate_output_tokens: i32,
+    #[serde(default)]
+    pub aggregate_cache_creation_tokens: i32,
+    #[serde(default)]
+    pub aggregate_cache_read_tokens: i32,
     pub single_turn: bool,
     pub subagent_depth: usize,
 }
@@ -240,6 +248,10 @@ pub enum Message {
         reasoning_tokens: i32,
         cache_creation_input_tokens: i32,
         cache_read_input_tokens: i32,
+        aggregate_input_tokens: i32,
+        aggregate_output_tokens: i32,
+        aggregate_cache_creation_tokens: i32,
+        aggregate_cache_read_tokens: i32,
     },
 
     ToolMessageStart {
@@ -399,6 +411,22 @@ pub enum Message {
     SubAgentPermissionDenied {
         msg_id: MessageID,
         conversation_id: String,
+    },
+
+    /// Internal: delta sent via loop_tx from collect_subagent_response to parent event loop.
+    SubAgentTokenRollup {
+        input_tokens: i32,
+        output_tokens: i32,
+        cache_creation_tokens: i32,
+        cache_read_tokens: i32,
+    },
+
+    /// Broadcast: notifies UI of updated aggregate after any token change.
+    AggregateTokenUpdate {
+        aggregate_input_tokens: i32,
+        aggregate_output_tokens: i32,
+        aggregate_cache_creation_tokens: i32,
+        aggregate_cache_read_tokens: i32,
     },
 }
 
@@ -593,6 +621,10 @@ impl ConversationManager {
             total_output_tokens: 0,
             total_cache_creation_tokens: 0,
             total_cache_read_tokens: 0,
+            aggregate_input_tokens: 0,
+            aggregate_output_tokens: 0,
+            aggregate_cache_creation_tokens: 0,
+            aggregate_cache_read_tokens: 0,
             single_turn,
             pending_tools: HashSet::new(),
             cancelled_tools: HashSet::new(),
@@ -740,6 +772,10 @@ impl ConversationManager {
             total_output_tokens: state.total_output_tokens,
             total_cache_creation_tokens: state.total_cache_creation_tokens,
             total_cache_read_tokens: state.total_cache_read_tokens,
+            aggregate_input_tokens: state.aggregate_input_tokens,
+            aggregate_output_tokens: state.aggregate_output_tokens,
+            aggregate_cache_creation_tokens: state.aggregate_cache_creation_tokens,
+            aggregate_cache_read_tokens: state.aggregate_cache_read_tokens,
             single_turn: state.single_turn,
             pending_tools: HashSet::new(),
             cancelled_tools: HashSet::new(),
@@ -962,6 +998,10 @@ async fn collect_subagent_response(
         end_status: MessageEndStatus::Succeeded,
     };
     let mut cancel_sent = false;
+    let mut last_rolled_input = 0i32;
+    let mut last_rolled_output = 0i32;
+    let mut last_rolled_cache_creation = 0i32;
+    let mut last_rolled_cache_read = 0i32;
 
     loop {
         let msg = tokio::select! {
@@ -987,16 +1027,132 @@ async fn collect_subagent_response(
             Message::AssistantMessageEnd {
                 end_status: MessageEndStatus::Failed,
                 error: Some(err),
+                aggregate_input_tokens,
+                aggregate_output_tokens,
+                aggregate_cache_creation_tokens,
+                aggregate_cache_read_tokens,
                 ..
             } if resp.text.is_empty() => {
                 resp.text = format!("Error: Subagent failed: {}", err);
                 resp.end_status = MessageEndStatus::Failed;
+                let delta_input = aggregate_input_tokens - last_rolled_input;
+                let delta_output = aggregate_output_tokens - last_rolled_output;
+                let delta_cache_creation =
+                    aggregate_cache_creation_tokens - last_rolled_cache_creation;
+                let delta_cache_read = aggregate_cache_read_tokens - last_rolled_cache_read;
+                if delta_input != 0
+                    || delta_output != 0
+                    || delta_cache_creation != 0
+                    || delta_cache_read != 0
+                {
+                    loop_tx
+                        .send(Message::SubAgentTokenRollup {
+                            input_tokens: delta_input,
+                            output_tokens: delta_output,
+                            cache_creation_tokens: delta_cache_creation,
+                            cache_read_tokens: delta_cache_read,
+                        })
+                        .await?;
+                }
+                last_rolled_input = *aggregate_input_tokens;
+                last_rolled_output = *aggregate_output_tokens;
+                last_rolled_cache_creation = *aggregate_cache_creation_tokens;
+                last_rolled_cache_read = *aggregate_cache_read_tokens;
             }
             Message::AssistantMessageEnd {
                 end_status: MessageEndStatus::Cancelled,
+                aggregate_input_tokens,
+                aggregate_output_tokens,
+                aggregate_cache_creation_tokens,
+                aggregate_cache_read_tokens,
                 ..
             } => {
                 resp.end_status = MessageEndStatus::Cancelled;
+                let delta_input = aggregate_input_tokens - last_rolled_input;
+                let delta_output = aggregate_output_tokens - last_rolled_output;
+                let delta_cache_creation =
+                    aggregate_cache_creation_tokens - last_rolled_cache_creation;
+                let delta_cache_read = aggregate_cache_read_tokens - last_rolled_cache_read;
+                if delta_input != 0
+                    || delta_output != 0
+                    || delta_cache_creation != 0
+                    || delta_cache_read != 0
+                {
+                    loop_tx
+                        .send(Message::SubAgentTokenRollup {
+                            input_tokens: delta_input,
+                            output_tokens: delta_output,
+                            cache_creation_tokens: delta_cache_creation,
+                            cache_read_tokens: delta_cache_read,
+                        })
+                        .await?;
+                }
+                last_rolled_input = *aggregate_input_tokens;
+                last_rolled_output = *aggregate_output_tokens;
+                last_rolled_cache_creation = *aggregate_cache_creation_tokens;
+                last_rolled_cache_read = *aggregate_cache_read_tokens;
+            }
+            Message::AssistantMessageEnd {
+                aggregate_input_tokens,
+                aggregate_output_tokens,
+                aggregate_cache_creation_tokens,
+                aggregate_cache_read_tokens,
+                ..
+            } => {
+                // Successful or other status — just roll up aggregates
+                let delta_input = aggregate_input_tokens - last_rolled_input;
+                let delta_output = aggregate_output_tokens - last_rolled_output;
+                let delta_cache_creation =
+                    aggregate_cache_creation_tokens - last_rolled_cache_creation;
+                let delta_cache_read = aggregate_cache_read_tokens - last_rolled_cache_read;
+                if delta_input != 0
+                    || delta_output != 0
+                    || delta_cache_creation != 0
+                    || delta_cache_read != 0
+                {
+                    loop_tx
+                        .send(Message::SubAgentTokenRollup {
+                            input_tokens: delta_input,
+                            output_tokens: delta_output,
+                            cache_creation_tokens: delta_cache_creation,
+                            cache_read_tokens: delta_cache_read,
+                        })
+                        .await?;
+                }
+                last_rolled_input = *aggregate_input_tokens;
+                last_rolled_output = *aggregate_output_tokens;
+                last_rolled_cache_creation = *aggregate_cache_creation_tokens;
+                last_rolled_cache_read = *aggregate_cache_read_tokens;
+            }
+            Message::AggregateTokenUpdate {
+                aggregate_input_tokens,
+                aggregate_output_tokens,
+                aggregate_cache_creation_tokens,
+                aggregate_cache_read_tokens,
+            } => {
+                let delta_input = aggregate_input_tokens - last_rolled_input;
+                let delta_output = aggregate_output_tokens - last_rolled_output;
+                let delta_cache_creation =
+                    aggregate_cache_creation_tokens - last_rolled_cache_creation;
+                let delta_cache_read = aggregate_cache_read_tokens - last_rolled_cache_read;
+                if delta_input != 0
+                    || delta_output != 0
+                    || delta_cache_creation != 0
+                    || delta_cache_read != 0
+                {
+                    loop_tx
+                        .send(Message::SubAgentTokenRollup {
+                            input_tokens: delta_input,
+                            output_tokens: delta_output,
+                            cache_creation_tokens: delta_cache_creation,
+                            cache_read_tokens: delta_cache_read,
+                        })
+                        .await?;
+                }
+                last_rolled_input = *aggregate_input_tokens;
+                last_rolled_output = *aggregate_output_tokens;
+                last_rolled_cache_creation = *aggregate_cache_creation_tokens;
+                last_rolled_cache_read = *aggregate_cache_read_tokens;
             }
             Message::AssistantRequestEnd {
                 total_input_tokens,
@@ -1171,6 +1327,12 @@ pub struct Conversation {
     total_cache_creation_tokens: i32,
     total_cache_read_tokens: i32,
 
+    /// Aggregate token usage (own + all subagent descendants).
+    aggregate_input_tokens: i32,
+    aggregate_output_tokens: i32,
+    aggregate_cache_creation_tokens: i32,
+    aggregate_cache_read_tokens: i32,
+
     /// When true, the conversation exits after one user message + LLM response cycle.
     single_turn: bool,
 
@@ -1219,6 +1381,10 @@ impl Conversation {
             total_output_tokens: self.total_output_tokens,
             total_cache_creation_tokens: self.total_cache_creation_tokens,
             total_cache_read_tokens: self.total_cache_read_tokens,
+            aggregate_input_tokens: self.aggregate_input_tokens,
+            aggregate_output_tokens: self.aggregate_output_tokens,
+            aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
+            aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
             single_turn: self.single_turn,
             subagent_depth: self.env.subagent_depth,
         }
@@ -1315,6 +1481,10 @@ impl Conversation {
                         reasoning_tokens: 0,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
+                        aggregate_input_tokens: self.aggregate_input_tokens,
+                        aggregate_output_tokens: self.aggregate_output_tokens,
+                        aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
+                        aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
                     })?;
                     self.finish_turn()?;
                 }
@@ -1415,6 +1585,18 @@ impl Conversation {
                             }
                             // If not found (e.g. parent moved on), silently ignore
                         }
+                        Message::SubAgentTokenRollup { input_tokens, output_tokens, cache_creation_tokens, cache_read_tokens } => {
+                            self.aggregate_input_tokens += input_tokens;
+                            self.aggregate_output_tokens += output_tokens;
+                            self.aggregate_cache_creation_tokens += cache_creation_tokens;
+                            self.aggregate_cache_read_tokens += cache_read_tokens;
+                            self.broadcast_msg(Message::AggregateTokenUpdate {
+                                aggregate_input_tokens: self.aggregate_input_tokens,
+                                aggregate_output_tokens: self.aggregate_output_tokens,
+                                aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
+                                aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
+                            })?;
+                        }
                         other => {
                             tracing::error!("unexpected message type in event loop: {:?}", other);
                         }
@@ -1471,6 +1653,10 @@ impl Conversation {
                         reasoning_tokens: 0,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
+                        aggregate_input_tokens: self.aggregate_input_tokens,
+                        aggregate_output_tokens: self.aggregate_output_tokens,
+                        aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
+                        aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
                     })?;
                     self.llm_calls += 1;
                     return Ok(());
@@ -1557,6 +1743,10 @@ impl Conversation {
                     self.total_output_tokens += output_tokens;
                     self.total_cache_creation_tokens += cache_creation_input_tokens;
                     self.total_cache_read_tokens += cache_read_input_tokens;
+                    self.aggregate_input_tokens += input_tokens;
+                    self.aggregate_output_tokens += output_tokens;
+                    self.aggregate_cache_creation_tokens += cache_creation_input_tokens;
+                    self.aggregate_cache_read_tokens += cache_read_input_tokens;
 
                     let (end_status, error) = if stop_reason == StopReason::MaxTokens {
                         (
@@ -1576,6 +1766,10 @@ impl Conversation {
                         reasoning_tokens,
                         cache_creation_input_tokens,
                         cache_read_input_tokens,
+                        aggregate_input_tokens: self.aggregate_input_tokens,
+                        aggregate_output_tokens: self.aggregate_output_tokens,
+                        aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
+                        aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
                     })?;
 
                     if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
@@ -1606,6 +1800,10 @@ impl Conversation {
                         reasoning_tokens: 0,
                         cache_creation_input_tokens: 0,
                         cache_read_input_tokens: 0,
+                        aggregate_input_tokens: self.aggregate_input_tokens,
+                        aggregate_output_tokens: self.aggregate_output_tokens,
+                        aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
+                        aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
                     })?;
                     self.llm_calls += 1;
                     return Ok(());

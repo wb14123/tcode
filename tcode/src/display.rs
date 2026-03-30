@@ -25,6 +25,7 @@ impl DisplayClient {
         let display_file = self.session.display_file();
         let status_file = self.session.status_file();
         let usage_file = self.session.usage_file();
+        let token_usage_file = self.session.token_usage_file();
         let exe_path =
             std::env::current_exe().context("Failed to determine current executable path")?;
 
@@ -37,6 +38,7 @@ impl DisplayClient {
             &display_file,
             &status_file,
             &usage_file,
+            &token_usage_file,
             &self.session_id,
             &exe_path,
         )?;
@@ -57,15 +59,17 @@ fn spawn_nvim(
     display_file: &Path,
     status_file: &Path,
     usage_file: &Path,
+    token_usage_file: &Path,
     session_id: &str,
     exe_path: &Path,
 ) -> Result<Child> {
     let lua_cmd = format!(
-        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}', '{}')",
+        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}', '{}', '{}')",
         lua_dir.display(),
         display_file.display(),
         status_file.display(),
         usage_file.display(),
+        token_usage_file.display(),
         session_id,
         exe_path.display(),
     );

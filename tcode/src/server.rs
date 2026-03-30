@@ -216,6 +216,7 @@ impl Server {
                 let sa_events = Box::pin(sa.client.subscribe_new());
                 let sa_display = sa.state_dir.join("display.jsonl");
                 let sa_status = sa.state_dir.join("status.txt");
+                let sa_token_usage = sa.state_dir.join("token_usage.txt");
                 let sa_dir_clone = sa.state_dir.clone();
                 let sa_conv_client = Arc::clone(&sa.client);
                 let sa_tool_clients = Arc::clone(&tool_clients);
@@ -224,6 +225,7 @@ impl Server {
                         sa_events,
                         sa_display,
                         sa_status,
+                        sa_token_usage,
                         sa_dir_clone,
                         Some(mgr_clone),
                         sa_conv_client,
@@ -245,6 +247,7 @@ impl Server {
             let events = Box::pin(client.subscribe_new());
             let display_file = self.display_file.clone();
             let status_file = self.status_file.clone();
+            let token_usage_file = self.session_dir.join("token_usage.txt");
             let session_dir = self.session_dir.clone();
             let root_client = Arc::clone(&client);
             let tc_map = Arc::clone(&tool_clients);
@@ -252,6 +255,7 @@ impl Server {
                 events,
                 display_file,
                 status_file,
+                token_usage_file,
                 session_dir,
                 Some(manager_clone),
                 root_client,
@@ -288,6 +292,7 @@ impl Server {
             let events = Box::pin(client.subscribe());
             let display_file = self.display_file.clone();
             let status_file = self.status_file.clone();
+            let token_usage_file = self.session_dir.join("token_usage.txt");
             let session_dir = self.session_dir.clone();
             let root_client = Arc::clone(&client);
             let tc_map = Arc::clone(&tool_clients);
@@ -295,6 +300,7 @@ impl Server {
                 events,
                 display_file,
                 status_file,
+                token_usage_file,
                 session_dir,
                 Some(manager_clone),
                 root_client,
@@ -394,11 +400,49 @@ async fn write_usage_file(tm: &auth::TokenManager, usage_file: &Path) {
 type EventStream =
     Pin<Box<dyn Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + Send>>;
 
+fn format_token_count(n: i32) -> String {
+    if n >= 1_000_000 {
+        format!("{:.1}M", n as f64 / 1_000_000.0)
+    } else if n >= 1_000 {
+        format!("{:.1}K", n as f64 / 1_000.0)
+    } else {
+        format!("{}", n)
+    }
+}
+
+async fn write_token_usage(
+    path: &Path,
+    input: i32,
+    output: i32,
+    cache_creation: i32,
+    cache_read: i32,
+) -> Result<()> {
+    let cache_total = cache_creation + cache_read;
+    let content = if cache_total > 0 {
+        format!(
+            "{} in ({} cached) / {} out",
+            format_token_count(input),
+            format_token_count(cache_total),
+            format_token_count(output)
+        )
+    } else {
+        format!(
+            "{} in / {} out",
+            format_token_count(input),
+            format_token_count(output)
+        )
+    };
+    tokio::fs::write(path, content)
+        .await
+        .context("Failed to write token usage file")
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_event_writer(
     mut events: EventStream,
     display_file: PathBuf,
     status_file: PathBuf,
+    token_usage_file: PathBuf,
     session_dir: PathBuf,
     manager: Option<Arc<ConversationManager>>,
     conv_client: Arc<ConversationClient>,
@@ -667,6 +711,7 @@ fn run_event_writer(
 
                         let sa_display = sa_dir.join("display.jsonl");
                         let sa_status = sa_dir.join("status.txt");
+                        let sa_token_usage = sa_dir.join("token_usage.txt");
                         tokio::fs::write(&sa_display, "")
                             .await
                             .context("Failed to initialize subagent display file")?;
@@ -686,6 +731,7 @@ fn run_event_writer(
                                         sa_events,
                                         sa_display,
                                         sa_status_clone,
+                                        sa_token_usage,
                                         sa_dir,
                                         Some(sa_mgr),
                                         sa_conv_client,
@@ -873,21 +919,52 @@ fn run_event_writer(
                         .context("Failed to append subagent input chunk to display")?;
                 }
 
+                Message::AssistantMessageEnd {
+                    aggregate_input_tokens,
+                    aggregate_output_tokens,
+                    aggregate_cache_creation_tokens,
+                    aggregate_cache_read_tokens,
+                    ..
+                } => {
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append display event")?;
+                    is_thinking = false;
+                    tool_call_index_map.clear();
+                    tokio::fs::write(&status_file, "Ready")
+                        .await
+                        .context("Failed to write status file")?;
+                    write_token_usage(
+                        &token_usage_file,
+                        *aggregate_input_tokens,
+                        *aggregate_output_tokens,
+                        *aggregate_cache_creation_tokens,
+                        *aggregate_cache_read_tokens,
+                    )
+                    .await?;
+                }
+
+                Message::AggregateTokenUpdate {
+                    aggregate_input_tokens,
+                    aggregate_output_tokens,
+                    aggregate_cache_creation_tokens,
+                    aggregate_cache_read_tokens,
+                } => {
+                    write_token_usage(
+                        &token_usage_file,
+                        *aggregate_input_tokens,
+                        *aggregate_output_tokens,
+                        *aggregate_cache_creation_tokens,
+                        *aggregate_cache_read_tokens,
+                    )
+                    .await?;
+                }
+
                 _ => {
                     // All other events: write to main display only
                     append_event(&display_file, &event)
                         .await
                         .context("Failed to append display event")?;
-
-                    if matches!(&*event, Message::AssistantMessageEnd { .. }) {
-                        is_thinking = false;
-                        // Tool call indices are only valid within a single assistant
-                        // turn — clear the map so stale entries don't accumulate.
-                        tool_call_index_map.clear();
-                        tokio::fs::write(&status_file, "Ready")
-                            .await
-                            .context("Failed to write status file")?;
-                    }
                 }
             }
         }
