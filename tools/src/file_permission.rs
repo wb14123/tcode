@@ -23,6 +23,20 @@ fn permission_dir_for(canonical_path: &Path, is_dir: bool) -> PathBuf {
     }
 }
 
+/// If `dir` is inside the project directory (cwd), return cwd so that a single
+/// permission grant covers the whole project. Otherwise return `dir` unchanged.
+fn widen_to_project_dir(dir: &Path) -> PathBuf {
+    let cwd = match std::env::current_dir().and_then(|p| p.canonicalize()) {
+        Ok(c) => c,
+        Err(_) => return dir.to_path_buf(),
+    };
+    if dir.starts_with(&cwd) {
+        cwd
+    } else {
+        dir.to_path_buf()
+    }
+}
+
 /// Walk ancestors from `permission_dir` up to root, checking for a stored permission.
 fn has_ancestor_permission(
     permission: &ScopedPermissionManager,
@@ -108,7 +122,8 @@ pub async fn has_file_write_permission(permission: &ScopedPermissionManager, pat
         return false;
     };
 
-    let permission_dir = permission_dir_for(&canonical_path, false);
+    let parent_dir = permission_dir_for(&canonical_path, false);
+    let permission_dir = widen_to_project_dir(&parent_dir);
     has_ancestor_permission(permission, FILE_WRITE_SCOPE, &permission_dir)
 }
 
@@ -159,6 +174,10 @@ pub async fn check_file_read_permission(
 /// controls what is shown via `preview_content` and `preview_type` (e.g. a
 /// file extension like `"rs"` for full-content previews, or `"tcodediff"`
 /// for diff previews).
+///
+/// When the file is inside the project directory (cwd), the permission prompt
+/// covers the entire project folder instead of just the parent directory,
+/// so a single "allow for session/project" grants write access project-wide.
 pub async fn check_file_write_permission(
     permission: &ScopedPermissionManager,
     path: &Path,
@@ -167,7 +186,8 @@ pub async fn check_file_write_permission(
 ) -> Result<()> {
     let (canonical_path, exists) = canonicalize_path(path).await?;
 
-    let permission_dir = permission_dir_for(&canonical_path, false);
+    let parent_dir = permission_dir_for(&canonical_path, false);
+    let permission_dir = widen_to_project_dir(&parent_dir);
     if has_ancestor_permission(permission, FILE_WRITE_SCOPE, &permission_dir) {
         return Ok(());
     }
