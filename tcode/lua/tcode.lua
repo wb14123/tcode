@@ -1276,10 +1276,18 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   vim.g.tcode_status = 'Connecting...'
   vim.g.tcode_usage = ''
   vim.g.tcode_token_usage = ''
+  vim.g.tcode_combined_usage = ''
+
+  local function update_combined_usage()
+    local parts = {}
+    if vim.g.tcode_token_usage ~= '' then table.insert(parts, vim.g.tcode_token_usage) end
+    if vim.g.tcode_usage ~= '' then table.insert(parts, vim.g.tcode_usage) end
+    vim.g.tcode_combined_usage = table.concat(parts, ' │ ')
+  end
 
   setup_highlights('#98c379', 114)
   local buf = create_display_buffer('[TCode Display]',
-    '%#TCodeStatusLine# TCode: %{g:tcode_status}%=%{g:tcode_token_usage}  %{g:tcode_usage} ')
+    '%#TCodeStatusLine# TCode: %{g:tcode_status}%=%{g:tcode_combined_usage} ')
   local ns = vim.api.nvim_create_namespace('tcode')
 
   -- Mark the buffer as markdown so treesitter and plugins (e.g. render-markdown.nvim)
@@ -1307,6 +1315,7 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
       else
         vim.g.tcode_usage = ''
       end
+      update_combined_usage()
       vim.cmd('redrawstatus')
     end)
   end
@@ -1320,6 +1329,7 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
       else
         vim.g.tcode_token_usage = ''
       end
+      update_combined_usage()
       vim.cmd('redrawstatus')
     end)
   end

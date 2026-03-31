@@ -435,14 +435,14 @@ async fn write_token_usage(
     let processed_input = input + cache_creation;
     let content = if cache_read > 0 {
         format!(
-            "{} in / {} cache read / {} out tokens",
+            "{} in │ {} cached │ {} out",
             format_token_count(processed_input),
             format_token_count(cache_read),
             format_token_count(output)
         )
     } else {
         format!(
-            "{} in / {} out tokens",
+            "{} in │ {} out",
             format_token_count(processed_input),
             format_token_count(output)
         )
