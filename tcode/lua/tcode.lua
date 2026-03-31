@@ -1571,11 +1571,20 @@ local function load_shortcuts()
   return {}
 end
 
--- Attempt to expand a /shortcut on the current line.
+-- Attempt to expand a /shortcut at the cursor position.
+-- @param shortcuts: table of shortcut_name -> template_text
+-- @param cursor_col: optional 0-indexed byte column (uses current cursor if nil)
 -- Returns true if expanded, false otherwise.
-local function try_expand_shortcut(shortcuts)
+local function try_expand_shortcut(shortcuts, cursor_col)
   local line = vim.api.nvim_get_current_line()
-  local cmd = line:match('^/([%w%-_]+)%s*$')
+  local cursor = vim.api.nvim_win_get_cursor(0)
+  local row = cursor[1]  -- 1-indexed
+  local col = cursor_col or cursor[2]  -- 0-indexed byte position
+
+  -- Find /command ending at or before cursor position
+  local before_cursor = line:sub(1, col)
+  local cmd_start, _, cmd = before_cursor:find('/([%w%-_]+)%s*$')
+
   if not cmd then
     return false
   end
@@ -1585,20 +1594,27 @@ local function try_expand_shortcut(shortcuts)
     return false
   end
 
+  -- Text before the /command and after cursor
+  local prefix = line:sub(1, cmd_start - 1)
+  local suffix = line:sub(col + 1)
+
   -- Split template into lines
   local replacement_lines = {}
   for tline in template:gmatch('[^\n]*') do
     table.insert(replacement_lines, tline)
   end
 
-  -- Replace the current line with the template lines
-  local row = vim.api.nvim_win_get_cursor(0)[1]  -- 1-indexed
+  -- Combine with surrounding text
+  replacement_lines[1] = prefix .. replacement_lines[1]
+  replacement_lines[#replacement_lines] = replacement_lines[#replacement_lines] .. suffix
+
+  -- Replace the current line with the replacement lines
   vim.api.nvim_buf_set_lines(0, row - 1, row, false, replacement_lines)
 
-  -- Move cursor to end of last replacement line
+  -- Move cursor to end of expanded template (before suffix)
   local last_row = row - 1 + #replacement_lines
-  local last_line = replacement_lines[#replacement_lines]
-  vim.api.nvim_win_set_cursor(0, { last_row, #last_line })
+  local final_col = #replacement_lines[#replacement_lines] - #suffix
+  vim.api.nvim_win_set_cursor(0, { last_row, final_col })
 
   return true
 end
@@ -1652,6 +1668,8 @@ local function setup_shortcut_completion(shortcuts)
   end
 
   vim.bo.completefunc = 'v:lua.tcode_shortcut_complete'
+  -- Don't auto-select first entry — let user continue typing to filter
+  vim.opt_local.completeopt = { 'menu', 'menuone', 'noselect' }
 end
 
 -- @param msg_file: Path to file where messages should be written
@@ -1760,11 +1778,12 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
   if next(shortcuts) ~= nil then
     setup_shortcut_completion(shortcuts)
 
-    -- Auto-trigger completion popup when typing '/' at the start of a line
+    -- Auto-trigger completion popup when typing '/'
     vim.keymap.set('i', '/', function()
       local col = vim.fn.col('.') - 1  -- 0-indexed cursor column
-      if col == 0 then
-        -- Insert '/' then trigger completion
+      local line = vim.api.nvim_get_current_line()
+      -- Trigger if at start of line or preceded by whitespace
+      if col == 0 or line:sub(col, col):match('%s') then
         vim.api.nvim_feedkeys('/', 'n', false)
         vim.schedule(function()
           vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n', false)
@@ -1783,18 +1802,20 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
       end
 
       local line = vim.api.nvim_get_current_line()
-      local cmd = line:match('^/([%w%-_]+)%s*$')
+      local col = vim.fn.col('.') - 1  -- 0-indexed cursor column
+      local before_cursor = line:sub(1, col)
+      local cmd = before_cursor:match('/([%w%-_]+)%s*$')
 
       if cmd and shortcuts[cmd] then
-        -- Exact match — expand the shortcut
+        -- Exact match — expand the shortcut (pass col captured in insert mode)
         vim.cmd('stopinsert')
-        try_expand_shortcut(shortcuts)
-        vim.cmd('startinsert!')
-      elseif line:match('^/') then
-        -- Partial match or just '/' — trigger completion popup
+        try_expand_shortcut(shortcuts, col)
+        vim.cmd('startinsert')
+      elseif before_cursor:match('/%s*$') or cmd then
+        -- Has / with partial or no text after it — trigger completion popup
         vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n', false)
       else
-        -- Not a shortcut line — insert a normal tab
+        -- No shortcut context — insert a normal tab
         vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Tab>', true, false, true), 'n', false)
       end
     end, { buffer = true, silent = true, desc = 'Expand shortcut or insert tab' })
