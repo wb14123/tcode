@@ -610,13 +610,14 @@ impl LLM for Claude {
             let mut emitted_start = false;
             let mut stop_reason: Option<StopReason> = None;
             let mut accumulated_content: Vec<ContentBlock> = Vec::new();
-            let mut accumulated_text = String::new();
 
             // Track tool_use blocks being built (by index)
             let mut tool_blocks: HashMap<usize, ToolBlockAccumulator> = HashMap::new();
 
             // Track thinking blocks being built (by index)
             let mut thinking_blocks: HashMap<usize, ThinkingBlockAccumulator> = HashMap::new();
+            // Track text blocks being built (by index)
+            let mut text_blocks: HashMap<usize, String> = HashMap::new();
             let reasoning_tokens = 0i32;
             let mut cache_creation_input_tokens = 0i32;
             let mut cache_read_input_tokens = 0i32;
@@ -673,12 +674,11 @@ impl LLM for Claude {
                                         }
                                         "text" => {
                                             // Text block started, initial text may be present
-                                            if let Some(text) = parsed.content_block.text
-                                                && !text.is_empty()
-                                            {
-                                                accumulated_text.push_str(&text);
-                                                yield LLMEvent::TextDelta(text);
+                                            let initial = parsed.content_block.text.unwrap_or_default();
+                                            if !initial.is_empty() {
+                                                yield LLMEvent::TextDelta(initial.clone());
                                             }
+                                            text_blocks.insert(parsed.index, initial);
                                         }
                                         "thinking" => {
                                             // Start tracking a new thinking block
@@ -701,7 +701,11 @@ impl LLM for Claude {
                                             if let Some(text) = parsed.delta.text
                                                 && !text.is_empty()
                                             {
-                                                accumulated_text.push_str(&text);
+                                                if let Some(acc) = text_blocks.get_mut(&parsed.index) {
+                                                    acc.push_str(&text);
+                                                } else {
+                                                    tracing::warn!("text_delta for unknown block index {}", parsed.index);
+                                                }
                                                 yield LLMEvent::TextDelta(text);
                                             }
                                         }
@@ -764,14 +768,20 @@ impl LLM for Claude {
                                             name: strip_tool_prefix(&acc.name),
                                             arguments: acc.input_json,
                                         });
-                                    }
-                                    // Check if this was a thinking block
-                                    if let Some(acc) = thinking_blocks.remove(&index) {
+                                    } else if let Some(acc) = thinking_blocks.remove(&index) {
+                                        // Check if this was a thinking block
                                         // Store for raw round-tripping (with signature for verification)
                                         accumulated_content.push(ContentBlock::Thinking {
                                             thinking: acc.thinking_text,
                                             signature: acc.signature,
                                         });
+                                    } else if let Some(text) = text_blocks.remove(&index) {
+                                        // Check if this was a text block
+                                        if !text.is_empty() {
+                                            accumulated_content.push(ContentBlock::Text {
+                                                text,
+                                            });
+                                        }
                                     }
                                 }
                             }
@@ -795,11 +805,13 @@ impl LLM for Claude {
                             "message_stop" => {
                                 // Build raw content for round-tripping
                                 let mut raw_content = accumulated_content.clone();
-                                if !accumulated_text.is_empty() {
-                                    // Insert text at the beginning if we have it
-                                    raw_content.insert(0, ContentBlock::Text {
-                                        text: accumulated_text.clone(),
-                                    });
+                                // Safety fallback: drain any text blocks that never got content_block_stop
+                                let mut remaining_text: Vec<_> = text_blocks.drain().collect();
+                                remaining_text.sort_by_key(|(idx, _)| *idx);
+                                for (_, text) in remaining_text {
+                                    if !text.is_empty() {
+                                        raw_content.push(ContentBlock::Text { text });
+                                    }
                                 }
 
                                 let raw = serde_json::json!({
@@ -835,10 +847,12 @@ impl LLM for Claude {
 
             // Stream ended without message_stop (shouldn't happen normally)
             let mut raw_content = accumulated_content;
-            if !accumulated_text.is_empty() {
-                raw_content.insert(0, ContentBlock::Text {
-                    text: accumulated_text,
-                });
+            let mut remaining_text: Vec<_> = text_blocks.drain().collect();
+            remaining_text.sort_by_key(|(idx, _)| *idx);
+            for (_, text) in remaining_text {
+                if !text.is_empty() {
+                    raw_content.push(ContentBlock::Text { text });
+                }
             }
 
             let raw = serde_json::json!({
