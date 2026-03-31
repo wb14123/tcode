@@ -1547,6 +1547,113 @@ function M.setup_tool_call_display(tool_call_file, status_file)
 end
 
 -- Setup edit window for composing messages
+-- Load shortcut templates from ~/.tcode/shortcuts.lua
+-- Returns a table: { shortcut_name = "expanded text", ... }
+-- Returns empty table if file doesn't exist or has errors.
+local function load_shortcuts()
+  local path = vim.fn.expand('~/.tcode/shortcuts.lua')
+  -- Check if file exists before trying to load
+  local f = io.open(path, 'r')
+  if not f then
+    return {}
+  end
+  f:close()
+
+  local ok, result = pcall(dofile, path)
+  if ok and type(result) == 'table' then
+    return result
+  end
+  -- File exists but failed to load — warn the user
+  local err_msg = not ok and tostring(result) or 'did not return a table'
+  vim.schedule(function()
+    vim.notify('shortcuts.lua: ' .. err_msg, vim.log.levels.WARN)
+  end)
+  return {}
+end
+
+-- Attempt to expand a /shortcut on the current line.
+-- Returns true if expanded, false otherwise.
+local function try_expand_shortcut(shortcuts)
+  local line = vim.api.nvim_get_current_line()
+  local cmd = line:match('^/([%w%-_]+)%s*$')
+  if not cmd then
+    return false
+  end
+
+  local template = shortcuts[cmd]
+  if not template then
+    return false
+  end
+
+  -- Split template into lines
+  local replacement_lines = {}
+  for tline in template:gmatch('[^\n]*') do
+    table.insert(replacement_lines, tline)
+  end
+
+  -- Replace the current line with the template lines
+  local row = vim.api.nvim_win_get_cursor(0)[1]  -- 1-indexed
+  vim.api.nvim_buf_set_lines(0, row - 1, row, false, replacement_lines)
+
+  -- Move cursor to end of last replacement line
+  local last_row = row - 1 + #replacement_lines
+  local last_line = replacement_lines[#replacement_lines]
+  vim.api.nvim_win_set_cursor(0, { last_row, #last_line })
+
+  return true
+end
+
+-- Set up completion function for /shortcuts.
+-- Called by nvim's insert-mode completion (<C-x><C-u>).
+-- We wire <Tab> to trigger this when appropriate.
+local function setup_shortcut_completion(shortcuts)
+  -- Build sorted list of shortcut names for stable ordering
+  local shortcut_names = {}
+  for name, _ in pairs(shortcuts) do
+    table.insert(shortcut_names, name)
+  end
+  table.sort(shortcut_names)
+
+  -- Register the completefunc
+  -- completefunc is called twice by nvim:
+  --   1st call (findstart=1): return the column where the completion word starts
+  --   2nd call (findstart=0): return the list of matches for `base`
+  _G.tcode_shortcut_complete = function(findstart, base)
+    if findstart == 1 then
+      -- Find the start of the /command on the current line
+      local line = vim.api.nvim_get_current_line()
+      local col = vim.fn.col('.') - 1  -- 0-indexed cursor column
+      -- Walk backwards to find the '/'
+      local start = col
+      while start > 0 and line:sub(start, start):match('[%w%-_]') do
+        start = start - 1
+      end
+      -- Check if we landed on a '/'
+      if start >= 1 and line:sub(start, start) == '/' then
+        -- Return 0-indexed column of the '/' character
+        return start - 1
+      end
+      -- No '/' found — abort completion
+      return -3
+    else
+      -- Return matching shortcuts (base includes the '/')
+      local prefix = base:match('^/(.*)') or ''
+      local matches = {}
+      for _, name in ipairs(shortcut_names) do
+        if name:find(prefix, 1, true) == 1 then
+          table.insert(matches, {
+            word = '/' .. name,
+            menu = shortcuts[name]:sub(1, 50) .. (shortcuts[name]:len() > 50 and '...' or ''),
+          })
+        end
+      end
+      return matches
+    end
+  end
+
+  vim.bo.completefunc = 'v:lua.tcode_shortcut_complete'
+end
+
 -- @param msg_file: Path to file where messages should be written
 -- @param is_subagent: Whether this is a subagent edit window
 -- @param session_id: Session ID (for approve-next)
@@ -1613,7 +1720,15 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
   })
 
   vim.keymap.set('n', '<C-s>', ':w<CR>', { buffer = true, silent = true, desc = 'Send message' })
-  vim.keymap.set('i', '<CR>', '<Esc>:w<CR>i', { buffer = true, silent = true, desc = 'Send message' })
+  vim.keymap.set('i', '<CR>', function()
+    if vim.fn.pumvisible() == 1 then
+      -- Completion popup visible — confirm selection (CompleteDone autocmd will auto-expand)
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-y>', true, false, true), 'n', false)
+    else
+      -- No popup — send message
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>:w<CR>i', true, false, true), 'n', false)
+    end
+  end, { buffer = true, silent = true, desc = 'Send message or confirm completion' })
   vim.keymap.set('i', '<C-o>', '<Esc>o', { buffer = true, silent = true, desc = 'New line below' })
 
   vim.cmd([[
@@ -1637,6 +1752,67 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
       end
     end)
   end, { buffer = true, silent = true, desc = 'Open pending tool approvals' })
+
+  -- Load shortcuts from ~/.tcode/shortcuts.lua
+  local shortcuts = load_shortcuts()
+
+  -- Set up shortcut keybindings if shortcuts are available
+  if next(shortcuts) ~= nil then
+    setup_shortcut_completion(shortcuts)
+
+    -- Auto-trigger completion popup when typing '/' at the start of a line
+    vim.keymap.set('i', '/', function()
+      local col = vim.fn.col('.') - 1  -- 0-indexed cursor column
+      if col == 0 then
+        -- Insert '/' then trigger completion
+        vim.api.nvim_feedkeys('/', 'n', false)
+        vim.schedule(function()
+          vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n', false)
+        end)
+      else
+        vim.api.nvim_feedkeys('/', 'n', false)
+      end
+    end, { buffer = true, silent = true, desc = 'Auto-trigger shortcut completion' })
+
+    -- <Tab> in insert mode: expand shortcut, show completion, or insert tab
+    vim.keymap.set('i', '<Tab>', function()
+      -- Check if completion popup is already visible — if so, select next item
+      if vim.fn.pumvisible() == 1 then
+        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-n>', true, false, true), 'n', false)
+        return
+      end
+
+      local line = vim.api.nvim_get_current_line()
+      local cmd = line:match('^/([%w%-_]+)%s*$')
+
+      if cmd and shortcuts[cmd] then
+        -- Exact match — expand the shortcut
+        vim.cmd('stopinsert')
+        try_expand_shortcut(shortcuts)
+        vim.cmd('startinsert!')
+      elseif line:match('^/') then
+        -- Partial match or just '/' — trigger completion popup
+        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n', false)
+      else
+        -- Not a shortcut line — insert a normal tab
+        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Tab>', true, false, true), 'n', false)
+      end
+    end, { buffer = true, silent = true, desc = 'Expand shortcut or insert tab' })
+
+    -- Auto-expand shortcut after selecting from completion popup
+    vim.api.nvim_create_autocmd('CompleteDone', {
+      buffer = 0,
+      callback = function()
+        local completed = vim.v.completed_item
+        if completed and completed.word and completed.word:match('^/') then
+          -- Schedule expansion to run after the completion popup closes
+          vim.schedule(function()
+            try_expand_shortcut(shortcuts)
+          end)
+        end
+      end,
+    })
+  end
 
   vim.api.nvim_buf_set_lines(0, 0, -1, false, { '' })
   vim.cmd('startinsert')

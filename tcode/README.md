@@ -266,7 +266,43 @@ Context is determined by cursor position using extmarks. `Ctrl-k` checks for a s
 |-----|------|--------|
 | `Enter` | Insert | Send message |
 | `Ctrl-s` | Normal | Send message |
+| `Ctrl-o` | Insert | New line below |
 | `Ctrl-p` | Normal/Insert | Open pending tool approvals one by one |
+| `Tab` | Insert | Expand `/shortcut`, show completion popup, or insert tab |
+
+## Shortcut Templates
+
+Type `/shortcutname` and press `Tab` in the edit buffer to expand pre-configured prompt templates.
+
+### Setup
+
+Copy the default shortcuts config to your tcode config directory:
+
+```bash
+mkdir -p ~/.tcode
+cp tcode/config/shortcuts.lua ~/.tcode/shortcuts.lua
+```
+
+Or if tcode is already installed, the install script copies it automatically (won't overwrite existing).
+
+### Usage
+
+| Input | Tab Result |
+|-------|------------|
+| `/review` | Expands to template text (exact match) |
+| `/rev` | Shows completion popup (`/review`, `/refactor`) |
+| `/` | Shows all available shortcuts |
+| `hello world` | Inserts a normal tab (no `/` prefix) |
+
+Edit `~/.tcode/shortcuts.lua` to add your own shortcuts:
+
+```lua
+return {
+  review = [[Review this code for correctness and edge cases.]],
+  explain = "Explain this code in detail.",
+  myshortcut = [[Your custom template here]],
+}
+```
 
 ## Cancellation
 
