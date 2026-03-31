@@ -29,6 +29,18 @@ impl DisplayClient {
         let exe_path =
             std::env::current_exe().context("Failed to determine current executable path")?;
 
+        // Pre-create usage and token_usage files so the nvim fs_event watchers can
+        // attach immediately instead of retrying. Without this, the watchers give up
+        // after ~20 seconds of retries, so if the first assistant response takes longer
+        // (or usage fetch fails with e.g. 429), the status bar never updates.
+        for path in [&usage_file, &token_usage_file] {
+            if !path.exists() {
+                tokio::fs::write(path, "")
+                    .await
+                    .with_context(|| format!("Failed to pre-create {:?}", path))?;
+            }
+        }
+
         // Save terminal settings before neovim takes over
         let saved_termios = nix::sys::termios::tcgetattr(std::io::stdin()).ok();
 

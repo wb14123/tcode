@@ -1299,57 +1299,29 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   end)
 
   -- Watch usage file for subscription usage updates.
-  -- The file may not exist yet (usage is fetched async), so retry until it appears.
+  -- The file is pre-created by the Rust side before nvim starts.
   if M.usage_file then
-    local usage_callback = function(usage)
+    M.usage_watcher = create_status_watcher(M.usage_file, function(usage)
       if usage and usage ~= '' then
         vim.g.tcode_usage = usage
       else
         vim.g.tcode_usage = ''
       end
       vim.cmd('redrawstatus')
-    end
-    local usage_retries = 0
-    local function try_watch_usage()
-      local ok, watcher = pcall(create_status_watcher, M.usage_file, usage_callback)
-      if ok then
-        M.usage_watcher = watcher
-      else
-        usage_retries = usage_retries + 1
-        if usage_retries < 10 then
-          -- File doesn't exist yet; retry in 2 seconds
-          vim.defer_fn(try_watch_usage, 2000)
-        end
-      end
-    end
-    try_watch_usage()
+    end)
   end
 
   -- Watch token usage file for token count updates.
-  -- The file may not exist yet, so retry until it appears.
+  -- The file is pre-created by the Rust side before nvim starts.
   if M.token_usage_file then
-    local token_usage_callback = function(token_usage)
+    M.token_usage_watcher = create_status_watcher(M.token_usage_file, function(token_usage)
       if token_usage and token_usage ~= '' then
         vim.g.tcode_token_usage = token_usage
       else
         vim.g.tcode_token_usage = ''
       end
       vim.cmd('redrawstatus')
-    end
-    local token_usage_retries = 0
-    local function try_watch_token_usage()
-      local ok, watcher = pcall(create_status_watcher, M.token_usage_file, token_usage_callback)
-      if ok then
-        M.token_usage_watcher = watcher
-      else
-        token_usage_retries = token_usage_retries + 1
-        if token_usage_retries < 10 then
-          -- File doesn't exist yet; retry in 2 seconds
-          vim.defer_fn(try_watch_token_usage, 2000)
-        end
-      end
-    end
-    try_watch_token_usage()
+    end)
   end
 
   -- Clean up watchers when buffer is deleted
