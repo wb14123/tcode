@@ -1695,7 +1695,7 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
   if is_subagent then
     vim.wo.statusline = '%#TCodeEditStatus# Subagent Edit - Enter to send, /done to finish %='
   else
-    vim.wo.statusline = '%#TCodeEditStatus# TCode Edit - Enter to send, Ctrl-o new line, Ctrl-p approvals %='
+    vim.wo.statusline = '%#TCodeEditStatus# TCode Edit - Enter to send, Ctrl-j new line, Ctrl-p approvals %='
   end
 
   -- Create autocmd to send content on save
@@ -1747,7 +1747,6 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
       vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Esc>:w<CR>i', true, false, true), 'n', false)
     end
   end, { buffer = true, silent = true, desc = 'Send message or confirm completion' })
-  vim.keymap.set('i', '<C-o>', '<Esc>o', { buffer = true, silent = true, desc = 'New line below' })
 
   vim.cmd([[
     highlight TCodeEditStatus guibg=#282c34 guifg=#61afef ctermfg=75 ctermbg=236

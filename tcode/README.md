@@ -266,7 +266,7 @@ Context is determined by cursor position using extmarks. `Ctrl-k` checks for a s
 |-----|------|--------|
 | `Enter` | Insert | Send message |
 | `Ctrl-s` | Normal | Send message |
-| `Ctrl-o` | Insert | New line below |
+| `Ctrl-j` | Insert | Insert newline at cursor |
 | `Ctrl-p` | Normal/Insert | Open pending tool approvals one by one |
 | `Tab` | Insert | Expand `/shortcut`, show completion popup, or insert tab |
 
