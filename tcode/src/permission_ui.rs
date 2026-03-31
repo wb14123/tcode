@@ -731,13 +731,18 @@ pub fn launch_approval_popup(
         match exit_code {
             10 => {
                 if let Some(pfp) = preview_file_path {
+                    let nvim_setup_base = "hi TCodeStatusLine guibg=#2d4f2d guifg=#c0c0c0 ctermbg=22 ctermfg=7 | nnoremap q :qa!<CR> | set laststatus=2";
                     if pfp.ends_with(".tcodediff") {
                         // Read tcodediff: line 1 = original path, line 2 = new content tmp path
                         match std::fs::read_to_string(pfp) {
                             Ok(diff_content) => {
                                 let mut lines = diff_content.lines();
-                                if let (Some(original), Some(tmp)) = (lines.next(), lines.next())
-                                    && let Err(e) = Command::new("tmux")
+                                if let (Some(original), Some(tmp)) = (lines.next(), lines.next()) {
+                                    let nvim_cmd = format!(
+                                        "{} | windo setlocal statusline=%#TCodeStatusLine#\\ TCode\\ Diff\\ Preview\\ -\\ q\\ to\\ quit\\ %=",
+                                        nvim_setup_base
+                                    );
+                                    if let Err(e) = Command::new("tmux")
                                         .args([
                                             "display-popup",
                                             "-E",
@@ -751,32 +756,43 @@ pub fn launch_approval_popup(
                                             "-d",
                                             original,
                                             tmp,
+                                            "-c",
+                                            &nvim_cmd,
                                         ])
                                         .output()
-                                {
-                                    tracing::warn!("failed to launch nvim diff popup: {}", e);
+                                    {
+                                        tracing::warn!("failed to launch nvim diff popup: {}", e);
+                                    }
                                 }
                             }
                             Err(e) => {
                                 tracing::warn!("failed to read tcodediff file {}: {}", pfp, e);
                             }
                         }
-                    } else if let Err(e) = Command::new("tmux")
-                        .args([
-                            "display-popup",
-                            "-E",
-                            "-w",
-                            "80%",
-                            "-h",
-                            "80%",
-                            "--",
-                            "nvim",
-                            "-R",
-                            pfp,
-                        ])
-                        .output()
-                    {
-                        tracing::warn!("failed to launch nvim popup: {}", e);
+                    } else {
+                        let nvim_cmd = format!(
+                            "{} | setlocal statusline=%#TCodeStatusLine#\\ TCode\\ Preview\\ -\\ q\\ to\\ quit\\ %=",
+                            nvim_setup_base
+                        );
+                        if let Err(e) = Command::new("tmux")
+                            .args([
+                                "display-popup",
+                                "-E",
+                                "-w",
+                                "80%",
+                                "-h",
+                                "80%",
+                                "--",
+                                "nvim",
+                                "-R",
+                                pfp,
+                                "-c",
+                                &nvim_cmd,
+                            ])
+                            .output()
+                        {
+                            tracing::warn!("failed to launch nvim popup: {}", e);
+                        }
                     }
                 }
             }
