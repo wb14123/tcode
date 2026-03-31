@@ -272,7 +272,7 @@ Context is determined by cursor position using extmarks. `Ctrl-k` checks for a s
 
 ## Shortcut Templates
 
-Type `/shortcutname` and press `Tab` in the edit buffer to expand pre-configured prompt templates.
+Type `/shortcutname` and press `Tab` in the edit buffer to expand pre-configured prompt templates. Shortcuts work anywhere in the text — typing `/` after a space (or at the start of a line) automatically shows the completion popup.
 
 ### Setup
 
@@ -287,12 +287,15 @@ Or if tcode is already installed, the install script copies it automatically (wo
 
 ### Usage
 
-| Input | Tab Result |
-|-------|------------|
-| `/review` | Expands to template text (exact match) |
-| `/rev` | Shows completion popup (`/review`, `/refactor`) |
-| `/` | Shows all available shortcuts |
-| `hello world` | Inserts a normal tab (no `/` prefix) |
+| Input | Result |
+|-------|--------|
+| `/` | Auto-shows completion popup with all shortcuts |
+| `/rev` + Tab | Shows completion popup filtered to matches (`/review`, `/refactor`) |
+| `/review` + Tab | Expands to template text (exact match) |
+| `please /review this` + Tab | Expands `/review` in place, keeps surrounding text |
+| `hello world` + Tab | Inserts a normal tab (no `/` nearby) |
+
+Select from the popup with Enter — the shortcut auto-expands after selection.
 
 Edit `~/.tcode/shortcuts.lua` to add your own shortcuts:
 
@@ -300,7 +303,7 @@ Edit `~/.tcode/shortcuts.lua` to add your own shortcuts:
 return {
   review = [[Review this code for correctness and edge cases.]],
   explain = "Explain this code in detail.",
-  myshortcut = [[Your custom template here]],
+  ["my-shortcut"] = [[Use ["quoted-key"] syntax for names with hyphens.]],
 }
 ```
 
