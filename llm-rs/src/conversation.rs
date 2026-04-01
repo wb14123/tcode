@@ -55,6 +55,7 @@ Delegate to keep your context clean. Subagents retain context and can be continu
 
 Use dedicated tools for file ops, not bash:
 - `read`/`write`/`edit` for files, `grep` for search, `glob` for finding files
+- `LSP` (if available) for code navigation: go-to-definition, find-references, type info, call hierarchy
 - `bash` is for terminal ops: git, cargo, npm, docker, etc.
 
 ## Efficient Reading
