@@ -16,6 +16,7 @@ use lsp_types::{
     WorkspaceSymbolResponse,
 };
 
+use llm_rs::permission::ScopedPermissionManager;
 use llm_rs::tool::{Tool, ToolContext};
 
 const DESCRIPTION: &str = r#"Interact with Language Server Protocol (LSP) servers to get code intelligence features.
@@ -94,10 +95,11 @@ pub fn lsp_tool(manager: Arc<LspManager>) -> Tool {
         "LSP",
         DESCRIPTION,
         Some(Duration::from_millis(30000)),
-        move |_ctx: ToolContext, params: LspParams| {
+        move |ctx: ToolContext, params: LspParams| {
             let manager = manager.clone();
+            let permission = ctx.permission.clone();
             async_stream::stream! {
-                let result = execute_lsp_operation(&manager, params).await;
+                let result = execute_lsp_operation(&manager, &permission, params).await;
                 yield result;
             }
         },
@@ -159,9 +161,13 @@ fn require_position(params: &LspParams) -> Result<(&str, u32, u32), String> {
 /// Get a server for a file path, returning (server, filetype, absolute_path, uri).
 async fn server_for_file(
     manager: &LspManager,
+    permission: &ScopedPermissionManager,
     file_path: &str,
 ) -> Result<(Arc<lsp_client::LspServer>, String, PathBuf, lsp_types::Uri), String> {
     let abs_path = resolve_file_path(file_path).await?;
+    crate::file_permission::check_file_read_permission(permission, &abs_path, abs_path.is_dir())
+        .await
+        .map_err(|e| format!("{e}"))?;
     let ext = get_extension(&abs_path)?;
     let filetype = manager
         .filetype_for_extension(&ext)
@@ -384,7 +390,11 @@ fn build_position_params(
     }
 }
 
-async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Result<String, String> {
+async fn execute_lsp_operation(
+    manager: &LspManager,
+    permission: &ScopedPermissionManager,
+    params: LspParams,
+) -> Result<String, String> {
     if params.language.is_some() && !matches!(params.operation, LspOperation::WorkspaceSymbol) {
         return Err(
             "'language' parameter is only supported for workspaceSymbol operation".to_string(),
@@ -394,7 +404,8 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
     match params.operation {
         LspOperation::GoToDefinition => {
             let (file_path, line, character) = require_position(&params)?;
-            let (server, filetype, abs_path, uri) = server_for_file(manager, file_path).await?;
+            let (server, filetype, abs_path, uri) =
+                server_for_file(manager, permission, file_path).await?;
             open_file(&server, &uri, &filetype, &abs_path).await?;
 
             let pos_params = build_position_params(&uri, line, character);
@@ -421,7 +432,8 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
 
         LspOperation::FindReferences => {
             let (file_path, line, character) = require_position(&params)?;
-            let (server, filetype, abs_path, uri) = server_for_file(manager, file_path).await?;
+            let (server, filetype, abs_path, uri) =
+                server_for_file(manager, permission, file_path).await?;
             open_file(&server, &uri, &filetype, &abs_path).await?;
 
             let pos_params = build_position_params(&uri, line, character);
@@ -455,7 +467,8 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
 
         LspOperation::Hover => {
             let (file_path, line, character) = require_position(&params)?;
-            let (server, filetype, abs_path, uri) = server_for_file(manager, file_path).await?;
+            let (server, filetype, abs_path, uri) =
+                server_for_file(manager, permission, file_path).await?;
             open_file(&server, &uri, &filetype, &abs_path).await?;
 
             let pos_params = build_position_params(&uri, line, character);
@@ -477,7 +490,8 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
 
         LspOperation::GoToImplementation => {
             let (file_path, line, character) = require_position(&params)?;
-            let (server, filetype, abs_path, uri) = server_for_file(manager, file_path).await?;
+            let (server, filetype, abs_path, uri) =
+                server_for_file(manager, permission, file_path).await?;
             open_file(&server, &uri, &filetype, &abs_path).await?;
 
             let pos_params = build_position_params(&uri, line, character);
@@ -506,7 +520,8 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
 
         LspOperation::PrepareCallHierarchy => {
             let (file_path, line, character) = require_position(&params)?;
-            let (server, filetype, abs_path, uri) = server_for_file(manager, file_path).await?;
+            let (server, filetype, abs_path, uri) =
+                server_for_file(manager, permission, file_path).await?;
             open_file(&server, &uri, &filetype, &abs_path).await?;
 
             let pos_params = build_position_params(&uri, line, character);
@@ -540,7 +555,8 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
 
         LspOperation::IncomingCalls => {
             let (file_path, line, character) = require_position(&params)?;
-            let (server, filetype, abs_path, uri) = server_for_file(manager, file_path).await?;
+            let (server, filetype, abs_path, uri) =
+                server_for_file(manager, permission, file_path).await?;
             open_file(&server, &uri, &filetype, &abs_path).await?;
 
             let pos_params = build_position_params(&uri, line, character);
@@ -596,7 +612,8 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
 
         LspOperation::OutgoingCalls => {
             let (file_path, line, character) = require_position(&params)?;
-            let (server, filetype, abs_path, uri) = server_for_file(manager, file_path).await?;
+            let (server, filetype, abs_path, uri) =
+                server_for_file(manager, permission, file_path).await?;
             open_file(&server, &uri, &filetype, &abs_path).await?;
 
             let pos_params = build_position_params(&uri, line, character);
@@ -655,7 +672,8 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
                 .file_path
                 .as_deref()
                 .ok_or("'filePath' is required for documentSymbol")?;
-            let (server, filetype, abs_path, uri) = server_for_file(manager, file_path).await?;
+            let (server, filetype, abs_path, uri) =
+                server_for_file(manager, permission, file_path).await?;
             open_file(&server, &uri, &filetype, &abs_path).await?;
 
             let result = server
@@ -689,6 +707,13 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
             } else if let Some(file_path) = params.file_path.as_deref() {
                 // Derive filetype from file extension
                 let abs_path = resolve_file_path(file_path).await?;
+                crate::file_permission::check_file_read_permission(
+                    permission,
+                    &abs_path,
+                    abs_path.is_dir(),
+                )
+                .await
+                .map_err(|e| format!("{e}"))?;
                 let ext = get_extension(&abs_path)?;
                 let filetype = manager
                     .filetype_for_extension(&ext)
