@@ -25,7 +25,7 @@ Supported operations:
 - findReferences: Find all references to a symbol
 - hover: Get hover information (documentation, type info) for a symbol
 - documentSymbol: Get all symbols (functions, classes, variables) in a document
-- workspaceSymbol: Search for symbols across the entire workspace
+- workspaceSymbol: Search for symbols across the entire workspace (requires 'language' or 'filePath')
 - goToImplementation: Find implementations of an interface or abstract method
 - prepareCallHierarchy: Get call hierarchy item at a position (functions/methods)
 - incomingCalls: Find all functions/methods that call the function at a position
@@ -35,6 +35,12 @@ All position-based operations require:
 - filePath: The file to operate on
 - line: The line number (1-based, as shown in editors)
 - character: The character offset (1-based, as shown in editors)
+
+workspaceSymbol requires either:
+- language: The language filetype (e.g. "rust", "python", "typescript") to determine which LSP server to query
+- filePath: Any file of the target language (used only for server routing)
+
+The 'language' parameter is ONLY valid for workspaceSymbol. Do not pass it for other operations.
 
 Note: LSP servers are configured from your Neovim LSP setup. If no server is available for a file type, an error will be returned."#;
 
@@ -55,6 +61,10 @@ pub struct LspParams {
     /// Search query (for workspaceSymbol)
     #[serde(default)]
     pub query: Option<String>,
+    /// Language filetype for server routing (e.g. "rust", "python", "typescript").
+    /// Only used with workspaceSymbol. Uses Neovim filetype names.
+    #[serde(default)]
+    pub language: Option<String>,
 }
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
@@ -375,6 +385,12 @@ fn build_position_params(
 }
 
 async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Result<String, String> {
+    if params.language.is_some() && !matches!(params.operation, LspOperation::WorkspaceSymbol) {
+        return Err(
+            "'language' parameter is only supported for workspaceSymbol operation".to_string(),
+        );
+    }
+
     match params.operation {
         LspOperation::GoToDefinition => {
             let (file_path, line, character) = require_position(&params)?;
@@ -662,8 +678,16 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
         LspOperation::WorkspaceSymbol => {
             let query = params.query.as_deref().unwrap_or("").to_string();
 
-            // Try to get a server: prefer file_path's filetype, otherwise pick first configured
-            let server = if let Some(file_path) = params.file_path.as_deref() {
+            // Priority: language > filePath > error
+            let server = if let Some(language) =
+                params.language.as_deref().filter(|s| !s.is_empty())
+            {
+                // Use language directly as filetype
+                manager.get_or_start_server(language).await.map_err(|e| {
+                    format!("Failed to start LSP server for language '{language}': {e}")
+                })?
+            } else if let Some(file_path) = params.file_path.as_deref() {
+                // Derive filetype from file extension
                 let abs_path = resolve_file_path(file_path).await?;
                 let ext = get_extension(&abs_path)?;
                 let filetype = manager
@@ -672,19 +696,12 @@ async fn execute_lsp_operation(manager: &LspManager, params: LspParams) -> Resul
                 manager
                     .get_or_start_server(filetype)
                     .await
-                    .map_err(|e| format!("Failed to start LSP server: {e}"))?
+                    .map_err(|e| format!("Failed to start LSP server for '{filetype}': {e}"))?
             } else {
-                // Try to get any configured server
-                let config = manager.config();
-                let first_filetype = config
-                    .servers
-                    .first()
-                    .and_then(|s| s.filetypes.first())
-                    .ok_or("No LSP servers configured")?;
-                manager
-                    .get_or_start_server(first_filetype)
-                    .await
-                    .map_err(|e| format!("Failed to start LSP server: {e}"))?
+                return Err(
+                    "workspaceSymbol requires either 'language' or 'filePath' to determine which LSP server to query"
+                        .to_string(),
+                );
             };
 
             let result = server
