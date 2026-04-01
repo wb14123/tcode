@@ -1137,6 +1137,30 @@ local function setup_highlights(statusline_fg, statusline_ctermfg)
   })
 end
 
+local function disable_conflicting_plugins()
+  -- Disable known statusline plugins and kill their autocmds so they
+  -- cannot re-assert. Supported: lualine, vim-airline, lightline.
+  pcall(function()
+    require('lualine').hide()
+    vim.api.nvim_del_augroup_by_name('lualine')
+  end)
+  pcall(function()
+    vim.cmd('AirlineToggle')
+    vim.api.nvim_del_augroup_by_name('airline')
+  end)
+  pcall(function()
+    vim.fn['lightline#disable']()
+    vim.api.nvim_del_augroup_by_name('lightline')
+  end)
+  -- Wipe dashboard/start screen buffers created before us
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    local ft = vim.bo[buf].filetype
+    if ft == 'alpha' or ft == 'dashboard' or ft == 'snacks_dashboard' or ft == 'starter' then
+      pcall(vim.api.nvim_buf_delete, buf, { force = true })
+    end
+  end
+end
+
 -- Create a read-only display buffer with standard options
 -- @return buf number
 local function create_display_buffer(name, statusline)
@@ -1286,7 +1310,8 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   end
 
   setup_highlights('#98c379', 114)
-  local buf = create_display_buffer('[TCode Display]',
+  disable_conflicting_plugins()
+  local buf = create_display_buffer('tcode',
     '%#TCodeStatusLine# TCode: %{g:tcode_status}%=%{g:tcode_combined_usage} ')
   local ns = vim.api.nvim_create_namespace('tcode')
 
@@ -1512,7 +1537,8 @@ function M.setup_tool_call_display(tool_call_file, status_file)
   vim.g.tcode_tc_status = 'Waiting...'
 
   setup_highlights('#e5c07b', 180)
-  local buf = create_display_buffer('[TCode Tool Call]',
+  disable_conflicting_plugins()
+  local buf = create_display_buffer('tcode-tool-call',
     '%#TCodeStatusLine# Tool Call: %{g:tcode_tc_status} %=')
   local ns = vim.api.nvim_create_namespace('tcode_tc')
 
@@ -1682,7 +1708,8 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
   M.exe_path = exe_path or M.exe_path
 
   vim.cmd('enew')
-  vim.api.nvim_buf_set_name(0, '[TCode Edit]')
+  vim.api.nvim_buf_set_name(0, 'tcode-edit')
+  disable_conflicting_plugins()
 
   vim.bo.buftype = 'acwrite'
   vim.bo.bufhidden = 'hide'

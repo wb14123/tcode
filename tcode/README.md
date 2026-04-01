@@ -339,6 +339,15 @@ Flow: `Ctrl-c` in display (or `Ctrl-k` on a subagent) → confirmation popup →
 - File watching via inotify
 - Token usage display
 
+### Plugin Compatibility
+
+TCode windows use custom statuslines to show connection status, token usage, and keybinding hints. On setup, TCode automatically disables conflicting plugins in its neovim instances:
+
+- **Statusline plugins** (lualine, vim-airline, lightline) — disabled and their autocmds removed so they cannot re-assert
+- **Dashboard/start screen plugins** (alpha-nvim, dashboard-nvim, snacks.nvim dashboard, mini.starter) — their buffers are wiped on setup
+
+This only affects TCode's own neovim processes — your other neovim instances are not affected.
+
 ## Design Notes
 
 The following are design directions, some implemented and some aspirational:
