@@ -27,13 +27,18 @@ mod tests {
     }
 
     /// Build a ToolContext with file_write permission pre-granted for `dir`.
-    fn make_ctx_with_write_permission(dir: &std::path::Path) -> Result<ToolContext> {
+    ///
+    /// Note: `check_file_write_permission` uses `widen_to_project_dir` which
+    /// widens any path inside the current working directory to the cwd itself.
+    /// So we must grant permission for the canonical cwd (not just `dir`),
+    /// otherwise `ask_permission` will block forever waiting for user input.
+    fn make_ctx_with_write_permission(_dir: &std::path::Path) -> Result<ToolContext> {
         let pm = Arc::new(PermissionManager::new(temp_perm_path()));
-        let canonical_dir = dir.canonicalize()?;
+        let canonical_cwd = std::env::current_dir()?.canonicalize()?;
         let key = PermissionKey {
             tool: "file_write".to_string(),
             key: "path".to_string(),
-            value: canonical_dir.to_string_lossy().to_string(),
+            value: canonical_cwd.to_string_lossy().to_string(),
         };
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
         let scoped =

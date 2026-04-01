@@ -9,6 +9,9 @@ chrono = "0.4"
 quick-xml = "0.37"
 async-stream = "0.3"
 browser-server = { path = "../browser-server" }
+lsp-client = { path = "../lsp-client" }
+lsp-types = "0.97"
+url = "2"
 tracing = "0.1"
 llm-rs = { path = "../llm-rs" }
 llm-rs-macros = { path = "../llm-rs-macros" }

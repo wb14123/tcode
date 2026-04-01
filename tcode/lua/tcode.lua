@@ -1835,6 +1835,41 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
   end
 
   vim.api.nvim_buf_set_lines(0, 0, -1, false, { '' })
+
+  -- Check for LSP hint
+  local session_dir = vim.fn.fnamemodify(msg_file, ':h')
+  local hint_path = session_dir .. '/lsp-hint.txt'
+  local hint_file = io.open(hint_path, 'r')
+  if hint_file then
+    local hint_lines = {}
+    for line in hint_file:lines() do
+      table.insert(hint_lines, line)
+    end
+    hint_file:close()
+
+    if #hint_lines > 0 then
+      vim.api.nvim_set_hl(0, 'TCodeTokens', { fg = '#5c6370', italic = true, ctermfg = 242 })
+      local hint_ns = vim.api.nvim_create_namespace('tcode_lsp_hint')
+      -- First line as overlay on line 0, additional lines as virtual lines below
+      vim.api.nvim_buf_set_extmark(0, hint_ns, 0, 0, {
+        virt_text = { { hint_lines[1], 'TCodeTokens' } },
+        virt_text_pos = 'overlay',
+        virt_lines = vim.tbl_map(function(line)
+          return { { line, 'TCodeTokens' } }
+        end, vim.list_slice(hint_lines, 2)),
+      })
+
+      -- Clear on first edit
+      vim.api.nvim_create_autocmd({ 'InsertCharPre' }, {
+        buffer = 0,
+        once = true,
+        callback = function()
+          vim.api.nvim_buf_clear_namespace(0, hint_ns, 0, -1)
+        end,
+      })
+    end
+  end
+
   vim.cmd('startinsert')
 end
 

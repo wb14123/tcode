@@ -152,6 +152,12 @@ impl Server {
             .join("permissions.json");
         let manager = ConversationManager::new(permissions_path);
 
+        // Start LSP config extraction in the background (runs headless nvim, can take seconds).
+        // We await the result later, just before building the tools list, so it doesn't
+        // block session file creation (display.jsonl, status.txt) which the display nvim
+        // needs to watch on startup.
+        let lsp_config_task = tokio::spawn(lsp_client::extract_config_from_nvim());
+
         // Build tools list including subagent tools
         let model_infos = if self.subagent_model_selection {
             self.llm.available_models()
@@ -175,9 +181,66 @@ impl Server {
         tools_list.push(Arc::new(create_subagent_tool(&model_infos)));
         tools_list.push(Arc::new(create_continue_subagent_tool()));
 
-        let tool_clients: ToolClientMap = Arc::new(parking_lot::Mutex::new(HashMap::new()));
-
+        // Create session files early so the display nvim (which may already be running)
+        // can start watching them before the LSP config await which can take seconds.
         let resuming = self.conversation_state_file.exists();
+        if !resuming {
+            tokio::fs::write(&self.display_file, "")
+                .await
+                .with_context(|| {
+                    format!("Failed to initialize display file {:?}", self.display_file)
+                })?;
+            tokio::fs::write(&self.status_file, "Ready")
+                .await
+                .with_context(|| {
+                    format!("Failed to initialize status file {:?}", self.status_file)
+                })?;
+        }
+
+        // Await LSP config extraction result and conditionally add LSP tool
+        let lsp_manager = match lsp_config_task.await {
+            Ok(Ok(lsp_config)) => {
+                if lsp_config.has_servers() {
+                    let manager =
+                        std::sync::Arc::new(lsp_client::LspManager::new(lsp_config, cwd.clone()));
+                    // Pre-warm: detect project languages and start servers in background
+                    let manager_clone = manager.clone();
+                    let project_dir = cwd.clone();
+                    let _pre_warm = tokio::spawn(async move {
+                        manager_clone.pre_warm(&project_dir).await;
+                    });
+                    tools_list.push(Arc::new(tools::lsp_tool(manager.clone())));
+                    Some(manager)
+                } else {
+                    tracing::info!("No LSP servers configured in nvim");
+                    None
+                }
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("Failed to extract LSP config from nvim: {e}");
+                None
+            }
+            Err(e) => {
+                tracing::warn!("LSP config extraction task panicked: {e}");
+                None
+            }
+        };
+
+        // Write LSP hint file if no servers configured
+        if lsp_manager.is_none() {
+            let hint_path = self.session_dir.join("lsp-hint.txt");
+            if let Err(e) = tokio::fs::write(
+                &hint_path,
+                "LSP tools not available. Configure LSP in Neovim for code intelligence.\n\
+                 See: https://neovim.io/doc/user/lsp.html",
+            )
+            .await
+            {
+                tracing::warn!("Failed to write LSP hint file: {e}");
+            }
+        }
+
+        let tool_clients: ToolClientMap = Arc::new(parking_lot::Mutex::new(HashMap::new()));
 
         let conversation_client = if resuming {
             tracing::info!(
@@ -264,18 +327,7 @@ impl Server {
 
             client
         } else {
-            // New conversation path
-            tokio::fs::write(&self.display_file, "")
-                .await
-                .with_context(|| {
-                    format!("Failed to initialize display file {:?}", self.display_file)
-                })?;
-            tokio::fs::write(&self.status_file, "Ready")
-                .await
-                .with_context(|| {
-                    format!("Failed to initialize status file {:?}", self.status_file)
-                })?;
-
+            // New conversation path (display.jsonl and status.txt already created above)
             let (_, client) = manager.new_conversation(
                 self.llm,
                 &self.model,
@@ -359,6 +411,12 @@ impl Server {
             .with_context(|| {
                 format!("Failed to write shutdown status to {:?}", self.status_file)
             })?;
+
+        // Shutdown LSP servers
+        if let Some(manager) = lsp_manager {
+            manager.shutdown_all().await;
+        }
+
         std::fs::remove_file(&socket_path)
             .with_context(|| format!("Failed to remove socket {:?}", socket_path))?;
         Ok(())
