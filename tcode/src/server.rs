@@ -152,6 +152,13 @@ impl Server {
             .join("permissions.json");
         let manager = ConversationManager::new(permissions_path);
 
+        // Scan skills
+        let (skills, skill_warnings) = llm_rs::skill::scan_skills();
+        for warning in &skill_warnings {
+            tracing::warn!("{}", warning);
+        }
+        let skills = std::sync::Arc::new(skills);
+
         // Start LSP config extraction in the background (runs headless nvim, can take seconds).
         // We await the result later, just before building the tools list, so it doesn't
         // block session file creation (display.jsonl, status.txt) which the display nvim
@@ -180,6 +187,9 @@ impl Server {
         ];
         tools_list.push(Arc::new(create_subagent_tool(&model_infos)));
         tools_list.push(Arc::new(create_continue_subagent_tool()));
+        if !skills.is_empty() {
+            tools_list.push(Arc::new(tools::skill_tool(Arc::clone(&skills))));
+        }
 
         // Create session files early so the display nvim (which may already be running)
         // can start watching them before the LSP config await which can take seconds.
@@ -369,6 +379,11 @@ impl Server {
 
             client
         };
+
+        // Broadcast skill shadow warnings to the UI
+        for warning in skill_warnings {
+            conversation_client.broadcast_system_warning(warning);
+        }
 
         // Shutdown signal
         let (shutdown_tx, _) = broadcast::channel::<()>(1);

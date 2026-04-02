@@ -2558,6 +2558,18 @@ impl ConversationClient {
         self.children.lock().insert(conversation_id, client);
     }
 
+    /// Broadcast a warning-level system message to subscribers.
+    pub fn broadcast_system_warning(&self, message: String) {
+        if let Err(e) = self.notify_msg(Message::SystemMessage {
+            msg_id: self.next_msg_id(),
+            created_at: now_millis(),
+            level: SystemMessageLevel::Warning,
+            message,
+        }) {
+            tracing::warn!(error = %e, "failed to broadcast system warning");
+        }
+    }
+
     /// Get a clone of the current cancel token for use in `tokio::select!`.
     pub(crate) fn current_cancel_token(&self) -> CancellationToken {
         self.cancel_token.lock().clone()
