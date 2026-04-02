@@ -9,6 +9,64 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout};
 use tokio::sync::oneshot;
 
+/// A single active progress item from the LSP server.
+#[derive(Debug, Clone)]
+pub struct ProgressItem {
+    pub title: String,
+    pub message: Option<String>,
+    pub percentage: Option<u32>,
+}
+
+/// Tracks active work-done progress notifications from the LSP server.
+/// Clone is cheap (inner Arc).
+#[derive(Debug, Clone, Default)]
+pub struct ProgressTracker {
+    items: Arc<Mutex<HashMap<String, ProgressItem>>>,
+}
+
+impl ProgressTracker {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Snapshot of all currently active progress items.
+    pub fn active_items(&self) -> Vec<ProgressItem> {
+        self.items.lock().values().cloned().collect()
+    }
+
+    fn begin(
+        &self,
+        token: String,
+        title: String,
+        message: Option<String>,
+        percentage: Option<u32>,
+    ) {
+        self.items.lock().insert(
+            token,
+            ProgressItem {
+                title,
+                message,
+                percentage,
+            },
+        );
+    }
+
+    fn report(&self, token: &str, message: Option<String>, percentage: Option<u32>) {
+        if let Some(item) = self.items.lock().get_mut(token) {
+            if message.is_some() {
+                item.message = message;
+            }
+            if percentage.is_some() {
+                item.percentage = percentage;
+            }
+        }
+    }
+
+    fn end(&self, token: &str) {
+        self.items.lock().remove(token);
+    }
+}
+
 /// JSON-RPC transport over stdio for LSP communication.
 pub struct LspTransport {
     next_id: AtomicI64,
@@ -16,6 +74,7 @@ pub struct LspTransport {
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
     reader_task: Option<tokio::task::JoinHandle<()>>,
     child: Option<Child>,
+    progress: ProgressTracker,
 }
 
 impl LspTransport {
@@ -34,12 +93,14 @@ impl LspTransport {
         let pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let stdin = Arc::new(tokio::sync::Mutex::new(stdin));
+        let progress = ProgressTracker::new();
 
         let reader_task = {
             let pending = Arc::clone(&pending);
             let stdin = Arc::clone(&stdin);
+            let progress = progress.clone();
             tokio::spawn(async move {
-                if let Err(e) = reader_loop(stdout, pending, stdin).await {
+                if let Err(e) = reader_loop(stdout, pending, stdin, progress).await {
                     tracing::debug!("LSP reader loop ended: {e}");
                 }
             })
@@ -51,6 +112,7 @@ impl LspTransport {
             stdin,
             reader_task: Some(reader_task),
             child: Some(child),
+            progress,
         })
     }
 
@@ -141,6 +203,11 @@ impl LspTransport {
         stdin.flush().await?;
         Ok(())
     }
+
+    /// Get the progress tracker for this transport.
+    pub fn progress(&self) -> &ProgressTracker {
+        &self.progress
+    }
 }
 
 impl Drop for LspTransport {
@@ -158,11 +225,66 @@ impl Drop for LspTransport {
     }
 }
 
+fn extract_progress_token(params: &Value) -> Option<String> {
+    match params.get("token")? {
+        Value::String(s) => Some(s.clone()),
+        Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn handle_progress_notification(msg: &Value, tracker: &ProgressTracker) {
+    let Some(params) = msg.get("params") else {
+        return;
+    };
+    let Some(token) = extract_progress_token(params) else {
+        return;
+    };
+    let Some(value) = params.get("value") else {
+        return;
+    };
+
+    match value.get("kind").and_then(|k| k.as_str()) {
+        Some("begin") => {
+            let title = value
+                .get("title")
+                .and_then(|t| t.as_str())
+                .unwrap_or("")
+                .to_string();
+            let message = value
+                .get("message")
+                .and_then(|m| m.as_str())
+                .map(String::from);
+            let percentage = value
+                .get("percentage")
+                .and_then(|p| p.as_u64())
+                .map(|p| p as u32);
+            tracker.begin(token, title, message, percentage);
+        }
+        Some("report") => {
+            let message = value
+                .get("message")
+                .and_then(|m| m.as_str())
+                .map(String::from);
+            let percentage = value
+                .get("percentage")
+                .and_then(|p| p.as_u64())
+                .map(|p| p as u32);
+            tracker.report(&token, message, percentage);
+        }
+        Some("end") => {
+            tracker.end(&token);
+        }
+        _ => {}
+    }
+}
+
 /// Background loop: read LSP messages from stdout, dispatch responses/notifications.
 async fn reader_loop(
     stdout: ChildStdout,
     pending: Arc<Mutex<HashMap<i64, oneshot::Sender<Value>>>>,
     stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    progress: ProgressTracker,
 ) -> Result<()> {
     let mut reader = BufReader::new(stdout);
 
@@ -244,6 +366,10 @@ async fn reader_loop(
             // Server notification
             let method = msg["method"].as_str().unwrap_or("<unknown>");
             tracing::debug!("LSP server notification: {method}");
+
+            if method == "$/progress" {
+                handle_progress_notification(&msg, &progress);
+            }
         }
     }
 }

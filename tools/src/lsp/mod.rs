@@ -390,6 +390,31 @@ fn build_position_params(
     }
 }
 
+/// If the LSP server has active progress, append a warning to the result.
+fn maybe_append_progress(result: String, server: &lsp_client::LspServer) -> String {
+    let items = server.progress().active_items();
+    if items.is_empty() {
+        return result;
+    }
+
+    let mut warning =
+        String::from("\n\nWARNING: LSP server has work in progress — results may be incomplete:");
+    for item in &items {
+        warning.push_str("\n  - ");
+        warning.push_str(&item.title);
+        if let Some(msg) = &item.message {
+            warning.push_str(" (");
+            warning.push_str(msg);
+            warning.push(')');
+        }
+        if let Some(pct) = item.percentage {
+            warning.push_str(&format!(" [{pct}%]"));
+        }
+    }
+
+    format!("{result}{warning}")
+}
+
 async fn execute_lsp_operation(
     manager: &LspManager,
     permission: &ScopedPermissionManager,
@@ -401,7 +426,7 @@ async fn execute_lsp_operation(
         );
     }
 
-    match params.operation {
+    let (result, server_opt) = match params.operation {
         LspOperation::GoToDefinition => {
             let (file_path, line, character) = require_position(&params)?;
             let (server, filetype, abs_path, uri) =
@@ -421,13 +446,14 @@ async fn execute_lsp_operation(
             let result = result.map_err(|e| format!("goToDefinition request failed: {e}"))?;
             let root = root_path(&server);
 
-            match result {
+            let result = match result {
                 Some(response) => match filter_definition_response(response, &root).await {
                     Some(filtered) => Ok(formatters::format_definition(filtered, &root)),
                     None => Ok("No definitions found.".to_string()),
                 },
                 None => Ok("No definition found.".to_string()),
-            }
+            };
+            (result, Some(server))
         }
 
         LspOperation::FindReferences => {
@@ -452,7 +478,7 @@ async fn execute_lsp_operation(
             let result = result.map_err(|e| format!("findReferences request failed: {e}"))?;
             let root = root_path(&server);
 
-            match result {
+            let result = match result {
                 Some(locations) => {
                     let locations = filter_locations(locations, &root).await;
                     if locations.is_empty() {
@@ -462,7 +488,8 @@ async fn execute_lsp_operation(
                     }
                 }
                 None => Ok("No references found.".to_string()),
-            }
+            };
+            (result, Some(server))
         }
 
         LspOperation::Hover => {
@@ -482,10 +509,11 @@ async fn execute_lsp_operation(
             close_file(&server, &uri).await;
             let result = result.map_err(|e| format!("hover request failed: {e}"))?;
 
-            match result {
+            let result = match result {
                 Some(hover) => Ok(formatters::format_hover(hover)),
                 None => Ok("No hover information available.".to_string()),
-            }
+            };
+            (result, Some(server))
         }
 
         LspOperation::GoToImplementation => {
@@ -509,13 +537,14 @@ async fn execute_lsp_operation(
             let result = result.map_err(|e| format!("goToImplementation request failed: {e}"))?;
             let root = root_path(&server);
 
-            match result {
+            let result = match result {
                 Some(response) => match filter_definition_response(response, &root).await {
                     Some(filtered) => Ok(formatters::format_definition(filtered, &root)),
                     None => Ok("No implementations found.".to_string()),
                 },
                 None => Ok("No implementations found.".to_string()),
-            }
+            };
+            (result, Some(server))
         }
 
         LspOperation::PrepareCallHierarchy => {
@@ -538,7 +567,7 @@ async fn execute_lsp_operation(
             let result = result.map_err(|e| format!("prepareCallHierarchy request failed: {e}"))?;
             let root = root_path(&server);
 
-            match result {
+            let result = match result {
                 Some(items) if !items.is_empty() => {
                     let mut out = String::from("Call hierarchy items:\n");
                     for item in &items {
@@ -550,7 +579,8 @@ async fn execute_lsp_operation(
                     Ok(out)
                 }
                 _ => Ok("No call hierarchy item found at this position.".to_string()),
-            }
+            };
+            (result, Some(server))
         }
 
         LspOperation::IncomingCalls => {
@@ -578,7 +608,10 @@ async fn execute_lsp_operation(
                 Some(items) if !items.is_empty() => items,
                 _ => {
                     close_file(&server, &uri).await;
-                    return Ok("No call hierarchy item found at this position.".to_string());
+                    return Ok(maybe_append_progress(
+                        "No call hierarchy item found at this position.".to_string(),
+                        &server,
+                    ));
                 }
             };
 
@@ -597,7 +630,7 @@ async fn execute_lsp_operation(
             let result = result.map_err(|e| format!("incomingCalls request failed: {e}"))?;
             let root = root_path(&server);
 
-            match result {
+            let result = match result {
                 Some(calls) => {
                     let calls = filter_incoming_calls(calls, &root).await;
                     if calls.is_empty() {
@@ -607,7 +640,8 @@ async fn execute_lsp_operation(
                     }
                 }
                 None => Ok("No incoming calls found.".to_string()),
-            }
+            };
+            (result, Some(server))
         }
 
         LspOperation::OutgoingCalls => {
@@ -635,7 +669,10 @@ async fn execute_lsp_operation(
                 Some(items) if !items.is_empty() => items,
                 _ => {
                     close_file(&server, &uri).await;
-                    return Ok("No call hierarchy item found at this position.".to_string());
+                    return Ok(maybe_append_progress(
+                        "No call hierarchy item found at this position.".to_string(),
+                        &server,
+                    ));
                 }
             };
 
@@ -654,7 +691,7 @@ async fn execute_lsp_operation(
             let result = result.map_err(|e| format!("outgoingCalls request failed: {e}"))?;
             let root = root_path(&server);
 
-            match result {
+            let result = match result {
                 Some(calls) => {
                     let calls = filter_outgoing_calls(calls, &root).await;
                     if calls.is_empty() {
@@ -664,7 +701,8 @@ async fn execute_lsp_operation(
                     }
                 }
                 None => Ok("No outgoing calls found.".to_string()),
-            }
+            };
+            (result, Some(server))
         }
 
         LspOperation::DocumentSymbol => {
@@ -687,10 +725,11 @@ async fn execute_lsp_operation(
             close_file(&server, &uri).await;
             let result = result.map_err(|e| format!("documentSymbol request failed: {e}"))?;
 
-            match result {
+            let result = match result {
                 Some(response) => Ok(formatters::format_document_symbols(response, file_path)),
                 None => Ok(format!("No symbols found in {file_path}.")),
-            }
+            };
+            (result, Some(server))
         }
 
         LspOperation::WorkspaceSymbol => {
@@ -740,13 +779,19 @@ async fn execute_lsp_operation(
 
             let root = root_path(&server);
 
-            match result {
+            let result = match result {
                 Some(response) => match filter_workspace_symbols(response, &root).await {
                     Some(filtered) => Ok(formatters::format_workspace_symbols(filtered, &root)),
                     None => Ok("No symbols found.".to_string()),
                 },
                 None => Ok("No symbols found.".to_string()),
-            }
+            };
+            (result, Some(server))
         }
+    };
+
+    match (result, server_opt) {
+        (Ok(text), Some(server)) => Ok(maybe_append_progress(text, &server)),
+        (other, _) => other,
     }
 }

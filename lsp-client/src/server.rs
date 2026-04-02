@@ -13,7 +13,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::config::LspServerConfig;
-use crate::transport::LspTransport;
+use crate::transport::{LspTransport, ProgressTracker};
 
 /// A running LSP server instance.
 pub struct LspServer {
@@ -160,6 +160,11 @@ impl LspServer {
     /// Get the server config.
     pub fn config(&self) -> &LspServerConfig {
         &self.config
+    }
+
+    /// Get the progress tracker for this server.
+    pub fn progress(&self) -> &ProgressTracker {
+        self.transport.progress()
     }
 }
 
