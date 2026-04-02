@@ -70,7 +70,9 @@ fn build_system_prompt(subagent_depth: usize) -> String {
         "You are the main agent coordinating the user's task. \
          Plan the approach and delegate work to subagents. Delegate based on context \
          cost, not complexity — offload anything that loads content you won't need \
-         afterward. Reserve your context for planning, coordination, and user communication."
+         afterward. Reserve your context for planning, coordination, and user communication. \
+         Always ask the user question when there is something not clear and you are not able to \
+         confirm from your own research. "
     } else {
         "You are a subagent spawned for a specific task. Complete it and return a \
          concise result. You may spawn sub-subagents for genuine subtasks, but never \
