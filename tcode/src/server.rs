@@ -301,6 +301,14 @@ impl Server {
                 });
             }
 
+            // Clear stale usage percentage so the status bar doesn't show an
+            // outdated "X% used" while we wait for the fresh fetch.
+            tokio::fs::write(&self.usage_file, "")
+                .await
+                .with_context(|| {
+                    format!("Failed to clear stale usage file {:?}", self.usage_file)
+                })?;
+
             // Do NOT truncate display.jsonl on resume; subscribe to new events only
             tokio::fs::write(&self.status_file, "Ready")
                 .await
