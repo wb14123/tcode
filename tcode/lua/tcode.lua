@@ -37,14 +37,25 @@ local function format_time(ts_millis)
   return os.date('%H:%M:%S', math.floor(ts_millis / 1000))
 end
 
+-- Ensure a buffer is modifiable before writing to it.
+-- Returns false if the buffer is invalid, so caller can bail out.
+-- Note: caller is responsible for resetting modifiable = false when done.
+local function ensure_buf_modifiable(buf)
+  if not vim.api.nvim_buf_is_valid(buf) then return false end
+  vim.bo[buf].modifiable = true
+  return true
+end
+
 -- Append complete lines to the buffer
 local function append_lines(buf, lines)
+  if not ensure_buf_modifiable(buf) then return end
   local line_count = vim.api.nvim_buf_line_count(buf)
   vim.api.nvim_buf_set_lines(buf, line_count, line_count, false, lines)
 end
 
 -- Append text continuing from current buffer position (for streaming chunks)
 local function append_text(buf, text)
+  if not ensure_buf_modifiable(buf) then return end
   local line_count = vim.api.nvim_buf_line_count(buf)
   local last_line = vim.api.nvim_buf_get_lines(buf, line_count - 1, line_count, false)[1] or ''
   local lines = vim.split(text, '\n', { plain = true })
@@ -102,6 +113,10 @@ local tc_fence_opened = {}  -- tool_call_id -> true once opening fence has been 
 
 --- Show a y/n confirmation popup at the cursor and execute callback on confirm.
 local function confirm_popup(prompt, on_confirm)
+  -- Remember the window and buffer we came from so we can restore after the popup
+  local parent_win = vim.api.nvim_get_current_win()
+  local parent_buf = vim.api.nvim_get_current_buf()
+
   local popup_buf = vim.api.nvim_create_buf(false, true)
   vim.api.nvim_buf_set_lines(popup_buf, 0, -1, false, { prompt })
   local width = #prompt + 4
@@ -113,15 +128,29 @@ local function confirm_popup(prompt, on_confirm)
     height = 1,
     style = 'minimal',
     border = 'rounded',
+    noautocmd = true,
   })
 
   local function close_popup()
-    if vim.api.nvim_win_is_valid(popup_win) then
-      vim.api.nvim_win_close(popup_win, true)
-    end
-    if vim.api.nvim_buf_is_valid(popup_buf) then
-      vim.api.nvim_buf_delete(popup_buf, { force = true })
-    end
+    -- Suppress all autocmds during close to prevent LazyVim plugins
+    -- (file explorers, completion, etc.) from hijacking the display window
+    local saved_ei = vim.o.eventignore
+    vim.o.eventignore = 'all'
+    local ok, err = pcall(function()
+      if vim.api.nvim_win_is_valid(popup_win) then
+        vim.api.nvim_win_close(popup_win, true)
+      end
+      if vim.api.nvim_buf_is_valid(popup_buf) then
+        vim.api.nvim_buf_delete(popup_buf, { force = true })
+      end
+      -- Restore the parent window/buffer in case plugins already switched it
+      if vim.api.nvim_win_is_valid(parent_win) and vim.api.nvim_buf_is_valid(parent_buf) then
+        vim.api.nvim_win_set_buf(parent_win, parent_buf)
+        vim.api.nvim_set_current_win(parent_win)
+      end
+    end)
+    vim.o.eventignore = saved_ei
+    if not ok then vim.api.nvim_err_writeln('close_popup: ' .. tostring(err)) end
   end
 
   vim.keymap.set('n', 'y', function()
@@ -1229,18 +1258,27 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
           if ok and event then
             if on_event then
               local variant, event_data = next(event)
-              on_event(variant, event_data)
+              local ev_ok, ev_err = pcall(on_event, variant, event_data)
+              if not ev_ok then
+                vim.api.nvim_err_writeln('on_event error: ' .. tostring(ev_err))
+              end
             end
-            render_event(buf, ns, event)
+            local render_ok, render_err = pcall(render_event, buf, ns, event)
+            if not render_ok then
+              vim.api.nvim_err_writeln('render_event error: ' .. tostring(render_err))
+              break
+            end
           end
         end
       end
 
       if win ~= -1 and was_at_bottom then
-        vim.api.nvim_win_set_cursor(win, { vim.api.nvim_buf_line_count(buf), 0 })
+        pcall(vim.api.nvim_win_set_cursor, win, { vim.api.nvim_buf_line_count(buf), 0 })
       end
 
-      vim.bo[buf].modifiable = false
+      if vim.api.nvim_buf_is_valid(buf) then
+        vim.bo[buf].modifiable = false
+      end
     end)
   end
 
@@ -1359,8 +1397,8 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     end)
   end
 
-  -- Clean up watchers when buffer is deleted
-  vim.api.nvim_create_autocmd('BufDelete', {
+  -- Clean up watchers when buffer is deleted or wiped
+  vim.api.nvim_create_autocmd({'BufDelete', 'BufWipeout'}, {
     buffer = buf,
     callback = function()
       if M.display_watcher then M.display_watcher.stop(); M.display_watcher = nil end
