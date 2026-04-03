@@ -1,4 +1,4 @@
-# Claude Code Project Instructions
+# LLM Agent Instruction
 
 ## Cargo Commands
 
