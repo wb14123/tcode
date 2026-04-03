@@ -1,11 +1,11 @@
-# llm-rs
+# tcode
 
 A Rust workspace for building LLM-powered coding agents. The primary application is **tcode**, a terminal-based coding agent (similar to Claude Code or Codex) that leverages neovim and tmux for its UI.
 
 ## Workspace Structure
 
 ```
-llm-rs/               Root workspace
+tcode/                Root workspace
 ├── llm-rs/            Core LLM library (provider abstraction, conversations, tool system)
 ├── llm-rs-macros/     Proc macros for tool definition (#[tool] attribute)
 ├── browser-server/    Headless Chrome server (web_search/web_fetch REST APIs)
