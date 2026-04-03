@@ -16,6 +16,10 @@ use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
 
+/// Prefix that subagent prompts are expected to start with.
+/// Used in the system prompt instruction and stripped from display descriptions.
+const SUBAGENT_PROMPT_PREFIX: &str = "You are a subagent.";
+
 /// Shared prompt rules appended to both root and subagent system prompts.
 pub const SUBAGENT_RULES: &str = "\
 ## Subagent Rules
@@ -485,7 +489,7 @@ pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
          verification, fix-and-verify cycles, or any task loading content \
          you won't need afterward.\n\n\
          **Rules:**\n\
-         - Start the prompt with \"You are a subagent.\"\n\
+         - Start the prompt with \"{SUBAGENT_PROMPT_PREFIX}\"\n\
          - Give specific sub-tasks with file paths, function names, and acceptance criteria.\n\
          - State deliverable: code change, summary, or both.\n\
          - Spawn in parallel when tasks are independent.\n\n\
@@ -2289,7 +2293,14 @@ async fn execute_subagent(
         &tool_call.id,
     );
 
-    let task_preview = truncate_preview(&params.task, 100);
+    let task_preview = truncate_preview(
+        params
+            .task
+            .strip_prefix(SUBAGENT_PROMPT_PREFIX)
+            .unwrap_or(&params.task)
+            .trim_start(),
+        100,
+    );
     env.client
         .notify_msg(Message::SubAgentStart {
             msg_id: env.client.next_msg_id(),

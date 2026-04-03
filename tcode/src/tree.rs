@@ -1121,25 +1121,6 @@ fn summarize_tool_args(args: &str) -> String {
     parts.join(" ")
 }
 
-fn strip_subagent_prefix(desc: &str) -> String {
-    let prefixes = [
-        "You are a sub agent. ",
-        "You are a sub agent.",
-        "You are a subagent. ",
-        "You are a subagent.",
-        "You are a sub-agent. ",
-        "You are a sub-agent.",
-    ];
-    let mut s = desc;
-    for prefix in &prefixes {
-        if let Some(rest) = s.strip_prefix(prefix) {
-            s = rest;
-            break;
-        }
-    }
-    s.trim().to_string()
-}
-
 fn render_node_line(
     state: &TreeState,
     node_idx: usize,
@@ -1209,7 +1190,6 @@ fn render_node_line(
             output_tokens,
             ..
         } => {
-            let desc = strip_subagent_prefix(description);
             let tok = if *input_tokens > 0 || *output_tokens > 0 {
                 Span::styled(
                     format!(" [{}/{}]", input_tokens, output_tokens),
@@ -1228,7 +1208,7 @@ fn render_node_line(
                 String::new()
             };
             (
-                format!("[agent] {}", desc),
+                format!("[agent] {}", description),
                 Span::styled(
                     status.label().to_string(),
                     Style::default().fg(status.color()),
