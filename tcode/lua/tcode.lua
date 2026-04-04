@@ -1273,7 +1273,11 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
       end
 
       if win ~= -1 and was_at_bottom then
-        pcall(vim.api.nvim_win_set_cursor, win, { vim.api.nvim_buf_line_count(buf), 0 })
+        local last_line_nr = vim.api.nvim_buf_line_count(buf)
+        local last_line_text = vim.api.nvim_buf_get_lines(buf, last_line_nr - 1, last_line_nr, false)[1] or ''
+        -- Set cursor to end of last line so viewport scrolls to show the latest
+        -- content even when streaming appends to a long wrapped line.
+        pcall(vim.api.nvim_win_set_cursor, win, { last_line_nr, #last_line_text })
       end
 
       if vim.api.nvim_buf_is_valid(buf) then
