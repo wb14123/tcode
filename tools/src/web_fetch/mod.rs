@@ -77,7 +77,7 @@ fn format_result(
     }
 }
 
-/// Fetch a web page and return cleaned content extracted by Readability.
+/// Fetch a web page and return cleaned content extracted by Chrome's accessibility tree.
 /// Default max_length is 20000 chars. Use skip_chars for pagination.
 /// For large pages, spawn parallel sub agents each with a different skip_chars value; have each summarize its chunk.
 /// Prefer using a sub agent to avoid keeping the full page in the main context.
