@@ -195,6 +195,10 @@ struct Cli {
     /// Bearer token for remote browser-server (required with --browser-server-url)
     #[arg(long)]
     browser_server_token: Option<String>,
+
+    /// Search engine to use for web_search tool
+    #[arg(long, value_enum, default_value_t = browser_server::SearchEngineKind::Kagi)]
+    search_engine: browser_server::SearchEngineKind,
 }
 
 #[derive(Subcommand)]
@@ -376,6 +380,7 @@ async fn main() -> Result<()> {
                 cli.browser_server_token.clone(),
             )
             .await?;
+            tools::set_search_engine(cli.search_engine);
             let (llm, model, token_manager) = create_llm(&cli)?;
             let chat_options = build_chat_options(&cli);
             let session = Session::new(session_id)?;
@@ -462,6 +467,7 @@ async fn main() -> Result<()> {
                 cli.subagent_model_selection,
                 cli.browser_server_url,
                 cli.browser_server_token,
+                cli.search_engine,
                 token_manager,
                 "Attaching to session",
             )
@@ -659,6 +665,7 @@ async fn run_unified(cli: Cli) -> Result<()> {
         cli.subagent_model_selection,
         cli.browser_server_url,
         cli.browser_server_token,
+        cli.search_engine,
         token_manager,
         "Session",
     )
@@ -679,6 +686,7 @@ async fn run_unified_with_session(
     subagent_model_selection: bool,
     browser_server_url: Option<String>,
     browser_server_token: Option<String>,
+    search_engine: browser_server::SearchEngineKind,
     token_manager: Option<claude_auth::TokenManager>,
     label: &str,
 ) -> Result<()> {
@@ -690,6 +698,7 @@ async fn run_unified_with_session(
 
     // Initialize browser client (before tool registration)
     init_browser_client(browser_server_url, browser_server_token).await?;
+    tools::set_search_engine(search_engine);
 
     let socket_path = session.socket_path();
 

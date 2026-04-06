@@ -25,5 +25,6 @@ pub use lsp::lsp_tool;
 pub use read::read_tool;
 pub use skill::skill_tool;
 pub use web_fetch::web_fetch_tool;
+pub use web_search::set_search_engine;
 pub use web_search::web_search_tool;
 pub use write::write_tool;

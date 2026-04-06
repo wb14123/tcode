@@ -16,25 +16,18 @@ Multiple clients share a single browser-server process. The server manages Chrom
 
 ### POST /web_search
 
-Search the web via Kagi and return structured results.
+Search the web using a configurable search engine (Kagi or Google) and return results as formatted text.
 
 **Request:**
 ```json
-{ "query": "rust async patterns" }
+{ "query": "rust async patterns", "engine": "kagi" }
 ```
+
+The `engine` field is optional and defaults to `"kagi"`. Valid values: `"kagi"`, `"google"`.
 
 **Response:**
 ```json
-{
-  "results": [
-    {
-      "title": "Async in Rust",
-      "url": "https://example.com/async",
-      "snippet": "A guide to async patterns...",
-      "sub_results": []
-    }
-  ]
-}
+{ "content": "Title: Async in Rust\nURL: https://example.com/async\nA guide to async patterns...\n" }
 ```
 
 ### POST /web_fetch
@@ -142,7 +135,7 @@ Shared headless Chrome management with tab pooling. Launches Chrome with a persi
 
 ### `web_search`
 
-Kagi search extraction. Navigates to Kagi, runs `extract-search-results.js` to parse the results page into structured data.
+Web search extraction. Supports multiple search engines (Kagi and Google). Navigates to the selected engine, extracts and formats the results into a text representation.
 
 ### `web_fetch`
 
@@ -154,6 +147,6 @@ The crate exports request/response types via `lib.rs` that are used by both the 
 
 - `WebSearchRequest` / `WebSearchResponse`
 - `WebFetchRequest` / `WebFetchResponse`
-- `SearchResult` / `SubResult`
+- `SearchEngineKind` (enum: `Kagi`, `Google`)
 - `ErrorResponse` / `ErrorDetail`
 - `HealthResponse`

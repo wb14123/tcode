@@ -59,6 +59,7 @@ Each provider has its own default model, base URL, and environment variable for 
 --model <model>                    # Override default model
 --base-url <url>                   # Override default base URL
 --session <id>                     # Session ID (required for subcommands, auto-generated for main command)
+--search-engine <kagi|google>      # Search engine for web_search tool (default: kagi)
 --browser-server-url <url>         # Connect to a remote browser-server (TCP mode)
 --browser-server-token <token>     # Bearer token for remote browser-server
 ```
@@ -190,7 +191,7 @@ Opens a two-phase add-permission dialog for proactively granting a permission (n
 
 ### `tcode browser`
 
-Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) that the browser-server needs. This is a standalone command that opens a visible Chrome window — it does not interact with the browser-server process.
+Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) that the browser-server needs. Google search works without authentication. This is a standalone command that opens a visible Chrome window — it does not interact with the browser-server process.
 
 ### `tcode claude-auth`
 

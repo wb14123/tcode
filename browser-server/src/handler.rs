@@ -57,13 +57,13 @@ async fn handle_web_search(
 ) -> Result<Json<WebSearchResponse>, AppError> {
     state.touch();
     let query = req.query;
-    let results =
-        tokio::task::spawn_blocking(move || crate::web_search::search_and_extract(&query))
-            .await
-            .map_err(|e| AppError(e.into()))??;
+    let engine = req.engine;
+    let content = tokio::task::spawn_blocking(move || crate::web_search::search(&query, engine))
+        .await
+        .map_err(|e| AppError(e.into()))??;
 
     state.touch();
-    Ok(Json(WebSearchResponse { results }))
+    Ok(Json(WebSearchResponse { content }))
 }
 
 async fn handle_web_fetch(

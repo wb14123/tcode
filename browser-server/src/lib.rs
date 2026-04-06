@@ -11,33 +11,26 @@ pub use handler::build_app;
 
 use serde::{Deserialize, Serialize};
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
+#[serde(rename_all = "lowercase")]
+pub enum SearchEngineKind {
+    #[default]
+    Kagi,
+    Google,
+}
+
 /// Request for the /web_search endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WebSearchRequest {
     pub query: String,
-}
-
-/// A single search result returned by web_search.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SearchResult {
-    pub title: String,
-    pub url: String,
-    pub snippet: String,
-    pub sub_results: Vec<SubResult>,
-}
-
-/// A sub-result within a search result.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SubResult {
-    pub title: String,
-    pub url: String,
-    pub snippet: String,
+    #[serde(default)]
+    pub engine: SearchEngineKind,
 }
 
 /// Response from the /web_search endpoint.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct WebSearchResponse {
-    pub results: Vec<SearchResult>,
+    pub content: String,
 }
 
 /// Request for the /web_fetch endpoint.

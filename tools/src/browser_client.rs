@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use browser_server::{
-    ErrorResponse, HealthResponse, SearchResult, WebFetchRequest, WebFetchResponse,
+    ErrorResponse, HealthResponse, SearchEngineKind, WebFetchRequest, WebFetchResponse,
     WebSearchRequest, WebSearchResponse,
 };
 
@@ -59,12 +59,13 @@ impl BrowserClient {
     }
 
     /// Perform a web search via the browser-server.
-    pub async fn web_search(&self, query: &str) -> Result<Vec<SearchResult>> {
+    pub async fn web_search(&self, query: &str, engine: SearchEngineKind) -> Result<String> {
         let body = WebSearchRequest {
             query: query.to_string(),
+            engine,
         };
         let resp: WebSearchResponse = self.post("/web_search", &body).await?;
-        Ok(resp.results)
+        Ok(resp.content)
     }
 
     /// Fetch a web page via the browser-server.
