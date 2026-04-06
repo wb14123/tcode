@@ -1213,6 +1213,23 @@ async fn handle_client_inner(
                             }).await?,
                         }
                     }
+                    ClientMessage::AddPermission { key, scope } => {
+                        match manager.permission_manager().add_permission(key, scope) {
+                            Ok(()) => {
+                                if let Err(e) = conv_client.notify_msg(
+                                    Message::PermissionUpdated {
+                                        msg_id: conv_client.next_msg_id(),
+                                    },
+                                ) {
+                                    tracing::error!(error = %e, "failed to broadcast PermissionUpdated");
+                                }
+                                send_msg(&mut sink, &ServerMessage::Ack).await?;
+                            }
+                            Err(e) => send_msg(&mut sink, &ServerMessage::Error {
+                                message: format!("Failed to add permission: {}", e),
+                            }).await?,
+                        }
+                    }
                     ClientMessage::RevokePermission { key } => {
                         match manager.permission_manager().revoke(&key) {
                             Ok(()) => {

@@ -257,11 +257,14 @@ enum Commands {
         #[arg(long)]
         key: String,
         /// Permission value
-        #[arg(long)]
-        value: String,
+        #[arg(long, required_unless_present = "add")]
+        value: Option<String>,
         /// Manage (revoke) mode instead of approve mode
         #[arg(long)]
         manage: bool,
+        /// Add-permission mode (interactive value input)
+        #[arg(long, conflicts_with = "manage")]
+        add: bool,
         /// Human-readable prompt describing what is being approved
         #[arg(long, default_value = "")]
         prompt: String,
@@ -564,6 +567,7 @@ async fn main() -> Result<()> {
             key,
             value,
             manage,
+            add,
             prompt,
             request_id,
             preview_file_path,
@@ -577,6 +581,7 @@ async fn main() -> Result<()> {
                 key,
                 value,
                 manage,
+                add,
                 prompt,
                 request_id,
                 preview_file_path: preview_file_path.map(PathBuf::from),

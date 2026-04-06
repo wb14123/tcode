@@ -127,7 +127,7 @@ Opens a TUI tree view of the conversation's subagents and tool calls. Displays s
 
 ### `tcode --session <id> permission`
 
-Opens a TUI pane showing all tool permissions — pending requests, session grants, and project grants — grouped by tool and key. Automatically shown as a bottom-right pane when starting a new session.
+Opens a TUI pane showing all tool permissions — pending requests, session grants, and project grants — grouped by tool and key. All known scopes and keys are always shown as a skeleton tree (from the `ALL_SCOPES` registry), even when no permissions have been requested yet. Automatically shown as a bottom-right pane when starting a new session.
 
 The pane watches `display.jsonl` for `PermissionUpdated` signals and queries the server for the latest permission state over the Unix socket.
 
@@ -136,12 +136,14 @@ The pane watches `display.jsonl` for `PermissionUpdated` signals and queries the
 | `j`/`↓` | Move down |
 | `k`/`↑` | Move up |
 | `Space` | Toggle collapse/expand |
-| `Enter`/`o` | Open approval/management popup for selected item |
+| `Enter`/`o` on pending permission | Open approval popup |
+| `Enter`/`o` on granted permission | Open management popup (revoke) |
+| `Enter`/`o` on key node | Open add-permission popup |
 | `f` | Toggle filter (pending only / all) |
 | `R` | Full refresh |
 | `q` | Quit |
 
-Pressing Enter on a pending permission opens a `tmux display-popup` with approval options. Pressing Enter on a granted permission opens a management popup to revoke it.
+Pressing `Enter`/`o` on a pending permission opens a `tmux display-popup` with approval options. Pressing `Enter`/`o` on a granted permission opens a management popup to revoke it. Pressing `Enter`/`o` on a key node opens an add-permission popup where the user can type a value and choose session or project scope to proactively grant a permission.
 
 ### `tcode --session <id> approve-next`
 
@@ -165,6 +167,26 @@ Opens a small approval dialog (designed for `tmux display-popup`). Shows the per
 |-----|--------|
 | `r` | Revoke permission |
 | `q`/`Esc` | Cancel |
+
+### `tcode --session <id> approve --add --tool <t> --key <k>`
+
+Opens a two-phase add-permission dialog for proactively granting a permission (no pending request needed).
+
+**Phase 1** — type the permission value (e.g., a file path or hostname):
+| Key | Action |
+|-----|--------|
+| printable chars | Append to value input |
+| `Backspace` | Delete last character |
+| `Enter` | Confirm value, proceed to phase 2 |
+| `Esc`/`Ctrl-C` | Cancel |
+
+**Phase 2** — choose scope:
+| Key | Action |
+|-----|--------|
+| `2` | Allow for session |
+| `3` | Allow for project (persisted) |
+| `Backspace` | Go back to edit value |
+| `q`/`Esc`/`Ctrl-C` | Cancel |
 
 ### `tcode browser`
 

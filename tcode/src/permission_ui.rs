@@ -12,7 +12,7 @@ use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use llm_rs::permission::PermissionState;
+use llm_rs::permission::{ALL_SCOPES, PermissionState};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -142,7 +142,47 @@ impl PermissionTreeState {
     }
 
     /// Rebuild the tree from a PermissionState snapshot.
+    ///
+    /// Always creates skeleton Tool/Key nodes for every entry in `ALL_SCOPES`,
+    /// then populates Value leaves from the permission state. Entries from the
+    /// state that don't appear in `ALL_SCOPES` are still included (defensive).
     fn rebuild_from_state(&mut self, state: &PermissionState) {
+        // Preserve collapsed state keyed by (tool_name) and (tool_name, key_name).
+        let mut collapsed_tools: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        let mut collapsed_keys: std::collections::HashSet<(String, String)> =
+            std::collections::HashSet::new();
+        for (idx, node) in self.arena.iter().enumerate() {
+            if node.collapsed {
+                match &node.kind {
+                    NodeKind::Tool { name } => {
+                        collapsed_tools.insert(name.clone());
+                    }
+                    NodeKind::Key { key } => {
+                        // Find parent tool name
+                        let tool_name = self.find_tool_for_node_idx(idx);
+                        collapsed_keys.insert((tool_name, key.clone()));
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        // Remember selection identity for restoration.
+        // For Key and Value nodes, also save the parent tool name to disambiguate
+        // keys with the same name under different tools (e.g. "path" under
+        // file_read vs file_write).
+        let prev_selected: Option<(Option<String>, NodeKind)> =
+            self.visible.get(self.selected).map(|&idx| {
+                let parent_tool = match &self.arena[idx].kind {
+                    NodeKind::Key { .. } | NodeKind::Value { .. } => {
+                        Some(self.find_tool_for_node_idx(idx))
+                    }
+                    NodeKind::Tool { .. } => None,
+                };
+                (parent_tool, self.arena[idx].kind.clone())
+            });
+
         self.arena.clear();
 
         // Group all entries by tool -> key -> Vec<(value, status, prompt, request_id, preview_file_path, once_only)>
@@ -204,19 +244,56 @@ impl PermissionTreeState {
                 ));
         }
 
-        // Sort tools alphabetically, but put tools with pending items first
-        let mut tool_names: Vec<String> = groups.keys().cloned().collect();
-        tool_names.sort_by(|a, b| {
-            let a_pending = groups[a]
-                .values()
-                .any(|vals| vals.iter().any(|e| e.1 == PermStatus::Pending));
-            let b_pending = groups[b]
-                .values()
-                .any(|vals| vals.iter().any(|e| e.1 == PermStatus::Pending));
-            b_pending.cmp(&a_pending).then(a.cmp(b))
+        // Build a merged list of (tool_name, keys) starting from ALL_SCOPES,
+        // then adding any extra scopes/keys found in the state.
+        use std::collections::BTreeSet;
+        let mut tool_key_order: Vec<(String, Vec<String>)> = Vec::new();
+        let mut seen_tools: BTreeSet<String> = BTreeSet::new();
+
+        // First pass: ALL_SCOPES skeleton
+        for &(scope, keys) in ALL_SCOPES {
+            let tool = scope.to_string();
+            seen_tools.insert(tool.clone());
+            let mut key_list: Vec<String> = keys.iter().map(|k| k.to_string()).collect();
+            let key_set: BTreeSet<String> = key_list.iter().cloned().collect();
+            // Append any extra keys from state not in ALL_SCOPES
+            if let Some(state_keys) = groups.get(&tool) {
+                for k in state_keys.keys() {
+                    if !key_set.contains(k) {
+                        key_list.push(k.clone());
+                    }
+                }
+            }
+            tool_key_order.push((tool, key_list));
+        }
+
+        // Second pass: extra tools from state not in ALL_SCOPES
+        let mut extra_tools: Vec<String> = groups
+            .keys()
+            .filter(|t| !seen_tools.contains(*t))
+            .cloned()
+            .collect();
+        extra_tools.sort();
+        for tool in extra_tools {
+            let mut key_list: Vec<String> = groups[&tool].keys().cloned().collect();
+            key_list.sort();
+            tool_key_order.push((tool, key_list));
+        }
+
+        // Sort: tools with pending items first, then alphabetical
+        tool_key_order.sort_by(|a, b| {
+            let a_pending = groups.get(&a.0).is_some_and(|km| {
+                km.values()
+                    .any(|v| v.iter().any(|e| e.1 == PermStatus::Pending))
+            });
+            let b_pending = groups.get(&b.0).is_some_and(|km| {
+                km.values()
+                    .any(|v| v.iter().any(|e| e.1 == PermStatus::Pending))
+            });
+            b_pending.cmp(&a_pending).then(a.0.cmp(&b.0))
         });
 
-        for tool_name in &tool_names {
+        for (tool_name, key_names) in &tool_key_order {
             let tool_idx = self.arena.len();
             self.arena.push(TreeNode {
                 kind: NodeKind::Tool {
@@ -224,14 +301,10 @@ impl PermissionTreeState {
                 },
                 depth: 0,
                 children: Vec::new(),
-                collapsed: false,
+                collapsed: collapsed_tools.contains(tool_name),
             });
 
-            let key_map = &groups[tool_name];
-            let mut key_names: Vec<String> = key_map.keys().cloned().collect();
-            key_names.sort();
-
-            for key_name in &key_names {
+            for key_name in key_names {
                 let key_idx = self.arena.len();
                 self.arena.push(TreeNode {
                     kind: NodeKind::Key {
@@ -239,45 +312,129 @@ impl PermissionTreeState {
                     },
                     depth: 1,
                     children: Vec::new(),
-                    collapsed: false,
+                    collapsed: collapsed_keys.contains(&(tool_name.clone(), key_name.clone())),
                 });
                 self.arena[tool_idx].children.push(key_idx);
 
-                let mut values = key_map[key_name].clone();
-                // Sort: pending first, then alphabetical
-                values.sort_by(|a, b| {
-                    let a_pending = a.1 == PermStatus::Pending;
-                    let b_pending = b.1 == PermStatus::Pending;
-                    b_pending.cmp(&a_pending).then(a.0.cmp(&b.0))
-                });
-
-                for (value, status, prompt, request_id, preview_file_path, once_only) in values {
-                    if self.filter_pending_only && status != PermStatus::Pending {
-                        continue;
-                    }
-                    let val_idx = self.arena.len();
-                    self.arena.push(TreeNode {
-                        kind: NodeKind::Value {
-                            value,
-                            status,
-                            prompt,
-                            request_id,
-                            preview_file_path,
-                            once_only,
-                        },
-                        depth: 2,
-                        children: Vec::new(),
-                        collapsed: false,
+                if let Some(key_map) = groups.get(tool_name)
+                    && let Some(values) = key_map.get(key_name)
+                {
+                    let mut values = values.clone();
+                    // Sort: pending first, then alphabetical
+                    values.sort_by(|a, b| {
+                        let a_pending = a.1 == PermStatus::Pending;
+                        let b_pending = b.1 == PermStatus::Pending;
+                        b_pending.cmp(&a_pending).then(a.0.cmp(&b.0))
                     });
-                    self.arena[key_idx].children.push(val_idx);
+
+                    for (value, status, prompt, request_id, preview_file_path, once_only) in values
+                    {
+                        if self.filter_pending_only && status != PermStatus::Pending {
+                            continue;
+                        }
+                        let val_idx = self.arena.len();
+                        self.arena.push(TreeNode {
+                            kind: NodeKind::Value {
+                                value,
+                                status,
+                                prompt,
+                                request_id,
+                                preview_file_path,
+                                once_only,
+                            },
+                            depth: 2,
+                            children: Vec::new(),
+                            collapsed: false,
+                        });
+                        self.arena[key_idx].children.push(val_idx);
+                    }
                 }
             }
         }
 
         self.rebuild_visible();
+
+        // Try to restore selection position by matching node identity.
+        if let Some((prev_parent_tool, prev_kind)) = prev_selected {
+            for (vi, &idx) in self.visible.iter().enumerate() {
+                let matches = match (&prev_kind, &self.arena[idx].kind) {
+                    (NodeKind::Tool { name: a }, NodeKind::Tool { name: b }) => a == b,
+                    (NodeKind::Key { key: a }, NodeKind::Key { key: b }) => {
+                        a == b
+                            && prev_parent_tool.as_deref()
+                                == Some(&self.find_tool_for_node_idx(idx))
+                    }
+                    (
+                        NodeKind::Value {
+                            value: a,
+                            status: sa,
+                            ..
+                        },
+                        NodeKind::Value {
+                            value: b,
+                            status: sb,
+                            ..
+                        },
+                    ) => {
+                        a == b
+                            && sa == sb
+                            && prev_parent_tool.as_deref()
+                                == Some(&self.find_tool_for_node_idx(idx))
+                    }
+                    _ => false,
+                };
+                if matches {
+                    self.selected = vi;
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Find the tool name for a given arena index by looking at parent Tool nodes.
+    fn find_tool_for_node_idx(&self, target_idx: usize) -> String {
+        for node in &self.arena {
+            if let NodeKind::Tool { name } = &node.kind
+                && (node.children.contains(&target_idx)
+                    || node
+                        .children
+                        .iter()
+                        .any(|&ki| self.arena[ki].children.contains(&target_idx)))
+            {
+                return name.clone();
+            }
+        }
+        tracing::warn!(
+            target_idx,
+            "find_tool_for_node_idx: no parent tool found for node"
+        );
+        String::new()
     }
 
     fn collect_visible(&mut self, idx: usize) {
+        // When filter_pending_only is active, skip Tool/Key nodes that have no
+        // visible Value children (i.e. empty skeleton nodes).
+        if self.filter_pending_only {
+            match &self.arena[idx].kind {
+                NodeKind::Tool { .. } => {
+                    // A Tool node is visible only if at least one of its Key
+                    // children has Value children.
+                    let has_values = self.arena[idx]
+                        .children
+                        .iter()
+                        .any(|&ki| !self.arena[ki].children.is_empty());
+                    if !has_values {
+                        return;
+                    }
+                }
+                NodeKind::Key { .. } => {
+                    if self.arena[idx].children.is_empty() {
+                        return;
+                    }
+                }
+                NodeKind::Value { .. } => {}
+            }
+        }
         self.visible.push(idx);
         if !self.arena[idx].collapsed {
             let children = self.arena[idx].children.clone();
@@ -350,7 +507,30 @@ impl PermissionTreeState {
                     }
                 }
             }
-            NodeKind::Tool { .. } | NodeKind::Key { .. } => {
+            NodeKind::Key { key } => {
+                // Launch an add-permission popup for this key.
+                let tool_name = self.find_tool_for_node_idx(idx);
+                let exe = match std::env::current_exe() {
+                    Ok(p) => p.to_string_lossy().to_string(),
+                    Err(_) => return false,
+                };
+                match Command::new("tmux")
+                    .args(["display-popup", "-E", "-w", "60", "-h", "20", "--"])
+                    .arg(&exe)
+                    .arg(format!("--session={}", self.session_id))
+                    .args(["approve", "--add"])
+                    .args(["--tool", &tool_name])
+                    .args(["--key", key])
+                    .output()
+                {
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!("failed to launch add popup: {}", e);
+                    }
+                }
+                false
+            }
+            NodeKind::Tool { .. } => {
                 // Toggle collapse for non-leaf
                 self.toggle_collapse();
                 false
@@ -382,17 +562,12 @@ impl PermissionTreeState {
 
         // Fallback: try direct parent search
         if key_name.is_empty() || tool_name.is_empty() {
-            for node in &self.arena {
+            for (key_idx, node) in self.arena.iter().enumerate() {
                 if let NodeKind::Key { key } = &node.kind
                     && node.children.contains(&value_idx)
                 {
                     key_name = key.clone();
                     // Find tool parent of this key node
-                    let key_idx = self
-                        .arena
-                        .iter()
-                        .position(|n| std::ptr::eq(n, node))
-                        .unwrap_or(0);
                     for tool_node in &self.arena {
                         if let NodeKind::Tool { name } = &tool_node.kind
                             && tool_node.children.contains(&key_idx)
@@ -558,7 +733,7 @@ fn render_tree(
         let status_text = state
             .status_message
             .as_deref()
-            .unwrap_or("j/k:nav  o:open  f:filter  q:quit");
+            .unwrap_or("j/k:nav  space:expand  o:open  f:filter  q:quit");
         let status = Paragraph::new(Line::from(Span::styled(
             status_text,
             Style::default().fg(Color::DarkGray),

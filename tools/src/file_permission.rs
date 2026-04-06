@@ -1,13 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Result, anyhow};
-use llm_rs::permission::ScopedPermissionManager;
-
-/// Shared permission scope used by both the `read` and `glob` tools.
-const FILE_READ_SCOPE: &str = "file_read";
-
-/// Shared permission scope for file write operations.
-const FILE_WRITE_SCOPE: &str = "file_write";
+use llm_rs::permission::{SCOPE_FILE_READ, SCOPE_FILE_WRITE, ScopedPermissionManager};
 
 /// Determine the directory to use for permission checks.
 ///
@@ -109,7 +103,7 @@ pub async fn has_file_read_permission(
     }
 
     let permission_dir = permission_dir_for(&canonical_path, is_dir);
-    has_ancestor_permission(permission, FILE_READ_SCOPE, &permission_dir)
+    has_ancestor_permission(permission, SCOPE_FILE_READ, &permission_dir)
 }
 
 /// Check whether a write permission already exists for `path` without prompting.
@@ -124,7 +118,7 @@ pub async fn has_file_write_permission(permission: &ScopedPermissionManager, pat
 
     let parent_dir = permission_dir_for(&canonical_path, false);
     let permission_dir = widen_to_project_dir(&parent_dir);
-    has_ancestor_permission(permission, FILE_WRITE_SCOPE, &permission_dir)
+    has_ancestor_permission(permission, SCOPE_FILE_WRITE, &permission_dir)
 }
 
 /// Check whether the caller has permission to read `path`.
@@ -152,14 +146,14 @@ pub async fn check_file_read_permission(
     }
 
     let permission_dir = permission_dir_for(&canonical_path, is_dir);
-    if has_ancestor_permission(permission, FILE_READ_SCOPE, &permission_dir) {
+    if has_ancestor_permission(permission, SCOPE_FILE_READ, &permission_dir) {
         return Ok(());
     }
 
     let permission_dir_str = permission_dir.to_string_lossy().to_string();
     permission
         .ask_permission_for(
-            FILE_READ_SCOPE,
+            SCOPE_FILE_READ,
             &format!("Allow read access to {}?", path.display()),
             "path",
             &permission_dir_str,
@@ -188,7 +182,7 @@ pub async fn check_file_write_permission(
 
     let parent_dir = permission_dir_for(&canonical_path, false);
     let permission_dir = widen_to_project_dir(&parent_dir);
-    if has_ancestor_permission(permission, FILE_WRITE_SCOPE, &permission_dir) {
+    if has_ancestor_permission(permission, SCOPE_FILE_WRITE, &permission_dir) {
         return Ok(());
     }
 
@@ -201,7 +195,7 @@ pub async fn check_file_write_permission(
 
     permission
         .ask_permission_with_preview(
-            FILE_WRITE_SCOPE,
+            SCOPE_FILE_WRITE,
             &prompt,
             "path",
             &permission_dir_str,

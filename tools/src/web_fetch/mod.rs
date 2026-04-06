@@ -1,4 +1,5 @@
 use anyhow::{Result, anyhow};
+use llm_rs::permission::SCOPE_WEB_FETCH;
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 
@@ -100,7 +101,8 @@ pub fn web_fetch(
             .and_then(|u| u.host_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "unknown".to_string());
 
-        if let Err(e) = ctx.permission.ask_permission(
+        if let Err(e) = ctx.permission.ask_permission_for(
+            SCOPE_WEB_FETCH,
             &format!("Allow web_fetch to access {}?", url),
             "hostname",
             &hostname,

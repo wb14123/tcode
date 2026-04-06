@@ -4,12 +4,12 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use llm_rs::permission::{PermissionDecision, PermissionKey};
+use llm_rs::permission::{PermissionDecision, PermissionKey, PermissionScope};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Alignment, Constraint, Layout};
@@ -24,8 +24,10 @@ pub struct ApproveArgs {
     pub socket_path: PathBuf,
     pub tool: String,
     pub key: String,
-    pub value: String,
+    pub value: Option<String>,
     pub manage: bool,
+    /// Add-permission mode (interactive value input).
+    pub add: bool,
     pub prompt: String,
     pub request_id: Option<String>,
     pub preview_file_path: Option<PathBuf>,
@@ -47,7 +49,7 @@ fn make_key(args: &ApproveArgs) -> PermissionKey {
     PermissionKey {
         tool: args.tool.clone(),
         key: args.key.clone(),
-        value: args.value.clone(),
+        value: args.value.clone().unwrap_or_default(),
     }
 }
 
@@ -103,6 +105,10 @@ fn send_revoke(socket_path: &PathBuf, key: PermissionKey) -> Result<()> {
 }
 
 pub fn run_approve(args: ApproveArgs) -> Result<ApproveResult> {
+    if args.add {
+        return run_add_permission_loop(&args);
+    }
+
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
@@ -130,6 +136,7 @@ fn render_title<'a>(text: &'a str, color: Color) -> Paragraph<'a> {
 }
 
 fn render_details<'a>(args: &'a ApproveArgs) -> Paragraph<'a> {
+    let value_str = args.value.as_deref().unwrap_or("");
     Paragraph::new(vec![
         Line::from(vec![
             Span::raw("  Tool: "),
@@ -139,7 +146,7 @@ fn render_details<'a>(args: &'a ApproveArgs) -> Paragraph<'a> {
         ]),
         Line::from(vec![
             Span::raw("  Value: "),
-            Span::styled(&args.value, Style::default().fg(Color::White)),
+            Span::styled(value_str, Style::default().fg(Color::White)),
         ]),
     ])
 }
@@ -284,7 +291,10 @@ fn run_approve_loop(
                             Span::raw("  "),
                             Span::styled(&args.key, Style::default().fg(Color::DarkGray)),
                             Span::styled(": ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(&args.value, Style::default().fg(Color::Cyan)),
+                            Span::styled(
+                                args.value.as_deref().unwrap_or(""),
+                                Style::default().fg(Color::Cyan),
+                            ),
                         ]),
                     ]);
                     frame.render_widget(separator, chunks[8]);
@@ -447,4 +457,191 @@ fn run_manage_loop(
             }
         }
     }
+}
+
+/// Two-phase TUI for adding a permission: Phase 1 = text input for value,
+/// Phase 2 = scope selection (Session / Project).
+fn run_add_permission_loop(args: &ApproveArgs) -> Result<ApproveResult> {
+    enable_raw_mode()?;
+    let mut stdout = io::stdout();
+    execute!(stdout, EnterAlternateScreen)?;
+    let backend = CrosstermBackend::new(stdout);
+    let mut terminal = Terminal::new(backend)?;
+
+    let result = run_add_permission_inner(&mut terminal, args);
+
+    disable_raw_mode()?;
+    execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
+    result
+}
+
+/// Whether we are in the text-input phase or the scope-selection phase.
+enum AddPhase {
+    Input,
+    SelectScope,
+}
+
+fn run_add_permission_inner(
+    terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
+    args: &ApproveArgs,
+) -> Result<ApproveResult> {
+    let mut input = String::new();
+    let mut phase = AddPhase::Input;
+
+    loop {
+        let phase_ref = &phase;
+        let input_ref = &input;
+
+        terminal.draw(|frame| {
+            let area = frame.area();
+
+            match phase_ref {
+                AddPhase::Input => {
+                    let chunks = Layout::vertical([
+                        Constraint::Length(3), // Title
+                        Constraint::Length(2), // Tool/Key info
+                        Constraint::Length(1), // Blank
+                        Constraint::Length(1), // Value input
+                        Constraint::Length(1), // Blank
+                        Constraint::Length(2), // Instructions
+                        Constraint::Min(0),    // Spacer
+                    ])
+                    .split(area);
+
+                    frame.render_widget(render_title("Add Permission", Color::Green), chunks[0]);
+
+                    let details = Paragraph::new(vec![Line::from(vec![
+                        Span::raw("  Tool: "),
+                        Span::styled(&args.tool, Style::default().fg(Color::Cyan)),
+                        Span::raw("  Key: "),
+                        Span::styled(&args.key, Style::default().fg(Color::Cyan)),
+                    ])]);
+                    frame.render_widget(details, chunks[1]);
+
+                    let cursor_line = format!("  Value: {}█", input_ref);
+                    let input_widget = Paragraph::new(Line::from(Span::styled(
+                        cursor_line,
+                        Style::default().fg(Color::White),
+                    )));
+                    frame.render_widget(input_widget, chunks[3]);
+
+                    let instructions = Paragraph::new(vec![Line::from(Span::styled(
+                        "  [Enter] Confirm  [Esc] Cancel",
+                        Style::default().fg(Color::DarkGray),
+                    ))]);
+                    frame.render_widget(instructions, chunks[5]);
+                }
+                AddPhase::SelectScope => {
+                    let chunks = Layout::vertical([
+                        Constraint::Length(3), // Title
+                        Constraint::Length(2), // Tool/Key info
+                        Constraint::Length(1), // Value display
+                        Constraint::Length(1), // Blank
+                        Constraint::Length(4), // Options
+                        Constraint::Min(0),    // Spacer
+                    ])
+                    .split(area);
+
+                    frame.render_widget(render_title("Add Permission", Color::Green), chunks[0]);
+
+                    let details = Paragraph::new(vec![Line::from(vec![
+                        Span::raw("  Tool: "),
+                        Span::styled(&args.tool, Style::default().fg(Color::Cyan)),
+                        Span::raw("  Key: "),
+                        Span::styled(&args.key, Style::default().fg(Color::Cyan)),
+                    ])]);
+                    frame.render_widget(details, chunks[1]);
+
+                    let value_display = Paragraph::new(Line::from(vec![
+                        Span::raw("  Value: "),
+                        Span::styled(input_ref.as_str(), Style::default().fg(Color::White)),
+                    ]));
+                    frame.render_widget(value_display, chunks[2]);
+
+                    let options = Paragraph::new(vec![
+                        Line::from(Span::styled(
+                            "  [2] Allow for session",
+                            Style::default().fg(Color::Cyan),
+                        )),
+                        Line::from(Span::styled(
+                            "  [3] Allow for project",
+                            Style::default().fg(Color::Blue),
+                        )),
+                        Line::from(Span::styled(
+                            "  [Backspace] Edit value",
+                            Style::default().fg(Color::Yellow),
+                        )),
+                        Line::from(Span::styled(
+                            "  [q] Cancel",
+                            Style::default().fg(Color::DarkGray),
+                        )),
+                    ]);
+                    frame.render_widget(options, chunks[4]);
+                }
+            }
+        })?;
+
+        if !event::poll(Duration::from_millis(200))? {
+            continue;
+        }
+        let Event::Key(key) = event::read()? else {
+            continue;
+        };
+        if key.kind != KeyEventKind::Press {
+            continue;
+        }
+
+        match phase {
+            AddPhase::Input => match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(ApproveResult::Cancelled);
+                }
+                KeyCode::Esc => {
+                    return Ok(ApproveResult::Cancelled);
+                }
+                KeyCode::Enter => {
+                    if !input.is_empty() {
+                        phase = AddPhase::SelectScope;
+                    }
+                }
+                KeyCode::Backspace => {
+                    input.pop();
+                }
+                KeyCode::Char(c) => {
+                    input.push(c);
+                }
+                _ => {}
+            },
+            AddPhase::SelectScope => match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(ApproveResult::Cancelled);
+                }
+                KeyCode::Char('2') => {
+                    send_add_permission(args, &input, PermissionScope::Session)?;
+                    return Ok(ApproveResult::Done);
+                }
+                KeyCode::Char('3') => {
+                    send_add_permission(args, &input, PermissionScope::Project)?;
+                    return Ok(ApproveResult::Done);
+                }
+                KeyCode::Backspace => {
+                    phase = AddPhase::Input;
+                }
+                KeyCode::Char('q') | KeyCode::Esc => {
+                    return Ok(ApproveResult::Cancelled);
+                }
+                _ => {}
+            },
+        }
+    }
+}
+
+fn send_add_permission(args: &ApproveArgs, value: &str, scope: PermissionScope) -> Result<()> {
+    let key = PermissionKey {
+        tool: args.tool.clone(),
+        key: args.key.clone(),
+        value: value.to_string(),
+    };
+    let msg = ClientMessage::AddPermission { key, scope };
+    send_and_expect_ack(&args.socket_path, &msg)
 }

@@ -1,6 +1,6 @@
-use llm_rs::permission::ScopedPermissionManager;
+use llm_rs::permission::{SCOPE_BASH, ScopedPermissionManager};
 
-use super::command_permission::{BASH_SCOPE, command_matches_permission, has_command_permission};
+use super::command_permission::{command_matches_permission, has_command_permission};
 
 #[test]
 fn command_matches_exact() {
@@ -52,7 +52,7 @@ fn hierarchical_lookup_most_specific_first() {
     ));
 
     let key = llm_rs::permission::PermissionKey {
-        tool: BASH_SCOPE.to_string(),
+        tool: SCOPE_BASH.to_string(),
         key: "command".to_string(),
         value: "git add".to_string(),
     };
@@ -95,7 +95,7 @@ fn hierarchical_lookup_base_command() {
     ));
 
     let key = llm_rs::permission::PermissionKey {
-        tool: BASH_SCOPE.to_string(),
+        tool: SCOPE_BASH.to_string(),
         key: "command".to_string(),
         value: "cargo".to_string(),
     };

@@ -24,6 +24,11 @@ pub enum ClientMessage {
     RevokePermission {
         key: llm_rs::permission::PermissionKey,
     },
+    /// Add a permission directly (user-initiated, bypasses pending request flow)
+    AddPermission {
+        key: llm_rs::permission::PermissionKey,
+        scope: llm_rs::permission::PermissionScope,
+    },
     /// Query the current permission state (pending, session, project)
     GetPermissionState,
     /// Request server shutdown (broadcasts to all clients)

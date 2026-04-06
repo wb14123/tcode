@@ -1,15 +1,13 @@
 use std::path::Path;
 
 use anyhow::Result;
-use llm_rs::permission::ScopedPermissionManager;
+use llm_rs::permission::{SCOPE_BASH, ScopedPermissionManager};
 
 use super::command_parser::{CommandClassification, parse_command, try_decompose_complex};
 use crate::file_permission::{
     check_file_read_permission, check_file_write_permission, has_file_read_permission,
     has_file_write_permission,
 };
-
-pub(crate) const BASH_SCOPE: &str = "bash";
 
 /// Check bash command permissions using a four-layer system.
 ///
@@ -81,7 +79,7 @@ pub(crate) fn has_command_permission(
 ) -> bool {
     for i in (1..=tokens.len()).rev() {
         let prefix = tokens[..i].join(" ");
-        if permission.has_permission_for(BASH_SCOPE, "command", &prefix) {
+        if permission.has_permission_for(SCOPE_BASH, "command", &prefix) {
             return true;
         }
     }
@@ -230,7 +228,7 @@ async fn prompt_command_permission(
 
     permission
         .ask_permission_with_preview(
-            BASH_SCOPE,
+            SCOPE_BASH,
             &prompt,
             "command",
             &default_value,
@@ -253,7 +251,7 @@ async fn prompt_complex_command_permission(
     };
 
     permission
-        .ask_permission_once(BASH_SCOPE, &prompt, full_command, "bash")
+        .ask_permission_once(SCOPE_BASH, &prompt, full_command, "bash")
         .await
 }
 

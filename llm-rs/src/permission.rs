@@ -9,6 +9,33 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
+// --- Scope name constants ---
+pub const SCOPE_FILE_READ: &str = "file_read";
+pub const SCOPE_FILE_WRITE: &str = "file_write";
+pub const SCOPE_BASH: &str = "bash";
+pub const SCOPE_WEB_FETCH: &str = "web_fetch";
+
+// --- Key name constants ---
+pub const KEY_PATH: &str = "path";
+pub const KEY_COMMAND: &str = "command";
+pub const KEY_HOSTNAME: &str = "hostname";
+
+/// Registry of all known permission scopes and their associated key names.
+///
+/// When implementing a new tool that requires permissions, you MUST:
+/// 1. Add a `SCOPE_*` constant for your tool's scope name above.
+/// 2. Add `KEY_*` constants for any new key names (reuse existing ones if applicable).
+/// 3. Add an entry to this array mapping your scope to its keys.
+///
+/// This registry is used by the permission tree UI to display all available
+/// scopes and keys, even before any permissions have been requested.
+pub const ALL_SCOPES: &[(&str, &[&str])] = &[
+    (SCOPE_BASH, &[KEY_COMMAND]),
+    (SCOPE_FILE_READ, &[KEY_PATH]),
+    (SCOPE_FILE_WRITE, &[KEY_PATH]),
+    (SCOPE_WEB_FETCH, &[KEY_HOSTNAME]),
+];
+
 /// RAII guard that removes a waiter from `PermissionManager::pending_requests`
 /// when dropped. This ensures cleanup even if the permission-wait future is
 /// abandoned (e.g. by `CancellableStream` intercepting the cancel token at the
@@ -272,6 +299,24 @@ impl PermissionManager {
         Ok(())
     }
 
+    /// Add a permission directly (user-initiated, bypasses pending request flow).
+    /// Only `Session` and `Project` scopes are valid. `Once` is silently ignored.
+    pub fn add_permission(&self, key: PermissionKey, scope: PermissionScope) -> anyhow::Result<()> {
+        match scope {
+            PermissionScope::Session => {
+                self.session_permissions.lock().insert(key);
+            }
+            PermissionScope::Project => {
+                self.project_permissions.lock().insert(key);
+                self.save_project_permissions()?;
+            }
+            PermissionScope::Once => {
+                // Once is not valid for user-initiated adds; silently ignore
+            }
+        }
+        Ok(())
+    }
+
     /// Revoke a permission from both session and project storage.
     pub fn revoke(&self, key: &PermissionKey) -> anyhow::Result<()> {
         self.session_permissions.lock().remove(key);
@@ -466,6 +511,9 @@ impl ScopedPermissionManager {
     /// Check if the action is permitted using a custom scope instead of this
     /// manager's tool name. If no saved preference exists, registers a pending
     /// request, notifies the UI, and awaits the user's decision.
+    ///
+    /// **Important:** Any new scope/key combination passed here must be
+    /// registered in [`ALL_SCOPES`] so the permission tree UI can display it.
     pub async fn ask_permission_for(
         &self,
         scope: &str,
