@@ -3,6 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 use tokio::process::{Child, Command};
 
+use crate::lua_escape;
 use crate::session::Session;
 use crate::tty_stdio;
 
@@ -10,14 +11,47 @@ pub struct DisplayClient {
     session: Session,
     lua_dir: PathBuf,
     session_id: String,
+    /// Root directory prepended to Neovim's runtimepath so that
+    /// `queries/tcode/{injections,highlights}.scm` are discovered by tree-sitter.
+    runtime_dir: PathBuf,
+}
+
+/// Find the tree-sitter tcode parser library. Checks (in order):
+/// 1. Next to the executable (dev builds: `target/debug/`)
+/// 2. `../lib` relative to exe (installed: `/usr/bin` → `/usr/lib`)
+fn parser_lib_path(exe_path: &Path) -> PathBuf {
+    let name = if cfg!(target_os = "macos") {
+        "libtree-sitter-tcode.dylib"
+    } else {
+        "libtree-sitter-tcode.so"
+    };
+    let exe_dir = exe_path.parent().unwrap_or(Path::new("."));
+    // Check next to executable first (dev builds)
+    let beside_exe = exe_dir.join(name);
+    if beside_exe.exists() {
+        return beside_exe;
+    }
+    // Check ../lib (e.g. /usr/bin/tcode → /usr/lib/)
+    let lib_dir = exe_dir.join("../lib").join(name);
+    if lib_dir.exists() {
+        return lib_dir;
+    }
+    // Fall back to next to exe (will trigger the pcall error gracefully)
+    beside_exe
 }
 
 impl DisplayClient {
-    pub fn new(session: Session, lua_dir: PathBuf, session_id: String) -> Self {
+    pub fn new(
+        session: Session,
+        lua_dir: PathBuf,
+        session_id: String,
+        runtime_dir: PathBuf,
+    ) -> Self {
         Self {
             session,
             lua_dir,
             session_id,
+            runtime_dir,
         }
     }
 
@@ -28,6 +62,7 @@ impl DisplayClient {
         let token_usage_file = self.session.token_usage_file();
         let exe_path =
             std::env::current_exe().context("Failed to determine current executable path")?;
+        let parser_path = parser_lib_path(&exe_path);
 
         // Pre-create usage and token_usage files so the nvim fs_event watchers can
         // attach immediately instead of retrying. Without this, the watchers give up
@@ -53,6 +88,8 @@ impl DisplayClient {
             &token_usage_file,
             &self.session_id,
             &exe_path,
+            &parser_path,
+            &self.runtime_dir,
         )?;
         nvim.wait().await?;
 
@@ -66,6 +103,7 @@ impl DisplayClient {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_nvim(
     lua_dir: &Path,
     display_file: &Path,
@@ -74,16 +112,20 @@ fn spawn_nvim(
     token_usage_file: &Path,
     session_id: &str,
     exe_path: &Path,
+    parser_path: &Path,
+    runtime_dir: &Path,
 ) -> Result<Child> {
     let lua_cmd = format!(
-        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}', '{}', '{}')",
-        lua_dir.display(),
-        display_file.display(),
-        status_file.display(),
-        usage_file.display(),
-        token_usage_file.display(),
-        session_id,
-        exe_path.display(),
+        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
+        lua_escape(&lua_dir.display().to_string()),
+        lua_escape(&display_file.display().to_string()),
+        lua_escape(&status_file.display().to_string()),
+        lua_escape(&usage_file.display().to_string()),
+        lua_escape(&token_usage_file.display().to_string()),
+        lua_escape(session_id),
+        lua_escape(&exe_path.display().to_string()),
+        lua_escape(&parser_path.display().to_string()),
+        lua_escape(&runtime_dir.display().to_string()),
     );
 
     let (stdin, stdout, stderr) = tty_stdio::get_tty_stdio();

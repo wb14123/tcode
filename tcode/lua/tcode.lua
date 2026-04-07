@@ -76,6 +76,9 @@ local sa_extmark_ids = {}  -- extmark_id -> conversation_id
 local sa_label_marks = {}  -- conversation_id -> { extmark_id, ns, description }
 local sa_input_marks = {}  -- tool_call_id -> { extmark_id, ns, tool_name }
 
+-- Flag to handle the initial empty line in Neovim buffers
+local first_event = true
+
 -- Thinking token state: track streaming thinking and collapsed entries
 local thinking_ns = vim.api.nvim_create_namespace('tcode_thinking')
 local thinking_entries = {}  -- extmark_id -> { content, expanded }
@@ -163,8 +166,15 @@ local function confirm_popup(prompt, on_confirm)
 end
 
 -- Render a label line with optional timestamp as virtual text
-local function render_label(buf, ns, prefix, hl_group, data)
-  append_lines(buf, { '' })
+local function render_label(buf, ns, separator, prefix, hl_group, data)
+  if first_event then
+    first_event = false
+    -- Neovim buffers start with one empty line that can't be deleted.
+    -- Replace it with the first separator instead of appending.
+    vim.api.nvim_buf_set_lines(buf, 0, 1, false, { separator })
+  else
+    append_lines(buf, { separator })
+  end
   local label_line = vim.api.nvim_buf_line_count(buf) - 1
   local virt = { { prefix, hl_group } }
   local ts = format_time(data.created_at)
@@ -227,10 +237,10 @@ end
 local function render_info(buf, ns, data, token_prefix, insert_at)
   local info_line
   if insert_at then
-    insert_lines_at(buf, insert_at, { '' })
+    insert_lines_at(buf, insert_at, { '► INFO' })
     info_line = insert_at
   else
-    append_lines(buf, { '' })
+    append_lines(buf, { '► INFO' })
     info_line = vim.api.nvim_buf_line_count(buf) - 1
   end
 
@@ -263,13 +273,11 @@ local function render_info(buf, ns, data, token_prefix, insert_at)
     table.insert(virt_parts, { prefix .. data.end_status .. ']', 'TCodeError' })
   end
 
-  -- Render tokens/status as virtual text
-  if #virt_parts > 0 then
-    vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
-      virt_text = virt_parts,
-      virt_text_pos = 'overlay',
-    })
-  end
+  -- Render tokens/status as virtual text (always set to conceal separator text)
+  vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
+    virt_text = #virt_parts > 0 and virt_parts or { { '', '' } },
+    virt_text_pos = 'overlay',
+  })
 
   -- Render error as real buffer text so it can wrap, be navigated, selected, copied
   if type(data.error) == 'string' and data.error ~= '' then
@@ -577,12 +585,12 @@ local function render_event(buf, ns, event)
   if not variant then return end
 
   if variant == 'UserMessage' then
-    render_label(buf, ns, '>>> USER', 'TCodeUser', data)
+    render_label(buf, ns, '► USER', '>>> USER', 'TCodeUser', data)
     local content_lines = vim.split(data.content, '\n', { plain = true })
     append_lines(buf, content_lines)
 
   elseif variant == 'AssistantMessageStart' then
-    render_label(buf, ns, '>>> ASSISTANT', 'TCodeAssistant', data)
+    render_label(buf, ns, '► ASSISTANT', '>>> ASSISTANT', 'TCodeAssistant', data)
     append_lines(buf, { '' })
 
   elseif variant == 'AssistantThinkingChunk' then
@@ -635,7 +643,7 @@ local function render_event(buf, ns, event)
     local tool_call_index = data.tool_call_index or 0
 
     -- Render the tool label line
-    local label_line, label_extmark = render_label(buf, ns, '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
+    local label_line, label_extmark = render_label(buf, ns, '► TOOL', '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
 
     -- Store label info for status updates
     tc_tool_names[tool_call_id] = tool_name
@@ -716,7 +724,7 @@ local function render_event(buf, ns, event)
     else
       -- Fallback: no streaming args (provider doesn't support it or missed events)
       -- Keep the original behavior
-      local label_line, label_extmark = render_label(buf, ns, '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
+      local label_line, label_extmark = render_label(buf, ns, '► TOOL', '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
       if data.tool_call_id then
         tc_tool_names[data.tool_call_id] = tool_name
         tc_label_marks[data.tool_call_id] = {
@@ -833,8 +841,13 @@ local function render_event(buf, ns, event)
     -- Show as nvim notification (ephemeral)
     vim.notify(data.message or '', notify_level, { title = 'TCode' })
     -- Also show in main display (persistent)
-    append_lines(buf, { '' })
-    local msg_lines = vim.split(prefix .. (data.message or ''), '\n', { plain = true })
+    append_lines(buf, { '► SYSTEM' })
+    local sep_line = vim.api.nvim_buf_line_count(buf) - 1
+    vim.api.nvim_buf_set_extmark(buf, ns, sep_line, 0, {
+      virt_text = { { prefix, hl_group } },
+      virt_text_pos = 'overlay',
+    })
+    local msg_lines = vim.split(data.message or '', '\n', { plain = true })
     append_lines(buf, msg_lines)
     local start_row = vim.api.nvim_buf_line_count(buf) - #msg_lines
     for i = 0, #msg_lines - 1 do
@@ -850,7 +863,7 @@ local function render_event(buf, ns, event)
     local tool_call_index = data.tool_call_index or 0
 
     -- Render the subagent label line (same style as SubAgentStart but with [generating])
-    local label_line, label_extmark = render_label(buf, ns, '>>> SUB-AGENT: [generating]', 'TCodeTool', data)
+    local label_line, label_extmark = render_label(buf, ns, '► SUBAGENT', '>>> SUB-AGENT: [generating]', 'TCodeTool', data)
 
     -- Store in a pending map keyed by tool_call_id
     sa_input_marks[tool_call_id] = {
@@ -940,7 +953,7 @@ local function render_event(buf, ns, event)
       sa_extmark_ids[mark_id] = conv_id
     else
       -- No pending input (e.g., resumed session) — create label from scratch (existing logic)
-      local label_line, label_extmark = render_label(buf, ns, '>>> SUB-AGENT: [running] ' .. description, 'TCodeTool', data)
+      local label_line, label_extmark = render_label(buf, ns, '► SUBAGENT', '>>> SUB-AGENT: [running] ' .. description, 'TCodeTool', data)
       append_lines(buf, { '' })
       if conv_id then
         sa_label_marks[conv_id] = { extmark_id = label_extmark, ns = ns, description = description }
@@ -1124,7 +1137,7 @@ local function render_event(buf, ns, event)
     end
 
   elseif variant == 'AssistantRequestEnd' then
-    append_lines(buf, { '', '' })
+    append_lines(buf, { '► END' })
     local info_line = vim.api.nvim_buf_line_count(buf) - 1
     if data.total_input_tokens and data.total_output_tokens then
       local text
@@ -1140,6 +1153,11 @@ local function render_event(buf, ns, event)
       end
       vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
         virt_text = { { text, 'TCodeTokens' } },
+        virt_text_pos = 'overlay',
+      })
+    else
+      vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
+        virt_text = { { '', '' } },
         virt_text_pos = 'overlay',
       })
     end
@@ -1331,7 +1349,9 @@ end
 -- @param token_usage_file: Path to file where token usage is written
 -- @param session_id: Session ID for spawning tool call windows
 -- @param exe_path: Path to tcode executable
-function M.setup_display(display_file, status_file, usage_file, token_usage_file, session_id, exe_path)
+-- @param parser_path: Path to libtree_sitter_tcode.so/.dylib (optional, for treesitter isolation)
+-- @param runtime_dir: Root directory containing queries/tcode/*.scm (optional, prepended to runtimepath)
+function M.setup_display(display_file, status_file, usage_file, token_usage_file, session_id, exe_path, parser_path, runtime_dir)
   M.display_file = display_file or '/tmp/tcode-display.jsonl'
   M.status_file = status_file or '/tmp/tcode-status.txt'
   M.usage_file = usage_file
@@ -1357,10 +1377,25 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     '%#TCodeStatusLine# TCode: %{g:tcode_status}%=%{g:tcode_combined_usage} ')
   local ns = vim.api.nvim_create_namespace('tcode')
 
-  -- Mark the buffer as markdown so treesitter and plugins (e.g. render-markdown.nvim)
-  -- render the whole buffer. Tool output is wrapped in fenced code blocks to prevent
-  -- partial HTML/XML/JSON from corrupting the markdown parse.
-  vim.bo[buf].filetype = 'markdown'
+  -- Mark the buffer as tcode so our custom tree-sitter grammar handles separator
+  -- lines and injects each content region as independent markdown parses.
+  vim.bo[buf].filetype = 'tcode'
+
+  -- Reset first_event flag for this display session
+  first_event = true
+
+  -- Register tcode tree-sitter parser and start highlighting
+  if parser_path and parser_path ~= '' then
+    local ok, err = pcall(vim.treesitter.language.add, 'tcode', { path = parser_path })
+    if ok then
+      if runtime_dir and runtime_dir ~= '' then
+        vim.opt.runtimepath:prepend(runtime_dir)
+      end
+      pcall(vim.treesitter.start, buf, 'tcode')
+    else
+      vim.notify('tcode: tree-sitter parser not loaded: ' .. tostring(err), vim.log.levels.WARN)
+    end
+  end
 
   local check_updates = create_jsonl_reader(M.display_file, buf, ns)
   M.display_watcher = watch_file(M.display_file, check_updates)

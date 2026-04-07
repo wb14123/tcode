@@ -30,6 +30,12 @@ use tokio::process::Child;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing_subscriber::EnvFilter;
 
+/// Escape a string for use inside a Lua single-quoted string literal.
+/// Replaces `\` with `\\` and `'` with `\'` to prevent injection.
+pub(crate) fn lua_escape(s: &str) -> String {
+    s.replace('\\', "\\\\").replace('\'', "\\'")
+}
+
 /// LLM provider selection
 #[derive(Clone, Copy, Debug, Default)]
 enum Provider {
@@ -276,9 +282,15 @@ enum Commands {
 /// Embedded Lua source, compiled into the binary.
 const TCODE_LUA: &str = include_str!("../lua/tcode.lua");
 
-/// Write the embedded Lua source to a cache directory and return the directory path.
+/// Embedded tree-sitter query files for the tcode filetype.
+const INJECTIONS_SCM: &str = include_str!("../../tree-sitter-tcode/queries/injections.scm");
+const HIGHLIGHTS_SCM: &str = include_str!("../../tree-sitter-tcode/queries/highlights.scm");
+
+/// Write the embedded Lua source and tree-sitter query files to a cache directory
+/// and return the directory path for the Lua files.
 /// Uses `<session_dir>/lua/` so each session gets its own copy (avoids conflicts
 /// between concurrent sessions running different binary versions).
+/// Also writes `queries/tcode/{injections,highlights}.scm` under `session_dir`.
 fn ensure_lua_files(session_dir: &Path) -> Result<PathBuf> {
     let lua_dir = session_dir.join("lua");
     std::fs::create_dir_all(&lua_dir)
@@ -286,6 +298,16 @@ fn ensure_lua_files(session_dir: &Path) -> Result<PathBuf> {
     let lua_file = lua_dir.join("tcode.lua");
     std::fs::write(&lua_file, TCODE_LUA)
         .with_context(|| format!("Failed to write embedded tcode.lua to {:?}", lua_file))?;
+
+    // Write tree-sitter query files for the tcode filetype
+    let queries_dir = session_dir.join("queries").join("tcode");
+    std::fs::create_dir_all(&queries_dir)
+        .with_context(|| format!("Failed to create queries directory {:?}", queries_dir))?;
+    std::fs::write(queries_dir.join("injections.scm"), INJECTIONS_SCM)
+        .with_context(|| format!("Failed to write injections.scm to {:?}", queries_dir))?;
+    std::fs::write(queries_dir.join("highlights.scm"), HIGHLIGHTS_SCM)
+        .with_context(|| format!("Failed to write highlights.scm to {:?}", queries_dir))?;
+
     Ok(lua_dir)
 }
 
@@ -413,7 +435,8 @@ async fn main() -> Result<()> {
             init_tracing(&session_id);
             let session = Session::new(session_id.clone())?;
             let lua_dir = ensure_lua_files(session.session_dir())?;
-            let client = DisplayClient::new(session, lua_dir, session_id);
+            let runtime_dir = session.session_dir().clone();
+            let client = DisplayClient::new(session, lua_dir, session_id, runtime_dir);
             client.run().await
         }
         Some(Commands::ToolCall { tool_call_id }) => {
@@ -942,7 +965,7 @@ async fn run_unified_with_session(
         .spawn()
         .context("Failed to spawn display process")?;
 
-    let display_pid = display_child.id();
+    let display_pid: i32 = display_child.id().try_into().unwrap_or(-1);
     let result = {
         let wait_handle = tokio::task::spawn_blocking(move || display_child.wait());
         tokio::select! {
@@ -950,10 +973,12 @@ async fn run_unified_with_session(
                 result.unwrap_or_else(|e| Err(std::io::Error::other(e)))
             }
             _ = tokio::signal::ctrl_c() => {
-                nix::sys::signal::kill(
-                    nix::unistd::Pid::from_raw(display_pid as i32),
-                    nix::sys::signal::Signal::SIGTERM,
-                ).ok();
+                if display_pid > 0 {
+                    nix::sys::signal::kill(
+                        nix::unistd::Pid::from_raw(display_pid),
+                        nix::sys::signal::Signal::SIGTERM,
+                    ).ok();
+                }
                 Err(std::io::Error::new(std::io::ErrorKind::Interrupted, "interrupted by Ctrl+C"))
             }
         }

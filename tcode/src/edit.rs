@@ -11,6 +11,7 @@ use tokio::net::UnixStream;
 use tokio::process::{Child, Command};
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
+use crate::lua_escape;
 use crate::protocol::ClientMessage;
 use crate::session::Session;
 use crate::tty_stdio;
@@ -190,11 +191,11 @@ fn spawn_nvim(
 ) -> Result<Child> {
     let lua_cmd = format!(
         "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_edit('{}', {}, '{}', '{}')",
-        lua_dir.display(),
-        msg_file.display(),
+        lua_escape(&lua_dir.display().to_string()),
+        lua_escape(&msg_file.display().to_string()),
         is_subagent,
-        session_id,
-        exe_path.display(),
+        lua_escape(session_id),
+        lua_escape(&exe_path.display().to_string()),
     );
 
     let (stdin, stdout, stderr) = tty_stdio::get_tty_stdio();
