@@ -422,6 +422,32 @@ TCode windows use custom statuslines to show connection status, token usage, and
 
 This only affects TCode's own neovim processes — your other neovim instances are not affected.
 
+### Syntax Highlighting (Tree-Sitter)
+
+TCode includes a custom tree-sitter grammar (`tree-sitter-tcode`) that parses the display buffer. The grammar splits content at separator lines (the `►` delimiters between messages) and injects each content region as **markdown**, so Neovim's built-in markdown tree-sitter highlighting works inside tcode buffers.
+
+**How it works:**
+- The external scanner (`scanner.c`) recognizes `►` lines as separators and everything between them as content blocks.
+- `highlights.scm` styles the separator lines.
+- `injections.scm` tells Neovim to parse each content block as markdown.
+- At runtime, tcode loads the parser via `vim.treesitter.language.add()` and writes the query files into the session directory.
+
+**Installation:** `install.sh` compiles the shared library (`libtree-sitter-tcode.so` / `.dylib`) via `make` and copies it to `/usr/lib`. The parser is then found automatically by the tcode binary at startup.
+
+**Markdown rendering with render-markdown.nvim:** Since tcode buffers are injected as markdown, plugins like [render-markdown.nvim](https://github.com/MeanderingProgrammer/render-markdown.nvim) can render headings, code blocks, lists, etc. inside the display pane. Add `tcode` to its file types:
+
+```lua
+return {
+  {
+    "MeanderingProgrammer/render-markdown.nvim",
+    ft = { "markdown", "tcode" },
+    opts = {
+      file_types = { "markdown", "tcode" },
+    },
+  },
+}
+```
+
 ## Design Notes
 
 The following are design directions, some implemented and some aspirational:
