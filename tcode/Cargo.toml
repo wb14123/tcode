@@ -10,6 +10,7 @@ auth = { path = "../auth" }
 lsp-client = { path = "../lsp-client" }
 llm-rs = { path = "../llm-rs" }
 tools = { path = "../tools" }
+toml = "0.8"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 serde = { version = "1", features = ["derive"] }

@@ -32,54 +32,105 @@ TCode uses a server-client architecture. The server manages the LLM conversation
 └─────────────────────────────────────────────────────────────┘
 ```
 
-## CLI Options
+## Configuration
 
-### Provider Selection
+All settings are configured via TOML config files in `~/.tcode/`:
 
-Use `--provider` to select the LLM provider:
+| File | Purpose |
+|------|---------|
+| `config.toml` | Default config |
+| `config-<profile>.toml` | Profile-specific config (selected with `-p <profile>`) |
 
-```bash
-tcode --provider claude    # Default - uses Claude API
-tcode --provider openai    # Uses OpenAI API
-tcode --provider openrouter # Uses OpenRouter API
-```
+On first run, tcode auto-creates `~/.tcode/config.toml` with all options commented out as a template (0600 permissions). Profiles are fully self-contained — there is no inheritance from the default config. Missing profile = error. Missing fields use built-in defaults.
 
-Each provider has its own default model, base URL, and environment variable for the API key:
-
-| Provider | Env Variable | Default Model | Default Base URL |
-|----------|--------------|---------------|------------------|
-| `claude` | `ANTHROPIC_ACCESS_TOKEN` | `claude-opus-4-6` | `https://api.anthropic.com` |
-| `openai` | `OPENAI_API_KEY` | `gpt-5-nano` | `https://api.openai.com/v1` |
-| `openrouter` | `OPENROUTER_API_KEY` | `deepseek/deepseek-r1` | `https://openrouter.ai/api/v1` |
-
-### Other Options
+### CLI Flags
 
 ```bash
---api-key <key>                    # Override API key (otherwise uses provider's env var)
---model <model>                    # Override default model
---base-url <url>                   # Override default base URL
---session <id>                     # Session ID (required for subcommands, auto-generated for main command)
---search-engine <kagi|google>      # Search engine for web_search tool (default: kagi)
---browser-server-url <url>         # Connect to a remote browser-server (TCP mode)
---browser-server-token <token>     # Bearer token for remote browser-server
+tcode                        # Start with default config
+tcode -p work                # Start with ~/.tcode/config-work.toml
+tcode --session <id> attach  # Attach to existing session
 ```
+
+The CLI only accepts `--session` and `-p`/`--profile`. All other settings live in the config file.
+
+### Config File Reference
+
+```toml
+# ~/.tcode/config.toml
+
+provider = "claude"              # claude | open-ai | open-router
+api_key = ""                     # or set env var (see table below)
+model = "claude-opus-4-6"        # defaults per provider
+base_url = ""                    # defaults per provider
+subagent_max_iterations = 50
+max_subagent_depth = 10
+subagent_model_selection = false
+browser_server_url = ""          # remote browser-server URL (TCP mode)
+browser_server_token = ""        # bearer token for remote browser-server
+search_engine = "kagi"           # kagi | google
+```
+
+### Providers
+
+| Provider | Config value | Env Variable | Default Model | Default Base URL |
+|----------|-------------|--------------|---------------|------------------|
+| Claude | `claude` | `ANTHROPIC_API_KEY` | `claude-opus-4-6` | `https://api.anthropic.com` |
+| OpenAI | `open-ai` | `OPENAI_API_KEY` | `gpt-5-nano` | `https://api.openai.com/v1` |
+| OpenRouter | `open-router` | `OPENROUTER_API_KEY` | `deepseek/deepseek-r1` | `https://openrouter.ai/api/v1` |
+
+If `api_key` is not set in the config, the provider's environment variable is used.
+
+### Layout Configuration
+
+The tmux pane layout is configured as a binary split tree. Each node is either a `split` (with two children `a` and `b`) or a `command` (a leaf pane). Sizes are percentages and siblings must add up to 100.
+
+The default layout (used when `[layout]` is omitted):
+
+```toml
+[layout]
+split = "horizontal"
+
+  [layout.a]
+  split = "vertical"
+  size = 70
+
+    [layout.a.a]
+    command = "display"
+    size = 70
+
+    [layout.a.b]
+    command = "edit"
+    size = 30
+    focus = true
+
+  [layout.b]
+  split = "vertical"
+  size = 30
+
+    [layout.b.a]
+    command = "tree"
+    size = 50
+
+    [layout.b.b]
+    command = "permission"
+    size = 50
+```
+
+Split directions: `horizontal` (left/right) or `vertical` (top/bottom). Available commands: `display`, `edit`, `tree`, `permission`. A layout must have exactly one `display`, at least one `edit`, and at most one `focus = true`.
 
 ### Browser Server
 
 By default, tcode automatically manages a local `browser-server` process via Unix socket at `~/.tcode/browser-server.sock`. Multiple tcode sessions share the same server, and it exits on its own after 5 minutes of inactivity.
 
-To use a remote browser-server instead:
-```bash
-tcode --browser-server-url http://host:8090 --browser-server-token my-token
-```
+To use a remote browser-server instead, set `browser_server_url` and `browser_server_token` in your config file.
 
 ## Commands
 
-### `tcode`
+### `tcode [-p <profile>]`
 
-Starts the server and opens display + edit panes in the current tmux session. Generates a unique 8-character session ID (e.g., `abc12def`) and prints it on startup. Session files persist in `~/.tcode/sessions/{id}/`.
+Starts the server and opens display + edit panes in the current tmux session. Generates a unique 8-character session ID (e.g., `abc12def`) and prints it on startup. Session files persist in `~/.tcode/sessions/{id}/`. Use `-p` to load a specific config profile.
 
-### `tcode [--session <id>] attach`
+### `tcode [-p <profile>] [--session <id>] attach`
 
 Attaches to an existing session and resumes the conversation in the current tmux session. If `--session` is omitted, an interactive picker lets you select from available sessions. Must be run inside tmux.
 
@@ -89,7 +140,7 @@ Lists all sessions with their status (active/inactive). Active sessions have a r
 
 ### `tcode --session <id> serve`
 
-Starts just the server process (no tmux integration). Requires `--session` flag.
+Starts just the server process (no tmux integration). Requires `--session` flag. Reads provider/model/search settings from the config file.
 
 ### `tcode --session <id> edit`
 

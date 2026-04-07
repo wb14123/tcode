@@ -1,5 +1,6 @@
 mod approve_ui;
 mod claude_auth;
+mod config;
 mod display;
 mod edit;
 mod permission_ui;
@@ -12,14 +13,17 @@ mod tree;
 mod tree_nav;
 mod tty_stdio;
 
+#[cfg(test)]
+mod config_tests;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Parser, Subcommand};
 use futures::{SinkExt, StreamExt};
 use tokio::net::UnixStream;
 use tokio::process::Child;
@@ -27,7 +31,7 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing_subscriber::EnvFilter;
 
 /// LLM provider selection
-#[derive(Clone, Copy, Debug, Default, ValueEnum)]
+#[derive(Clone, Copy, Debug, Default)]
 enum Provider {
     #[default]
     Claude,
@@ -87,58 +91,60 @@ use server::Server;
 use session::Session;
 use tool_call_display::ToolCallDisplayClient;
 
-/// Get API key from CLI or environment variable
-fn get_api_key(cli: &Cli, provider: Provider) -> Result<String> {
-    cli.api_key
+/// Get API key from config or environment variable
+fn get_api_key(config: &config::TcodeConfig, provider: Provider) -> Result<String> {
+    config
+        .api_key
         .clone()
         .or_else(|| std::env::var(provider.env_var_name()).ok())
         .ok_or_else(|| {
             anyhow!(
-                "API key required. Set {} env or use --api-key",
+                "API key required. Set {} env var or add api_key to config file",
                 provider.env_var_name()
             )
         })
 }
 
-/// Build ChatOptions from CLI args
-fn build_chat_options(_cli: &Cli) -> ChatOptions {
+/// Build ChatOptions
+fn build_chat_options() -> ChatOptions {
     ChatOptions {
         reasoning_effort: Some(ReasoningEffort::High),
         ..Default::default()
     }
 }
 
-/// Create an LLM instance from CLI options
-fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String, Option<claude_auth::TokenManager>)> {
-    let provider = cli.provider;
-    let model = cli
+/// Create an LLM instance from config options
+fn create_llm(
+    config: &config::TcodeConfig,
+) -> Result<(Box<dyn LLM>, String, Option<claude_auth::TokenManager>)> {
+    let provider = parse_provider(config.provider_str())?;
+    let model = config
         .model
         .clone()
         .unwrap_or_else(|| provider.default_model().to_string());
-    let base_url = cli
+    let base_url = config
         .base_url
         .clone()
         .unwrap_or_else(|| provider.default_base_url().to_string());
 
     let (llm, token_manager): (Box<dyn LLM>, Option<claude_auth::TokenManager>) = match provider {
         Provider::Claude => {
-            // Try API key first, fall back to OAuth
-            if let Ok(api_key) = get_api_key(cli, provider) {
+            if let Ok(api_key) = get_api_key(config, provider) {
                 (Box::new(Claude::with_base_url(&api_key, &base_url)), None)
             } else {
                 let manager = claude_auth::load_token_manager().ok_or_else(|| {
-                    anyhow!("No Claude authentication found. Set ANTHROPIC_API_KEY env, use --api-key, or run 'tcode claude-auth' to authenticate via OAuth.")
+                    anyhow!("No Claude authentication found. Set ANTHROPIC_API_KEY env, add api_key to config, or run 'tcode claude-auth'")
                 })?;
                 let llm = Box::new(Claude::with_token_provider(manager.clone(), &base_url));
                 (llm, Some(manager))
             }
         }
         Provider::OpenAi => {
-            let api_key = get_api_key(cli, provider)?;
+            let api_key = get_api_key(config, provider)?;
             (Box::new(OpenAI::with_base_url(&api_key, &base_url)), None)
         }
         Provider::OpenRouter => {
-            let api_key = get_api_key(cli, provider)?;
+            let api_key = get_api_key(config, provider)?;
             (
                 Box::new(OpenRouter::with_base_url(&api_key, &base_url)),
                 None,
@@ -149,6 +155,25 @@ fn create_llm(cli: &Cli) -> Result<(Box<dyn LLM>, String, Option<claude_auth::To
     Ok((llm, model, token_manager))
 }
 
+fn parse_provider(s: &str) -> Result<Provider> {
+    match s {
+        "claude" => Ok(Provider::Claude),
+        "open-ai" | "openai" => Ok(Provider::OpenAi),
+        "open-router" | "openrouter" => Ok(Provider::OpenRouter),
+        other => bail!(
+            "unknown provider \"{other}\" in config file, expected: claude, open-ai, open-router"
+        ),
+    }
+}
+
+fn parse_search_engine(s: &str) -> Result<browser_server::SearchEngineKind> {
+    match s {
+        "kagi" => Ok(browser_server::SearchEngineKind::Kagi),
+        "google" => Ok(browser_server::SearchEngineKind::Google),
+        other => bail!("unknown search_engine \"{other}\" in config file, expected: kagi, google"),
+    }
+}
+
 #[derive(Parser)]
 #[command(name = "tcode")]
 #[command(about = "Terminal-based LLM conversation interface with neovim")]
@@ -156,49 +181,13 @@ struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
 
-    /// LLM provider to use
-    #[arg(long, value_enum, default_value_t = Provider::Claude)]
-    provider: Provider,
-
-    /// API key/token (defaults to provider-specific env var)
-    #[arg(long)]
-    api_key: Option<String>,
-
-    /// Model to use (defaults based on provider)
-    #[arg(long)]
-    model: Option<String>,
-
-    /// Base URL for the API (defaults based on provider)
-    #[arg(long)]
-    base_url: Option<String>,
-
     /// Session ID (defaults to tmux session name or "default")
     #[arg(long)]
     session: Option<String>,
 
-    /// Maximum number of LLM call iterations for subagent conversations
-    #[arg(long, default_value_t = 50)]
-    subagent_max_iterations: usize,
-
-    /// Maximum nesting depth for subagents (0 = no subagents, 1 = one level, etc.)
-    #[arg(long, default_value_t = 10)]
-    max_subagent_depth: usize,
-
-    /// Allow LLM to select model for subagents (default: use parent model)
-    #[arg(long)]
-    subagent_model_selection: bool,
-
-    /// Connect to an existing remote browser-server (TCP mode)
-    #[arg(long)]
-    browser_server_url: Option<String>,
-
-    /// Bearer token for remote browser-server (required with --browser-server-url)
-    #[arg(long)]
-    browser_server_token: Option<String>,
-
-    /// Search engine to use for web_search tool
-    #[arg(long, value_enum, default_value_t = browser_server::SearchEngineKind::Kagi)]
-    search_engine: browser_server::SearchEngineKind,
+    /// Config profile to use (loads ~/.tcode/config-<profile>.toml)
+    #[arg(short = 'p', long)]
+    profile: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -361,48 +350,58 @@ fn run_shell_cmd(cmd: &str, context_msg: &str) -> Result<()> {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    let Cli {
+        command,
+        session,
+        profile,
+    } = cli;
 
     // Helper to require --session flag for subcommands
     let require_session = |opt: Option<String>| -> Result<String> {
         opt.ok_or_else(|| anyhow!("--session=<id> is required for this subcommand"))
     };
 
-    match cli.command {
+    // Helper: load config lazily (only called by branches that need it)
+    let load_cfg = || config::load_config(profile.as_deref());
+
+    match command {
         None => {
-            // Unified startup: server + tmux panes (generates new session ID)
-            run_unified(cli).await
+            let config = load_cfg()?;
+            run_unified(config).await
         }
         Some(Commands::Serve) => {
-            let session_id = require_session(cli.session.clone())?;
+            let config = load_cfg()?;
+            let session_id = require_session(session)?;
             init_tracing(&session_id);
             init_browser_client(
-                cli.browser_server_url.clone(),
-                cli.browser_server_token.clone(),
+                config.browser_server_url.clone(),
+                config.browser_server_token.clone(),
             )
             .await?;
-            tools::set_search_engine(cli.search_engine);
-            let (llm, model, token_manager) = create_llm(&cli)?;
-            let chat_options = build_chat_options(&cli);
-            let session = Session::new(session_id)?;
+            let search_engine = parse_search_engine(config.search_engine_str())?;
+            tools::set_search_engine(search_engine);
+            let (llm, model, token_manager) = create_llm(&config)?;
+            let chat_options = build_chat_options();
+            let sess = Session::new(session_id)?;
             let server = Server::new(
-                session.socket_path(),
-                session.display_file(),
-                session.status_file(),
-                session.usage_file(),
-                session.session_dir().clone(),
-                session.conversation_state_file(),
+                sess.socket_path(),
+                sess.display_file(),
+                sess.status_file(),
+                sess.usage_file(),
+                sess.session_dir().clone(),
+                sess.conversation_state_file(),
                 llm,
                 model,
                 chat_options,
-                cli.subagent_max_iterations,
-                cli.max_subagent_depth,
-                cli.subagent_model_selection,
+                config.subagent_max_iterations.unwrap_or(50),
+                config.max_subagent_depth.unwrap_or(10),
+                config.subagent_model_selection.unwrap_or(false),
                 token_manager,
             );
             server.run(None).await
         }
         Some(Commands::Edit { conversation_id }) => {
-            let session_id = require_session(cli.session)?;
+            let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
             let lua_dir = ensure_lua_files(session.session_dir())?;
@@ -410,7 +409,7 @@ async fn main() -> Result<()> {
             client.run().await
         }
         Some(Commands::Display) => {
-            let session_id = require_session(cli.session)?;
+            let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id.clone())?;
             let lua_dir = ensure_lua_files(session.session_dir())?;
@@ -418,7 +417,7 @@ async fn main() -> Result<()> {
             client.run().await
         }
         Some(Commands::ToolCall { tool_call_id }) => {
-            let session_id = require_session(cli.session)?;
+            let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
             let lua_dir = ensure_lua_files(session.session_dir())?;
@@ -426,19 +425,20 @@ async fn main() -> Result<()> {
             client.run().await
         }
         Some(Commands::CancelTool { tool_call_id }) => {
-            let session_id = require_session(cli.session)?;
+            let session_id = require_session(session)?;
             let session = Session::new(root_session_id(&session_id))?;
             let msg = protocol::ClientMessage::CancelTool { tool_call_id };
             send_server_message(&session, msg, "Tool cancelled").await
         }
         Some(Commands::CancelConversation { conversation_id }) => {
-            let session_id = require_session(cli.session)?;
+            let session_id = require_session(session)?;
             let session = Session::new(root_session_id(&session_id))?;
             let msg = protocol::ClientMessage::CancelConversation { conversation_id };
             send_server_message(&session, msg, "Conversation cancelled").await
         }
         Some(Commands::Attach) => {
-            let session_id = match session_id_or_pick(cli.session.clone())? {
+            let config = load_cfg()?;
+            let session_id = match session_id_or_pick(session)? {
                 Some(id) => id,
                 None => return Ok(()),
             };
@@ -447,27 +447,22 @@ async fn main() -> Result<()> {
                     "tcode attach must be run inside tmux.\nRun `tcode serve` to start the server without tmux."
                 );
             }
-            let session = Session::new(session_id.clone())?;
-            if !session.conversation_state_file().exists() {
+            let sess = Session::new(session_id.clone())?;
+            if !sess.conversation_state_file().exists() {
                 anyhow::bail!(
                     "No conversation state found for session '{}'. Nothing to resume.",
                     session_id
                 );
             }
-            let (llm, model, token_manager) = create_llm(&cli)?;
-            let chat_options = build_chat_options(&cli);
+            let (llm, model, token_manager) = create_llm(&config)?;
+            let chat_options = build_chat_options();
             run_unified_with_session(
-                session,
+                sess,
                 session_id,
                 llm,
                 model,
                 chat_options,
-                cli.subagent_max_iterations,
-                cli.max_subagent_depth,
-                cli.subagent_model_selection,
-                cli.browser_server_url,
-                cli.browser_server_token,
-                cli.search_engine,
+                &config,
                 token_manager,
                 "Attaching to session",
             )
@@ -480,7 +475,6 @@ async fn main() -> Result<()> {
             if sessions.is_empty() {
                 println!("No sessions in ~/.tcode/sessions/");
             } else {
-                // Collect session info with metadata for sorting
                 let mut entries: Vec<(String, String, Option<String>, u64)> = sessions
                     .into_iter()
                     .map(|id| {
@@ -499,7 +493,6 @@ async fn main() -> Result<()> {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                // Sort by last_active_at descending (most recent first)
                 entries.sort_by(|a, b| b.3.cmp(&a.3));
 
                 println!("Sessions:");
@@ -514,7 +507,7 @@ async fn main() -> Result<()> {
             Ok(())
         }
         Some(Commands::Tree) => {
-            let session_id = match session_id_or_pick(cli.session.clone())? {
+            let session_id = match session_id_or_pick(session)? {
                 Some(id) => id,
                 None => return Ok(()),
             };
@@ -522,7 +515,7 @@ async fn main() -> Result<()> {
             tree::run_tree(session)
         }
         Some(Commands::OpenToolCall { tool_call_id }) => {
-            let session_id = require_session(cli.session)?;
+            let session_id = require_session(session)?;
             let exe = std::env::current_exe().context("Failed to determine current executable")?;
             let exe_str = exe.to_string_lossy();
             let inner_cmd = format!(
@@ -533,7 +526,7 @@ async fn main() -> Result<()> {
             run_shell_cmd(&tmux_cmd, "Failed to open tool-call detail window")
         }
         Some(Commands::OpenSubagent { conversation_id }) => {
-            let session_id = require_session(cli.session)?;
+            let session_id = require_session(session)?;
             let exe = std::env::current_exe().context("Failed to determine current executable")?;
             let exe_str = exe.to_string_lossy();
             let sa_session = format!("{}/subagent-{}", session_id, conversation_id);
@@ -552,7 +545,7 @@ async fn main() -> Result<()> {
             run_shell_cmd(&tmux_cmd, "Failed to open subagent window")
         }
         Some(Commands::Permission) => {
-            let session_id = match session_id_or_pick(cli.session.clone())? {
+            let session_id = match session_id_or_pick(session)? {
                 Some(id) => id,
                 None => return Ok(()),
             };
@@ -560,7 +553,7 @@ async fn main() -> Result<()> {
             permission_ui::run_permission_ui(session)
         }
         Some(Commands::ApproveNext) => {
-            let session_id = require_session(cli.session)?;
+            let session_id = require_session(session)?;
             let session = Session::new(root_session_id(&session_id))?;
             if let Some(0) = permission_ui::approve_all_pending(&session_id, &session.socket_path())
             {
@@ -579,7 +572,7 @@ async fn main() -> Result<()> {
             preview_file_path,
             once_only,
         }) => {
-            let session_id = require_session(cli.session)?;
+            let session_id = require_session(session)?;
             let session = Session::new(root_session_id(&session_id))?;
             let args = approve_ui::ApproveArgs {
                 socket_path: session.socket_path(),
@@ -642,7 +635,7 @@ async fn run_browser() -> Result<()> {
     browser_server::browser::launch_interactive().await
 }
 
-async fn run_unified(cli: Cli) -> Result<()> {
+async fn run_unified(config: config::TcodeConfig) -> Result<()> {
     if !is_in_tmux() {
         anyhow::bail!(
             "tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux."
@@ -651,8 +644,8 @@ async fn run_unified(cli: Cli) -> Result<()> {
 
     let session_id = session::generate_session_id();
     let session = Session::new(session_id.clone())?;
-    let (llm, model, token_manager) = create_llm(&cli)?;
-    let chat_options = build_chat_options(&cli);
+    let (llm, model, token_manager) = create_llm(&config)?;
+    let chat_options = build_chat_options();
 
     run_unified_with_session(
         session,
@@ -660,16 +653,196 @@ async fn run_unified(cli: Cli) -> Result<()> {
         llm,
         model,
         chat_options,
-        cli.subagent_max_iterations,
-        cli.max_subagent_depth,
-        cli.subagent_model_selection,
-        cli.browser_server_url,
-        cli.browser_server_token,
-        cli.search_engine,
+        &config,
         token_manager,
         "Session",
     )
     .await
+}
+
+struct PaneInfo {
+    pane_id: String,
+    command: config::PanelCommand,
+    focus: bool,
+}
+
+/// Recursively create tmux panes for the layout tree.
+/// `current_pane` is the tmux pane ID that this node occupies.
+/// `spawned_pane_ids` collects IDs of newly created panes so the caller can clean
+/// them up if a later step fails.
+fn create_layout_panes(
+    node: &config::LayoutNode,
+    current_pane: &str,
+    spawned_pane_ids: &mut Vec<String>,
+) -> Result<Vec<PaneInfo>> {
+    match node {
+        config::LayoutNode::Leaf { command, focus, .. } => Ok(vec![PaneInfo {
+            pane_id: current_pane.to_string(),
+            command: *command,
+            focus: focus.unwrap_or(false),
+        }]),
+        config::LayoutNode::Split { split, a, b, .. } => {
+            let b_size = b
+                .size()
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| "50".to_string());
+
+            let split_flag = match split {
+                config::SplitDirection::Horizontal => "-h",
+                config::SplitDirection::Vertical => "-v",
+            };
+
+            let output = Command::new("tmux")
+                .args([
+                    "split-window",
+                    split_flag,
+                    "-d",
+                    "-p",
+                    &b_size,
+                    "-t",
+                    current_pane,
+                    "-P",
+                    "-F",
+                    "#{pane_id}",
+                    "sleep infinity",
+                ])
+                .output()
+                .context("Failed to run tmux split-window")?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                bail!("tmux split-window failed: {}", stderr.trim());
+            }
+            let b_pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            if b_pane_id.is_empty() {
+                bail!("tmux split-window did not return a pane ID");
+            }
+            spawned_pane_ids.push(b_pane_id.clone());
+
+            let mut panes = create_layout_panes(a, current_pane, spawned_pane_ids)?;
+            panes.extend(create_layout_panes(b, &b_pane_id, spawned_pane_ids)?);
+            Ok(panes)
+        }
+    }
+}
+
+/// Kill all spawned (non-original) tmux panes. Best-effort; errors are ignored.
+fn kill_spawned_panes(pane_ids: &[String]) {
+    for pane_id in pane_ids {
+        Command::new("tmux")
+            .args(["kill-pane", "-t", pane_id])
+            .output()
+            .ok();
+    }
+}
+
+/// Create layout panes, swap display into the original pane, start commands,
+/// and set focus. On any failure the already-created panes are killed before
+/// returning the error.
+fn setup_layout_panes(
+    layout: &config::LayoutNode,
+    current_pane_id: &str,
+    exe_str: &str,
+    session_arg: &str,
+) -> Result<Vec<PaneInfo>> {
+    let mut spawned_pane_ids: Vec<String> = Vec::new();
+
+    let mut panes = match create_layout_panes(layout, current_pane_id, &mut spawned_pane_ids) {
+        Ok(p) => p,
+        Err(e) => {
+            kill_spawned_panes(&spawned_pane_ids);
+            return Err(e);
+        }
+    };
+
+    // Ensure display pane is in the original pane (where we have saved stdio FDs)
+    let display_idx = panes
+        .iter()
+        .position(|p| p.command == config::PanelCommand::Display)
+        .ok_or_else(|| anyhow!("no display panel in layout"))?;
+
+    if panes[display_idx].pane_id != current_pane_id {
+        let orig_idx = panes
+            .iter()
+            .position(|p| p.pane_id == current_pane_id)
+            .ok_or_else(|| anyhow!("original pane not found in layout"))?;
+
+        let output = Command::new("tmux")
+            .args([
+                "swap-pane",
+                "-d",
+                "-s",
+                &panes[display_idx].pane_id,
+                "-t",
+                current_pane_id,
+            ])
+            .output()
+            .context("Failed to run tmux swap-pane")?;
+
+        if !output.status.success() {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            kill_spawned_panes(&spawned_pane_ids);
+            bail!("tmux swap-pane failed: {}", stderr);
+        }
+
+        // Swap pane IDs in our records (commands stay, pane positions swapped)
+        let display_pane_id = panes[display_idx].pane_id.clone();
+        panes[display_idx].pane_id = current_pane_id.to_string();
+        panes[orig_idx].pane_id = display_pane_id;
+    }
+
+    // Start real commands in non-display panes
+    for pane in &panes {
+        if pane.command == config::PanelCommand::Display {
+            continue; // display runs in-process in the caller
+        }
+        let cmd = match pane.command {
+            config::PanelCommand::Edit => format!("{} {} edit", exe_str, session_arg),
+            config::PanelCommand::Tree => format!("{} {} tree", exe_str, session_arg),
+            config::PanelCommand::Permission => {
+                let inner = format!("{} {} permission", exe_str, session_arg);
+                format!(
+                    "bash -c '{} 2>&1; ret=$?; if [ $ret -ne 0 ]; then echo \"[permission pane exited with code $ret — press Enter to close]\"; read; fi'",
+                    inner.replace('\'', "'\\''")
+                )
+            }
+            config::PanelCommand::Display => unreachable!(),
+        };
+        let output = Command::new("tmux")
+            .args(["respawn-pane", "-k", "-t", &pane.pane_id, &cmd])
+            .output();
+        match output {
+            Ok(o) if !o.status.success() => {
+                let stderr = String::from_utf8_lossy(&o.stderr);
+                tracing::warn!(
+                    "failed to start {} pane in {}: {}",
+                    pane.command,
+                    pane.pane_id,
+                    stderr
+                );
+            }
+            Err(e) => {
+                tracing::warn!("failed to start {} pane: {e}", pane.command);
+            }
+            _ => {}
+        }
+    }
+
+    // Set focus
+    let focus_pane = panes.iter().find(|p| p.focus).or_else(|| {
+        panes
+            .iter()
+            .find(|p| p.command == config::PanelCommand::Edit)
+    });
+    if let Some(fp) = focus_pane
+        && let Err(e) = Command::new("tmux")
+            .args(["select-pane", "-t", &fp.pane_id])
+            .output()
+    {
+        tracing::warn!("failed to focus pane: {e}");
+    }
+
+    Ok(panes)
 }
 
 /// Shared entry point for unified mode: redirects stdio, initializes tracing,
@@ -681,15 +854,21 @@ async fn run_unified_with_session(
     llm: Box<dyn LLM>,
     model: String,
     chat_options: ChatOptions,
-    subagent_max_iterations: usize,
-    max_subagent_depth: usize,
-    subagent_model_selection: bool,
-    browser_server_url: Option<String>,
-    browser_server_token: Option<String>,
-    search_engine: browser_server::SearchEngineKind,
+    config: &config::TcodeConfig,
     token_manager: Option<claude_auth::TokenManager>,
     label: &str,
 ) -> Result<()> {
+    let subagent_max_iterations = config.subagent_max_iterations.unwrap_or(50);
+    let max_subagent_depth = config.max_subagent_depth.unwrap_or(10);
+    let subagent_model_selection = config.subagent_model_selection.unwrap_or(false);
+    let browser_server_url = config.browser_server_url.clone();
+    let browser_server_token = config.browser_server_token.clone();
+    let search_engine = parse_search_engine(config.search_engine_str())?;
+    let layout = config
+        .layout
+        .clone()
+        .unwrap_or_else(config::LayoutNode::default_layout);
+
     let original_stdout =
         tty_stdio::redirect_output_to_files(&session.stdout_log(), &session.stderr_log());
     tty_stdio::write_to_terminal(original_stdout, &format!("{}: {}\n", label, session_id));
@@ -737,103 +916,20 @@ async fn run_unified_with_session(
     }
 
     // Capture current pane ID before splitting (for layout placement).
-    // Use $TMUX_PANE env var instead of `tmux display-message` to avoid a race condition:
-    // display-message returns whichever pane has *focus*, which may be in a different tab
-    // if the user switches away quickly after starting tcode.  $TMUX_PANE is set per-pane
-    // at shell creation and always refers to the pane this process is running in.
-    let current_pane_id = std::env::var("TMUX_PANE").unwrap_or_default();
+    let current_pane_id = std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| anyhow!("TMUX_PANE not set — cannot determine current tmux pane"))?;
 
-    // Layout: left-right split first (50/50), then split each column vertically.
-    // Left column:  Display (top 70%) + Edit (bottom 30%)
-    // Right column: Tree (top 50%) + Permission (bottom 50%)
-
-    // 1. Split right column for tree pane (50% width, don't steal focus)
-    let tree_cmd = format!("{} {} tree", exe_str, session_arg);
-    let tree_pane_id = if !current_pane_id.is_empty() {
-        Command::new("tmux")
-            .args([
-                "split-window",
-                "-h",
-                "-d",
-                "-p",
-                "30",
-                "-t",
-                &current_pane_id,
-                "-P",
-                "-F",
-                "#{pane_id}",
-                &tree_cmd,
-            ])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    } else {
-        None
-    };
-
-    // 2. Split left column: edit below display (30% height)
-    let edit_cmd = format!("{} {} edit", exe_str, session_arg);
-    let output = Command::new("tmux")
-        .args([
-            "split-window",
-            "-v",
-            "-p",
-            "30",
-            "-t",
-            &current_pane_id,
-            "-P",
-            "-F",
-            "#{pane_id}",
-            &edit_cmd,
-        ])
-        .output()
-        .context("Failed to run 'tmux' - is tmux installed and in PATH?");
-
-    let edit_pane_id = match output {
-        Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_string(),
+    let panes = match setup_layout_panes(&layout, &current_pane_id, &exe_str, &session_arg) {
+        Ok(p) => p,
         Err(e) => {
             server_handle.abort();
-            return Err(e);
+            return Err(e.context("Failed to set up layout"));
         }
     };
 
-    // 3. Split right column: permission below tree (50% height).
-    // Wrap command so the pane stays open on failure for debugging.
-    let perm_inner = format!("{} {} permission", exe_str, session_arg);
-    let perm_cmd = format!(
-        "bash -c '{} 2>&1; ret=$?; if [ $ret -ne 0 ]; then echo \"[permission pane exited with code $ret — press Enter to close]\"; read; fi'",
-        perm_inner.replace('\'', "'\\''")
-    );
-    let perm_pane_id = if let Some(ref tree_pane) = tree_pane_id {
-        Command::new("tmux")
-            .args([
-                "split-window",
-                "-v",
-                "-d",
-                "-p",
-                "50",
-                "-t",
-                tree_pane,
-                "-P",
-                "-F",
-                "#{pane_id}",
-                &perm_cmd,
-            ])
-            .output()
-            .ok()
-            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-    } else {
-        None
-    };
-
-    // Focus the edit pane so the user starts typing there
-    if let Err(e) = Command::new("tmux")
-        .args(["select-pane", "-t", &edit_pane_id])
-        .output()
-    {
-        tracing::warn!("failed to focus edit pane: {e}");
-    }
-
+    // Display runs as child process with saved original stdio FDs
     let display_cmd = format!("{} {} display", exe_str, session_arg);
     let (stdin, stdout, stderr) =
         tty_stdio::get_original_stdio().context("Failed to get original stdio fds")?;
@@ -854,7 +950,6 @@ async fn run_unified_with_session(
                 result.unwrap_or_else(|e| Err(std::io::Error::other(e)))
             }
             _ = tokio::signal::ctrl_c() => {
-                // Ctrl+C received — terminate display child so we can proceed to cleanup
                 nix::sys::signal::kill(
                     nix::unistd::Pid::from_raw(display_pid as i32),
                     nix::sys::signal::Signal::SIGTERM,
@@ -864,28 +959,17 @@ async fn run_unified_with_session(
         }
     };
 
-    // Clean up: tmux panes and server — browser-server handles its own lifecycle
-    if let Err(e) = Command::new("tmux")
-        .args(["kill-pane", "-t", &edit_pane_id])
-        .output()
-    {
-        tracing::debug!("failed to kill edit pane: {e}");
-    }
-
-    if let Some(ref tree_pane) = tree_pane_id
-        && let Err(e) = Command::new("tmux")
-            .args(["kill-pane", "-t", tree_pane])
+    // Clean up: kill all non-display panes, then abort server
+    for pane in &panes {
+        if pane.command == config::PanelCommand::Display {
+            continue;
+        }
+        if let Err(e) = Command::new("tmux")
+            .args(["kill-pane", "-t", &pane.pane_id])
             .output()
-    {
-        tracing::debug!("failed to kill tree pane: {e}");
-    }
-
-    if let Some(ref perm_pane) = perm_pane_id
-        && let Err(e) = Command::new("tmux")
-            .args(["kill-pane", "-t", perm_pane])
-            .output()
-    {
-        tracing::debug!("failed to kill permission pane: {e}");
+        {
+            tracing::debug!("failed to kill {} pane {}: {e}", pane.command, pane.pane_id);
+        }
     }
 
     server_handle.abort();

@@ -83,6 +83,9 @@ Run `cargo fmt` and `cargo clippy` after each change to ensure consistent format
 # Inside a tmux session - starts server + display + edit panes
 cargo run -p tcode
 
+# Use a config profile (~/.tcode/config-work.toml)
+cargo run -p tcode -- -p work
+
 # Attach to a previous session (interactive picker or --session <id>)
 cargo run -p tcode -- attach                  # Interactive picker
 cargo run -p tcode -- --session <id> attach   # Direct
@@ -92,6 +95,8 @@ cargo run -p tcode -- serve     # Server only
 cargo run -p tcode -- edit      # Editor pane (connects to running server)
 cargo run -p tcode -- display   # Display pane (connects to running server)
 ```
+
+Provider, model, API key, and other settings are configured via `~/.tcode/config.toml` (auto-created on first run). See [tcode/README.md](tcode/) for full configuration details.
 
 Session data is stored at `~/.tcode/sessions/{session_id}/`.
 
