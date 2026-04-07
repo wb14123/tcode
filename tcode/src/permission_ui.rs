@@ -1088,13 +1088,19 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
     }
 
     loop {
-        // Drain filesystem events and check for PermissionUpdated
+        // Drain filesystem events, then check for PermissionUpdated once.
+        // We must NOT call check_for_permission_updates inside the while loop
+        // because it does File::open(), which generates an inotify OPEN event
+        // (notify 8.x registers WatchMask::OPEN). With two permission windows,
+        // each process's reads trigger the other's watcher, creating a
+        // cross-process amplification loop of hundreds of redundant file opens.
         let mut need_refresh = false;
+        let mut fs_changed = false;
         while fs_rx.try_recv().is_ok() {
-            // Any change to the display file might contain PermissionUpdated
-            if check_for_permission_updates(&display_path, &mut file_offset) {
-                need_refresh = true;
-            }
+            fs_changed = true;
+        }
+        if fs_changed && check_for_permission_updates(&display_path, &mut file_offset) {
+            need_refresh = true;
         }
 
         if need_refresh {
