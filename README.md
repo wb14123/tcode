@@ -19,15 +19,7 @@ A terminal-based coding agent powered by neovim and tmux.
 
 ## Quick Start
 
-**Start with the [Getting Started](docs/01-getting-started.md) guide for prerequisites, installation, and a walkthrough of the UI.**
-
-Or if you just want to jump in:
-
-```bash
-./install.sh                # build and install
-# edit ~/.tcode/config.toml — set provider and API key
-tcode                       # run inside tmux
-```
+Start with the [Getting Started](docs/01-getting-started.md) guide for prerequisites, installation, and a walkthrough of the UI.
 
 More user docs:
 
