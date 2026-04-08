@@ -1,5 +1,7 @@
 # browser-server
 
+> For browser setup instructions, see [docs/06-browser.md](../docs/06-browser.md).
+
 A standalone headless Chrome server that exposes `web_search` and `web_fetch` as REST APIs over a Unix socket or TCP.
 
 ## Architecture

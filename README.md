@@ -1,69 +1,54 @@
 # tcode
 
-A Rust workspace for building LLM-powered coding agents. The primary application is **tcode**, a terminal-based coding agent (similar to Claude Code or Codex) that leverages neovim and tmux for its UI.
+A terminal-based coding agent powered by neovim and tmux.
 
-## Workspace Structure
+## Features
 
-```
-tcode/                Root workspace
-├── llm-rs/            Core LLM library (provider abstraction, conversations, tool system)
-├── llm-rs-macros/     Proc macros for tool definition (#[tool] attribute)
-├── browser-server/    Headless Chrome server (web_search/web_fetch REST APIs)
-├── tools/             Built-in tools (thin API clients for browser-server)
-└── tcode/             Terminal coding agent application (server + neovim/tmux clients)
-```
+- **Built on neovim and tmux**. Your keybindings, plugins, and muscle memory carry over.
+  - Tree-sitter syntax highlighting and render-markdown support in the display pane
+  - Configurable tmux pane layout (display, edit, tree, permissions — arrange however you like)
+- **Subagent tree view** — see all subagents and tool calls in a live hierarchy, open any subagent's conversation, cancel running ones
+- **Permission dashboard** — see every permission the agent currently has at a glance, approve or revoke individually, with session and project-level persistence
+- Headless Chrome for web search and web fetch — log in with your own accounts (Kagi, Google, etc.)
+- Token usage tracking per conversation and subagent
+- **Powered by llm-rs**, a standalone LLM library built from scratch for this project:
+  - Provider-agnostic trait with streaming — currently supports Claude, OpenAI, and OpenRouter
+  - `#[tool]` proc macro for defining tools from plain function signatures
+  - Conversation manager with multi-turn subagents and cancellation
 
-## Architecture Overview
 
-```
-┌──────────────────────────────────────────────────────┐
-│  tcode (Application)                                 │
-│  Server-client architecture over Unix sockets        │
-│  UI via neovim buffers + tmux panes                  │
-│                                                      │
-│  ┌─────────┐  ┌──────────┐  ┌───────────────────┐   │
-│  │ Display  │  │  Edit    │  │  Tool Call Viewer │   │
-│  │ (neovim) │  │ (neovim) │  │  (neovim)         │   │
-│  └────┬─────┘  └────┬─────┘  └───────────────────┘   │
-│       │ JSONL files  │ Unix socket                    │
-│       └──────┬───────┘                                │
-│              ▼                                        │
-│         Server Process                                │
-│              │                                        │
-├──────────────┼────────────────────────────────────────┤
-│              ▼                                        │
-│  llm-rs (Core Library)                                │
-│  ├─ ConversationManager (multi-round chat loop)      │
-│  │   └─ Multi-turn subagents (resumable, depth-limited)│
-│  ├─ LLM trait (provider-agnostic streaming interface)│
-│  │   ├─ OpenAI impl (Responses API)                  │
-│  │   ├─ OpenRouter impl (Chat Completions API)       │
-│  │   └─ Claude impl (Messages API with OAuth)        │
-│  ├─ Permission system (tool access control)           │
-│  └─ Tool system (streaming execution with timeouts)  │
-│                                                      │
-│  tools (Built-in Tools)                              │
-│  ├─ web_fetch (API client → browser-server)          │
-│  └─ web_search (API client → browser-server)         │
-│                                                      │
-│  browser-server (Shared Browser Process)             │
-│  ├─ Headless Chrome management + tab pooling         │
-│  ├─ REST API (Unix socket or TCP)                    │
-│  └─ Auto-started by tcode, shared across instances   │
-│                                                      │
-│  llm-rs-macros                                       │
-│  └─ #[tool] proc macro for tool definitions          │
-└──────────────────────────────────────────────────────┘
+## Quick Start
+
+Start with the [Getting Started](docs/01-getting-started.md) guide for prerequisites, installation, and a walkthrough of the UI.
+
+Or if you just want to jump in:
+
+```bash
+./install.sh                # build and install
+# edit ~/.tcode/config.toml — set provider and API key
+tcode                       # run inside tmux
 ```
 
-## Key Design Decisions
+More user docs:
 
-- **Terminal-native**: Uses neovim and tmux rather than building a custom GUI. Users get familiar keybindings and extensibility for free.
-- **Server-client over Unix sockets**: The server manages the conversation and writes JSONL event files. Clients (display, edit, tool-call viewer) are separate neovim processes that read those files. This allows flexible multi-pane layouts via tmux.
-- **Streaming everywhere**: LLM responses and tool outputs stream incrementally through async Rust streams for low-latency feedback.
-- **Provider-agnostic LLM trait**: The `LLM` trait abstracts providers. Currently implemented for OpenAI (Responses API), OpenRouter (Chat Completions API), and Claude (Messages API with OAuth). Adding new providers means implementing one trait.
-- **Macro-based tool definitions**: The `#[tool]` proc macro generates JSON schema, deserialization, and `Tool` construction from a plain function signature.
-- **Tool permission system**: A centralized `PermissionManager` mediates tool access to sensitive resources (e.g., hostnames for `web_fetch`). Users approve/deny via a TUI pane with session and project-level persistence. Tools block individually — other tools run concurrently while one awaits approval.
+- [Configuration](docs/02-configuration.md) — config file reference, providers, layout, shortcuts
+- [Commands](docs/03-commands.md) — full CLI reference
+- [Keybindings](docs/04-keybindings.md) — display, edit, tree, and permission views
+- [Neovim Setup](docs/05-neovim.md) — render-markdown, tree-sitter, plugin compatibility
+- [Browser Setup](docs/06-browser.md) — Chrome setup for web tools
+
+## Crate Map
+
+Each crate has its own README with architecture and developer documentation.
+
+- [**tcode**](tcode/) — Terminal application — server, display, edit, tree, permission clients
+- [**llm-rs**](llm-rs/) — Core library — LLM provider abstraction, conversation management, tools, permissions
+- [**llm-rs-macros**](llm-rs-macros/) — Proc macros for tool definitions (`#[tool]` attribute)
+- [**tools**](tools/) — Built-in tool implementations (web_search, web_fetch API clients)
+- [**browser-server**](browser-server/) — Headless Chrome server for web search/fetch (REST API over Unix socket or TCP)
+- [**tree-sitter-tcode**](tree-sitter-tcode/) — Tree-sitter grammar for tcode conversation format
+- [**lsp-client**](lsp-client/) — LSP client for code intelligence tools
+- [**auth**](auth/) — OAuth authentication
 
 ## Building
 
@@ -76,36 +61,3 @@ cargo clippy          # Lint code
 ```
 
 Run `cargo fmt` and `cargo clippy` after each change to ensure consistent formatting and catch common issues.
-
-## Running tcode
-
-```bash
-# Inside a tmux session - starts server + display + edit panes
-cargo run -p tcode
-
-# Use a config profile (~/.tcode/config-work.toml)
-cargo run -p tcode -- -p work
-
-# Attach to a previous session (interactive picker or --session <id>)
-cargo run -p tcode -- attach                  # Interactive picker
-cargo run -p tcode -- --session <id> attach   # Direct
-
-# Or start components separately
-cargo run -p tcode -- serve     # Server only
-cargo run -p tcode -- edit      # Editor pane (connects to running server)
-cargo run -p tcode -- display   # Display pane (connects to running server)
-```
-
-Provider, model, API key, and other settings are configured via `~/.tcode/config.toml` (auto-created on first run). See [tcode/README.md](tcode/) for full configuration details.
-
-Session data is stored at `~/.tcode/sessions/{session_id}/`.
-
-## Crate Details
-
-See each crate's README for more details:
-
-- [llm-rs/](llm-rs/) - Core LLM library
-- [llm-rs-macros/](llm-rs-macros/) - Procedural macros
-- [browser-server/](browser-server/) - Headless Chrome browser server
-- [tools/](tools/) - Built-in tools
-- [tcode/](tcode/) - Terminal application
