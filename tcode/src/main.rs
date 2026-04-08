@@ -16,6 +16,7 @@ mod tty_stdio;
 #[cfg(test)]
 mod config_tests;
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -31,9 +32,13 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing_subscriber::EnvFilter;
 
 /// Escape a string for use inside a Lua single-quoted string literal.
-/// Replaces `\` with `\\` and `'` with `\'` to prevent injection.
+/// Replaces `\` with `\\`, `'` with `\'`, and newlines/carriage returns
+/// with their escape sequences to prevent injection and syntax errors.
 pub(crate) fn lua_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
+    s.replace('\\', "\\\\")
+        .replace('\'', "\\'")
+        .replace('\n', "\\n")
+        .replace('\r', "\\r")
 }
 
 /// LLM provider selection
@@ -291,13 +296,34 @@ const HIGHLIGHTS_SCM: &str = include_str!("../../tree-sitter-tcode/queries/highl
 /// Uses `<session_dir>/lua/` so each session gets its own copy (avoids conflicts
 /// between concurrent sessions running different binary versions).
 /// Also writes `queries/tcode/{injections,highlights}.scm` under `session_dir`.
-fn ensure_lua_files(session_dir: &Path) -> Result<PathBuf> {
+fn ensure_lua_files(session_dir: &Path, shortcuts: &HashMap<String, String>) -> Result<PathBuf> {
     let lua_dir = session_dir.join("lua");
     std::fs::create_dir_all(&lua_dir)
         .with_context(|| format!("Failed to create lua cache directory {:?}", lua_dir))?;
     let lua_file = lua_dir.join("tcode.lua");
-    std::fs::write(&lua_file, TCODE_LUA)
-        .with_context(|| format!("Failed to write embedded tcode.lua to {:?}", lua_file))?;
+
+    // Build shortcuts preamble (must come before the module code since it ends with `return M`)
+    let content = if shortcuts.is_empty() {
+        TCODE_LUA.to_string()
+    } else {
+        use std::fmt::Write;
+        let mut preamble = String::from("_G.tcode_shortcuts = {\n");
+        for (name, template) in shortcuts {
+            writeln!(
+                preamble,
+                "  ['{}'] = '{}',",
+                lua_escape(name),
+                lua_escape(template)
+            )
+            .expect("writing to String cannot fail");
+        }
+        preamble.push_str("}\n\n");
+        preamble.push_str(TCODE_LUA);
+        preamble
+    };
+
+    std::fs::write(&lua_file, content)
+        .with_context(|| format!("Failed to write tcode.lua to {:?}", lua_file))?;
 
     // Write tree-sitter query files for the tcode filetype
     let queries_dir = session_dir.join("queries").join("tcode");
@@ -426,7 +452,8 @@ async fn main() -> Result<()> {
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
-            let lua_dir = ensure_lua_files(session.session_dir())?;
+            let config = load_cfg()?;
+            let lua_dir = ensure_lua_files(session.session_dir(), &config.shortcuts)?;
             let client = EditClient::new(session, lua_dir, conversation_id);
             client.run().await
         }
@@ -434,7 +461,8 @@ async fn main() -> Result<()> {
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id.clone())?;
-            let lua_dir = ensure_lua_files(session.session_dir())?;
+            let config = load_cfg()?;
+            let lua_dir = ensure_lua_files(session.session_dir(), &config.shortcuts)?;
             let runtime_dir = session.session_dir().clone();
             let client = DisplayClient::new(session, lua_dir, session_id, runtime_dir);
             client.run().await
@@ -443,7 +471,8 @@ async fn main() -> Result<()> {
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
-            let lua_dir = ensure_lua_files(session.session_dir())?;
+            let config = load_cfg()?;
+            let lua_dir = ensure_lua_files(session.session_dir(), &config.shortcuts)?;
             let client = ToolCallDisplayClient::new(session, lua_dir, tool_call_id);
             client.run().await
         }

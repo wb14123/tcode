@@ -1,9 +1,10 @@
 use anyhow::{Result, bail};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::fmt;
 use std::path::PathBuf;
 
-#[derive(Debug, Clone, Deserialize, Default)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TcodeConfig {
     pub provider: Option<String>,
@@ -16,7 +17,28 @@ pub struct TcodeConfig {
     pub browser_server_url: Option<String>,
     pub browser_server_token: Option<String>,
     pub search_engine: Option<String>,
+    #[serde(default = "default_shortcuts")]
+    pub shortcuts: HashMap<String, String>,
     pub layout: Option<LayoutNode>,
+}
+
+impl Default for TcodeConfig {
+    fn default() -> Self {
+        Self {
+            provider: None,
+            api_key: None,
+            model: None,
+            base_url: None,
+            subagent_max_iterations: None,
+            max_subagent_depth: None,
+            subagent_model_selection: None,
+            browser_server_url: None,
+            browser_server_token: None,
+            search_engine: None,
+            shortcuts: default_shortcuts(),
+            layout: None,
+        }
+    }
 }
 
 impl TcodeConfig {
@@ -252,6 +274,16 @@ impl<'de> Deserialize<'de> for LayoutNode {
     }
 }
 
+fn default_shortcuts() -> HashMap<String, String> {
+    HashMap::from([
+        ("brainstorm".to_string(), "This is a brainstorm to get the requirements and features more clear. Do not implement anything. Ask me questions if there is anything not clear".to_string()),
+        ("plan".to_string(), "Design and plan first. Do not implement or change any code before I confirm. Ask me questions if there is anything not clear. Break it into multiple steps if necessary. Do not need to include implementation details like what exact code to add or replace (but can include the important code if it makes sense to be in plan/design doc.)".to_string()),
+        ("save-plan".to_string(), "Save the plan to `plan.md`. Include all the details so that it can be used for implementation in a fresh LLM session. Do not need to include implementation details like what exact code to add or replace (but can include the important code if it makes sense to be in plan/design doc.)".to_string()),
+        ("implement-plan".to_string(), "Implement plan.md. Ask me questions if there is anything not clear. Use subagent to implement each step if needed, so that you keep your context window clean for large changes and can supervise the overall correctness.".to_string()),
+        ("review".to_string(), "Use a subagent to review the change. Only include enough info for the subagent to understand the context. Focus on correctness, edge cases, potential bugs, security, code cleanliness, and dead code. Do not need to pass changes to subagent, it can use git to figure out the changes.".to_string()),
+    ])
+}
+
 const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # Uncomment and modify values as needed.
 
@@ -265,6 +297,33 @@ const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # browser_server_url = ""
 # browser_server_token = ""
 # search_engine = "kagi"           # kagi | google
+
+[shortcuts]
+brainstorm = """\
+  This is a brainstorm to get the requirements and features more clear. \
+  Do not implement anything. \
+  Ask me questions if there is anything not clear"""
+plan = """\
+  Design and plan first. Do not implement or change any code before I confirm. \
+  Ask me questions if there is anything not clear. \
+  Break it into multiple steps if necessary. \
+  Do not need to include implementation details like what exact code to add or replace \
+  (but can include the important code if it makes sense to be in plan/design doc.)"""
+save-plan = """\
+  Save the plan to `plan.md`. \
+  Include all the details so that it can be used for implementation in a fresh LLM session. \
+  Do not need to include implementation details like what exact code to add or replace \
+  (but can include the important code if it makes sense to be in plan/design doc.)"""
+implement-plan = """\
+  Implement plan.md. \
+  Ask me questions if there is anything not clear. \
+  Use subagent to implement each step if needed, so that you keep your context window \
+  clean for large changes and can supervise the overall correctness."""
+review = """\
+  Use a subagent to review the change. \
+  Only include enough info for the subagent to understand the context. \
+  Focus on correctness, edge cases, potential bugs, security, code cleanliness, and dead code. \
+  Do not need to pass changes to subagent, it can use git to figure out the changes."""
 
 # [layout]
 # split = "horizontal"

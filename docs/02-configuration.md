@@ -34,6 +34,9 @@ subagent_model_selection = false
 browser_server_url = ""          # remote browser-server URL (TCP mode)
 browser_server_token = ""        # bearer token for remote browser-server
 search_engine = "kagi"           # kagi | google
+
+[shortcuts]                      # see Shortcut Templates section below
+brainstorm = "..."
 ```
 
 ## Providers
@@ -106,11 +109,7 @@ See [06-browser.md](06-browser.md) for browser setup details.
 
 ## Shortcut Templates
 
-Shortcuts let you expand short names into full prompts in the edit buffer.
-
-**File:** `~/.tcode/shortcuts.lua`
-
-**Setup:** Copy from `tcode/config/shortcuts.lua`, or let `install.sh` copy it automatically.
+Shortcuts let you expand short names into full prompts in the edit buffer. They are defined in the `[shortcuts]` section of your config file.
 
 **Usage:**
 
@@ -119,15 +118,18 @@ Shortcuts let you expand short names into full prompts in the edit buffer.
 3. Typing narrows the popup to matching shortcuts.
 4. Press Tab on an exact match to expand it, or press Enter on a popup selection to expand.
 
-Example `shortcuts.lua`:
+tcode ships with 5 built-in shortcuts (`brainstorm`, `plan`, `save-plan`, `implement-plan`, `review`). If no `[shortcuts]` section exists in your config, the defaults are used. To customize, add a `[shortcuts]` section:
 
-```lua
-return {
-  review = [[Review this code for correctness and edge cases.]],
-  explain = "Explain this code in detail.",
-  ["my-shortcut"] = [[Use ["quoted-key"] syntax for names with hyphens.]],
-}
+```toml
+[shortcuts]
+brainstorm = "This is a brainstorm. Do not implement anything."
+plan = """\
+  Design and plan first. Do not implement or change any code before I confirm. \
+  Ask me questions if there is anything not clear."""
+my-shortcut = "Custom shortcut text here."
 ```
+
+Use TOML multi-line strings (`"""\...\"""`) with trailing backslashes for long templates. Setting `[shortcuts]` to an empty section disables all shortcuts.
 
 ## CLAUDE.md
 

@@ -1653,28 +1653,11 @@ function M.setup_tool_call_display(tool_call_file, status_file)
 end
 
 -- Setup edit window for composing messages
--- Load shortcut templates from ~/.tcode/shortcuts.lua
+-- Load shortcut templates from config (injected by Rust via _G.tcode_shortcuts)
 -- Returns a table: { shortcut_name = "expanded text", ... }
--- Returns empty table if file doesn't exist or has errors.
+-- Returns empty table if no shortcuts configured.
 local function load_shortcuts()
-  local path = vim.fn.expand('~/.tcode/shortcuts.lua')
-  -- Check if file exists before trying to load
-  local f = io.open(path, 'r')
-  if not f then
-    return {}
-  end
-  f:close()
-
-  local ok, result = pcall(dofile, path)
-  if ok and type(result) == 'table' then
-    return result
-  end
-  -- File exists but failed to load — warn the user
-  local err_msg = not ok and tostring(result) or 'did not return a table'
-  vim.schedule(function()
-    vim.notify('shortcuts.lua: ' .. err_msg, vim.log.levels.WARN)
-  end)
-  return {}
+  return _G.tcode_shortcuts or {}
 end
 
 -- Attempt to expand a /shortcut at the cursor position.
@@ -1877,7 +1860,7 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
     end)
   end, { buffer = true, silent = true, desc = 'Open pending tool approvals' })
 
-  -- Load shortcuts from ~/.tcode/shortcuts.lua
+  -- Load shortcuts from config
   local shortcuts = load_shortcuts()
 
   -- Set up shortcut keybindings if shortcuts are available

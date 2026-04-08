@@ -34,7 +34,6 @@ The install script does the following:
 1. Builds the release binaries and tree-sitter grammar (`cargo build --release`)
 2. Copies `tcode` and `browser-server` to `/usr/bin`
 3. Copies `libtree-sitter-tcode.so` to `/usr/lib`
-4. Copies the default `shortcuts.lua` to `~/.tcode/`
 
 ## Set up render-markdown (recommended)
 
@@ -149,7 +148,7 @@ tcode comes with built-in prompt shortcuts that save typing for common workflows
 - `/save-plan` + Tab — asks the agent to save a plan to `plan.md`
 - `/implement-plan` + Tab — asks the agent to implement an existing `plan.md`
 
-Typing `/` at the start of a line or after a space shows a completion popup with all available shortcuts. You can customize these by editing `~/.tcode/shortcuts.lua` — see [02-configuration.md](02-configuration.md#shortcut-templates) for details.
+Typing `/` at the start of a line or after a space shows a completion popup with all available shortcuts. You can customize these in the `[shortcuts]` section of your config file — see [02-configuration.md](02-configuration.md#shortcut-templates) for details.
 
 ### Monitoring subagents and tool calls
 
