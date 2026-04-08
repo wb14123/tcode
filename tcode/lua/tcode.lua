@@ -235,16 +235,8 @@ end
 ---   "cache read" = cache_read_input_tokens (tokens cheaply served from cache)
 ---   "out" = output_tokens
 local function render_info(buf, ns, data, token_prefix, insert_at)
-  local info_line
-  if insert_at then
-    insert_lines_at(buf, insert_at, { '► INFO' })
-    info_line = insert_at
-  else
-    append_lines(buf, { '► INFO' })
-    info_line = vim.api.nvim_buf_line_count(buf) - 1
-  end
-
-  -- Collect virtual text parts for tokens/status metadata
+  -- Collect virtual text parts for tokens/status metadata FIRST,
+  -- so we can skip writing the buffer line entirely when there's nothing to show.
   local virt_parts = {}
   if data.input_tokens and data.output_tokens then
     local has_tokens = not token_prefix or (data.input_tokens > 0 or data.output_tokens > 0)
@@ -273,14 +265,31 @@ local function render_info(buf, ns, data, token_prefix, insert_at)
     table.insert(virt_parts, { prefix .. data.end_status .. ']', 'TCodeError' })
   end
 
-  -- Render tokens/status as virtual text (always set to conceal separator text)
+  local has_error = type(data.error) == 'string' and data.error ~= ''
+
+  -- Nothing to display: skip writing the buffer line + extmark entirely
+  if #virt_parts == 0 and not has_error then
+    return nil
+  end
+
+  -- Write the separator line to the buffer
+  local info_line
+  if insert_at then
+    insert_lines_at(buf, insert_at, { '► INFO' })
+    info_line = insert_at
+  else
+    append_lines(buf, { '► INFO' })
+    info_line = vim.api.nvim_buf_line_count(buf) - 1
+  end
+
+  -- Render tokens/status as virtual text overlay to conceal separator text
   vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
-    virt_text = #virt_parts > 0 and virt_parts or { { '', '' } },
+    virt_text = #virt_parts > 0 and virt_parts or { { '► ERROR', 'TCodeError' } },
     virt_text_pos = 'overlay',
   })
 
   -- Render error as real buffer text so it can wrap, be navigated, selected, copied
-  if type(data.error) == 'string' and data.error ~= '' then
+  if has_error then
     if insert_at then
       insert_lines_at(buf, info_line + 1, { '' })
       local error_start_line = info_line + 1
@@ -1139,28 +1148,22 @@ local function render_event(buf, ns, event)
   elseif variant == 'AssistantRequestEnd' then
     append_lines(buf, { '► END' })
     local info_line = vim.api.nvim_buf_line_count(buf) - 1
-    if data.total_input_tokens and data.total_output_tokens then
-      local text
-      -- Same semantics as render_info: "in" = processed, "cache read" = served from cache
-      local total_cache_read = data.total_cache_read_tokens or 0
-      local total_processed_input = data.total_input_tokens + (data.total_cache_creation_tokens or 0)
-      if total_cache_read > 0 then
-        text = string.format('[Total: %d in / %d cache read / %d out tokens]',
-          total_processed_input, total_cache_read, data.total_output_tokens)
-      else
-        text = string.format('[Total: %d in / %d out tokens]',
-          total_processed_input, data.total_output_tokens)
-      end
-      vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
-        virt_text = { { text, 'TCodeTokens' } },
-        virt_text_pos = 'overlay',
-      })
+    local text
+    -- Same semantics as render_info: "in" = processed, "cache read" = served from cache
+    local total_cache_read = data.total_cache_read_tokens or 0
+    local total_processed_input = (data.total_input_tokens or 0) + (data.total_cache_creation_tokens or 0)
+    local total_output = data.total_output_tokens or 0
+    if total_cache_read > 0 then
+      text = string.format('[Total: %d in / %d cache read / %d out tokens]',
+        total_processed_input, total_cache_read, total_output)
     else
-      vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
-        virt_text = { { '', '' } },
-        virt_text_pos = 'overlay',
-      })
+      text = string.format('[Total: %d in / %d out tokens]',
+        total_processed_input, total_output)
     end
+    vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
+      virt_text = { { text, 'TCodeTokens' } },
+      virt_text_pos = 'overlay',
+    })
   end
 end
 
