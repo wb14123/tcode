@@ -2,6 +2,10 @@
 
 A terminal-based coding agent powered by neovim and tmux.
 
+<p align="center">
+  <img src="assets/demo.gif" alt="demo"/>
+</p>
+
 ## Features
 
 - **Built on neovim and tmux**. Your keybindings, plugins, and muscle memory carry over.
