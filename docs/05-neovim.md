@@ -37,7 +37,7 @@ tcode includes a custom tree-sitter grammar (`tree-sitter-tcode`) that parses th
 - `injections.scm` tells neovim to parse each content block as markdown.
 - At runtime, tcode loads the parser via `vim.treesitter.language.add()` and writes query files into the session directory.
 
-**Installation:** `install.sh` compiles the shared library (`libtree-sitter-tcode.so` / `.dylib`) via `make` and copies it to `/usr/lib`. The parser is then found automatically by the tcode binary at startup.
+**Installation:** The shared library (`libtree-sitter-tcode.so` / `.dylib`) is compiled automatically by the tcode crate's `build.rs` during `cargo build`. `install.sh` copies it from `target/release/` to `/usr/lib`. The parser is then found automatically by the tcode binary at startup.
 
 ## Plugin Compatibility Notes
 

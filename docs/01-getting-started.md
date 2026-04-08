@@ -16,7 +16,9 @@ There are no pre-built binaries yet, so building from source is currently the on
 
 - **Rust toolchain** -- install via [rustup](https://rustup.rs/).
 
-- **make and a C compiler** -- needed to build the tree-sitter grammar (`gcc` or `clang`).
+- **A C compiler** -- needed to build the tree-sitter grammar (`gcc` or `clang`).
+
+- **tree-sitter CLI** -- needed to generate the parser from the grammar. Install via `npm install -g tree-sitter-cli` or `cargo install tree-sitter-cli`.
 
 ## Installation
 
@@ -29,11 +31,10 @@ git clone <repo-url> && cd llm-rs
 
 The install script does the following:
 
-1. Builds the tree-sitter grammar (`make -C tree-sitter-tcode`)
-2. Builds the release binaries (`cargo build --release`)
-3. Copies `tcode` and `browser-server` to `/usr/bin`
-4. Copies `libtree-sitter-tcode.so` to `/usr/lib`
-5. Copies the default `shortcuts.lua` to `~/.tcode/`
+1. Builds the release binaries and tree-sitter grammar (`cargo build --release`)
+2. Copies `tcode` and `browser-server` to `/usr/bin`
+3. Copies `libtree-sitter-tcode.so` to `/usr/lib`
+4. Copies the default `shortcuts.lua` to `~/.tcode/`
 
 ## Set up render-markdown (recommended)
 
