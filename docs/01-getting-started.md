@@ -75,6 +75,8 @@ The default provider is `claude` and the default model is `claude-opus-4-6`. You
 
 ### Launch tcode
 
+> **The agent can read all files under the current directory by default.** tcode automatically grants the agent read access to everything inside the directory you launch it from — no approval prompt. Always `cd` into the specific project you want to work on before running `tcode`. Don't launch it from broad directories like `~` or `/`. See [07-permissions.md](07-permissions.md) for details.
+
 Open a tmux session and run:
 
 ```sh
@@ -135,7 +137,7 @@ When the agent tries to use a tool that requires permission (e.g., reading a fil
 
 - **From the permission pane:** Navigate to a pending request with `j`/`k` and press **Enter** to open the approval popup.
 
-Approved permissions are visible in the permission pane. You can navigate to any granted permission and press **Enter** to revoke it. This gives you a clear view of exactly what the agent can do at any point. See [04-keybindings.md](04-keybindings.md) for the full keybinding reference.
+Approved permissions are visible in the permission pane. You can navigate to any granted permission and press **Enter** to revoke it. This gives you a clear view of exactly what the agent can do at any point. See [07-permissions.md](07-permissions.md) for a full explanation of how permissions work (scopes, matching, adding permissions proactively, etc.) and [04-keybindings.md](04-keybindings.md) for the full keybinding reference.
 
 ### Using shortcuts
 
@@ -181,3 +183,4 @@ Detail views open as separate tmux windows. Use tmux window navigation to switch
 - [04-keybindings.md](04-keybindings.md) -- keyboard shortcuts
 - [05-neovim.md](05-neovim.md) -- neovim plugin setup
 - [06-browser.md](06-browser.md) -- browser and web tools setup
+- [07-permissions.md](07-permissions.md) -- how the permission system works
