@@ -128,3 +128,71 @@ return {
   ["my-shortcut"] = [[Use ["quoted-key"] syntax for names with hyphens.]],
 }
 ```
+
+## CLAUDE.md
+
+Place a `CLAUDE.md` file in your project root to inject custom instructions into every conversation. Its content is appended to the system prompt automatically.
+
+**Location:** `<project-root>/CLAUDE.md`
+
+**Behavior:**
+
+- Loaded every time the system prompt is built (both root agent and subagents).
+- The entire file content is appended to the end of the system prompt.
+- If the file doesn't exist, it is silently skipped.
+- No size limit is enforced — keep it concise for best results.
+
+Example `CLAUDE.md`:
+
+```markdown
+# Project Notes
+
+- This project uses parking_lot instead of std::sync.
+- Always run `cargo fmt` after making changes.
+- Prefer returning Result over unwrap in production code.
+```
+
+## Skills
+
+Skills are reusable instruction sets the agent can load on demand via a tool call. Unlike CLAUDE.md (which is always present in the system prompt), skills are only loaded when the agent decides they are relevant.
+
+**Directory structure:**
+
+```
+<skill-dir>/
+  my-skill/
+    SKILL.md
+    helper.sh        # optional companion files
+  another-skill/
+    SKILL.md
+```
+
+**Scan locations (first match wins):**
+
+1. `<project-root>/.tcode/skills/`
+2. `<project-root>/.claude/skills/`
+3. `~/.tcode/skills/`
+4. `~/.claude/skills/`
+
+If the same skill name appears in multiple directories, the first one found is used and duplicates produce a warning.
+
+**SKILL.md format:** Markdown with optional YAML frontmatter:
+
+```markdown
+---
+name: my-skill
+description: One-line summary shown in skill listings
+when_to_use: Guidance for the agent on when to invoke this skill
+---
+
+Detailed instructions go here.
+
+Use ${CLAUDE_SKILL_DIR} to reference the skill's own directory.
+```
+
+**Key details:**
+
+- **Name:** Defaults to the directory name if not set in frontmatter. Capped at 100 characters.
+- **Companion files:** Each skill directory can include up to 10 additional files (non-recursive). These are listed alongside the skill content when loaded.
+- **`${CLAUDE_SKILL_DIR}`:** Replaced with the absolute path to the skill directory at load time, useful for referencing companion scripts or data files.
+- **Registration:** Skills are scanned once at startup. The `skill` tool is only registered if at least one skill is found.
