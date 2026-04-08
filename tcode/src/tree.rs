@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
@@ -1284,6 +1284,7 @@ pub fn run_tree(session: Session) -> Result<()> {
         .and_then(|n| n.to_str())
         .unwrap_or("unknown")
         .to_string();
+    let socket_path = session.socket_path();
 
     // Set up notify watcher
     let (fs_tx, fs_rx) = mpsc::channel();
@@ -1343,12 +1344,12 @@ pub fn run_tree(session: Session) -> Result<()> {
             // Clear status message on any key press
             state.status_message = None;
             // Handle Ctrl-k before plain k (cancel vs move up)
-            if key.code == KeyCode::Char('k')
-                && key
-                    .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL)
-            {
+            if key.code == KeyCode::Char('k') && key.modifiers.contains(KeyModifiers::CONTROL) {
                 state.cancel_selected();
+            } else if key.code == KeyCode::Char('p')
+                && key.modifiers.contains(KeyModifiers::CONTROL)
+            {
+                crate::permission_ui::approve_all_pending(&state.session_id, &socket_path);
             } else {
                 match key.code {
                     KeyCode::Char('q') => break,

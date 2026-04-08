@@ -1134,6 +1134,15 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
                 continue;
             }
             state.status_message = None;
+            if key.code == KeyCode::Char('p')
+                && key
+                    .modifiers
+                    .contains(crossterm::event::KeyModifiers::CONTROL)
+            {
+                approve_all_pending(&state.session_id, &socket_path);
+                state.refresh_from_server(&socket_path);
+                continue;
+            }
             match key.code {
                 KeyCode::Char('q') => break,
                 KeyCode::Down | KeyCode::Char('j') => state.move_down(),
