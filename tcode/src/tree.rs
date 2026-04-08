@@ -1245,7 +1245,7 @@ fn render_node_line(
 
     let type_color = match &node.kind {
         NodeType::Root { .. } => Color::Cyan,
-        NodeType::ToolCall { .. } => Color::Blue,
+        NodeType::ToolCall { .. } => Color::LightBlue,
         NodeType::SubAgent { .. } => Color::LightCyan,
     };
 
