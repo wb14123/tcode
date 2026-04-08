@@ -19,7 +19,7 @@ A terminal-based coding agent powered by neovim and tmux.
 
 ## Quick Start
 
-Start with the [Getting Started](docs/01-getting-started.md) guide for prerequisites, installation, and a walkthrough of the UI.
+**Start with the [Getting Started](docs/01-getting-started.md) guide for prerequisites, installation, and a walkthrough of the UI.**
 
 Or if you just want to jump in:
 
