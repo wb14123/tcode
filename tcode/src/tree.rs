@@ -1068,7 +1068,7 @@ fn render_tree(
                 Span::styled("k/↑", Style::default().fg(Color::Yellow)),
                 Span::raw(" up  "),
                 Span::styled("Space", Style::default().fg(Color::Yellow)),
-                Span::raw(" collapse  "),
+                Span::raw(" toggle  "),
                 Span::styled("Enter/o", Style::default().fg(Color::Yellow)),
                 Span::raw(" open  "),
             ]),
@@ -1077,8 +1077,6 @@ fn render_tree(
                 Span::raw(" cancel  "),
                 Span::styled("f", Style::default().fg(Color::Yellow)),
                 Span::raw(" running/all  "),
-                Span::styled("R", Style::default().fg(Color::Yellow)),
-                Span::raw(" refresh  "),
                 Span::styled("q", Style::default().fg(Color::Yellow)),
                 Span::raw(" quit"),
             ]),
@@ -1358,7 +1356,7 @@ pub fn run_tree(session: Session) -> Result<()> {
                     KeyCode::Char(' ') => state.toggle_collapse(),
                     KeyCode::Enter | KeyCode::Char('o') => state.open_detail(),
                     KeyCode::Char('f') => state.toggle_filter(),
-                    KeyCode::Char('R') => state.full_refresh(),
+
                     _ => {}
                 }
             }

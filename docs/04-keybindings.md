@@ -45,7 +45,6 @@ The tree view shows a hierarchical tree of subagents and tool calls.
 | `Enter` / `o` | Open detail in new tmux window |
 | `Ctrl-k` | Cancel selected subagent (running or idle) |
 | `f` | Toggle filter (running only / all) |
-| `R` | Full refresh |
 | `q` | Quit |
 
 ## Permission View
@@ -61,7 +60,6 @@ The permission view shows tool permissions organized by key, with their current 
 | `Enter` / `o` on granted permission | Open management popup (revoke) |
 | `Enter` / `o` on key node | Open add-permission popup |
 | `f` | Toggle filter (pending only / all) |
-| `R` | Full refresh |
 | `q` | Quit |
 
 Pressing `Enter` or `o` behaves differently depending on what is selected. On a pending permission, it opens a tmux popup with approval options. On a granted permission, it opens a management popup to revoke that permission. On a key node, it opens an add-permission popup where the user can type a value and choose between session or project scope.

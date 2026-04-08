@@ -100,7 +100,6 @@ struct PermissionTreeState {
     selected: usize,
     filter_pending_only: bool,
     session_id: String,
-    status_message: Option<String>,
     /// Frame counter for flash animation.
     frame_count: u64,
     /// Whether we've already sent a terminal bell for the current pending batch.
@@ -115,7 +114,6 @@ impl PermissionTreeState {
             selected: 0,
             filter_pending_only: false,
             session_id,
-            status_message: None,
             frame_count: 0,
             bell_sent: false,
         }
@@ -632,7 +630,7 @@ fn render_tree(
 ) -> Result<()> {
     terminal.draw(|frame| {
         let area = frame.area();
-        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).split(area);
+        let chunks = Layout::vertical([Constraint::Min(0), Constraint::Length(2)]).split(area);
 
         // Flash: toggle every 3 frames (~600ms cycle at 200ms poll)
         let flash_on = (state.frame_count / 3).is_multiple_of(2);
@@ -729,15 +727,25 @@ fn render_tree(
 
         frame.render_stateful_widget(list, chunks[0], list_state);
 
-        // Status bar
-        let status_text = state
-            .status_message
-            .as_deref()
-            .unwrap_or("j/k:nav  space:expand  o:open  f:filter  q:quit");
-        let status = Paragraph::new(Line::from(Span::styled(
-            status_text,
-            Style::default().fg(Color::DarkGray),
-        )));
+        // Help bar
+        let status = Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled(" j/↓", Style::default().fg(Color::Yellow)),
+                Span::raw(" down  "),
+                Span::styled("k/↑", Style::default().fg(Color::Yellow)),
+                Span::raw(" up  "),
+                Span::styled("Space", Style::default().fg(Color::Yellow)),
+                Span::raw(" toggle  "),
+                Span::styled("Enter/o", Style::default().fg(Color::Yellow)),
+                Span::raw(" action  "),
+            ]),
+            Line::from(vec![
+                Span::styled(" f", Style::default().fg(Color::Yellow)),
+                Span::raw(" pending/all  "),
+                Span::styled("q", Style::default().fg(Color::Yellow)),
+                Span::raw(" quit"),
+            ]),
+        ]);
         frame.render_widget(status, chunks[1]);
     })?;
     Ok(())
@@ -1133,7 +1141,6 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            state.status_message = None;
             if key.code == KeyCode::Char('p')
                 && key
                     .modifiers
@@ -1158,9 +1165,6 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
                 }
                 KeyCode::Char('f') => {
                     state.toggle_filter();
-                    state.refresh_from_server(&socket_path);
-                }
-                KeyCode::Char('R') => {
                     state.refresh_from_server(&socket_path);
                 }
                 _ => {}
