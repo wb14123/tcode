@@ -23,7 +23,13 @@ A terminal-based coding agent powered by neovim and tmux.
 
 ## Quick Start
 
-Start with the [Getting Started](docs/01-getting-started.md) guide for prerequisites, installation, and a walkthrough of the UI.
+Install the latest release:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/wb14123/llm-rs/main/install.sh | sh
+```
+
+Then follow the [Getting Started](docs/01-getting-started.md) guide for prerequisites, configuration, and a walkthrough of the UI.
 
 More user docs:
 
@@ -57,3 +63,20 @@ cargo clippy          # Lint code
 ```
 
 Run `cargo fmt` and `cargo clippy` after each change to ensure consistent formatting and catch common issues.
+
+## Releasing
+
+Requires [`cargo-release`](https://github.com/crate-ci/cargo-release): `cargo install cargo-release`.
+
+```sh
+# Bump version in all workspace Cargo.toml files, commit, tag, and push:
+cargo release 0.2.0 --execute
+```
+
+This creates a `v0.2.0` tag and pushes it. GitHub Actions then builds binaries for all 4 platforms and publishes a GitHub Release (~10 minutes).
+
+## Uninstall
+
+```sh
+sudo rm /usr/local/bin/tcode /usr/local/bin/browser-server /usr/local/lib/libtree-sitter-tcode.*
+```

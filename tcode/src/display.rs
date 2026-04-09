@@ -18,7 +18,7 @@ pub struct DisplayClient {
 
 /// Find the tree-sitter tcode parser library. Checks (in order):
 /// 1. Next to the executable (dev builds: `target/debug/`)
-/// 2. `../lib` relative to exe (installed: `/usr/bin` → `/usr/lib`)
+/// 2. `../lib` relative to exe (installed: `/usr/local/bin` → `/usr/local/lib`)
 fn parser_lib_path(exe_path: &Path) -> PathBuf {
     let name = if cfg!(target_os = "macos") {
         "libtree-sitter-tcode.dylib"
@@ -31,7 +31,7 @@ fn parser_lib_path(exe_path: &Path) -> PathBuf {
     if beside_exe.exists() {
         return beside_exe;
     }
-    // Check ../lib (e.g. /usr/bin/tcode → /usr/lib/)
+    // Check ../lib (e.g. /usr/local/bin/tcode → /usr/local/lib/)
     let lib_dir = exe_dir.join("../lib").join(name);
     if lib_dir.exists() {
         return lib_dir;

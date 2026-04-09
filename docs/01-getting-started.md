@@ -10,30 +10,46 @@ This guide walks you through installing tcode and running it for the first time.
 
 - **Chrome or Chromium** (optional) -- required only if you want to use the `web_search` and `web_fetch` tools. Run `tcode browser` to configure. See [06-browser.md](06-browser.md) for details.
 
-### Build dependencies
-
-There are no pre-built binaries yet, so building from source is currently the only install method. The following are only needed for the build and won't be required once binary releases are available.
-
-- **Rust toolchain** -- install via [rustup](https://rustup.rs/).
-
-- **A C compiler** -- needed to build the tree-sitter grammar (`gcc` or `clang`).
-
-- **tree-sitter CLI** -- needed to generate the parser from the grammar. Install via `npm install -g tree-sitter-cli` or `cargo install tree-sitter-cli`.
-
 ## Installation
 
-### Using the install script (recommended)
+### Install from binary release (recommended)
 
 ```sh
-git clone <repo-url> && cd llm-rs
-./install.sh
+curl -sSL https://raw.githubusercontent.com/wb14123/llm-rs/main/install.sh | sh
 ```
 
-The install script does the following:
+This downloads the latest release and installs:
+- `tcode` and `browser-server` to `/usr/local/bin`
+- `libtree-sitter-tcode.so` (or `.dylib` on macOS) to `/usr/local/lib`
 
-1. Builds the release binaries and tree-sitter grammar (`cargo build --release`)
-2. Copies `tcode` and `browser-server` to `/usr/bin`
-3. Copies `libtree-sitter-tcode.so` to `/usr/lib`
+To install a specific version:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/wb14123/llm-rs/main/install.sh | VERSION=v0.2.0 sh
+```
+
+> **macOS manual download:** If you download `.tar.gz` from GitHub Releases via a browser instead of using the install script, macOS may block the binaries. Run `xattr -d com.apple.quarantine /usr/local/bin/tcode /usr/local/bin/browser-server /usr/local/lib/libtree-sitter-tcode.dylib` to fix this.
+
+### Build from source
+
+Building from source requires:
+- **Rust toolchain** — install via [rustup](https://rustup.rs/)
+- **A C compiler** — needed to build the tree-sitter grammar (`gcc` or `clang`)
+- **Node.js** — required by `tree-sitter generate`
+- **tree-sitter CLI** — install via `npm install -g tree-sitter-cli`
+
+```sh
+git clone https://github.com/wb14123/llm-rs.git && cd llm-rs
+cargo build --release
+sudo install -m 755 target/release/tcode target/release/browser-server /usr/local/bin/
+sudo install -m 644 target/release/libtree-sitter-tcode.so /usr/local/lib/   # or .dylib on macOS
+```
+
+To uninstall:
+
+```sh
+sudo rm /usr/local/bin/tcode /usr/local/bin/browser-server /usr/local/lib/libtree-sitter-tcode.*
+```
 
 ## Set up render-markdown (recommended)
 
