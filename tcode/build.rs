@@ -51,13 +51,14 @@ fn main() {
     }
 
     // Compile the shared library.
-    let lib_name = if cfg!(target_os = "macos") {
+    let target_os = env::var("CARGO_CFG_TARGET_OS").unwrap_or_default();
+    let lib_name = if target_os == "macos" {
         "libtree-sitter-tcode.dylib"
     } else {
         "libtree-sitter-tcode.so"
     };
 
-    let shared_flag = if cfg!(target_os = "macos") {
+    let shared_flag = if target_os == "macos" {
         "-dynamiclib"
     } else {
         "-shared"

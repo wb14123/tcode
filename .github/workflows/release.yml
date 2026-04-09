@@ -18,7 +18,7 @@ jobs:
           - target: aarch64-unknown-linux-gnu
             runner: ubuntu-24.04-arm
           - target: x86_64-apple-darwin
-            runner: macos-13
+            runner: macos-14
           - target: aarch64-apple-darwin
             runner: macos-14
     runs-on: ${{ matrix.runner }}
@@ -28,6 +28,8 @@ jobs:
 
       - name: Install Rust stable
         uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
 
       - name: Install Node.js
         uses: actions/setup-node@v4
@@ -38,7 +40,7 @@ jobs:
         run: npm install -g tree-sitter-cli
 
       - name: Build
-        run: cargo build --release
+        run: cargo build --release --target ${{ matrix.target }}
 
       - name: Package
         run: |
@@ -50,7 +52,7 @@ jobs:
             LIB_EXT="so"
           fi
           tar -czf "tcode-${TAG}-${TARGET}.tar.gz" \
-            -C target/release \
+            -C "target/${TARGET}/release" \
             tcode \
             browser-server \
             "libtree-sitter-tcode.${LIB_EXT}"
