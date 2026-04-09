@@ -38,6 +38,7 @@ More user docs:
 - [Keybindings](docs/04-keybindings.md) — display, edit, tree, and permission views
 - [Neovim Setup](docs/05-neovim.md) — render-markdown, tree-sitter, plugin compatibility
 - [Browser Setup](docs/06-browser.md) — Chrome setup for web tools
+- [Permissions](docs/07-permissions.md) — permission system, scopes, and config
 
 ## Crate Map
 
