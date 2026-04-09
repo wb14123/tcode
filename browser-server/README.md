@@ -88,7 +88,7 @@ browser-server browser
 
 #### `browser-server browser`
 
-Launches a visible (non-headless) Chrome window with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) before running the server. The command blocks until the browser window is closed. Fails with an error if the profile is already locked by a running browser-server instance.
+Launches a visible (non-headless) Chrome window with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) before running the server. Log in to your accounts, then press Ctrl+C to exit the command (closing the Chrome window first is optional — session data is persisted to the profile directory as you use it). Fails with an error if the profile is already locked by a running browser-server instance.
 
 ### Options
 

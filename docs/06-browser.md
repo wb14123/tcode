@@ -36,7 +36,7 @@ Run `tcode browser` to launch Chrome with a persistent profile at `~/.tcode/chro
 
 Cookies, sessions, and all browser storage are saved in the persistent profile and reused by the headless browser-server. You only need to log in once — your sessions carry over across tcode restarts.
 
-This is a standalone command — it opens a visible Chrome window and does not interact with the browser-server process. Close the browser when done.
+This is a standalone command — it opens a visible Chrome window and does not interact with the browser-server process. When finished, press Ctrl+C in the terminal to exit (closing the Chrome window first is optional).
 
 ## Browser Server Configuration
 
