@@ -7,15 +7,15 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Result;
-use crossterm::event::{self, Event, KeyCode, KeyEventKind};
-use crossterm::execute;
-use crossterm::terminal::{
-    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
-};
 use llm_rs::permission::{ALL_SCOPES, PermissionState};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
+use ratatui::crossterm::execute;
+use ratatui::crossterm::terminal::{
+    EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
+};
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -1144,7 +1144,7 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
             if key.code == KeyCode::Char('p')
                 && key
                     .modifiers
-                    .contains(crossterm::event::KeyModifiers::CONTROL)
+                    .contains(ratatui::crossterm::event::KeyModifiers::CONTROL)
             {
                 approve_all_pending(&state.session_id, &socket_path);
                 state.refresh_from_server(&socket_path);

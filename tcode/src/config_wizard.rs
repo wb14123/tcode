@@ -9,7 +9,9 @@ use std::io::{ErrorKind, Write};
 use std::path::Path;
 
 use anyhow::{Context, Result, bail};
-use dialoguer::{Input, Select, theme::ColorfulTheme};
+use rustyline::Editor;
+use rustyline::error::ReadlineError;
+use rustyline::history::MemHistory;
 
 /// Default base URL for each supported provider string. Mirrors the values
 /// in `main.rs::Provider::default_base_url` so the wizard stays decoupled
@@ -98,26 +100,38 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
         );
     }
 
-    let theme = ColorfulTheme::default();
+    // One rustyline Editor reused across all prompts. `MemHistory` is pinned
+    // explicitly (rather than via `DefaultEditor`) so the history backend
+    // stays in-memory regardless of any future Cargo feature edits — the API
+    // key must never touch the filesystem via rustyline.
+    let mut rl: Editor<(), MemHistory> =
+        Editor::new().context("failed to initialize line editor")?;
 
     // --- Provider select --------------------------------------------------
-    let items = [
-        "claude           — Anthropic API key",
-        "claude-oauth     — Claude Pro/Max subscription (OAuth)",
-        "open-ai          — OpenAI API key",
-        "open-router      — OpenRouter API key",
-    ];
-    let idx = Select::with_theme(&theme)
-        .with_prompt("Select a provider")
-        .items(&items)
-        .interact()
-        .context("provider selection failed")?;
-    let choice = match idx {
-        0 => WizardChoice::Claude,
-        1 => WizardChoice::ClaudeOauth,
-        2 => WizardChoice::OpenAi,
-        3 => WizardChoice::OpenRouter,
-        other => bail!("unexpected provider selection index: {other}"),
+    println!("Select a provider:");
+    println!("  1) claude           — Anthropic API key");
+    println!("  2) claude-oauth     — Claude Pro/Max subscription (OAuth)");
+    println!("  3) open-ai          — OpenAI API key");
+    println!("  4) open-router      — OpenRouter API key");
+    let choice = loop {
+        let line = match rl.readline("Enter a number [1-4]: ") {
+            Ok(s) => s,
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                bail!("wizard cancelled");
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context("provider selection failed"));
+            }
+        };
+        match line.trim() {
+            "1" => break WizardChoice::Claude,
+            "2" => break WizardChoice::ClaudeOauth,
+            "3" => break WizardChoice::OpenAi,
+            "4" => break WizardChoice::OpenRouter,
+            other => {
+                println!("Invalid choice {other:?}; please enter 1, 2, 3, or 4.");
+            }
+        }
     };
     let provider_str = choice.provider_str();
 
@@ -126,11 +140,18 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
         None
     } else {
         let default_base_url = default_base_url_for(provider_str);
-        let base_url_input: String = Input::with_theme(&theme)
-            .with_prompt("Base URL")
-            .with_initial_text(default_base_url)
-            .interact_text()
-            .context("base URL input failed")?;
+        // `(default_base_url, "")` pre-fills the line and places the cursor
+        // at the end, so the user can edit in place with arrow keys and
+        // backspace.
+        let base_url_input = match rl.readline_with_initial("Base URL: ", (default_base_url, "")) {
+            Ok(s) => s,
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                bail!("wizard cancelled");
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context("base URL input failed"));
+            }
+        };
         let trimmed = base_url_input.trim();
         validate_no_control_chars("base URL", trimmed)?;
         if trimmed.is_empty() || trimmed == default_base_url.trim() {
@@ -151,14 +172,18 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
         None
     } else {
         let prompt = format!(
-            "API key (empty means no auth or use ${})",
+            "API key (empty means no auth or use ${}): ",
             choice.env_var_name()
         );
-        let raw: String = Input::with_theme(&theme)
-            .with_prompt(prompt)
-            .allow_empty(true)
-            .interact_text()
-            .context("API key input failed")?;
+        let raw = match rl.readline(&prompt) {
+            Ok(s) => s,
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                bail!("wizard cancelled");
+            }
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context("API key input failed"));
+            }
+        };
         let trimmed = raw.trim();
         if !trimmed.is_empty() {
             validate_no_control_chars("API key", trimmed)?;
