@@ -36,6 +36,8 @@ The **value** is the actual resource being permitted. What it looks like depends
 
 - **`path`** values are directory paths like `/home/user/myproject`. A file permission always covers the *directory* (and all its children), not a single file. So granting `file_write > path > /home/user/myproject` lets the agent write to any file inside `/home/user/myproject/`.
 
+  `path` permissions gate the dedicated file tools — `read`, `write`, `edit`, `glob`, `grep`, and LSP-backed lookups. Each of those tools consults your grants before touching the filesystem, so for them the restriction is real. It is **not** a filesystem sandbox: the check happens at the tool boundary, not at the OS level. Bash commands are handled separately, by best-effort syntax analysis of the command — see [Bash commands and file paths](#how-matching-works) below.
+
 - **`command`** values are command prefixes like `cargo` or `npm test`. Permissions use prefix matching, so granting `bash > command > cargo` covers `cargo build`, `cargo test`, `cargo clippy`, and so on.
 
 - **`hostname`** values are hostnames like `github.com` or `docs.rs`.
@@ -63,6 +65,10 @@ Permissions are **hierarchical**:
 - **Default read access to the current directory:** The agent can read any file inside the directory you launched tcode from — no permission prompt, no approval needed. This is granted automatically so the agent can explore the project without you having to approve every file read. Writing still requires explicit permission.
 
   > **Be mindful of where you launch tcode.** If you run `tcode` from `/home/user`, the agent can read everything under your home directory. Always launch tcode from the specific project directory you want to work in.
+
+- **Bash commands and file paths — best-effort analysis, not a sandbox.** When the agent runs a bash command, the permission system parses it with tree-sitter-bash and walks the syntax tree to pull out file paths it can recognize: arguments to a small whitelist of read-only commands (`cat`, `head`, `tail`, `wc`, `stat`, …), arguments to constructive-write commands (`mkdir`, `touch`), and shell redirections (`<`, `>`, `>>`). Those extracted paths *are* matched against your `file_read`/`file_write` grants, so granting `file_read > path > /home/user/myproject` will silently cover `cat /home/user/myproject/README.md` without a new prompt.
+
+  Beyond that whitelist, the permission system does not track file access. Everything else — `sed`, `python script.py`, `make`, a shell function, any binary on `$PATH` — is gated only by the `bash > command` prefix check. Once the prefix is approved (or a complex command is allowed once), the process runs with the full filesystem access of your OS user. **`file_read`/`file_write` path grants do not prevent a permitted bash command from reading or writing files outside those paths**, and the syntax analysis itself is best-effort: a sufficiently clever command line can defeat it. If you need real isolation, use OS-level tools (containers, VMs, dedicated user accounts).
 
 - **Special case — complex commands:** Commands with pipes (`|`), chaining (`&&`, `||`, `;`), or other shell constructs are always prompted as "allow once" only. These can't be safely cached by prefix because the overall command may do something very different from what a simple prefix suggests.
 
