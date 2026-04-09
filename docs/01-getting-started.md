@@ -17,7 +17,7 @@ This guide walks you through installing tcode and running it for the first time.
 ### Install from binary release (recommended)
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/wb14123/tcode/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/wb14123/tcode/refs/heads/master/install.sh | sh
 ```
 
 This downloads the latest release and installs:
