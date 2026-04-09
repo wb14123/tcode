@@ -14,6 +14,9 @@ use dialoguer::{Input, Select, theme::ColorfulTheme};
 /// Default base URL for each supported provider string. Mirrors the values
 /// in `main.rs::Provider::default_base_url` so the wizard stays decoupled
 /// from the `Provider` enum (which is private to `main.rs`).
+///
+/// Only called for the three API-key providers: `ClaudeOauth` skips the
+/// base URL prompt entirely, so `"claude-oauth"` is never passed here.
 fn default_base_url_for(provider: &str) -> &'static str {
     match provider {
         "claude" => "https://api.anthropic.com",
@@ -21,7 +24,7 @@ fn default_base_url_for(provider: &str) -> &'static str {
         "open-router" => "https://openrouter.ai/api/v1",
         other => unreachable!(
             "default_base_url_for called with unknown provider {other:?}; \
-             WizardChoice::provider_str must return one of the three known values"
+             the wizard only calls this for claude, open-ai, or open-router"
         ),
     }
 }
@@ -41,10 +44,10 @@ fn validate_no_control_chars(field: &str, value: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Identifier for the wizard's provider choice. Both `Claude` and
-/// `ClaudeOauth` write `provider = "claude"` to the config file — the
-/// `ClaudeOauth` variant just skips the API-key prompt and hints at
-/// `tcode claude-auth`.
+/// Identifier for the wizard's provider choice. `ClaudeOauth` writes
+/// `provider = "claude-oauth"` to the config file and skips both the
+/// base URL and API-key prompts; at runtime tcode loads OAuth tokens via
+/// `tcode claude-auth` and ignores `api_key` / `$ANTHROPIC_API_KEY`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WizardChoice {
     Claude,
@@ -56,17 +59,26 @@ enum WizardChoice {
 impl WizardChoice {
     fn provider_str(&self) -> &'static str {
         match self {
-            WizardChoice::Claude | WizardChoice::ClaudeOauth => "claude",
+            WizardChoice::Claude => "claude",
+            WizardChoice::ClaudeOauth => "claude-oauth",
             WizardChoice::OpenAi => "open-ai",
             WizardChoice::OpenRouter => "open-router",
         }
     }
 
+    /// Environment variable name for the provider's API key.
+    ///
+    /// Not defined for `ClaudeOauth`: the OAuth flow skips the API-key
+    /// prompt entirely, so this function is structurally unreachable for
+    /// that variant.
     fn env_var_name(&self) -> &'static str {
         match self {
-            WizardChoice::Claude | WizardChoice::ClaudeOauth => "ANTHROPIC_API_KEY",
+            WizardChoice::Claude => "ANTHROPIC_API_KEY",
             WizardChoice::OpenAi => "OPENAI_API_KEY",
             WizardChoice::OpenRouter => "OPENROUTER_API_KEY",
+            WizardChoice::ClaudeOauth => {
+                unreachable!("env_var_name called on WizardChoice::ClaudeOauth")
+            }
         }
     }
 }
@@ -109,54 +121,57 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
     };
     let provider_str = choice.provider_str();
 
-    // --- Base URL input ---------------------------------------------------
-    let default_base_url = default_base_url_for(provider_str);
-    let base_url_input: String = Input::with_theme(&theme)
-        .with_prompt("Base URL")
-        .with_initial_text(default_base_url)
-        .interact_text()
-        .context("base URL input failed")?;
-
-    // --- API key input (skipped for claude-oauth) ------------------------
-    let api_key_input: Option<String> = if choice == WizardChoice::ClaudeOauth {
+    // --- Base URL input (skipped for claude-oauth) -----------------------
+    let base_url_override: Option<String> = if choice == WizardChoice::ClaudeOauth {
         None
     } else {
-        let prompt = format!("API key (leave empty to use ${})", choice.env_var_name());
+        let default_base_url = default_base_url_for(provider_str);
+        let base_url_input: String = Input::with_theme(&theme)
+            .with_prompt("Base URL")
+            .with_initial_text(default_base_url)
+            .interact_text()
+            .context("base URL input failed")?;
+        let trimmed = base_url_input.trim();
+        validate_no_control_chars("base URL", trimmed)?;
+        if trimmed.is_empty() || trimmed == default_base_url.trim() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    };
+
+    // --- API key input (skipped for claude-oauth) ------------------------
+    //
+    // For the three API-key providers, empty input is a real value: it
+    // writes an uncommented `api_key = ""` line to the config file. At
+    // runtime, an empty `api_key` in the config falls back to the env var
+    // if set, or passes "" through to the LLM client (for self-hosted
+    // unauthenticated endpoints).
+    let api_key_override: Option<String> = if choice == WizardChoice::ClaudeOauth {
+        None
+    } else {
+        let prompt = format!(
+            "API key (empty means no auth or use ${})",
+            choice.env_var_name()
+        );
         let raw: String = Input::with_theme(&theme)
             .with_prompt(prompt)
             .allow_empty(true)
             .interact_text()
             .context("API key input failed")?;
-        Some(raw)
-    };
-
-    // --- Compute overrides ------------------------------------------------
-    let base_url_trimmed = base_url_input.trim();
-    validate_no_control_chars("base URL", base_url_trimmed)?;
-    let base_url_override: Option<&str> =
-        if base_url_trimmed.is_empty() || base_url_trimmed == default_base_url.trim() {
-            None
-        } else {
-            Some(base_url_trimmed)
-        };
-
-    let api_key_trimmed = api_key_input.as_ref().map(|s| s.trim());
-    if let Some(k) = api_key_trimmed
-        && !k.is_empty()
-    {
-        validate_no_control_chars("API key", k)?;
-    }
-    let api_key_override: Option<&str> = match api_key_trimmed {
-        Some(s) if !s.is_empty() => Some(s),
-        _ => None,
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            validate_no_control_chars("API key", trimmed)?;
+        }
+        Some(trimmed.to_string())
     };
 
     // --- Render file contents ---------------------------------------------
     let contents = substitute_template(
         crate::config::DEFAULT_CONFIG_TEMPLATE,
         provider_str,
-        base_url_override,
-        api_key_override,
+        base_url_override.as_deref(),
+        api_key_override.as_deref(),
     );
 
     // --- Write file atomically --------------------------------------------
@@ -175,13 +190,6 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
         println!();
         println!("Next: run `tcode claude-auth` to authenticate with your Claude");
         println!("Pro/Max account.");
-        if std::env::var("ANTHROPIC_API_KEY").is_ok() {
-            println!();
-            println!("WARNING: ANTHROPIC_API_KEY is currently set in your environment.");
-            println!("tcode will prefer the env var over your OAuth tokens. Unset it");
-            println!("(e.g. `unset ANTHROPIC_API_KEY`) before running tcode if you");
-            println!("want to use your Claude Pro/Max subscription credits.");
-        }
     }
 
     if first_run {

@@ -14,6 +14,35 @@ fn test_parse_minimal_config() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `provider = "claude-oauth"` is a distinct, first-class provider value
+/// that parses cleanly at the TOML layer. Runtime behavior (OAuth token
+/// loading) is exercised via `create_llm` integration paths, not here —
+/// this test only guards against regressions in TOML parsing.
+#[test]
+fn test_parse_claude_oauth_provider() -> anyhow::Result<()> {
+    let toml_str = r#"provider = "claude-oauth""#;
+    let config: TcodeConfig = toml::from_str(toml_str)?;
+    assert_eq!(config.provider.as_deref(), Some("claude-oauth"));
+    assert!(config.api_key.is_none());
+    assert!(config.base_url.is_none());
+    Ok(())
+}
+
+/// Empty `api_key = ""` is a valid, distinct value — it deserializes as
+/// `Some("")`, not `None`. This is the config-layer guarantee that
+/// backs empty API key support for self-hosted unauthenticated endpoints.
+#[test]
+fn test_parse_empty_api_key_is_some_empty() -> anyhow::Result<()> {
+    let toml_str = r#"
+provider = "claude"
+api_key = ""
+"#;
+    let config: TcodeConfig = toml::from_str(toml_str)?;
+    assert_eq!(config.provider.as_deref(), Some("claude"));
+    assert_eq!(config.api_key.as_deref(), Some(""));
+    Ok(())
+}
+
 #[test]
 fn test_parse_config_with_layout() -> anyhow::Result<()> {
     let toml_str = r#"

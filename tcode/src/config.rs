@@ -281,13 +281,9 @@ fn default_shortcuts() -> HashMap<String, String> {
 
 pub(crate) const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # Uncomment and modify values as needed.
-#
-# Note: with provider = "claude", api_key takes precedence over OAuth
-# tokens from `tcode claude-auth` (Claude Pro/Max subscribers). Unset
-# ANTHROPIC_API_KEY in your shell to use OAuth tokens instead.
 
-# provider = "claude"              # REQUIRED. one of: claude | open-ai | open-router
-# api_key = ""                     # or set ANTHROPIC_API_KEY env var
+# provider = "claude"              # REQUIRED. one of: claude | claude-oauth | open-ai | open-router
+# api_key = ""                     # optional. Empty and omitted behave the same: both fall back to the provider env var, then to "" (no auth) if it is unset. Ignored when provider = "claude-oauth".
 # model = "claude-opus-4-6"        # defaults per provider
 # base_url = ""                    # defaults per provider
 # subagent_max_iterations = 50

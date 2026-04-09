@@ -125,3 +125,57 @@ fn test_substitute_rewrites_all_three_keys_in_default_template() -> anyhow::Resu
 
     Ok(())
 }
+
+/// Empty `api_key` input from the wizard writes an uncommented
+/// `api_key = ""` line to the config file and parses back as
+/// `Some("")`, not `None`. This is the key behavioral change for empty
+/// API key support.
+#[test]
+fn test_substitute_empty_api_key_round_trips_as_some_empty() -> anyhow::Result<()> {
+    let out = substitute_template(DEFAULT_CONFIG_TEMPLATE, "claude", None, Some(""));
+    let config: TcodeConfig = toml::from_str(&out)?;
+    assert_eq!(config.provider.as_deref(), Some("claude"));
+    assert_eq!(
+        config.api_key.as_deref(),
+        Some(""),
+        "expected empty api_key to round-trip as Some(\"\"); got {:?}",
+        config.api_key
+    );
+
+    // The rendered output must contain an uncommented `api_key = ""` line
+    // (i.e. `try_rewrite` fired and replaced the commented example).
+    // `try_rewrite` always emits `key = value` with spaces around `=`.
+    let has_uncommented = out.lines().any(|l| l.starts_with("api_key = \"\""));
+    assert!(
+        has_uncommented,
+        "expected an uncommented `api_key = \"\"` line; got:\n{out}"
+    );
+
+    // And the original commented example line is gone.
+    assert!(
+        !out.contains("# api_key = \"\""),
+        "expected commented api_key example to be rewritten; got:\n{out}"
+    );
+    Ok(())
+}
+
+/// The `claude-oauth` wizard choice writes `provider = "claude-oauth"`
+/// and skips both the base URL and API key prompts — the rendered config
+/// contains neither an uncommented `base_url` nor `api_key` line.
+#[test]
+fn test_substitute_claude_oauth_provider() -> anyhow::Result<()> {
+    let out = substitute_template(DEFAULT_CONFIG_TEMPLATE, "claude-oauth", None, None);
+    let config: TcodeConfig = toml::from_str(&out)?;
+    assert_eq!(config.provider.as_deref(), Some("claude-oauth"));
+    assert!(
+        config.api_key.is_none(),
+        "expected api_key to be None for claude-oauth; got {:?}",
+        config.api_key
+    );
+    assert!(
+        config.base_url.is_none(),
+        "expected base_url to be None for claude-oauth; got {:?}",
+        config.base_url
+    );
+    Ok(())
+}

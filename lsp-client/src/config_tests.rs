@@ -141,7 +141,7 @@ fn extension_to_filetype_mapping() -> anyhow::Result<()> {
         config.extension_to_filetype.get(".lua").map(String::as_str),
         Some("lua")
     );
-    assert!(config.extension_to_filetype.get(".py").is_none());
+    assert!(!config.extension_to_filetype.contains_key(".py"));
 
     Ok(())
 }

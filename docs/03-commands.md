@@ -38,10 +38,9 @@ tcode -p <profile> config
 
 **Behavior:**
 
-- **Provider choices.** The wizard menu offers four options: `claude` (Anthropic API key), `claude-oauth` (Claude Pro/Max subscription via OAuth), `open-ai` (OpenAI API key), and `open-router` (OpenRouter API key). `claude-oauth` skips the API-key prompt and tells you to run `tcode claude-auth` afterward. Both `claude` and `claude-oauth` write `provider = "claude"` in the config file — `claude-oauth` is purely a wizard-level UX label, not a distinct provider.
+- **Provider choices.** The wizard menu offers four options: `claude` (Anthropic API key), `claude-oauth` (Claude Pro/Max subscription via OAuth), `open-ai` (OpenAI API key), and `open-router` (OpenRouter API key). `claude-oauth` is a distinct provider value: the wizard skips both the base URL and API-key prompts, writes `provider = "claude-oauth"` to the config file, and tells you to run `tcode claude-auth` afterward. At runtime, `claude-oauth` loads tokens from `tcode claude-auth` and ignores both `api_key` in the config and `$ANTHROPIC_API_KEY` in the environment.
 - **Refuses to overwrite.** If the target file already exists, the wizard errors with ``Config already exists at <path>. Edit it directly, or delete it first and re-run `tcode config`.`` To regenerate, delete the file first and re-run the wizard.
 - **File permissions.** On Unix the file is written with `0600` permissions via a temp-file + rename dance, so a crash or Ctrl-C mid-wizard does not leave a partial file at the real path.
-- **`ANTHROPIC_API_KEY` warning.** If you pick `claude-oauth` while `ANTHROPIC_API_KEY` is set in your shell, the wizard prints a warning — tcode prefers the env var over OAuth tokens at runtime, so you should `unset ANTHROPIC_API_KEY` before launching tcode.
 - **Next-steps output.** After writing, the wizard prints the config file's absolute path and points at [02-configuration.md](02-configuration.md) for the full reference. For `claude-oauth`, it also prints a reminder to run `tcode claude-auth`.
 
 See [02-configuration.md](02-configuration.md#config-file-location) for the wizard's first-run auto-launch behavior and the full list of options you can uncomment later.

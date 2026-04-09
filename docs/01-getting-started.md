@@ -87,10 +87,10 @@ On first launch tcode detects that no config file exists and auto-starts the int
 
 Pick a provider from the menu:
 
-- **`claude`** — Anthropic API key (entered at the wizard prompt, or leave the prompt empty to use `ANTHROPIC_API_KEY` from your shell)
-- **`claude-oauth`** — Claude Pro/Max subscription via OAuth. The wizard skips the API-key prompt; after it finishes, run `tcode claude-auth` to authenticate. If `ANTHROPIC_API_KEY` is also set in your shell, tcode prefers the env var over your OAuth tokens at runtime — the wizard warns you and tells you to `unset ANTHROPIC_API_KEY`.
-- **`open-ai`** — OpenAI API key (or leave the prompt empty to use `OPENAI_API_KEY`)
-- **`open-router`** — OpenRouter API key (or leave the prompt empty to use `OPENROUTER_API_KEY`)
+- **`claude`** — Anthropic API-key mode. Paste your key at the wizard prompt, or leave it blank; an empty input is written as `api_key = ""` and at runtime tcode falls back to `ANTHROPIC_API_KEY` from your shell if the env var is set.
+- **`claude-oauth`** — Claude Pro/Max subscription via OAuth. The wizard skips both the base URL and API-key prompts; after it finishes, run `tcode claude-auth` to authenticate. This provider loads tokens via `tcode claude-auth` and ignores both the config `api_key` and `$ANTHROPIC_API_KEY` entirely.
+- **`open-ai`** — OpenAI API-key mode. Paste your key, or leave it blank to fall back to `OPENAI_API_KEY` at runtime.
+- **`open-router`** — OpenRouter API-key mode. Paste your key, or leave it blank to fall back to `OPENROUTER_API_KEY` at runtime.
 
 | Provider      | Environment Variable   |
 |---------------|------------------------|
@@ -98,7 +98,9 @@ Pick a provider from the menu:
 | `open-ai`     | `OPENAI_API_KEY`       |
 | `open-router` | `OPENROUTER_API_KEY`   |
 
-Accept the default base URL or override it, then paste your API key (or leave it empty to fall back to the env var). For `claude-oauth`, the API-key prompt is skipped entirely.
+`claude-oauth` has no environment variable — it authenticates via OAuth only.
+
+Accept the default base URL or override it, then paste your API key (or leave it blank to fall back to the env var). For `claude-oauth`, both the base URL and API-key prompts are skipped entirely.
 
 The wizard writes the config to `~/.tcode/config.toml` (or `~/.tcode/config-<profile>.toml` with `-p`), prints the absolute path, and exits. Run `tcode` again to start your first session.
 
