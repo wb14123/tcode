@@ -7,9 +7,16 @@ tcode stores configuration in TOML files under `~/.tcode/`:
 - **Default config:** `~/.tcode/config.toml`
 - **Profile configs:** `~/.tcode/config-<profile>.toml` — selected with `tcode -p <profile>`
 
-Profiles are fully self-contained. They do not inherit from the default config. If a profile file is missing, tcode exits with an error. Any fields omitted from a config file fall back to built-in defaults.
+Profiles are fully self-contained. They do not inherit from the default config. Any fields omitted from a config file fall back to built-in defaults.
 
-On first run, tcode auto-creates `~/.tcode/config.toml` with all options commented out as a template. The file is created with `0600` permissions to protect API keys.
+Config files are created by the `tcode config` interactive wizard, which prompts for `provider`, `base_url`, and `api_key`. All other options (`model`, `subagent_*`, `browser_server_*`, `search_engine`, `[shortcuts]`, `[layout]`) are written as commented-out lines in the generated file — open the file in your editor and uncomment the ones you want to customize.
+
+- **First launch.** If `~/.tcode/config.toml` does not exist and stdin/stdout are both TTYs, running `tcode` (with no profile) automatically launches the wizard, writes the file, prints the absolute path, and exits. Re-run `tcode` to start a session.
+- **Explicit invocation.** Run `tcode config` any time to create the default config, or `tcode -p <profile> config` to write `~/.tcode/config-<profile>.toml`. Running `tcode config` against an existing file is a **hard error** — to regenerate, delete the file first and re-run the wizard.
+- **File permissions.** On Unix the wizard writes the file with `0600` permissions via a temp-file + rename dance, so a crash or Ctrl-C mid-wizard does not leave a partial file at the real path.
+- **Missing config file.** If the target file does not exist and tcode cannot auto-launch the wizard (a profile is specified, or a non-TTY context such as CI or a piped stdin), tcode exits with an error naming the absolute path and the exact command to run — `tcode config` for the default config, or `tcode -p <profile> config` for a profile.
+
+See [03-commands.md](03-commands.md#tcode-config) for the full `tcode config` command reference.
 
 ## CLI Flags
 
@@ -23,8 +30,12 @@ The CLI only accepts `--session` and `-p`/`--profile`. All other settings live i
 
 ## Full Config Reference
 
+`provider` is required — there is no default. A config file missing the `provider` line causes tcode to exit with an error listing the valid values.
+
 ```toml
-provider = "claude"              # claude | open-ai | open-router
+provider = "claude"              # REQUIRED. claude | open-ai | open-router
+                                 # "claude" uses api_key if set, otherwise OAuth
+                                 # tokens from `tcode claude-auth` (Claude Pro/Max)
 api_key = ""                     # or set env var (see Providers table)
 model = "claude-opus-4-6"        # defaults per provider
 base_url = ""                    # defaults per provider
@@ -49,7 +60,7 @@ brainstorm = "..."
 
 If `api_key` is not set in the config file, tcode reads the provider's environment variable instead.
 
-**Claude Pro/Max subscribers** can use their subscription credits via the API instead of paying for API usage separately. Run `tcode claude-auth` to authenticate.
+**Claude Pro/Max subscribers** can use their subscription credits via the API instead of paying for API usage separately. In the `tcode config` wizard, choose **`claude-oauth`** instead of **`claude`** to skip the API-key step — the wizard then tells you to run `tcode claude-auth` to complete OAuth. Both wizard choices write `provider = "claude"` to the config file; `claude-oauth` is purely a wizard-level UX label, not a distinct provider. If you pick `claude-oauth` but `ANTHROPIC_API_KEY` is set in your shell, tcode prefers the env var at runtime — run `unset ANTHROPIC_API_KEY` before launching tcode if you want to use your Claude Pro/Max subscription credits.
 
 ## Layout Configuration
 

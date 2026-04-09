@@ -42,11 +42,6 @@ impl Default for TcodeConfig {
 }
 
 impl TcodeConfig {
-    /// Get provider string, defaulting to "claude"
-    pub fn provider_str(&self) -> &str {
-        self.provider.as_deref().unwrap_or("claude")
-    }
-
     /// Get search engine string, defaulting to "kagi"
     pub fn search_engine_str(&self) -> &str {
         self.search_engine.as_deref().unwrap_or("kagi")
@@ -284,10 +279,14 @@ fn default_shortcuts() -> HashMap<String, String> {
     ])
 }
 
-const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
+pub(crate) const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # Uncomment and modify values as needed.
+#
+# Note: with provider = "claude", api_key takes precedence over OAuth
+# tokens from `tcode claude-auth` (Claude Pro/Max subscribers). Unset
+# ANTHROPIC_API_KEY in your shell to use OAuth tokens instead.
 
-# provider = "claude"              # claude | open-ai | open-router
+# provider = "claude"              # REQUIRED. one of: claude | open-ai | open-router
 # api_key = ""                     # or set ANTHROPIC_API_KEY env var
 # model = "claude-opus-4-6"        # defaults per provider
 # base_url = ""                    # defaults per provider
@@ -354,7 +353,7 @@ review = """\
 #     size = 50
 "#;
 
-fn config_path(profile: Option<&str>) -> Result<PathBuf> {
+pub fn config_path_for(profile: Option<&str>) -> Result<PathBuf> {
     let home =
         dirs::home_dir().ok_or_else(|| anyhow::anyhow!("could not determine home directory"))?;
     let dir = home.join(".tcode");
@@ -365,29 +364,27 @@ fn config_path(profile: Option<&str>) -> Result<PathBuf> {
     Ok(dir.join(filename))
 }
 
+pub fn config_file_exists(profile: Option<&str>) -> bool {
+    config_path_for(profile)
+        .map(|p| p.exists())
+        .unwrap_or(false)
+}
+
 pub fn load_config(profile: Option<&str>) -> Result<TcodeConfig> {
-    let path = config_path(profile)?;
+    let path = config_path_for(profile)?;
 
     if !path.exists() {
-        if profile.is_some() {
-            bail!("config profile not found: {}", path.display());
+        match profile {
+            Some(p) => bail!(
+                "config not found at {}. Run `tcode -p {} config` to create it.",
+                path.display(),
+                p
+            ),
+            None => bail!(
+                "config not found at {}. Run `tcode config` to create it.",
+                path.display()
+            ),
         }
-        // First run — write the default template so the user can discover it
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&path, DEFAULT_CONFIG_TEMPLATE).map_err(|e| {
-            anyhow::anyhow!("failed to write default config to {}: {e}", path.display())
-        })?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let perms = std::fs::Permissions::from_mode(0o600);
-            std::fs::set_permissions(&path, perms).map_err(|e| {
-                anyhow::anyhow!("failed to set permissions on {}: {e}", path.display())
-            })?;
-        }
-        return Ok(TcodeConfig::default());
     }
 
     let contents = std::fs::read_to_string(&path)

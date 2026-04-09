@@ -223,9 +223,8 @@ fn test_validation_no_edit() {
 }
 
 #[test]
-fn test_provider_str_defaults() {
+fn test_search_engine_str_defaults() {
     let config = TcodeConfig::default();
-    assert_eq!(config.provider_str(), "claude");
     assert_eq!(config.search_engine_str(), "kagi");
 }
 
@@ -235,7 +234,7 @@ fn test_nonexistent_profile_errors() {
     assert!(result.is_err());
     let msg = result.unwrap_err().to_string();
     assert!(
-        msg.contains("config profile not found"),
+        msg.contains("config not found at") && msg.contains("nonexistent-test-profile-xyz"),
         "unexpected error: {msg}"
     );
 }

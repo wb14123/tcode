@@ -75,15 +75,22 @@ Without this, the display pane will have no syntax highlighting for markdown con
 
 ### Configure a provider
 
-Create a minimal config file at `~/.tcode/config.toml`:
+> **The agent can read all files under the current directory by default.** tcode automatically grants the agent read access to everything inside the directory you launch it from — no approval prompt. Always `cd` into the specific project you want to work on before running `tcode`. Don't launch it from broad directories like `~` or `/`. See [07-permissions.md](07-permissions.md) for details.
 
-```toml
-[llm]
-provider = "claude"
-api_key = "sk-ant-..."
+Inside a tmux window, `cd` into your project and run:
+
+```sh
+tcode
 ```
 
-The default provider is `claude` and the default model is `claude-opus-4-6`. You can omit `api_key` from the config and set it via an environment variable instead:
+On first launch tcode detects that no config file exists and auto-starts the interactive setup wizard. You can re-run the wizard any time with `tcode config`, or with `tcode -p <profile> config` to create a profile-specific config at `~/.tcode/config-<profile>.toml`. The wizard **refuses to overwrite** an existing file — delete it first if you want to regenerate.
+
+Pick a provider from the menu:
+
+- **`claude`** — Anthropic API key (entered at the wizard prompt, or leave the prompt empty to use `ANTHROPIC_API_KEY` from your shell)
+- **`claude-oauth`** — Claude Pro/Max subscription via OAuth. The wizard skips the API-key prompt; after it finishes, run `tcode claude-auth` to authenticate. If `ANTHROPIC_API_KEY` is also set in your shell, tcode prefers the env var over your OAuth tokens at runtime — the wizard warns you and tells you to `unset ANTHROPIC_API_KEY`.
+- **`open-ai`** — OpenAI API key (or leave the prompt empty to use `OPENAI_API_KEY`)
+- **`open-router`** — OpenRouter API key (or leave the prompt empty to use `OPENROUTER_API_KEY`)
 
 | Provider      | Environment Variable   |
 |---------------|------------------------|
@@ -91,15 +98,17 @@ The default provider is `claude` and the default model is `claude-opus-4-6`. You
 | `open-ai`     | `OPENAI_API_KEY`       |
 | `open-router` | `OPENROUTER_API_KEY`   |
 
-### Launch tcode
+Accept the default base URL or override it, then paste your API key (or leave it empty to fall back to the env var). For `claude-oauth`, the API-key prompt is skipped entirely.
 
-> **The agent can read all files under the current directory by default.** tcode automatically grants the agent read access to everything inside the directory you launch it from — no approval prompt. Always `cd` into the specific project you want to work on before running `tcode`. Don't launch it from broad directories like `~` or `/`. See [07-permissions.md](07-permissions.md) for details.
+The wizard writes the config to `~/.tcode/config.toml` (or `~/.tcode/config-<profile>.toml` with `-p`), prints the absolute path, and exits. Run `tcode` again to start your first session.
 
-Open a tmux session and run:
+**Typical first-time flow for `claude-oauth`:**
 
-```sh
-tcode
-```
+1. `tcode` — wizard runs, pick `claude-oauth`, accept defaults, wizard exits.
+2. `tcode claude-auth` — complete OAuth in the browser.
+3. `tcode` — launches the full four-pane UI.
+
+All other options (model, layout, shortcuts, subagent limits, browser server, search engine) live as commented-out lines in the generated file. Open `~/.tcode/config.toml` in your editor to uncomment and tune them. See [02-configuration.md](02-configuration.md) for the full reference.
 
 ### The four-pane layout
 

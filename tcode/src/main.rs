@@ -1,6 +1,7 @@
 mod approve_ui;
 mod claude_auth;
 mod config;
+mod config_wizard;
 mod display;
 mod edit;
 mod permission_ui;
@@ -15,6 +16,9 @@ mod tty_stdio;
 
 #[cfg(test)]
 mod config_tests;
+
+#[cfg(test)]
+mod config_wizard_tests;
 
 use std::collections::HashMap;
 use std::fs;
@@ -42,9 +46,8 @@ pub(crate) fn lua_escape(s: &str) -> String {
 }
 
 /// LLM provider selection
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 enum Provider {
-    #[default]
     Claude,
     OpenAi,
     OpenRouter,
@@ -127,8 +130,18 @@ fn build_chat_options() -> ChatOptions {
 /// Create an LLM instance from config options
 fn create_llm(
     config: &config::TcodeConfig,
+    profile: Option<&str>,
 ) -> Result<(Box<dyn LLM>, String, Option<claude_auth::TokenManager>)> {
-    let provider = parse_provider(config.provider_str())?;
+    let provider_str = config.provider.as_deref().ok_or_else(|| {
+        let path = config::config_path_for(profile)
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|_| "<unknown>".to_string());
+        anyhow!(
+            "provider is required in {}. Expected one of: claude | open-ai | open-router.",
+            path
+        )
+    })?;
+    let provider = parse_provider(provider_str)?;
     let model = config
         .model
         .clone()
@@ -222,6 +235,8 @@ enum Commands {
     Browser,
     /// Authenticate with Claude via OAuth and get an API key
     ClaudeAuth,
+    /// Interactively create a new config file
+    Config,
     /// Attach to an existing session and resume the conversation
     Attach,
     /// Cancel a running tool call
@@ -414,8 +429,16 @@ async fn main() -> Result<()> {
 
     match command {
         None => {
+            if profile.is_none() && !config::config_file_exists(None) {
+                use std::io::IsTerminal;
+                if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
+                    config_wizard::run(None, true)?;
+                    return Ok(());
+                }
+                // Non-TTY: fall through; load_cfg() will surface the hint.
+            }
             let config = load_cfg()?;
-            run_unified(config).await
+            run_unified(config, profile.as_deref()).await
         }
         Some(Commands::Serve) => {
             let config = load_cfg()?;
@@ -428,7 +451,7 @@ async fn main() -> Result<()> {
             .await?;
             let search_engine = parse_search_engine(config.search_engine_str())?;
             tools::set_search_engine(search_engine);
-            let (llm, model, token_manager) = create_llm(&config)?;
+            let (llm, model, token_manager) = create_llm(&config, profile.as_deref())?;
             let chat_options = build_chat_options();
             let sess = Session::new(session_id)?;
             let server = Server::new(
@@ -506,7 +529,7 @@ async fn main() -> Result<()> {
                     session_id
                 );
             }
-            let (llm, model, token_manager) = create_llm(&config)?;
+            let (llm, model, token_manager) = create_llm(&config, profile.as_deref())?;
             let chat_options = build_chat_options();
             run_unified_with_session(
                 sess,
@@ -647,6 +670,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Browser) => run_browser().await,
         Some(Commands::ClaudeAuth) => claude_auth::run().await,
+        Some(Commands::Config) => config_wizard::run(profile.as_deref(), false),
     }
 }
 
@@ -687,7 +711,7 @@ async fn run_browser() -> Result<()> {
     browser_server::browser::launch_interactive().await
 }
 
-async fn run_unified(config: config::TcodeConfig) -> Result<()> {
+async fn run_unified(config: config::TcodeConfig, profile: Option<&str>) -> Result<()> {
     if !is_in_tmux() {
         anyhow::bail!(
             "tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux."
@@ -696,7 +720,7 @@ async fn run_unified(config: config::TcodeConfig) -> Result<()> {
 
     let session_id = session::generate_session_id();
     let session = Session::new(session_id.clone())?;
-    let (llm, model, token_manager) = create_llm(&config)?;
+    let (llm, model, token_manager) = create_llm(&config, profile)?;
     let chat_options = build_chat_options();
 
     run_unified_with_session(

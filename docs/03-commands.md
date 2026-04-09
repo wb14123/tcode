@@ -6,6 +6,8 @@
 
 Starts a new session. Launches the server and opens display, edit, tree, and permission panes in the current tmux session. A unique 8-character session ID is generated automatically. Session files persist in `~/.tcode/sessions/{id}/`.
 
+If no config file exists at `~/.tcode/config.toml`, `tcode` automatically launches the `tcode config` wizard in interactive terminals, writes the file, and exits — run `tcode` again afterward to start a session. In non-interactive contexts (CI, piped stdin), tcode instead exits with a "config not found" error that tells you to run `tcode config`.
+
 ```
 tcode
 tcode -p <profile>
@@ -16,6 +18,33 @@ tcode -p <profile>
 | Flag | Description |
 |------|-------------|
 | `-p <profile>` | Load a specific config profile |
+
+---
+
+### `tcode config`
+
+Interactively creates a new tcode config file at `~/.tcode/config.toml` (or `~/.tcode/config-<profile>.toml` with `-p`). Prompts for `provider`, `base_url`, and `api_key` and writes the result with all other options (`model`, layout, shortcuts, subagent limits, browser server, search engine) left as commented-out lines for you to uncomment later.
+
+```
+tcode config
+tcode -p <profile> config
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-p <profile>` | Write to `~/.tcode/config-<profile>.toml` instead of the default file |
+
+**Behavior:**
+
+- **Provider choices.** The wizard menu offers four options: `claude` (Anthropic API key), `claude-oauth` (Claude Pro/Max subscription via OAuth), `open-ai` (OpenAI API key), and `open-router` (OpenRouter API key). `claude-oauth` skips the API-key prompt and tells you to run `tcode claude-auth` afterward. Both `claude` and `claude-oauth` write `provider = "claude"` in the config file — `claude-oauth` is purely a wizard-level UX label, not a distinct provider.
+- **Refuses to overwrite.** If the target file already exists, the wizard errors with ``Config already exists at <path>. Edit it directly, or delete it first and re-run `tcode config`.`` To regenerate, delete the file first and re-run the wizard.
+- **File permissions.** On Unix the file is written with `0600` permissions via a temp-file + rename dance, so a crash or Ctrl-C mid-wizard does not leave a partial file at the real path.
+- **`ANTHROPIC_API_KEY` warning.** If you pick `claude-oauth` while `ANTHROPIC_API_KEY` is set in your shell, the wizard prints a warning — tcode prefers the env var over OAuth tokens at runtime, so you should `unset ANTHROPIC_API_KEY` before launching tcode.
+- **Next-steps output.** After writing, the wizard prints the config file's absolute path and points at [02-configuration.md](02-configuration.md) for the full reference. For `claude-oauth`, it also prints a reminder to run `tcode claude-auth`.
+
+See [02-configuration.md](02-configuration.md#config-file-location) for the wizard's first-run auto-launch behavior and the full list of options you can uncomment later.
 
 ---
 
