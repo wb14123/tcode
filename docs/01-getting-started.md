@@ -4,6 +4,8 @@ This guide walks you through installing tcode and running it for the first time.
 
 ## Prerequisites
 
+- **Operating system** -- Linux or macOS. Windows is not supported natively, but tcode works on WSL2 (Chrome browser tools may require extra library dependencies; see [06-browser.md](06-browser.md)).
+
 - **tmux** -- tcode manages its UI as panes inside a tmux session. Install via your system package manager (`apt install tmux`, `brew install tmux`, etc.).
 
 - **Neovim** (>= 0.9) -- tcode uses neovim for its display and edit windows. The [LazyVim](https://www.lazyvim.org/) distribution is recommended. See [05-neovim.md](05-neovim.md) for plugin setup.
