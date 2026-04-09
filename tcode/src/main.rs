@@ -813,7 +813,12 @@ fn create_layout_panes(
                     "-P",
                     "-F",
                     "#{pane_id}",
-                    "sleep infinity",
+                    // NOTE: `sleep infinity` is a GNU coreutils extension and
+                    // fails immediately on macOS's BSD `sleep`, causing the
+                    // freshly-created pane to die before the next split-window
+                    // can target it ("can't find pane: %N"). Use a large finite
+                    // value (~68 years) which is portable across Linux + macOS.
+                    "sleep 2147483647",
                 ])
                 .output()
                 .context("Failed to run tmux split-window")?;
