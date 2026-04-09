@@ -20,6 +20,12 @@ A terminal-based coding agent powered by neovim and tmux.
   - `#[tool]` proc macro for defining tools from plain function signatures
   - Conversation manager with multi-turn subagents and cancellation
 
+### Features on Roadmap
+
+* Conversation branching.
+* Conversation compacting.
+* More provider supports, like Gemini, Codex subscription etc.
+
 
 ## Quick Start
 
