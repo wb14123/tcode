@@ -15,7 +15,7 @@ This guide walks you through installing tcode and running it for the first time.
 ### Install from binary release (recommended)
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/wb14123/llm-rs/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/wb14123/tcode/main/install.sh | sh
 ```
 
 This downloads the latest release and installs:
@@ -25,7 +25,7 @@ This downloads the latest release and installs:
 To install a specific version:
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/wb14123/llm-rs/main/install.sh | VERSION=v0.2.0 sh
+curl -sSL https://raw.githubusercontent.com/wb14123/tcode/main/install.sh | VERSION=v0.2.0 sh
 ```
 
 > **macOS manual download:** If you download `.tar.gz` from GitHub Releases via a browser instead of using the install script, macOS may block the binaries. Run `xattr -d com.apple.quarantine /usr/local/bin/tcode /usr/local/bin/browser-server /usr/local/lib/libtree-sitter-tcode.dylib` to fix this.
@@ -39,7 +39,7 @@ Building from source requires:
 - **tree-sitter CLI** — install via `npm install -g tree-sitter-cli`
 
 ```sh
-git clone https://github.com/wb14123/llm-rs.git && cd llm-rs
+git clone https://github.com/wb14123/tcode.git && cd tcode
 cargo build --release
 sudo install -m 755 target/release/tcode target/release/browser-server /usr/local/bin/
 sudo install -m 644 target/release/libtree-sitter-tcode.so /usr/local/lib/   # or .dylib on macOS

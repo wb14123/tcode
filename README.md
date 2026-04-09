@@ -26,7 +26,7 @@ A terminal-based coding agent powered by neovim and tmux.
 Install the latest release:
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/wb14123/llm-rs/main/install.sh | sh
+curl -sSL https://raw.githubusercontent.com/wb14123/tcode/main/install.sh | sh
 ```
 
 Then follow the [Getting Started](docs/01-getting-started.md) guide for prerequisites, configuration, and a walkthrough of the UI.

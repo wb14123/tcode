@@ -44,7 +44,7 @@ if [ -n "${VERSION:-}" ]; then
   esac
 else
   echo "Fetching latest release version..."
-  VERSION="$(curl -fsSL https://api.github.com/repos/wb14123/llm-rs/releases/latest \
+  VERSION="$(curl -fsSL https://api.github.com/repos/wb14123/tcode/releases/latest \
     | grep '"tag_name"' \
     | sed 's/.*"tag_name": *"\([^"]*\)".*/\1/')"
   if [ -z "$VERSION" ]; then
@@ -61,7 +61,7 @@ trap 'rm -rf "$WORK_DIR"' EXIT
 
 # --- Download ---
 TARBALL="tcode-${VERSION}-${TARGET}.tar.gz"
-URL="https://github.com/wb14123/llm-rs/releases/download/${VERSION}/${TARBALL}"
+URL="https://github.com/wb14123/tcode/releases/download/${VERSION}/${TARBALL}"
 
 echo "Downloading ${TARBALL}..."
 curl -fSL -o "${WORK_DIR}/${TARBALL}" "$URL"
