@@ -10,7 +10,7 @@ This guide walks you through installing tcode and running it for the first time.
 
 - **Neovim** (>= 0.9) -- tcode uses neovim for its display and edit windows. The [LazyVim](https://www.lazyvim.org/) distribution is recommended. See [05-neovim.md](05-neovim.md) for plugin setup.
 
-- **Chrome or Chromium** (optional) -- required only if you want to use the `web_search` and `web_fetch` tools. Run `tcode browser` to configure. See [06-browser.md](06-browser.md) for details.
+- **Chrome or Chromium** -- required by `web_search` and `web_fetch` tools. Run `tcode browser` to configure. See [06-browser.md](06-browser.md) for details.
 
   > **Heads up — Google CAPTCHA on first use.** `web_search` drives the public Google search page (`https://www.google.com/search`) through a headless Chrome profile — it does not use a search API. A brand-new profile with no history or cookies will very often hit Google's CAPTCHA / "unusual traffic" page on the first few queries, and searches will silently fail. Before relying on `web_search`, run `tcode browser` and either **log in to your Google account** in that window, or at least run a handful of manual Google searches to warm the profile up. Cookies and sessions from `tcode browser` are reused by the headless browser-server, so you only need to do this once. If you prefer a different engine, log in to Kagi in `tcode browser` and switch the `search_engine` setting — see [06-browser.md](06-browser.md) and [02-configuration.md](02-configuration.md).
 
