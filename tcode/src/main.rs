@@ -741,6 +741,52 @@ fn init_tracing(session_id: &str) {
 }
 
 async fn run_browser() -> Result<()> {
+    use tools::browser_client::BrowserClient;
+
+    let socket_path = browser_server_socket_path();
+    if socket_path.exists() {
+        let client = BrowserClient::unix(socket_path.clone())?;
+        if client.health_check().await {
+            println!("Detected running browser-server; stopping it to free the Chrome profile...");
+            if let Err(e) = client.shutdown_server().await {
+                eprintln!("Warning: failed to request browser-server shutdown: {e}");
+            }
+            // Poll until the server stops responding (up to ~5s).
+            let mut stopped = false;
+            for _ in 0..50 {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+                if !client.health_check().await {
+                    stopped = true;
+                    break;
+                }
+            }
+            if !stopped {
+                anyhow::bail!(
+                    "browser-server did not stop within 5s after /shutdown request. \
+                     Stop it manually (e.g. `pkill -f browser-server`) and retry."
+                );
+            }
+            println!("Browser-server stopped.");
+            // Give Chrome a brief moment to release the SingletonLock file.
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        }
+    }
+
+    // If the profile lock is still held, another browser-server (possibly on a
+    // non-default --socket path) or a stale lock file is blocking us. Produce
+    // a helpful error instead of letting `launch_interactive` emit a generic one.
+    let lock_file = browser_server::browser::chrome_data_dir().join("SingletonLock");
+    if lock_file.exists() {
+        anyhow::bail!(
+            "Chrome profile is locked ({}).\n\
+             If a browser-server is running on a custom --socket path, stop it manually \
+             (e.g. `pkill -f browser-server`).\n\
+             Otherwise, remove the stale lock file: `rm {}`",
+            lock_file.display(),
+            lock_file.display()
+        );
+    }
+
     browser_server::browser::launch_interactive().await
 }
 

@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 
 use browser_server::auth::{self, TokenSet};
 use browser_server::browser;
-use browser_server::handler::{AppState, build_app};
+use browser_server::handler::{AppState, build_app, build_app_unix};
 
 #[derive(Parser)]
 #[command(name = "browser-server")]
@@ -71,11 +71,11 @@ async fn main() -> Result<()> {
         return run_browser().await;
     }
 
-    let state = Arc::new(AppState::new());
+    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
+    let state = Arc::new(AppState::new(Arc::clone(&shutdown_notify)));
 
     // Set up idle timeout shutdown task
     let idle_timeout = cli.idle_timeout;
-    let shutdown_notify = Arc::new(tokio::sync::Notify::new());
 
     if let Some(timeout_secs) = idle_timeout {
         let state_clone = Arc::clone(&state);
@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
             .with_context(|| format!("Failed to bind Unix socket at {}", socket_path.display()))?;
         tracing::info!("Listening on Unix socket {}", socket_path.display());
 
-        let app = build_app(Arc::clone(&state));
+        let app = build_app_unix(Arc::clone(&state));
 
         axum::serve(tokio_listener_from_unix(listener), app)
             .with_graceful_shutdown(shutdown_signal(Arc::clone(&shutdown_notify)))

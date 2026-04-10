@@ -8,6 +8,7 @@ pub mod handler;
 
 pub use handler::AppState;
 pub use handler::build_app;
+pub use handler::build_app_unix;
 
 use serde::{Deserialize, Serialize};
 

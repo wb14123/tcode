@@ -5,6 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use axum::extract::State;
 use axum::routing::{get, post};
 use axum::{Json, Router};
+use tokio::sync::Notify;
 
 use crate::error::AppError;
 use crate::{
@@ -15,18 +16,15 @@ use crate::{
 pub struct AppState {
     /// Epoch-seconds timestamp of the last request (for idle timeout).
     pub last_activity: AtomicU64,
-}
-
-impl Default for AppState {
-    fn default() -> Self {
-        Self::new()
-    }
+    /// Notify used to trigger graceful shutdown of the server.
+    pub shutdown_notify: Arc<Notify>,
 }
 
 impl AppState {
-    pub fn new() -> Self {
+    pub fn new(shutdown_notify: Arc<Notify>) -> Self {
         Self {
             last_activity: AtomicU64::new(now_secs()),
+            shutdown_notify,
         }
     }
 
@@ -42,12 +40,26 @@ fn now_secs() -> u64 {
         .as_secs()
 }
 
-/// Build the Axum router with all endpoints.
-pub fn build_app(state: Arc<AppState>) -> Router {
+/// Routes available in all modes (TCP and Unix socket).
+fn common_routes() -> Router<Arc<AppState>> {
     Router::new()
         .route("/web_search", post(handle_web_search))
         .route("/web_fetch", post(handle_web_fetch))
         .route("/health", get(handle_health))
+}
+
+/// Build the Axum router with endpoints available in all modes.
+/// Does NOT include `/shutdown` — see `build_app_unix`.
+pub fn build_app(state: Arc<AppState>) -> Router {
+    common_routes().with_state(state)
+}
+
+/// Build the Axum router for Unix-socket mode. Includes the `/shutdown`
+/// endpoint, which is intentionally NOT exposed over TCP to avoid letting
+/// any authenticated remote client terminate the server.
+pub fn build_app_unix(state: Arc<AppState>) -> Router {
+    common_routes()
+        .route("/shutdown", post(handle_shutdown))
         .with_state(state)
 }
 
@@ -112,5 +124,13 @@ async fn handle_health(State(state): State<Arc<AppState>>) -> Json<HealthRespons
     state.touch();
     Json(HealthResponse {
         status: "ok".to_string(),
+    })
+}
+
+async fn handle_shutdown(State(state): State<Arc<AppState>>) -> Json<HealthResponse> {
+    tracing::info!("Received /shutdown request, triggering graceful shutdown");
+    state.shutdown_notify.notify_one();
+    Json(HealthResponse {
+        status: "shutting_down".to_string(),
     })
 }

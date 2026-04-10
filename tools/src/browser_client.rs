@@ -94,6 +94,26 @@ impl BrowserClient {
         }
     }
 
+    /// Request a graceful shutdown of the browser-server via the /shutdown endpoint.
+    /// Returns Ok(()) if the request was accepted (the server will shut down
+    /// shortly thereafter). Callers should poll `health_check()` to confirm exit.
+    pub async fn shutdown_server(&self) -> Result<()> {
+        let url = format!("{}/shutdown", self.base_url);
+        let mut request = self.client.post(&url);
+        if let Some(ref token) = self.token {
+            request = request.bearer_auth(token);
+        }
+        let response = request
+            .send()
+            .await
+            .context("failed to send /shutdown request")?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(anyhow!("shutdown request failed with HTTP {status}"));
+        }
+        Ok(())
+    }
+
     /// Ensure the browser-server is running. Checks health and restarts if needed.
     /// Intended for use at startup; request-time recovery uses the retry logic in `post`.
     pub async fn ensure_server_running(&self) {
