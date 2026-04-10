@@ -32,7 +32,7 @@ Run `tcode browser` to launch Chrome with a persistent profile at `~/.tcode/chro
 
 - Log in to **Kagi** to use it as your search engine
 - Log in to **GitHub**, **Google**, or any other service you want the agent to access
-- Google search works without authentication
+- Google search technically works without authentication, but a fresh profile will usually hit Google's CAPTCHA / "unusual traffic" page on the first queries and searches will fail. Before using `web_search` against Google, either log in to your Google account in this window, or run a few manual Google searches here to warm the profile up. Cookies persist and are reused by the headless browser-server.
 
 Cookies, sessions, and all browser storage are saved in the persistent profile and reused by the headless browser-server. You only need to log in once — your sessions carry over across tcode restarts.
 
