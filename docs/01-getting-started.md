@@ -27,10 +27,24 @@ This downloads the latest release and installs:
 To install a specific version:
 
 ```sh
-curl -sSL https://raw.githubusercontent.com/wb14123/tcode/main/install.sh | VERSION=v0.2.0 sh
+curl -sSL https://raw.githubusercontent.com/wb14123/tcode/refs/heads/master/install.sh | VERSION=v0.2.0 sh
 ```
 
-> **macOS manual download:** If you download `.tar.gz` from GitHub Releases via a browser instead of using the install script, macOS may block the binaries. Run `xattr -d com.apple.quarantine /usr/local/bin/tcode /usr/local/bin/browser-server /usr/local/lib/libtree-sitter-tcode.dylib` to fix this.
+#### User-local install (no sudo)
+
+If you don't have root, or prefer a self-contained install under your home directory, pass `--user`:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/wb14123/tcode/refs/heads/master/install.sh | sh -s -- --user
+```
+
+This installs to `~/.local/bin` and `~/.local/lib` and never invokes `sudo`. Make sure `~/.local/bin` is on your `$PATH`; the installer prints a shell-specific hint at the end if it isn't. The `VERSION` environment variable also works with `--user`:
+
+```sh
+curl -sSL https://raw.githubusercontent.com/wb14123/tcode/refs/heads/master/install.sh | VERSION=v0.2.0 sh -s -- --user
+```
+
+> **macOS manual download:** If you download `.tar.gz` from GitHub Releases via a browser instead of using the install script, macOS may block the binaries. Run `xattr -d com.apple.quarantine` against the installed files to fix this. For a system install: `xattr -d com.apple.quarantine /usr/local/bin/tcode /usr/local/bin/browser-server /usr/local/lib/libtree-sitter-tcode.dylib`. For a user install: `xattr -d com.apple.quarantine ~/.local/bin/tcode ~/.local/bin/browser-server ~/.local/lib/libtree-sitter-tcode.dylib`.
 
 ### Build from source
 
@@ -42,15 +56,20 @@ Building from source requires:
 
 ```sh
 git clone https://github.com/wb14123/tcode.git && cd tcode
-cargo build --release
-sudo install -m 755 target/release/tcode target/release/browser-server /usr/local/bin/
-sudo install -m 644 target/release/libtree-sitter-tcode.so /usr/local/lib/   # or .dylib on macOS
+./install-from-source.sh          # system install to /usr/local (uses sudo)
+# or, for a user-local install (no sudo):
+./install-from-source.sh --user   # installs to ~/.local
 ```
+
+`install-from-source.sh` runs `cargo build --release` and then installs `tcode`, `browser-server`, and the tree-sitter shared library into `<prefix>/bin` and `<prefix>/lib`.
 
 To uninstall:
 
 ```sh
+# System install:
 sudo rm /usr/local/bin/tcode /usr/local/bin/browser-server /usr/local/lib/libtree-sitter-tcode.*
+# User install:
+rm ~/.local/bin/tcode ~/.local/bin/browser-server ~/.local/lib/libtree-sitter-tcode.*
 ```
 
 ## Set up render-markdown (recommended)

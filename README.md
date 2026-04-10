@@ -85,5 +85,8 @@ This creates a `v0.2.0` tag and pushes it. GitHub Actions then builds binaries f
 ## Uninstall
 
 ```sh
+# System install:
 sudo rm /usr/local/bin/tcode /usr/local/bin/browser-server /usr/local/lib/libtree-sitter-tcode.*
+# User install:
+rm ~/.local/bin/tcode ~/.local/bin/browser-server ~/.local/lib/libtree-sitter-tcode.*
 ```
