@@ -49,7 +49,7 @@ max_subagent_depth = 10
 subagent_model_selection = false
 browser_server_url = ""          # remote browser-server URL (TCP mode)
 browser_server_token = ""        # bearer token for remote browser-server
-search_engine = "kagi"           # kagi | google
+search_engine = "google"         # kagi | google
 
 [shortcuts]                      # see Shortcut Templates section below
 brainstorm = "..."

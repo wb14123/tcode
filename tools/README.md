@@ -14,7 +14,7 @@ Fetches a web page and extracts its main content. Returns clean, readable HTML s
 
 ### `web_search`
 
-Performs a web search and returns formatted results with titles, URLs, and snippets. The search engine is configurable via the `--search-engine` CLI flag (default: Kagi). Supported engines: **Kagi** and **Google**.
+Performs a web search and returns formatted results with titles, URLs, and snippets. The search engine is configurable via the `--search-engine` CLI flag (default: Google). Supported engines: **Kagi** and **Google**.
 
 - Delegates to browser-server for search extraction
 - 300 second timeout

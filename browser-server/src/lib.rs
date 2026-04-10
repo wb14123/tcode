@@ -14,8 +14,8 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, clap::ValueEnum)]
 #[serde(rename_all = "lowercase")]
 pub enum SearchEngineKind {
-    #[default]
     Kagi,
+    #[default]
     Google,
 }
 

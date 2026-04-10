@@ -42,9 +42,9 @@ impl Default for TcodeConfig {
 }
 
 impl TcodeConfig {
-    /// Get search engine string, defaulting to "kagi"
+    /// Get search engine string, defaulting to "google"
     pub fn search_engine_str(&self) -> &str {
-        self.search_engine.as_deref().unwrap_or("kagi")
+        self.search_engine.as_deref().unwrap_or("google")
     }
 }
 
@@ -291,7 +291,7 @@ pub(crate) const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # subagent_model_selection = false
 # browser_server_url = ""
 # browser_server_token = ""
-# search_engine = "kagi"           # kagi | google
+# search_engine = "google"         # kagi | google
 
 [shortcuts]
 brainstorm = """\

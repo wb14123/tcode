@@ -254,7 +254,7 @@ fn test_validation_no_edit() {
 #[test]
 fn test_search_engine_str_defaults() {
     let config = TcodeConfig::default();
-    assert_eq!(config.search_engine_str(), "kagi");
+    assert_eq!(config.search_engine_str(), "google");
 }
 
 #[test]
