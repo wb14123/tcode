@@ -475,9 +475,13 @@ fn run_add_permission_loop(args: &ApproveArgs) -> Result<ApproveResult> {
     result
 }
 
-/// Whether we are in the text-input phase or the scope-selection phase.
+/// Which phase of the add-permission popup we're in.
 enum AddPhase {
+    /// Initial menu: choose between "enter specific value" and "allow all (*)".
+    Menu,
+    /// Text-input phase for a specific value.
     Input,
+    /// Scope-selection phase (Session / Project).
     SelectScope,
 }
 
@@ -486,22 +490,73 @@ fn run_add_permission_inner(
     args: &ApproveArgs,
 ) -> Result<ApproveResult> {
     let mut input = String::new();
-    let mut phase = AddPhase::Input;
+    let mut phase = AddPhase::Menu;
+    // `came_via_wildcard` tracks whether SelectScope was reached via the
+    // Menu's `[2] Allow all values (*)` path. Lifetime: one loop iteration
+    // through the state machine — reset to false when entering Input via
+    // `[1]`, set to true when entering SelectScope via `[2]`, and cleared
+    // when SelectScope's Backspace returns to Menu. SelectScope confirm
+    // (keys `2`/`3`) returns Done immediately and exits the loop, so stale
+    // values can never leak across iterations.
+    let mut came_via_wildcard = false;
+    let mut input_error: Option<String> = None;
 
     loop {
         let phase_ref = &phase;
         let input_ref = &input;
+        let input_error_ref = &input_error;
 
         terminal.draw(|frame| {
             let area = frame.area();
 
             match phase_ref {
+                AddPhase::Menu => {
+                    let chunks = Layout::vertical([
+                        Constraint::Length(3), // Title
+                        Constraint::Length(2), // Tool/Key info
+                        Constraint::Length(1), // Blank
+                        Constraint::Length(3), // Options (2 lines + 1 padding)
+                        Constraint::Length(1), // Blank
+                        Constraint::Length(1), // Instructions
+                        Constraint::Min(0),    // Spacer
+                    ])
+                    .split(area);
+
+                    frame.render_widget(render_title("Add Permission", Color::Green), chunks[0]);
+
+                    let details = Paragraph::new(vec![Line::from(vec![
+                        Span::raw("  Tool: "),
+                        Span::styled(&args.tool, Style::default().fg(Color::Cyan)),
+                        Span::raw("  Key: "),
+                        Span::styled(&args.key, Style::default().fg(Color::Cyan)),
+                    ])]);
+                    frame.render_widget(details, chunks[1]);
+
+                    let options = Paragraph::new(vec![
+                        Line::from(Span::styled(
+                            "  [1] Enter a specific value",
+                            Style::default().fg(Color::Cyan),
+                        )),
+                        Line::from(Span::styled(
+                            "  [2] Allow all values (*)",
+                            Style::default().fg(Color::Yellow),
+                        )),
+                    ]);
+                    frame.render_widget(options, chunks[3]);
+
+                    let instructions = Paragraph::new(vec![Line::from(Span::styled(
+                        "  [Esc] Cancel",
+                        Style::default().fg(Color::DarkGray),
+                    ))]);
+                    frame.render_widget(instructions, chunks[5]);
+                }
                 AddPhase::Input => {
                     let chunks = Layout::vertical([
                         Constraint::Length(3), // Title
                         Constraint::Length(2), // Tool/Key info
                         Constraint::Length(1), // Blank
                         Constraint::Length(1), // Value input
+                        Constraint::Length(1), // Inline error (blank when None)
                         Constraint::Length(1), // Blank
                         Constraint::Length(2), // Instructions
                         Constraint::Min(0),    // Spacer
@@ -518,18 +573,29 @@ fn run_add_permission_inner(
                     ])]);
                     frame.render_widget(details, chunks[1]);
 
-                    let cursor_line = format!("  Value: {}█", input_ref);
+                    let cursor_line = format!("  Value: {input_ref}█");
                     let input_widget = Paragraph::new(Line::from(Span::styled(
                         cursor_line,
                         Style::default().fg(Color::White),
                     )));
                     frame.render_widget(input_widget, chunks[3]);
 
+                    if let Some(err) = input_error_ref {
+                        let err_line = Paragraph::new(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                format!("\u{26a0} {err}"),
+                                Style::default().fg(Color::Red),
+                            ),
+                        ]));
+                        frame.render_widget(err_line, chunks[4]);
+                    }
+
                     let instructions = Paragraph::new(vec![Line::from(Span::styled(
-                        "  [Enter] Confirm  [Esc] Cancel",
+                        "  [Enter] Confirm  [Backspace] Back to menu  [Esc] Cancel",
                         Style::default().fg(Color::DarkGray),
                     ))]);
-                    frame.render_widget(instructions, chunks[5]);
+                    frame.render_widget(instructions, chunks[6]);
                 }
                 AddPhase::SelectScope => {
                     let chunks = Layout::vertical([
@@ -552,10 +618,18 @@ fn run_add_permission_inner(
                     ])]);
                     frame.render_widget(details, chunks[1]);
 
-                    let value_display = Paragraph::new(Line::from(vec![
-                        Span::raw("  Value: "),
-                        Span::styled(input_ref.as_str(), Style::default().fg(Color::White)),
-                    ]));
+                    let value_display = if input_ref == "*" {
+                        Paragraph::new(Line::from(vec![
+                            Span::raw("  Value: "),
+                            Span::styled("*", Style::default().fg(Color::Yellow)),
+                            Span::styled(" (allow all)", Style::default().fg(Color::DarkGray)),
+                        ]))
+                    } else {
+                        Paragraph::new(Line::from(vec![
+                            Span::raw("  Value: "),
+                            Span::styled(input_ref.as_str(), Style::default().fg(Color::White)),
+                        ]))
+                    };
                     frame.render_widget(value_display, chunks[2]);
 
                     let options = Paragraph::new(vec![
@@ -592,6 +666,24 @@ fn run_add_permission_inner(
         }
 
         match phase {
+            AddPhase::Menu => match key.code {
+                KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    return Ok(ApproveResult::Cancelled);
+                }
+                KeyCode::Esc => {
+                    return Ok(ApproveResult::Cancelled);
+                }
+                KeyCode::Char('1') => {
+                    phase = AddPhase::Input;
+                    came_via_wildcard = false;
+                }
+                KeyCode::Char('2') => {
+                    input = "*".to_string();
+                    came_via_wildcard = true;
+                    phase = AddPhase::SelectScope;
+                }
+                _ => {}
+            },
             AddPhase::Input => match key.code {
                 KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
                     return Ok(ApproveResult::Cancelled);
@@ -600,15 +692,34 @@ fn run_add_permission_inner(
                     return Ok(ApproveResult::Cancelled);
                 }
                 KeyCode::Enter => {
-                    if !input.is_empty() {
+                    if input == "*" {
+                        input_error = Some(
+                            "* is reserved \u{2014} use [2] Allow all values from the menu instead"
+                                .to_string(),
+                        );
+                    } else if !input.is_empty() {
+                        input_error = None;
                         phase = AddPhase::SelectScope;
+                    } else {
+                        // Input is empty: clear any stale error so it doesn't
+                        // linger. In practice this branch is unreachable because
+                        // Backspace already clears the error when input becomes
+                        // empty, but being explicit keeps the intent obvious.
+                        input_error = None;
                     }
                 }
                 KeyCode::Backspace => {
-                    input.pop();
+                    if input.is_empty() {
+                        input_error = None;
+                        phase = AddPhase::Menu;
+                    } else {
+                        input.pop();
+                        input_error = None;
+                    }
                 }
                 KeyCode::Char(c) => {
                     input.push(c);
+                    input_error = None;
                 }
                 _ => {}
             },
@@ -625,7 +736,13 @@ fn run_add_permission_inner(
                     return Ok(ApproveResult::Done);
                 }
                 KeyCode::Backspace => {
-                    phase = AddPhase::Input;
+                    if came_via_wildcard {
+                        input.clear();
+                        came_via_wildcard = false;
+                        phase = AddPhase::Menu;
+                    } else {
+                        phase = AddPhase::Input;
+                    }
                 }
                 KeyCode::Char('q') | KeyCode::Esc => {
                     return Ok(ApproveResult::Cancelled);

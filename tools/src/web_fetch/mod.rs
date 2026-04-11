@@ -101,6 +101,9 @@ pub fn web_fetch(
             .and_then(|u| u.host_str().map(|s| s.to_string()))
             .unwrap_or_else(|| "unknown".to_string());
 
+        // NOTE: `hostname` must be a real host string, never the literal "*".
+        // "*" is reserved as a wildcard in the permission store and only
+        // enters storage via the add-permission UI.
         if let Err(e) = ctx.permission.ask_permission_for(
             SCOPE_WEB_FETCH,
             &format!("Allow web_fetch to access {}?", url),

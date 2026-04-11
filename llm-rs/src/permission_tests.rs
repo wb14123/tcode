@@ -3,11 +3,16 @@ mod tests {
     use std::sync::Arc;
 
     use crate::permission::{
-        PermissionDecision, PermissionKey, PermissionManager, ScopedPermissionManager,
+        PermissionDecision, PermissionKey, PermissionManager, PermissionScope,
+        ScopedPermissionManager, WILDCARD_VALUE,
     };
 
+    fn test_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/permission")
+    }
+
     fn temp_path() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("perm-test-{}", uuid::Uuid::new_v4()));
+        let dir = test_root().join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&dir).expect("failed to create temp dir for test");
         dir.join("permissions.json")
     }
@@ -429,6 +434,186 @@ mod tests {
         handle.await?;
 
         assert_eq!(approved_count.load(Ordering::Relaxed), 0);
+        Ok(())
+    }
+
+    // ---------------------------------------------------------------------
+    // Wildcard permission tests (see plan.md §Test plan, tests 1–6 and 9).
+    // ---------------------------------------------------------------------
+
+    #[test]
+    fn wildcard_preserves_exact_match() -> anyhow::Result<()> {
+        let pm = PermissionManager::new(temp_path());
+        pm.add_permission(make_key("bash", "command", "git"), PermissionScope::Session)?;
+        pm.add_permission(
+            make_key("bash", "command", WILDCARD_VALUE),
+            PermissionScope::Session,
+        )?;
+        assert!(pm.has_permission("bash", "command", "git"));
+        Ok(())
+    }
+
+    #[test]
+    fn wildcard_matches_arbitrary_value() -> anyhow::Result<()> {
+        let pm = PermissionManager::new(temp_path());
+        pm.add_permission(
+            make_key("bash", "command", WILDCARD_VALUE),
+            PermissionScope::Session,
+        )?;
+        assert!(pm.has_permission("bash", "command", "anything-else"));
+        Ok(())
+    }
+
+    #[test]
+    fn no_wildcard_no_exact_match_returns_false() -> anyhow::Result<()> {
+        let pm = PermissionManager::new(temp_path());
+        pm.add_permission(make_key("bash", "command", "git"), PermissionScope::Session)?;
+        assert!(!pm.has_permission("bash", "command", "ls"));
+        Ok(())
+    }
+
+    #[test]
+    fn wildcard_scoped_to_tool_and_key() -> anyhow::Result<()> {
+        let pm = PermissionManager::new(temp_path());
+        pm.add_permission(
+            make_key("bash", "command", WILDCARD_VALUE),
+            PermissionScope::Session,
+        )?;
+        // Different tool — wildcard must not apply.
+        assert!(!pm.has_permission("file_read", "path", "/tmp"));
+        // Same tool but different key — wildcard must not apply.
+        assert!(!pm.has_permission("bash", "hostname", "x"));
+        Ok(())
+    }
+
+    #[test]
+    fn wildcard_works_across_session_and_project() -> anyhow::Result<()> {
+        // Session scope
+        {
+            let pm = PermissionManager::new(temp_path());
+            pm.add_permission(
+                make_key("bash", "command", WILDCARD_VALUE),
+                PermissionScope::Session,
+            )?;
+            assert!(pm.has_permission("bash", "command", "anything"));
+        }
+        // Fresh manager, project scope
+        {
+            let pm = PermissionManager::new(temp_path());
+            pm.add_permission(
+                make_key("bash", "command", WILDCARD_VALUE),
+                PermissionScope::Project,
+            )?;
+            assert!(pm.has_permission("bash", "command", "anything"));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn revoking_wildcard_leaves_specific_entries_intact() -> anyhow::Result<()> {
+        let pm = PermissionManager::new(temp_path());
+        pm.add_permission(make_key("bash", "command", "git"), PermissionScope::Session)?;
+        pm.add_permission(
+            make_key("bash", "command", WILDCARD_VALUE),
+            PermissionScope::Session,
+        )?;
+        // Sanity check: wildcard lets "ls" through before revocation.
+        assert!(pm.has_permission("bash", "command", "ls"));
+
+        pm.revoke(&make_key("bash", "command", WILDCARD_VALUE))?;
+
+        // Specific entry survives.
+        assert!(pm.has_permission("bash", "command", "git"));
+        // Wildcard is gone — "ls" no longer matches.
+        assert!(!pm.has_permission("bash", "command", "ls"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn ask_permission_with_wildcard_value_is_hard_error() -> anyhow::Result<()> {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let scoped = ScopedPermissionManager::new(
+            "bash",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+            None,
+        );
+
+        let result = scoped
+            .ask_permission_for("bash", "prompt", "command", WILDCARD_VALUE)
+            .await;
+        assert!(
+            result.is_err(),
+            "ask_permission_for with wildcard must hard-error"
+        );
+
+        let result = scoped
+            .ask_permission_with_preview(
+                "bash",
+                "prompt",
+                "command",
+                WILDCARD_VALUE,
+                "content",
+                "sh",
+            )
+            .await;
+        assert!(
+            result.is_err(),
+            "ask_permission_with_preview with wildcard must hard-error"
+        );
+
+        // ask_permission_once routes through the same ask_permission_inner guard.
+        // Its signature is (scope, prompt, content, file_extension) — it hard-codes
+        // key="command" and uses `content` as the value, so we pass WILDCARD_VALUE
+        // as `content` to exercise the guard.
+        let result = scoped
+            .ask_permission_once("bash", "Allow?", WILDCARD_VALUE, "sh")
+            .await;
+        assert!(
+            result.is_err(),
+            "ask_permission_once with value '*' should error"
+        );
+
+        // No pending request should have been registered.
+        assert!(pm.snapshot().pending.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn wildcard_roundtrips_through_project_file() -> anyhow::Result<()> {
+        let path = temp_path();
+
+        // Create PM, add wildcard at Project scope (triggers disk write), drop it.
+        {
+            let pm = PermissionManager::new(path.clone());
+            pm.add_permission(
+                make_key("bash", "command", WILDCARD_VALUE),
+                PermissionScope::Project,
+            )?;
+            assert!(pm.has_permission("bash", "command", "anything"));
+        }
+
+        // Reload — wildcard must survive the round-trip through JSON.
+        {
+            let pm = PermissionManager::new(path.clone());
+            assert!(
+                pm.has_permission("bash", "command", "anything"),
+                "wildcard should still match after reload from disk"
+            );
+
+            // Revoke the wildcard (another disk write) and drop.
+            pm.revoke(&make_key("bash", "command", WILDCARD_VALUE))?;
+        }
+
+        // Reload again — wildcard should be gone.
+        {
+            let pm = PermissionManager::new(path);
+            assert!(
+                !pm.has_permission("bash", "command", "anything"),
+                "revoked wildcard should not re-appear after reload"
+            );
+        }
         Ok(())
     }
 }

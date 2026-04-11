@@ -7,7 +7,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Result;
-use llm_rs::permission::{ALL_SCOPES, PermissionState};
+use llm_rs::permission::{ALL_SCOPES, PermissionState, WILDCARD_VALUE};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -318,11 +318,17 @@ impl PermissionTreeState {
                     && let Some(values) = key_map.get(key_name)
                 {
                     let mut values = values.clone();
-                    // Sort: pending first, then alphabetical
+                    // Sort: wildcard first, then pending, then alphabetical.
+                    // The wildcard position is explicit (not relying on ASCII '*' sort order).
                     values.sort_by(|a, b| {
+                        let a_wild = a.0 == WILDCARD_VALUE;
+                        let b_wild = b.0 == WILDCARD_VALUE;
                         let a_pending = a.1 == PermStatus::Pending;
                         let b_pending = b.1 == PermStatus::Pending;
-                        b_pending.cmp(&a_pending).then(a.0.cmp(&b.0))
+                        b_wild
+                            .cmp(&a_wild)
+                            .then(b_pending.cmp(&a_pending))
+                            .then(a.0.cmp(&b.0))
                     });
 
                     for (value, status, prompt, request_id, preview_file_path, once_only) in values
@@ -688,12 +694,32 @@ fn render_tree(
                                     Style::default().fg(Color::DarkGray),
                                 )
                             };
-                        let line = Line::from(vec![
-                            Span::styled(format!("{}  ", indent), text_style),
-                            Span::styled(format!("[{}]", status.icon()), icon_style),
-                            Span::styled(format!(" {}", value), text_style),
-                            Span::styled(format!(" ({})", status.label()), label_style),
-                        ]);
+                        // Wildcard entries can only be added via the add-permission UI flow
+                        // (ask_permission_inner hard-errors on `value == "*"`), so a wildcard
+                        // leaf in Pending state should never occur. If one somehow does, the
+                        // asterisk keeps its bold-yellow styling rather than flashing red; this
+                        // is a degenerate-case fallthrough, not a panic path.
+                        let line = if value == WILDCARD_VALUE {
+                            Line::from(vec![
+                                Span::styled(format!("{}  ", indent), text_style),
+                                Span::styled(format!("[{}]", status.icon()), icon_style),
+                                Span::styled(
+                                    " *",
+                                    Style::default()
+                                        .fg(Color::Yellow)
+                                        .add_modifier(Modifier::BOLD),
+                                ),
+                                Span::styled(" (allow all)", Style::default().fg(Color::DarkGray)),
+                                Span::styled(format!(" ({})", status.label()), label_style),
+                            ])
+                        } else {
+                            Line::from(vec![
+                                Span::styled(format!("{}  ", indent), text_style),
+                                Span::styled(format!("[{}]", status.icon()), icon_style),
+                                Span::styled(format!(" {}", value), text_style),
+                                Span::styled(format!(" ({})", status.label()), label_style),
+                            ])
+                        };
                         ListItem::new(line)
                     }
                 }

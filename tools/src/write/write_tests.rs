@@ -9,36 +9,35 @@ mod tests {
     use llm_rs::tool::{CancellationToken, ToolContext};
     use tokio_stream::StreamExt;
 
+    fn test_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/write")
+    }
+
     fn test_dir() -> std::path::PathBuf {
-        let cwd = std::env::current_dir().expect("failed to get current dir");
-        let dir = cwd
-            .join("target")
-            .join("test-tmp")
-            .join("write")
-            .join(uuid::Uuid::new_v4().to_string());
+        let dir = test_root().join(uuid::Uuid::new_v4().to_string());
         std::fs::create_dir_all(&dir).expect("failed to create test dir");
         dir
     }
 
     fn temp_perm_path() -> std::path::PathBuf {
-        let dir = std::env::temp_dir().join(format!("llm-rs-write-test-{}", uuid::Uuid::new_v4()));
+        let dir = test_root().join(format!("perm-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&dir).expect("failed to create temp perm dir");
         dir.join("permissions.json")
     }
 
     /// Build a ToolContext with file_write permission pre-granted for `dir`.
     ///
-    /// Note: `check_file_write_permission` uses `widen_to_project_dir` which
-    /// widens any path inside the current working directory to the cwd itself.
-    /// So we must grant permission for the canonical cwd (not just `dir`),
-    /// otherwise `ask_permission` will block forever waiting for user input.
-    fn make_ctx_with_write_permission(_dir: &std::path::Path) -> Result<ToolContext> {
+    /// Grants permission for the canonicalized `dir` itself. `has_ancestor_permission`
+    /// walks up the directory tree, so any file created under `dir` is covered by
+    /// this single grant. This works regardless of whether `dir` is inside cwd
+    /// (where `widen_to_project_dir` would otherwise widen it).
+    fn make_ctx_with_write_permission(dir: &std::path::Path) -> Result<ToolContext> {
         let pm = Arc::new(PermissionManager::new(temp_perm_path()));
-        let canonical_cwd = std::env::current_dir()?.canonicalize()?;
+        let canonical_dir = dir.canonicalize()?;
         let key = PermissionKey {
             tool: "file_write".to_string(),
             key: "path".to_string(),
-            value: canonical_cwd.to_string_lossy().to_string(),
+            value: canonical_dir.to_string_lossy().to_string(),
         };
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
         let scoped =
@@ -138,12 +137,7 @@ mod tests {
 
     #[tokio::test]
     async fn rejects_nonexistent_parent() -> Result<()> {
-        let cwd = std::env::current_dir()?;
-        let dir = cwd
-            .join("target")
-            .join("test-tmp")
-            .join("write")
-            .join(uuid::Uuid::new_v4().to_string());
+        let dir = test_root().join(uuid::Uuid::new_v4().to_string());
         // Do NOT create the directory
         let file_path = dir.join("no_parent").join("file.txt");
 

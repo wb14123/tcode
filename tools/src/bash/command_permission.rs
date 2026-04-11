@@ -1,20 +1,23 @@
 use std::path::Path;
 
 use anyhow::Result;
-use llm_rs::permission::{SCOPE_BASH, ScopedPermissionManager};
+use llm_rs::permission::{KEY_COMMAND, SCOPE_BASH, ScopedPermissionManager, WILDCARD_VALUE};
 
 use super::command_parser::{CommandClassification, parse_command, try_decompose_complex};
-use crate::file_permission::{
-    check_file_read_permission, check_file_write_permission, has_file_read_permission,
-    has_file_write_permission,
-};
+use crate::file_permission::{check_file_read_permission, check_file_write_permission};
 
 /// Check bash command permissions using a four-layer system.
 ///
 /// Layer 1: Read-only commands → file read permission per path
 /// Layer 2: Constructive-write commands → file write permission per path
 /// Layer 3: Other simple commands → hierarchical command prefix permission
-/// Layer 4: Complex commands → always prompt via command permission
+/// Layer 4: Complex commands → recursively decompose, or prompt as last resort
+///
+/// The `bash/command/*` wildcard does NOT bypass `file_read` / `file_write`
+/// defenses for classified read/write sub-commands. The wildcard only short-
+/// circuits the `OtherSimple` branch (transparently via `has_permission_for`)
+/// and the non-decomposable `Complex` branch (the only place we can't see what
+/// the command will actually do).
 ///
 /// If `workdir` is provided, it is included in the paths checked for
 /// file permission — read permission for read commands, write permission
@@ -26,7 +29,8 @@ pub async fn check_bash_permission(
 ) -> Result<()> {
     let parsed = parse_command(command);
 
-    // Always check redirect file permissions regardless of classification
+    // Top-level redirect file permissions always enforced — wildcard never
+    // bypasses these.
     for path in &parsed.redirections.input_files {
         check_file_read_permission(permission, path, false).await?;
     }
@@ -35,9 +39,32 @@ pub async fn check_bash_permission(
     }
 
     match &parsed.classification {
-        // Layer 4: complex → try decomposition fast-path, otherwise always prompt
+        // Layer 4: complex → try decomposition first; if decomposable, recurse
+        // into each sub-command so file_read/file_write defenses fire on
+        // ReadCommand/WriteCommand sub-commands. Only fully opaque commands
+        // (eval, command substitution, subshells, expansions) can be auto-
+        // approved by the wildcard.
         CommandClassification::Complex => {
-            if try_decomposed_permission(permission, command, workdir).await {
+            if let Some(decomposed) = try_decompose_complex(command) {
+                // Compound-level redirects (e.g., `cmd1 | cmd2 > file`).
+                for path in &decomposed.redirections.input_files {
+                    check_file_read_permission(permission, path, false).await?;
+                }
+                for path in &decomposed.redirections.output_files {
+                    check_file_write_permission(permission, path, command, "bash").await?;
+                }
+                // Recurse into each sub-command. Each sub-command is a strict
+                // substring of the original (at least one separator consumed),
+                // so recursion is bounded.
+                for sub_cmd in &decomposed.sub_commands {
+                    Box::pin(check_bash_permission(permission, sub_cmd, workdir)).await?;
+                }
+                return Ok(());
+            }
+            // Non-decomposable complex command (eval, command substitution,
+            // subshell, process substitution, variable expansion). We can't
+            // see inside, so the wildcard is the only blanket escape hatch.
+            if permission.has_permission_for(SCOPE_BASH, KEY_COMMAND, WILDCARD_VALUE) {
                 return Ok(());
             }
             prompt_complex_command_permission(permission, command, workdir).await
@@ -62,7 +89,9 @@ pub async fn check_bash_permission(
             }
             Ok(())
         }
-        // Layer 3: other simple commands → hierarchical command prefix permission
+        // Layer 3: other simple commands → hierarchical command prefix permission.
+        // `has_command_permission` → `has_permission_for` is wildcard-aware,
+        // so this branch transparently covers the `bash/command/*` case.
         CommandClassification::OtherSimple { tokens } => {
             check_command_permission(permission, tokens, command, workdir).await
         }
@@ -79,110 +108,11 @@ pub(crate) fn has_command_permission(
 ) -> bool {
     for i in (1..=tokens.len()).rev() {
         let prefix = tokens[..i].join(" ");
-        if permission.has_permission_for(SCOPE_BASH, "command", &prefix) {
+        if permission.has_permission_for(SCOPE_BASH, KEY_COMMAND, &prefix) {
             return true;
         }
     }
     false
-}
-
-/// Attempt to auto-approve a complex command by decomposing it into sub-commands
-/// and checking if ALL parts already have stored permissions.
-///
-/// Returns `true` if every sub-command (and any top-level redirections) is already
-/// approved — the complex command can proceed without prompting.
-/// Returns `false` if decomposition fails or any part lacks a stored permission —
-/// the caller should fall back to prompting for the whole complex command.
-async fn try_decomposed_permission(
-    permission: &ScopedPermissionManager,
-    command: &str,
-    workdir: Option<&Path>,
-) -> bool {
-    let decomposed = match try_decompose_complex(command) {
-        Some(d) => d,
-        None => return false,
-    };
-
-    // Check top-level redirections (e.g., pipeline-level `> file`)
-    for path in &decomposed.redirections.input_files {
-        if !has_file_read_permission(permission, path, false).await {
-            return false;
-        }
-    }
-    for path in &decomposed.redirections.output_files {
-        if !has_file_write_permission(permission, path).await {
-            return false;
-        }
-    }
-
-    // Check each sub-command using the same logic as the non-Complex branches
-    for sub_cmd in &decomposed.sub_commands {
-        if !has_simple_command_permission(permission, sub_cmd, workdir).await {
-            return false;
-        }
-    }
-
-    true
-}
-
-/// Check if a single (non-Complex) sub-command already has stored permission,
-/// without prompting. Returns `true` if approved, `false` if not.
-///
-/// This mirrors the non-Complex branches of `check_bash_permission` but
-/// only checks — never prompts.
-async fn has_simple_command_permission(
-    permission: &ScopedPermissionManager,
-    sub_command: &str,
-    workdir: Option<&Path>,
-) -> bool {
-    let parsed = parse_command(sub_command);
-
-    // Check redirect file permissions for this sub-command
-    for path in &parsed.redirections.input_files {
-        if !has_file_read_permission(permission, path, false).await {
-            return false;
-        }
-    }
-    for path in &parsed.redirections.output_files {
-        if !has_file_write_permission(permission, path).await {
-            return false;
-        }
-    }
-
-    match &parsed.classification {
-        CommandClassification::Complex => {
-            // Should not happen — try_decompose_complex already verified all
-            // sub-commands parse as non-Complex. But if it does, fail safely.
-            false
-        }
-        CommandClassification::ReadCommand { paths } => {
-            if let Some(dir) = workdir
-                && !has_file_read_permission(permission, dir, true).await
-            {
-                return false;
-            }
-            for path in paths {
-                if !has_file_read_permission(permission, path, false).await {
-                    return false;
-                }
-            }
-            true
-        }
-        CommandClassification::WriteCommand { paths } => {
-            if let Some(dir) = workdir
-                && !has_file_write_permission(permission, dir).await
-            {
-                return false;
-            }
-            for path in paths {
-                if !has_file_write_permission(permission, path).await {
-                    return false;
-                }
-            }
-            true
-        }
-        CommandClassification::OtherSimple { tokens } => has_command_permission(permission, tokens),
-    }
 }
 
 /// Check command permission using hierarchical prefix matching.
@@ -227,10 +157,13 @@ async fn prompt_command_permission(
     };
 
     permission
+        // NOTE: `default_value` must be a real command token prefix, never
+        // the literal "*". "*" is reserved as a wildcard in the permission
+        // store and only enters storage via the add-permission UI.
         .ask_permission_with_preview(
             SCOPE_BASH,
             &prompt,
-            "command",
+            KEY_COMMAND,
             &default_value,
             full_command,
             "bash",
@@ -251,6 +184,9 @@ async fn prompt_complex_command_permission(
     };
 
     permission
+        // NOTE: `full_command` must be a real command string, never the
+        // literal "*". "*" is reserved as a wildcard in the permission store
+        // and only enters storage via the add-permission UI.
         .ask_permission_once(SCOPE_BASH, &prompt, full_command, "bash")
         .await
 }

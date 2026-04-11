@@ -74,53 +74,6 @@ async fn canonicalize_path(path: &Path) -> Result<(PathBuf, bool)> {
     }
 }
 
-/// Check whether a read permission already exists for `path` without prompting.
-///
-/// Returns `true` if the path is inside cwd (auto-allowed) or if a stored
-/// `file_read` permission covers it. Returns `false` if the path doesn't exist
-/// or no permission is found (but does NOT prompt the user).
-pub async fn has_file_read_permission(
-    permission: &ScopedPermissionManager,
-    path: &Path,
-    is_dir: bool,
-) -> bool {
-    let Ok((canonical_path, exists)) = canonicalize_path(path).await else {
-        return false;
-    };
-    if !exists {
-        return false;
-    }
-
-    // Inside cwd — auto-allowed
-    let Ok(cwd) = std::env::current_dir() else {
-        return false;
-    };
-    let Ok(canonical_cwd) = tokio::fs::canonicalize(&cwd).await else {
-        return false;
-    };
-    if canonical_path.starts_with(&canonical_cwd) {
-        return true;
-    }
-
-    let permission_dir = permission_dir_for(&canonical_path, is_dir);
-    has_ancestor_permission(permission, SCOPE_FILE_READ, &permission_dir)
-}
-
-/// Check whether a write permission already exists for `path` without prompting.
-///
-/// Returns `true` if a stored `file_write` permission covers it.
-/// Returns `false` if no permission is found (but does NOT prompt the user).
-/// Unlike reads, writes inside cwd still require explicit permission.
-pub async fn has_file_write_permission(permission: &ScopedPermissionManager, path: &Path) -> bool {
-    let Ok((canonical_path, _exists)) = canonicalize_path(path).await else {
-        return false;
-    };
-
-    let parent_dir = permission_dir_for(&canonical_path, false);
-    let permission_dir = widen_to_project_dir(&parent_dir);
-    has_ancestor_permission(permission, SCOPE_FILE_WRITE, &permission_dir)
-}
-
 /// Check whether the caller has permission to read `path`.
 ///
 /// Paths inside cwd are auto-allowed. For paths outside cwd, checks for a
@@ -151,6 +104,9 @@ pub async fn check_file_read_permission(
     }
 
     let permission_dir_str = permission_dir.to_string_lossy().to_string();
+    // NOTE: `permission_dir_str` must be a real canonicalized path, never the
+    // literal "*". "*" is reserved as a wildcard in the permission store and
+    // only enters storage via the user-initiated add-permission UI flow.
     permission
         .ask_permission_for(
             SCOPE_FILE_READ,
@@ -194,6 +150,9 @@ pub async fn check_file_write_permission(
     };
 
     permission
+        // NOTE: `permission_dir_str` must be a real canonicalized path, never
+        // the literal "*". "*" is reserved as a wildcard in the permission
+        // store and only enters storage via the add-permission UI.
         .ask_permission_with_preview(
             SCOPE_FILE_WRITE,
             &prompt,

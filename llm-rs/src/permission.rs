@@ -20,6 +20,14 @@ pub const KEY_PATH: &str = "path";
 pub const KEY_COMMAND: &str = "command";
 pub const KEY_HOSTNAME: &str = "hostname";
 
+/// Reserved value meaning "match any value under this (tool, key)".
+/// Tools must NEVER pass this as a literal value to `ask_permission*`.
+/// The permission manager treats a stored entry with this value as a
+/// wildcard that matches every value for the same (tool, key) pair.
+/// The wildcard can only enter the permission store via the user-initiated
+/// add-permission UI flow (`ClientMessage::AddPermission`).
+pub const WILDCARD_VALUE: &str = "*";
+
 /// Registry of all known permission scopes and their associated key names.
 ///
 /// When implementing a new tool that requires permissions, you MUST:
@@ -172,14 +180,28 @@ impl PermissionManager {
     }
 
     /// Check if a permission exists in session or project storage.
+    ///
+    /// Returns `true` if either the exact `(tool, key, value)` triple is
+    /// stored, or a wildcard entry `(tool, key, WILDCARD_VALUE)` is stored
+    /// for the same `(tool, key)` pair. See [`WILDCARD_VALUE`].
     pub fn has_permission(&self, tool: &str, key: &str, value: &str) -> bool {
         let pk = PermissionKey {
             tool: tool.to_string(),
             key: key.to_string(),
             value: value.to_string(),
         };
-        self.session_permissions.lock().contains(&pk)
-            || self.project_permissions.lock().contains(&pk)
+        let wildcard_pk = PermissionKey {
+            tool: tool.to_string(),
+            key: key.to_string(),
+            value: WILDCARD_VALUE.to_string(),
+        };
+        let session = self.session_permissions.lock();
+        if session.contains(&pk) || session.contains(&wildcard_pk) {
+            return true;
+        }
+        drop(session);
+        let project = self.project_permissions.lock();
+        project.contains(&pk) || project.contains(&wildcard_pk)
     }
 
     /// Register a pending permission request. If the same key is already pending,
@@ -586,6 +608,20 @@ impl ScopedPermissionManager {
         preview_file_path: Option<PathBuf>,
         once_only: bool,
     ) -> anyhow::Result<()> {
+        // Hard-fail if a tool attempts to use the reserved wildcard value.
+        // This prevents a buggy tool from ever storing `"*"` via the pending
+        // request flow (e.g. via AllowSession/AllowProject resolution). The
+        // wildcard can only enter the permission store through the
+        // user-initiated add-permission UI flow.
+        if value == WILDCARD_VALUE {
+            Self::cleanup_preview_file(&preview_file_path);
+            return Err(anyhow!(
+                "internal error: tool attempted to use reserved wildcard value '*' \
+                 for scope={scope:?} key={key:?}; this is a bug — the wildcard can \
+                 only be created via the user-initiated add-permission UI flow"
+            ));
+        }
+
         if !once_only && self.manager.has_permission(scope, key, value) {
             Self::cleanup_preview_file(&preview_file_path);
             return Ok(());
