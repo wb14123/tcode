@@ -42,6 +42,8 @@ The **value** is the actual resource being permitted. What it looks like depends
 
 - **`hostname`** values are hostnames like `github.com` or `docs.rs`.
 
+- **`*` (wildcard)** is a reserved magic value that matches any value under its (tool, key) pair. See [Wildcards](#wildcards) below.
+
 ### Scope (lifetime)
 
 The scope controls how long a permission lasts:
@@ -70,7 +72,9 @@ Permissions are **hierarchical**:
 
   Beyond that whitelist, the permission system does not track file access. Everything else — `sed`, `python script.py`, `make`, a shell function, any binary on `$PATH` — is gated only by the `bash > command` prefix check. Once the prefix is approved (or a complex command is allowed once), the process runs with the full filesystem access of your OS user. **`file_read`/`file_write` path grants do not prevent a permitted bash command from reading or writing files outside those paths**, and the syntax analysis itself is best-effort: a sufficiently clever command line can defeat it. If you need real isolation, use OS-level tools (containers, VMs, dedicated user accounts).
 
-- **Special case — complex commands:** Commands with pipes (`|`), chaining (`&&`, `||`, `;`), or other shell constructs are always prompted as "allow once" only. These can't be safely cached by prefix because the overall command may do something very different from what a simple prefix suggests.
+- **Compound commands — decomposed, not blanket-approved.** Commands with pipes (`|`) or sequential chaining (`&&`, `||`, `;`) are parsed and split into their individual sub-commands, and each sub-command is checked against your permissions independently. So `mkdir foo && ls foo` produces a `file_write` check on `foo` (from `mkdir`) and a separate `bash > command > ls` check — each can be allowed once, for the session, or for the project, and cached grants apply per sub-command. Any top-level redirection (`>`, `>>`, `<`) also enforces the matching `file_write`/`file_read` path check on the redirect target.
+
+- **Non-decomposable commands — allow once only.** Commands that use constructs the parser cannot safely split — command substitution (`` `...` ``, `$(...)`), subshells (`(...)`), process substitution (`<(...)`), variable expansion into commands, and `eval` — are always prompted as "allow once" only. These can't be safely cached because the actual commands executed depend on runtime expansion.
 
 ## Approving permissions
 
@@ -90,10 +94,38 @@ You don't have to wait for the agent to ask. You can grant permissions in advanc
 
 1. Navigate to a key node (e.g., `bash > command`) in the permission tree.
 2. Press **Enter** or **o** to open the add-permission popup.
-3. Type the value (e.g., `npm`).
+3. In the menu, choose:
+   - `1` — **Enter a specific value**, then type it in (e.g., `npm`).
+   - `2` — **Allow all values (`*`)** — grants a wildcard permission for every value under this key. See [Wildcards](#wildcards).
 4. Choose the scope: `2` for session, `3` for project.
 
-This is useful when you know the agent will need certain permissions and you want to avoid repeated prompts.
+This is useful when you know the agent will need certain permissions and you want to avoid repeated prompts. Note that `*` is a reserved magic value: you cannot type it into the specific-value input — use option `[2]` instead.
+
+## Wildcards
+
+You can grant a **wildcard** permission with the reserved value `*`. A wildcard matches any value under its (tool, key) pair:
+
+| Wildcard | Effect |
+|----------|--------|
+| `file_read > path > *` | Read any file anywhere on the filesystem |
+| `file_write > path > *` | Write to any file anywhere on the filesystem |
+| `bash > command > *` | Run any bash command |
+| `web_fetch > hostname > *` | Fetch any hostname |
+
+Wildcards are added from the add-permission popup — on a key node, press **Enter**/**o** and choose `[2] Allow all values (*)`. In the tree view, wildcard leaves are sorted first under their key and rendered as `[S] * (allow all) (session)`.
+
+Wildcards are useful for short, trusted sessions where you don't want to be prompted at all. Prefer **session** scope so they disappear when you close tcode.
+
+### Wildcard safety for bash
+
+`bash > command > *` is deliberately scoped so that **file defenses are not bypassed**. Even with the wildcard granted:
+
+- Top-level redirections (`cmd > file`, `cmd < file`, `cmd >> file`) still require the matching `file_read`/`file_write` path permission for the redirect target.
+- Commands the parser classifies as read-only (`cat`, `head`, `tail`, `wc`, `stat`, …) are routed through `file_read > path` on their arguments, not the bash wildcard.
+- Commands the parser classifies as constructive writes (`mkdir`, `touch`) are routed through `file_write > path` on their arguments.
+- Compound commands (`cmd1 && cmd2`, `a | b`, `x; y`) are decomposed and each sub-command is checked independently. The bash wildcard only short-circuits each individual sub-command that reaches the final "other simple command" classification.
+
+The one place `bash > command > *` gives a true blanket pass is **non-decomposable complex commands** (eval, command substitution, subshells, process substitution) — there the parser cannot see inside, so the wildcard is the documented escape hatch. If you don't want that escape hatch, don't grant the bash wildcard.
 
 ## Revoking permissions
 

@@ -62,7 +62,7 @@ The permission view shows tool permissions organized by key, with their current 
 | `f` | Toggle filter (pending only / all) |
 | `q` | Quit |
 
-Pressing `Enter` or `o` behaves differently depending on what is selected. On a pending permission, it opens a tmux popup with approval options. On a granted permission, it opens a management popup to revoke that permission. On a key node, it opens an add-permission popup where the user can type a value and choose between session or project scope.
+Pressing `Enter` or `o` behaves differently depending on what is selected. On a pending permission, it opens a tmux popup with approval options. On a granted permission, it opens a management popup to revoke that permission. On a key node, it opens an add-permission popup where the user can either enter a specific value or grant a wildcard (`*`) permission, then choose between session or project scope.
 
 ## Approval Popup
 
@@ -87,20 +87,31 @@ The approval popup appears as a tmux popup and has several modes depending on co
 
 ### Add-permission mode
 
-**Phase 1 -- enter value:**
+**Phase 1 -- choose value type:**
+
+| Key | Action |
+|-----|--------|
+| `1` | Enter a specific value (proceed to Phase 2) |
+| `2` | Allow all values (`*`) -- skip straight to Phase 3 |
+| `Esc` / `Ctrl-C` | Cancel |
+
+**Phase 2 -- enter value** (only when `1` was chosen in Phase 1):
 
 | Key | Action |
 |-----|--------|
 | Printable chars | Append to value input |
-| `Backspace` | Delete last character |
-| `Enter` | Confirm value, proceed to Phase 2 |
+| `Backspace` (non-empty) | Delete last character |
+| `Backspace` (empty) | Go back to Phase 1 |
+| `Enter` | Confirm value, proceed to Phase 3 |
 | `Esc` / `Ctrl-C` | Cancel |
 
-**Phase 2 -- choose scope:**
+Typing a literal `*` is rejected with an inline error — use Phase 1 option `[2]` for wildcards instead.
+
+**Phase 3 -- choose scope:**
 
 | Key | Action |
 |-----|--------|
 | `2` | Allow for session |
 | `3` | Allow for project (persisted) |
-| `Backspace` | Go back to edit value |
+| `Backspace` | Go back (to Phase 1 if wildcard, Phase 2 if specific value) |
 | `q` / `Esc` / `Ctrl-C` | Cancel |
