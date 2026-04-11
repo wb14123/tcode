@@ -41,6 +41,7 @@ pub struct DecomposedCommand {
 
 /// Commands that only read files and never modify anything.
 const READ_WHITELIST: &[&str] = &[
+    "echo",
     "cat",
     "head",
     "tail",
