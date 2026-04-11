@@ -10,7 +10,7 @@ auth = { path = "../auth" }
 lsp-client = { path = "../lsp-client" }
 llm-rs = { path = "../llm-rs" }
 tools = { path = "../tools" }
-toml = "0.8"
+toml = "1.1"
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7", features = ["codec"] }
 serde = { version = "1", features = ["derive"] }
@@ -20,15 +20,15 @@ anyhow = "1"
 futures = "0.3"
 bytes = "1"
 notify = "8.2.0"
-nix = { version = "0.29", features = ["term", "signal", "fs"] }
+nix = { version = "0.31", features = ["term", "signal", "fs"] }
 parking_lot = "0.12"
 tokio-stream = "0.1.18"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
-sha2 = "0.10"
+sha2 = "0.11"
 base64 = "0.22"
 reqwest = { version = "0.13", features = ["json"] }
-rand = "0.9"
+rand = "0.10"
 urlencoding = "2.1"
 ratatui = "0.30"
 rustyline = { version = "18", default-features = false }

@@ -76,6 +76,7 @@ fn convert_messages(msgs: &[LLMMessage]) -> Vec<InputItem> {
                     role: Role::Developer,
                     content: EasyInputContent::Text(content.clone()),
                     r#type: Default::default(),
+                    phase: None,
                 }));
             }
             LLMMessage::User(content) => {
@@ -83,6 +84,7 @@ fn convert_messages(msgs: &[LLMMessage]) -> Vec<InputItem> {
                     role: Role::User,
                     content: EasyInputContent::Text(content.clone()),
                     r#type: Default::default(),
+                    phase: None,
                 }));
             }
             LLMMessage::Assistant {
@@ -100,12 +102,19 @@ fn convert_messages(msgs: &[LLMMessage]) -> Vec<InputItem> {
                         }
                     }
                 } else {
-                    // Fallback: reconstruct from fields (for messages not from OpenAI)
+                    // Fallback: reconstruct from fields (for messages not from OpenAI).
+                    // Note: async-openai 0.34 added `phase` to `EasyInputMessage`, and its
+                    // docs warn that for gpt-5.3-codex and beyond, follow-up requests should
+                    // preserve and resend `phase` on assistant messages or model quality may
+                    // degrade. This branch is only reached for assistant turns that did NOT
+                    // originate from an OpenAI response (so we have no phase to preserve);
+                    // `None` is the only sensible value here.
                     if !content.is_empty() {
                         items.push(InputItem::EasyMessage(EasyInputMessage {
                             role: Role::Assistant,
                             content: EasyInputContent::Text(content.clone()),
                             r#type: Default::default(),
+                            phase: None,
                         }));
                     }
                     for tc in tool_calls {
@@ -115,6 +124,7 @@ fn convert_messages(msgs: &[LLMMessage]) -> Vec<InputItem> {
                             arguments: tc.arguments.clone(),
                             id: None,
                             status: None,
+                            namespace: None,
                         })));
                     }
                 }
@@ -156,6 +166,7 @@ impl LLM for OpenAI {
                             description: Some(t.description.clone()),
                             parameters: Some(normalize_schema(&t.param_schema)),
                             strict: None,
+                            defer_loading: None,
                         })
                     })
                     .collect(),

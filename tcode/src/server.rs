@@ -142,7 +142,13 @@ impl Server {
         let cwd_str = cwd.to_string_lossy();
         let mut hasher = sha2::Sha256::new();
         hasher.update(cwd_str.as_bytes());
-        let hash = format!("{:x}", hasher.finalize());
+        let digest = hasher.finalize();
+        let mut hash = String::with_capacity(digest.len() * 2);
+        use std::fmt::Write;
+        for byte in digest.iter() {
+            // write! to a String is infallible (fmt::Write for String never errors).
+            write!(&mut hash, "{:02x}", byte).expect("writes to String are infallible");
+        }
         let base =
             dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
         let permissions_path = base

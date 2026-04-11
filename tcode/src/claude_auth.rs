@@ -1,6 +1,6 @@
 use anyhow::{Context, Result};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
-use rand::Rng;
+use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 

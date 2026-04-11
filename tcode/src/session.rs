@@ -4,7 +4,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
-use rand::Rng;
+use rand::RngExt;
 
 /// Returns the base path for all sessions: ~/.tcode/sessions/
 pub fn base_path() -> Result<PathBuf> {

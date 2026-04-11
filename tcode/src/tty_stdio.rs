@@ -3,7 +3,7 @@
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
-use std::os::unix::io::{AsFd, AsRawFd, BorrowedFd, FromRawFd, OwnedFd};
+use std::os::unix::io::{AsFd, BorrowedFd, OwnedFd};
 use std::path::Path;
 use std::process::Stdio;
 use std::sync::OnceLock;
@@ -14,9 +14,7 @@ static SAVED_FDS: OnceLock<(OwnedFd, OwnedFd, OwnedFd)> = OnceLock::new();
 
 /// Duplicate a file descriptor safely, returning an OwnedFd.
 fn dup_fd(fd: BorrowedFd<'_>) -> Option<OwnedFd> {
-    let raw = nix::unistd::dup(fd.as_raw_fd()).ok()?;
-    // SAFETY: nix::unistd::dup returns a new, valid fd that we now own
-    Some(unsafe { OwnedFd::from_raw_fd(raw) })
+    nix::unistd::dup(fd).ok()
 }
 
 /// Redirect stdout and stderr to log files.
@@ -47,9 +45,9 @@ pub fn redirect_output_to_files(stdout_log: &Path, stderr_log: &Path) -> Option<
         .ok()?;
 
     // Redirect stdout (fd 1) to the log file
-    nix::unistd::dup2(stdout_file.as_raw_fd(), 1).ok()?;
+    nix::unistd::dup2_stdout(stdout_file.as_fd()).ok()?;
     // Redirect stderr (fd 2) to the log file
-    nix::unistd::dup2(stderr_file.as_raw_fd(), 2).ok()?;
+    nix::unistd::dup2_stderr(stderr_file.as_fd()).ok()?;
 
     Some(stdout_for_return)
 }
