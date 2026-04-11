@@ -25,7 +25,7 @@ const DEFAULT_TIMEOUT_MS: u64 = 120_000;
 /// - Before creating files/dirs, verify parent dir exists. Quote paths with spaces.
 /// - Optional timeout, default 120000ms (2 min). Always provide a 5-10 word description.
 /// - Use `workdir` instead of `cd <dir> && <command>`.
-/// - Never use bash for `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, `echo`.
+/// - Never use bash for `ls`, `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, `echo` — use `read` for files/directories, `glob` for recursive patterns, `grep` for content search.
 /// - Multiple commands: parallel tool calls for independent; `&&` for sequential dependent; `;` for sequential independent.
 #[tool]
 pub fn bash(
