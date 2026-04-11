@@ -916,6 +916,19 @@ impl TreeState {
             Some(&i) => i,
             None => return,
         };
+        // Placeholder subagent nodes created at SubAgentInputStart don't have a
+        // conversation_id yet, and the `subagent-<id>/display.jsonl` file they
+        // would render from doesn't exist until SubAgentStart fires. Block the
+        // open action until then so we don't launch a broken display window.
+        if let NodeType::SubAgent {
+            conversation_id, ..
+        } = &self.arena[idx].kind
+            && conversation_id.is_empty()
+        {
+            self.status_message =
+                Some("Subagent still generating — not ready to open yet".to_string());
+            return;
+        }
         let node = &self.arena[idx];
         let exe = match self.resolve_exe() {
             Ok(e) => e,
