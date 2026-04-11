@@ -11,7 +11,6 @@ pub struct TcodeConfig {
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
-    pub subagent_max_iterations: Option<usize>,
     pub max_subagent_depth: Option<usize>,
     pub subagent_model_selection: Option<bool>,
     pub browser_server_url: Option<String>,
@@ -29,7 +28,6 @@ impl Default for TcodeConfig {
             api_key: None,
             model: None,
             base_url: None,
-            subagent_max_iterations: None,
             max_subagent_depth: None,
             subagent_model_selection: None,
             browser_server_url: None,
@@ -286,7 +284,6 @@ pub(crate) const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # api_key = ""                     # optional. Empty and omitted behave the same: both fall back to the provider env var, then to "" (no auth) if it is unset. Ignored when provider = "claude-oauth".
 # model = "claude-opus-4-6"        # defaults per provider
 # base_url = ""                    # defaults per provider
-# subagent_max_iterations = 50
 # max_subagent_depth = 10
 # subagent_model_selection = false
 # browser_server_url = ""

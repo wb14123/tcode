@@ -67,7 +67,6 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         },
         false,
-        20,
         0,    // subagent_depth (root)
         3,    // max_subagent_depth
         None, // state_dir (no persistence for this example)

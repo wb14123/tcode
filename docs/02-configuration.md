@@ -44,7 +44,6 @@ api_key = ""                     # optional. Empty string and omitting the line 
                                  # provider = "claude-oauth".
 model = "claude-opus-4-6"        # defaults per provider
 base_url = ""                    # defaults per provider
-subagent_max_iterations = 50
 max_subagent_depth = 10
 subagent_model_selection = false
 browser_server_url = ""          # remote browser-server URL (TCP mode)

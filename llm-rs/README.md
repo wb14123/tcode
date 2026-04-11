@@ -190,7 +190,6 @@ The tcode CLI exposes `--max-subagent-depth` (default: 3) to control this.
 - **Depth-limited nesting**: Subagents inherit the parent's tools including `subagent`/`continue_subagent`/`get_subagent_logs` when the depth limit allows, enabling recursive delegation. At the deepest allowed level, these tools are excluded to prevent infinite nesting.
 - **Context isolation**: Each subagent gets its own conversation with independent message history and token tracking.
 - **Model selection**: The LLM chooses which model to use for the subagent from the available models list (included in the tool description).
-- **Max iterations**: Subagents are capped at a configurable number of tool-call iterations (`--subagent-max-iterations`, default 50) to prevent runaway loops.
 
 ## Examples
 

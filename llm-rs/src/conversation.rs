@@ -511,7 +511,6 @@ struct ConversationEnv {
     conversation_manager: Arc<ConversationManager>,
     tools: HashMap<String, Arc<Tool>>,
     chat_options: ChatOptions,
-    subagent_max_iterations: usize,
     subagent_depth: usize,
     max_subagent_depth: usize,
     state_dir: Option<PathBuf>,
@@ -627,7 +626,6 @@ impl ConversationManager {
         tools: Vec<Arc<Tool>>,
         chat_options: ChatOptions,
         single_turn: bool,
-        subagent_max_iterations: usize,
         subagent_depth: usize,
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
@@ -640,7 +638,6 @@ impl ConversationManager {
             tools,
             chat_options,
             single_turn,
-            subagent_max_iterations,
             subagent_depth,
             max_subagent_depth,
             state_dir,
@@ -656,7 +653,6 @@ impl ConversationManager {
         tools: Vec<Arc<Tool>>,
         chat_options: ChatOptions,
         single_turn: bool,
-        subagent_max_iterations: usize,
         subagent_depth: usize,
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
@@ -682,7 +678,6 @@ impl ConversationManager {
             pending_tools: HashSet::new(),
             cancelled_tools: HashSet::new(),
             accumulated_tool_content: HashMap::new(),
-            llm_calls: 0,
             description: None,
             created_at: Some(now_millis()),
             env: ConversationEnv {
@@ -691,7 +686,6 @@ impl ConversationManager {
                 conversation_manager: Arc::clone(self),
                 tools: tools_map,
                 chat_options,
-                subagent_max_iterations,
                 subagent_depth,
                 max_subagent_depth,
                 state_dir,
@@ -785,7 +779,6 @@ impl ConversationManager {
         mut state: ConversationState,
         mut llm: Box<dyn LLM>,
         tools: Vec<Arc<Tool>>,
-        subagent_max_iterations: usize,
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
     ) -> Result<(String, Arc<ConversationClient>)> {
@@ -833,7 +826,6 @@ impl ConversationManager {
             pending_tools: HashSet::new(),
             cancelled_tools: HashSet::new(),
             accumulated_tool_content: HashMap::new(),
-            llm_calls: 0,
             description,
             created_at,
             env: ConversationEnv {
@@ -842,7 +834,6 @@ impl ConversationManager {
                 conversation_manager: Arc::clone(self),
                 tools: tools_map,
                 chat_options: state.chat_options,
-                subagent_max_iterations,
                 subagent_depth: state.subagent_depth,
                 max_subagent_depth,
                 state_dir,
@@ -865,7 +856,6 @@ impl ConversationManager {
         state: ConversationState,
         llm: Box<dyn LLM>,
         tools: Vec<Arc<Tool>>,
-        subagent_max_iterations: usize,
         max_subagent_depth: usize,
         state_dir: PathBuf,
     ) -> Result<(String, Arc<ConversationClient>, Vec<ResumedSubagent>)> {
@@ -905,7 +895,6 @@ impl ConversationManager {
                 sa_state,
                 sa_llm,
                 sa_tools,
-                subagent_max_iterations,
                 max_subagent_depth,
                 Some(sa_dir.clone()),
             )?;
@@ -917,14 +906,8 @@ impl ConversationManager {
         }
 
         // Resume root conversation
-        let (root_id, root_client) = self.resume_conversation(
-            state,
-            llm,
-            tools,
-            subagent_max_iterations,
-            max_subagent_depth,
-            Some(state_dir),
-        )?;
+        let (root_id, root_client) =
+            self.resume_conversation(state, llm, tools, max_subagent_depth, Some(state_dir))?;
 
         Ok((root_id, root_client, resumed_subagents))
     }
@@ -1408,9 +1391,6 @@ pub struct Conversation {
     /// Accumulated tool output per tool_call_id (chunks joined).
     accumulated_tool_content: HashMap<String, String>,
 
-    /// Number of LLM calls since the last user message (for subagent max_iterations).
-    llm_calls: usize,
-
     /// Truncated first user input used as session description.
     description: Option<String>,
 
@@ -1573,7 +1553,6 @@ impl Conversation {
                                 self.description = Some(truncate_preview(&content, 80));
                             }
                             self.push_llm_msg(LLMMessage::User(content.to_string()))?;
-                            self.llm_calls = 0;
                             self.call_llm().await?;
                             self.maybe_finish_turn()?;
                         }
@@ -1629,7 +1608,6 @@ impl Conversation {
                                 }
                             }
                             if found {
-                                self.llm_calls = 0;
                                 self.save_state()?;
                                 self.call_llm().await?;
                                 self.maybe_finish_turn()?;
@@ -1658,22 +1636,9 @@ impl Conversation {
         Ok(())
     }
 
-    /// Call the LLM if allowed by max_iterations and not cancelled.
+    /// Call the LLM if not cancelled.
     /// Streams the response, handles tool spawning and cancellation internally.
     async fn call_llm(&mut self) -> Result<()> {
-        let max = if self.single_turn {
-            self.env.subagent_max_iterations
-        } else {
-            usize::MAX
-        };
-        if self.llm_calls >= max {
-            log_and_broadcast_system_message(
-                &self.env.client,
-                SystemMessageLevel::Warning,
-                format!("Subagent reached maximum iterations limit ({})", max),
-            );
-            return Ok(());
-        }
         let cancel_token = self.env.client.current_cancel_token();
         if cancel_token.is_cancelled() {
             return Ok(());
@@ -1709,13 +1674,12 @@ impl Conversation {
                         aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
                         aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
                     })?;
-                    self.llm_calls += 1;
                     return Ok(());
                 }
                 event = response_stream.next() => {
                     match event {
                         Some(e) => e,
-                        None => { self.llm_calls += 1; return Ok(()); }
+                        None => { return Ok(()); }
                     }
                 }
             };
@@ -1838,7 +1802,6 @@ impl Conversation {
                             raw,
                         })?;
                     }
-                    self.llm_calls += 1;
                     return Ok(());
                 }
                 LLMEvent::Error(error) => {
@@ -1856,7 +1819,6 @@ impl Conversation {
                         aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
                         aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
                     })?;
-                    self.llm_calls += 1;
                     return Ok(());
                 }
             }
@@ -2289,7 +2251,6 @@ async fn execute_subagent(
             subagent_tools,
             env.chat_options.clone(),
             true, // single_turn
-            env.subagent_max_iterations,
             child_depth,
             env.max_subagent_depth,
             subagent_state_dir,

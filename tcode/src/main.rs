@@ -497,7 +497,6 @@ async fn main() -> Result<()> {
                 llm,
                 model,
                 chat_options,
-                config.subagent_max_iterations.unwrap_or(50),
                 config.max_subagent_depth.unwrap_or(10),
                 config.subagent_model_selection.unwrap_or(false),
                 token_manager,
@@ -1018,7 +1017,6 @@ async fn run_unified_with_session(
     token_manager: Option<claude_auth::TokenManager>,
     label: &str,
 ) -> Result<()> {
-    let subagent_max_iterations = config.subagent_max_iterations.unwrap_or(50);
     let max_subagent_depth = config.max_subagent_depth.unwrap_or(10);
     let subagent_model_selection = config.subagent_model_selection.unwrap_or(false);
     let browser_server_url = config.browser_server_url.clone();
@@ -1056,7 +1054,6 @@ async fn run_unified_with_session(
         llm,
         model,
         chat_options,
-        subagent_max_iterations,
         max_subagent_depth,
         subagent_model_selection,
         token_manager,
