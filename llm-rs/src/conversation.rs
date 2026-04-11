@@ -213,15 +213,16 @@ pub enum MessageEndStatus {
     Failed,
     Cancelled,
     Timeout,
-    UserDenied { reason: Option<String> },
+    UserDenied,
 }
 
 /// Wrap a raw tool output string based on the tool call's final status.
 ///
-/// For `UserDenied`, this injects boilerplate instructing the LLM that the
-/// denial was a deliberate human choice (not a technical error), optionally
-/// including the user-provided reason inline. For every other status the raw
-/// content is returned unchanged.
+/// For `UserDenied`, this prepends boilerplate instructing the LLM that the
+/// denial was a deliberate human choice (not a technical error). The user's
+/// reason (if any) is already baked into `raw_content` by
+/// `ask_permission_inner`, so this wrapper does not interpolate it
+/// separately. For every other status the raw content is returned unchanged.
 ///
 /// Kept `pub(crate)` so sibling tests in `conversation_tests.rs` can call it
 /// directly without driving the full conversation loop.
@@ -230,33 +231,13 @@ pub(crate) fn build_tool_result_content(
     raw_content: String,
 ) -> String {
     match end_status {
-        MessageEndStatus::UserDenied { reason: None } => {
+        MessageEndStatus::UserDenied => {
             format!(
                 "The user denied permission for this tool call. This is not a technical error — \
                  the human operator chose not to allow this action. Do not retry this tool call. \
                  Instead, ask the user what they would like to do.\n\
                  Original tool output: {}",
                 raw_content
-            )
-        }
-        MessageEndStatus::UserDenied { reason: Some(r) } => {
-            // Interpolate the reason verbatim — no tag block, no escaping.
-            //
-            // Trust boundary: the UI enforces a 500-char cap and uses Enter
-            // as the submit key (so UI-typed reasons cannot contain newlines),
-            // but `reason` is an `Option<String>` on the wire protocol and an
-            // in-process or socket-level caller could technically send arbitrary
-            // bytes (including newlines that would break the single-line layout
-            // below). This is within the existing threat model: the tcode IPC
-            // socket is a same-user / local-trust channel, and a malicious
-            // caller with that access can already do far worse. If that trust
-            // boundary ever tightens, sanitize here.
-            format!(
-                "The user denied permission for this tool call. This is not a technical error — \
-                 the human operator chose not to allow this action. Do not retry this tool call.\n\
-                 The user's reason: {r}\n\
-                 If you are not sure what to do next, ask the user.\n\
-                 Original tool output: {raw_content}"
             )
         }
         _ => raw_content,
@@ -1277,10 +1258,9 @@ async fn collect_subagent_response(
                     tracing::error!(error = %e, "failed to send SubAgentPermissionApproved to parent");
                 }
             }
-            // Tool denied → bubble up (reason stays inside the subagent whose
-            // tool was denied; we do not forward it to the parent — see plan §3 #6)
+            // Tool denied → bubble up
             Message::ToolMessageEnd {
-                end_status: MessageEndStatus::UserDenied { .. },
+                end_status: MessageEndStatus::UserDenied,
                 ..
             } => {
                 if let Err(e) = parent_client.notify_msg(Message::SubAgentPermissionDenied {
@@ -2100,9 +2080,7 @@ async fn execute_regular_tool(
         let status = if cancel_token.is_cancelled() {
             MessageEndStatus::Cancelled
         } else if scoped_pm_ref.was_denied() {
-            MessageEndStatus::UserDenied {
-                reason: scoped_pm_ref.was_denied_reason(),
-            }
+            MessageEndStatus::UserDenied
         } else {
             MessageEndStatus::Succeeded
         };

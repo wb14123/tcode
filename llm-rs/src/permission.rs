@@ -479,8 +479,6 @@ pub struct ScopedPermissionManager {
     on_approved_fn: Arc<dyn Fn() + Send + Sync>,
     /// Tracks whether the user denied permission during this tool execution.
     denied: Arc<AtomicBool>,
-    /// Reason text provided by the user when denying. Populated alongside `denied`.
-    denied_reason: Arc<parking_lot::Mutex<Option<String>>>,
     /// True while waiting for user approval. Used by `TimeoutStream` to
     /// pause the deadline so approval wait time doesn't count as timeout.
     approval_pending: Arc<AtomicBool>,
@@ -505,7 +503,6 @@ impl ScopedPermissionManager {
             notify_fn,
             on_approved_fn,
             denied: Arc::new(AtomicBool::new(false)),
-            denied_reason: Arc::new(parking_lot::Mutex::new(None)),
             approval_pending: Arc::new(AtomicBool::new(false)),
             session_dir,
             cancel_token: None,
@@ -526,7 +523,6 @@ impl ScopedPermissionManager {
             notify_fn: Arc::new(|| {}),
             on_approved_fn: Arc::new(|| {}),
             denied: Arc::new(AtomicBool::new(false)),
-            denied_reason: Arc::new(parking_lot::Mutex::new(None)),
             approval_pending: Arc::new(AtomicBool::new(false)),
             session_dir: None,
             cancel_token: None,
@@ -711,18 +707,45 @@ impl ScopedPermissionManager {
                 Ok(())
             }
             ResolveOutcome::Denied(reason) => {
-                *self.denied_reason.lock() = reason;
                 self.denied.store(true, Ordering::Relaxed);
-                Err(anyhow!(
-                    "Permission denied: {} The user chose not to allow this action.",
-                    prompt
-                ))
+                // Sanitize the reason: trim, then collapse any run of
+                // whitespace (spaces, tabs, newlines) to a single space.
+                // The UI caps reason length and submits on Enter, but
+                // `reason` is wire-protocol-shaped and an in-process or
+                // socket-level caller could technically send arbitrary bytes,
+                // so collapse here so a multi-line reason can never break
+                // the single-line display layout downstream.
+                let sanitized = reason
+                    .as_deref()
+                    .map(|r| {
+                        let mut out = String::with_capacity(r.len());
+                        for word in r.split_whitespace() {
+                            if !out.is_empty() {
+                                out.push(' ');
+                            }
+                            out.push_str(word);
+                        }
+                        out
+                    })
+                    .filter(|s| !s.is_empty());
+                match sanitized {
+                    Some(r) => Err(anyhow!(
+                        "Permission denied: {} The user chose not to allow this action. \
+                         The user's reason: {}",
+                        prompt,
+                        r
+                    )),
+                    None => Err(anyhow!(
+                        "Permission denied: {} The user chose not to allow this action.",
+                        prompt
+                    )),
+                }
             }
             ResolveOutcome::Cancelled => {
                 // Shutdown / external-cancel path (close_all_pending, or a
-                // dropped sender). Do NOT touch `denied` / `denied_reason` —
-                // `was_denied()` must stay false so the caller classifies this
-                // as a cancel, not a user denial.
+                // dropped sender). Do NOT touch `denied` — `was_denied()`
+                // must stay false so the caller classifies this as a cancel,
+                // not a user denial.
                 Err(anyhow!("Tool cancelled while waiting for permission"))
             }
         }
@@ -759,12 +782,6 @@ impl ScopedPermissionManager {
     /// Returns true if the user denied permission during this tool execution.
     pub fn was_denied(&self) -> bool {
         self.denied.load(Ordering::Relaxed)
-    }
-
-    /// Returns the deny reason text provided by the user, if any, from the
-    /// most recent denial recorded on this scoped manager.
-    pub fn was_denied_reason(&self) -> Option<String> {
-        self.denied_reason.lock().clone()
     }
 
     /// Returns a shared handle to the approval-pending flag.

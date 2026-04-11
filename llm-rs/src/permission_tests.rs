@@ -618,7 +618,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn deny_with_reason_surfaces_on_scoped_manager() -> anyhow::Result<()> {
+    async fn deny_with_reason_surfaces_in_error_text() -> anyhow::Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
         let scoped = ScopedPermissionManager::new(
             "bash",
@@ -649,12 +649,89 @@ mod tests {
             None,
         )?;
 
-        // The waiter should have returned an Err, and the scoped manager should
-        // expose the reason.
+        // The waiter should have returned an Err whose Display matches the
+        // reason-path error text byte-for-byte. The scoped manager still
+        // tracks `was_denied` so the caller can classify the tool result
+        // as UserDenied.
         let res = waiter.await?;
-        assert!(res.is_err(), "expected Err from denied permission");
+        let err = res.expect_err("expected Err from denied permission");
+        let expected = "Permission denied: Allow running ls? \
+                        The user chose not to allow this action. \
+                        The user's reason: because";
+        assert_eq!(format!("{err}"), expected);
         assert!(scoped.was_denied());
-        assert_eq!(scoped.was_denied_reason(), Some("because".to_string()));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deny_without_reason_error_text_is_byte_exact() -> anyhow::Result<()> {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let scoped = ScopedPermissionManager::new(
+            "bash",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+            None,
+        );
+
+        let scoped_clone = scoped.clone();
+        let waiter = tokio::spawn(async move {
+            scoped_clone
+                .ask_permission("Allow running ls?", "command", "ls")
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let key = make_key("bash", "command", "ls");
+        pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
+
+        let res = waiter.await?;
+        let err = res.expect_err("expected Err from denied permission");
+        // Byte-for-byte invariant: the no-reason error text must exactly
+        // equal the pre-deny-reason wording, with no trailing reason suffix.
+        let expected =
+            "Permission denied: Allow running ls? The user chose not to allow this action.";
+        assert_eq!(format!("{err}"), expected);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deny_reason_whitespace_is_sanitized() -> anyhow::Result<()> {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let scoped = ScopedPermissionManager::new(
+            "bash",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+            None,
+        );
+
+        let scoped_clone = scoped.clone();
+        let waiter = tokio::spawn(async move {
+            scoped_clone
+                .ask_permission("Allow running ls?", "command", "ls")
+                .await
+        });
+        tokio::task::yield_now().await;
+
+        let key = make_key("bash", "command", "ls");
+        pm.resolve(
+            &key,
+            &PermissionDecision::Deny {
+                reason: Some("\nuse\tglob\n\ninstead\n".to_string()),
+            },
+            None,
+        )?;
+
+        let res = waiter.await?;
+        let err = res.expect_err("expected Err from denied permission");
+        // Newlines/tabs/multi-space runs all collapse to a single space; the
+        // single-line layout invariant must hold downstream. Byte-exact so a
+        // stray double-space (e.g. from `"use  glob instead"`) would fail.
+        let expected = "Permission denied: Allow running ls? \
+                        The user chose not to allow this action. \
+                        The user's reason: use glob instead";
+        assert_eq!(format!("{err}"), expected);
         Ok(())
     }
 }

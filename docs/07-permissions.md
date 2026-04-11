@@ -92,7 +92,7 @@ When the agent needs to do something that requires permission, a pending request
 
 Pressing `4` in the approval popup does not immediately resolve the request — it opens a small single-line text input where you can type a short reason. Press **Enter** to deny (empty input denies without a reason; leading/trailing whitespace is stripped, so a space-only input is treated the same as empty). Press **Esc** to go back to the approval menu, or **Ctrl-C** to cancel the popup entirely.
 
-The reason, if given, is threaded into the tool-call result the agent sees so it can react intelligently. For example, denying a `grep` call with the reason `"use rg instead"` lets the agent switch to `rg` on its own without re-prompting you. If you deny without a reason, the agent is told only that the request was declined and asked to check in with you.
+The reason, if given, is appended to the permission-denied error itself, so the same text appears verbatim both in the tool output you see in the main display and in what the agent receives — a single source of truth. For example, denying a `grep` call with the reason `"use rg instead"` lets the agent switch to `rg` on its own without re-prompting you. (Embedded newlines or tabs in the reason are collapsed to single spaces, so a multi-line reason can never break the single-line display layout.) If you deny without a reason, the agent is told only that the request was declined and asked to check in with you.
 
 ## Adding permissions proactively
 

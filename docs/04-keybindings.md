@@ -91,7 +91,7 @@ The approval popup appears as a tmux popup and has several modes depending on co
 | `Esc` | Go back to Phase 1 |
 | `Ctrl-C` | Cancel the popup |
 
-The reason, if given, is forwarded to the agent in the tool-call result so it can react intelligently (e.g. picking a different tool) instead of just re-prompting. See [docs/07-permissions.md](07-permissions.md#denying-with-a-reason) for details.
+The reason, if given, is appended to the permission-denied error itself, so the same text appears verbatim in the tool output you see in the main display **and** in what the agent receives — letting the agent react intelligently (e.g. picking a different tool) instead of just re-prompting. See [docs/07-permissions.md](07-permissions.md#denying-with-a-reason) for details.
 
 ### Management mode (granted permissions)
 
