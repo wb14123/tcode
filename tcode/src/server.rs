@@ -976,30 +976,24 @@ fn run_event_writer(
                         .context("Failed to append subagent waiting permission to display")?;
                 }
 
+                // Both Approved and Denied resolve a pending permission request
+                // and put the subagent back into the Running state. They are
+                // handled identically here; the denial is still recorded in
+                // `display.jsonl` via `append_event` for audit/replay.
                 Message::SubAgentPermissionApproved {
+                    conversation_id, ..
+                }
+                | Message::SubAgentPermissionDenied {
                     conversation_id, ..
                 } => {
                     if let Some(state) = subagents.get(conversation_id) {
                         tokio::fs::write(&state.status_file_path, "Running")
                             .await
-                            .context("Failed to write subagent running status after approval")?;
+                            .context("Failed to write subagent running status after permission resolution")?;
                     }
                     append_event(&display_file, &event)
                         .await
-                        .context("Failed to append subagent permission approved to display")?;
-                }
-
-                Message::SubAgentPermissionDenied {
-                    conversation_id, ..
-                } => {
-                    if let Some(state) = subagents.get(conversation_id) {
-                        tokio::fs::write(&state.status_file_path, "Denied")
-                            .await
-                            .context("Failed to write subagent denied status")?;
-                    }
-                    append_event(&display_file, &event)
-                        .await
-                        .context("Failed to append subagent permission denied to display")?;
+                        .context("Failed to append subagent permission resolution to display")?;
                 }
 
                 Message::SubAgentInputStart { .. } => {

@@ -1109,30 +1109,14 @@ local function render_event(buf, ns, event)
       end
     end
 
-  elseif variant == 'SubAgentPermissionApproved' then
+  -- Both Approved and Denied resolve a pending permission request and put
+  -- the subagent label back into the [running] state.
+  elseif variant == 'SubAgentPermissionApproved' or variant == 'SubAgentPermissionDenied' then
     if data.conversation_id and sa_label_marks[data.conversation_id] then
       local info = sa_label_marks[data.conversation_id]
       local virt = {
         { '>>> SUB-AGENT: ', 'TCodeTool' },
         { '[running]', 'TCodeTool' },
-        { ' ' .. info.description, 'TCodeTool' },
-      }
-      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
-      if mark_pos and mark_pos[1] then
-        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
-          id = info.extmark_id,
-          virt_text = virt,
-          virt_text_pos = 'overlay',
-        })
-      end
-    end
-
-  elseif variant == 'SubAgentPermissionDenied' then
-    if data.conversation_id and sa_label_marks[data.conversation_id] then
-      local info = sa_label_marks[data.conversation_id]
-      local virt = {
-        { '>>> SUB-AGENT: ', 'TCodeTool' },
-        { '[denied]', 'TCodeError' },
         { ' ' .. info.description, 'TCodeTool' },
       }
       local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})

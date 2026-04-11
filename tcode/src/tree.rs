@@ -67,7 +67,7 @@ impl NodeStatus {
     fn is_terminal(&self) -> bool {
         matches!(
             self,
-            NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Cancelled
+            NodeStatus::Succeeded | NodeStatus::Failed | NodeStatus::Cancelled | NodeStatus::Denied
         )
     }
 
@@ -78,6 +78,19 @@ impl NodeStatus {
             MessageEndStatus::Cancelled => NodeStatus::Cancelled,
             MessageEndStatus::Timeout => NodeStatus::Failed,
             MessageEndStatus::UserDenied => NodeStatus::Denied,
+        }
+    }
+
+    /// Map a subagent end status to a node status.
+    ///
+    /// A subagent as a whole never ends in "denied" — only individual child
+    /// tool calls inside it can. This defensively remaps `UserDenied → Failed`
+    /// to preserve the invariant that `NodeStatus::Denied` is reachable only
+    /// for `ToolCall` nodes.
+    fn from_subagent_end_status(s: &MessageEndStatus) -> Self {
+        match s {
+            MessageEndStatus::UserDenied => NodeStatus::Failed,
+            _ => Self::from_end_status(s),
         }
     }
 }
@@ -593,7 +606,7 @@ impl TreeState {
                         ..
                     } = &mut self.arena[idx].kind
                 {
-                    *status = NodeStatus::from_end_status(end_status);
+                    *status = NodeStatus::from_subagent_end_status(end_status);
                     *it = *input_tokens;
                     *ot = *output_tokens;
                 }
@@ -654,7 +667,12 @@ impl TreeState {
                     *status = NodeStatus::Permission;
                 }
             }
+            // Both Approved and Denied resolve a pending permission request
+            // and put the subagent back into the Running state.
             Message::SubAgentPermissionApproved {
+                conversation_id, ..
+            }
+            | Message::SubAgentPermissionDenied {
                 conversation_id, ..
             } => {
                 if let Some(&idx) = self.conversation_idx.get(conversation_id)
@@ -662,16 +680,6 @@ impl TreeState {
                     && matches!(status, NodeStatus::Permission)
                 {
                     *status = NodeStatus::Running;
-                }
-            }
-            Message::SubAgentPermissionDenied {
-                conversation_id, ..
-            } => {
-                if let Some(&idx) = self.conversation_idx.get(conversation_id)
-                    && let NodeType::SubAgent { status, .. } = &mut self.arena[idx].kind
-                    && !status.is_terminal()
-                {
-                    *status = NodeStatus::Denied;
                 }
             }
             Message::SubAgentInputStart {
