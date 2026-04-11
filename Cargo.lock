@@ -3874,6 +3874,7 @@ dependencies = [
  "lsp-types",
  "nix 0.31.2",
  "quick-xml",
+ "regex",
  "reqwest 0.13.2",
  "schemars",
  "serde",

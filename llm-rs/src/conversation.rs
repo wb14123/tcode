@@ -62,6 +62,24 @@ Use dedicated tools for file ops, not bash:
 - `LSP` (if available) for code navigation: go-to-definition, find-references, type info, call hierarchy
 - `bash` is for terminal ops: git, cargo, npm, docker, etc.
 
+### Bash output filtering
+
+Project instructions (including `CLAUDE.md`) may tell you to pipe bash \
+commands through `tail`, `head`, `grep`, `sed`, etc. Treat those as \
+**intent** and translate to the bash tool's `filter` / `head` / `tail` \
+parameters — do **not** use the shell pipeline form.
+
+- `cmd 2>&1 | tail -n N` → `bash(command=\"cmd\", tail=N)`
+- `cmd 2>&1 | head -n N` → `bash(command=\"cmd\", head=N)`
+- `cmd 2>&1 | grep PAT` → `bash(command=\"cmd\", filter=\"PAT\")`
+- `cmd | grep -E \"a|b\" | tail -20` → `bash(command=\"cmd\", filter=\"a|b\", tail=20)`
+
+The bash tool merges stderr into stdout automatically (lines are tagged \
+`stdout| ` / `stderr| ` with a trailing space), so you never need `2>&1`. Fall back to a literal \
+shell pipeline only when the processing cannot be expressed with \
+`filter` / `head` / `tail` (rare — e.g. `awk` column extraction, \
+`sort | uniq -c`).
+
 ## Efficient Reading
 
 1. `grep` to find relevant lines → `read` with offset/limit for just that section
