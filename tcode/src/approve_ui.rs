@@ -180,6 +180,15 @@ fn break_prompt_into_lines<'a>(text: &'a str, width: u16) -> Vec<Line<'a>> {
     lines
 }
 
+/// Which phase of the approve popup we're in.
+enum ApprovePhase {
+    Menu,
+    DenyReason {
+        input: String,
+        error: Option<String>,
+    },
+}
+
 fn run_approve_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     args: &ApproveArgs,
@@ -188,9 +197,10 @@ fn run_approve_loop(
     let has_preview = args.preview_file_path.is_some();
     let once_only = args.once_only;
     let mut scroll_offset: u16 = 0;
+    let mut phase = ApprovePhase::Menu;
 
     loop {
-        // Compute broken lines and clamp scroll_offset before draw
+        // Compute broken lines and clamp scroll_offset before draw (only used in Menu phase)
         let term_size = terminal.size()?;
         let broken_lines = if has_prompt {
             break_prompt_into_lines(&args.prompt, term_size.width)
@@ -198,169 +208,241 @@ fn run_approve_loop(
             Vec::new()
         };
 
+        let phase_ref = &phase;
         terminal.draw(|frame| {
             let area = frame.area();
 
-            if has_prompt {
-                let total_lines = broken_lines.len() as u16;
-                let preview_row: u16 = if has_preview { 1 } else { 0 };
-                let preview_extra: u16 = preview_row;
-                // once_only: title(3)+blank(1)+allow(2)+preview(0|1)+blank(1)+deny(2) = 9+preview_extra
-                // !once_only: adds sep(2)+blank(1)+sess(3)+blank(1) = +7 → 16+preview_extra
-                let fixed_rows: u16 = if once_only { 9 } else { 16 } + preview_extra;
-                let prompt_space_no_hints = area.height.saturating_sub(fixed_rows);
-                let needs_scroll = total_lines > prompt_space_no_hints;
-                // Only reserve hint rows when scrolling is needed
-                let (hint_up, hint_down) = if needs_scroll { (1u16, 1u16) } else { (0, 0) };
+            match phase_ref {
+                ApprovePhase::Menu => {
+                    if has_prompt {
+                        let total_lines = broken_lines.len() as u16;
+                        let preview_row: u16 = if has_preview { 1 } else { 0 };
+                        let preview_extra: u16 = preview_row;
+                        // once_only: title(3)+blank(1)+allow(2)+preview(0|1)+blank(1)+deny(2) = 9+preview_extra
+                        // !once_only: adds sep(2)+blank(1)+sess(3)+blank(1) = +7 → 16+preview_extra
+                        let fixed_rows: u16 = if once_only { 9 } else { 16 } + preview_extra;
+                        let prompt_space_no_hints = area.height.saturating_sub(fixed_rows);
+                        let needs_scroll = total_lines > prompt_space_no_hints;
+                        // Only reserve hint rows when scrolling is needed
+                        let (hint_up, hint_down) = if needs_scroll { (1u16, 1u16) } else { (0, 0) };
 
-                // Build constraint list dynamically: common prefix, optional session/project
-                // group, then deny/cancel as the final entry.
-                let mut constraints = vec![
-                    Constraint::Length(3),           // [0] Title
-                    Constraint::Length(hint_up),     // [1] Scroll-up hint (0 when not needed)
-                    Constraint::Min(1),              // [2] Prompt content
-                    Constraint::Length(hint_down),   // [3] Scroll-down hint (0 when not needed)
-                    Constraint::Length(1),           // [4] Blank
-                    Constraint::Length(2),           // [5] Allow once
-                    Constraint::Length(preview_row), // [6] View in nvim (0 when no preview)
-                    Constraint::Length(1),           // [7] Blank
-                ];
-                if !once_only {
-                    constraints.push(Constraint::Length(2)); // [8] Separator + key:value
-                    constraints.push(Constraint::Length(1)); // [9] Blank
-                    constraints.push(Constraint::Length(3)); // [10] Session/Project options
-                    constraints.push(Constraint::Length(1)); // [11] Blank
-                }
-                constraints.push(Constraint::Length(2)); // [last] Deny/Cancel
-                let chunks = Layout::vertical(constraints).split(area);
+                        // Build constraint list dynamically: common prefix, optional session/project
+                        // group, then deny/cancel as the final entry.
+                        let mut constraints = vec![
+                            Constraint::Length(3),           // [0] Title
+                            Constraint::Length(hint_up), // [1] Scroll-up hint (0 when not needed)
+                            Constraint::Min(1),          // [2] Prompt content
+                            Constraint::Length(hint_down), // [3] Scroll-down hint (0 when not needed)
+                            Constraint::Length(1),         // [4] Blank
+                            Constraint::Length(2),         // [5] Allow once
+                            Constraint::Length(preview_row), // [6] View in nvim (0 when no preview)
+                            Constraint::Length(1),         // [7] Blank
+                        ];
+                        if !once_only {
+                            constraints.push(Constraint::Length(2)); // [8] Separator + key:value
+                            constraints.push(Constraint::Length(1)); // [9] Blank
+                            constraints.push(Constraint::Length(3)); // [10] Session/Project options
+                            constraints.push(Constraint::Length(1)); // [11] Blank
+                        }
+                        constraints.push(Constraint::Length(2)); // [last] Deny/Cancel
+                        let chunks = Layout::vertical(constraints).split(area);
 
-                frame.render_widget(render_title("Permission Request", Color::Yellow), chunks[0]);
+                        frame.render_widget(
+                            render_title("Permission Request", Color::Yellow),
+                            chunks[0],
+                        );
 
-                let prompt_content_height = chunks[2].height;
-                let scrollable = total_lines.saturating_sub(prompt_content_height);
-                // Clamp scroll offset
-                if scroll_offset > scrollable {
-                    scroll_offset = scrollable;
-                }
+                        let prompt_content_height = chunks[2].height;
+                        let scrollable = total_lines.saturating_sub(prompt_content_height);
+                        // Clamp scroll offset
+                        if scroll_offset > scrollable {
+                            scroll_offset = scrollable;
+                        }
 
-                // Render scroll-up hint (area is 0-height when not needed)
-                if scroll_offset > 0 {
-                    let hint = Paragraph::new(Line::from(Span::styled(
-                        "  \u{25b2} scroll up (k/\u{2191})",
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                    frame.render_widget(hint, chunks[1]);
-                }
+                        // Render scroll-up hint (area is 0-height when not needed)
+                        if scroll_offset > 0 {
+                            let hint = Paragraph::new(Line::from(Span::styled(
+                                "  \u{25b2} scroll up (k/\u{2191})",
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                            frame.render_widget(hint, chunks[1]);
+                        }
 
-                // Render prompt content with scroll
-                let prompt_text = Paragraph::new(broken_lines.clone()).scroll((scroll_offset, 0));
-                frame.render_widget(prompt_text, chunks[2]);
+                        // Render prompt content with scroll
+                        let prompt_text =
+                            Paragraph::new(broken_lines.clone()).scroll((scroll_offset, 0));
+                        frame.render_widget(prompt_text, chunks[2]);
 
-                // Render scroll-down hint (area is 0-height when not needed)
-                if scroll_offset < scrollable {
-                    let hint = Paragraph::new(Line::from(Span::styled(
-                        "  \u{25bc} scroll down (j/\u{2193})",
-                        Style::default().fg(Color::DarkGray),
-                    )));
-                    frame.render_widget(hint, chunks[3]);
-                }
+                        // Render scroll-down hint (area is 0-height when not needed)
+                        if scroll_offset < scrollable {
+                            let hint = Paragraph::new(Line::from(Span::styled(
+                                "  \u{25bc} scroll down (j/\u{2193})",
+                                Style::default().fg(Color::DarkGray),
+                            )));
+                            frame.render_widget(hint, chunks[3]);
+                        }
 
-                let allow_once = Paragraph::new(vec![Line::from(Span::styled(
-                    "  [1] Allow once",
-                    Style::default().fg(Color::Green),
-                ))]);
-                frame.render_widget(allow_once, chunks[5]);
+                        let allow_once = Paragraph::new(vec![Line::from(Span::styled(
+                            "  [1] Allow once",
+                            Style::default().fg(Color::Green),
+                        ))]);
+                        frame.render_widget(allow_once, chunks[5]);
 
-                // Render [v] View in nvim (area is 0-height when no preview)
-                if has_preview {
-                    let view_nvim = Paragraph::new(vec![Line::from(Span::styled(
-                        "  [v] View in nvim",
-                        Style::default().fg(Color::Magenta),
-                    ))]);
-                    frame.render_widget(view_nvim, chunks[6]);
-                }
+                        // Render [v] View in nvim (area is 0-height when no preview)
+                        if has_preview {
+                            let view_nvim = Paragraph::new(vec![Line::from(Span::styled(
+                                "  [v] View in nvim",
+                                Style::default().fg(Color::Magenta),
+                            ))]);
+                            frame.render_widget(view_nvim, chunks[6]);
+                        }
 
-                // Render session/project group only when not once_only
-                if !once_only {
-                    let separator = Paragraph::new(vec![
-                        Line::from(Span::styled(
-                            "  -- Or allow all matching requests --",
-                            Style::default().fg(Color::DarkGray),
-                        )),
-                        Line::from(vec![
-                            Span::raw("  "),
-                            Span::styled(&args.key, Style::default().fg(Color::DarkGray)),
-                            Span::styled(": ", Style::default().fg(Color::DarkGray)),
-                            Span::styled(
-                                args.value.as_deref().unwrap_or(""),
+                        // Render session/project group only when not once_only
+                        if !once_only {
+                            let separator = Paragraph::new(vec![
+                                Line::from(Span::styled(
+                                    "  -- Or allow all matching requests --",
+                                    Style::default().fg(Color::DarkGray),
+                                )),
+                                Line::from(vec![
+                                    Span::raw("  "),
+                                    Span::styled(&args.key, Style::default().fg(Color::DarkGray)),
+                                    Span::styled(": ", Style::default().fg(Color::DarkGray)),
+                                    Span::styled(
+                                        args.value.as_deref().unwrap_or(""),
+                                        Style::default().fg(Color::Cyan),
+                                    ),
+                                ]),
+                            ]);
+                            frame.render_widget(separator, chunks[8]);
+
+                            let session_project = Paragraph::new(vec![
+                                Line::from(Span::styled(
+                                    "  [2] Allow for session",
+                                    Style::default().fg(Color::Cyan),
+                                )),
+                                Line::from(Span::styled(
+                                    "  [3] Allow for project",
+                                    Style::default().fg(Color::Blue),
+                                )),
+                            ]);
+                            frame.render_widget(session_project, chunks[10]);
+                        }
+
+                        let deny_cancel = Paragraph::new(vec![
+                            Line::from(Span::styled(
+                                "  [4] Deny (with optional reason)",
+                                Style::default().fg(Color::Red),
+                            )),
+                            Line::from(Span::styled(
+                                "  [q] Cancel",
+                                Style::default().fg(Color::DarkGray),
+                            )),
+                        ]);
+                        let last = chunks.len() - 1;
+                        frame.render_widget(deny_cancel, chunks[last]);
+                    } else {
+                        // No prompt: build option lines dynamically based on once_only
+                        let mut option_lines = vec![Line::from(Span::styled(
+                            "  [1] Allow once",
+                            Style::default().fg(Color::Green),
+                        ))];
+                        if !once_only {
+                            option_lines.push(Line::from(Span::styled(
+                                "  [2] Allow for session",
                                 Style::default().fg(Color::Cyan),
-                            ),
-                        ]),
-                    ]);
-                    frame.render_widget(separator, chunks[8]);
+                            )));
+                            option_lines.push(Line::from(Span::styled(
+                                "  [3] Allow for project",
+                                Style::default().fg(Color::Blue),
+                            )));
+                        }
+                        option_lines.push(Line::from(Span::styled(
+                            "  [4] Deny (with optional reason)",
+                            Style::default().fg(Color::Red),
+                        )));
+                        option_lines.push(Line::from(Span::styled(
+                            "  [q] Cancel",
+                            Style::default().fg(Color::DarkGray),
+                        )));
+                        let options_height = option_lines.len() as u16;
 
-                    let session_project = Paragraph::new(vec![
-                        Line::from(Span::styled(
-                            "  [2] Allow for session",
-                            Style::default().fg(Color::Cyan),
-                        )),
-                        Line::from(Span::styled(
-                            "  [3] Allow for project",
-                            Style::default().fg(Color::Blue),
-                        )),
-                    ]);
-                    frame.render_widget(session_project, chunks[10]);
+                        let chunks = Layout::vertical([
+                            Constraint::Length(3),              // Title
+                            Constraint::Length(2),              // Details
+                            Constraint::Length(1),              // Blank
+                            Constraint::Length(options_height), // Options
+                            Constraint::Min(0),                 // Spacer
+                        ])
+                        .split(area);
+
+                        frame.render_widget(
+                            render_title("Permission Request", Color::Yellow),
+                            chunks[0],
+                        );
+                        frame.render_widget(render_details(args), chunks[1]);
+
+                        let options = Paragraph::new(option_lines);
+                        frame.render_widget(options, chunks[3]);
+                    }
                 }
+                ApprovePhase::DenyReason { input, error } => {
+                    // Text-input modal for the optional deny reason. Mirrors the
+                    // AddPhase::Input layout: title, tool/key info, input line
+                    // with block cursor, error slot, instructions.
+                    let chunks = Layout::vertical([
+                        Constraint::Length(3), // Title
+                        Constraint::Length(2), // Tool/Key info
+                        Constraint::Length(1), // Blank
+                        Constraint::Length(1), // Prompt/help line
+                        Constraint::Length(1), // Input
+                        Constraint::Length(1), // Inline error (blank when None)
+                        Constraint::Length(1), // Blank
+                        Constraint::Length(1), // Instructions
+                        Constraint::Min(0),    // Spacer
+                    ])
+                    .split(area);
 
-                let deny_cancel = Paragraph::new(vec![
-                    Line::from(Span::styled("  [4] Deny", Style::default().fg(Color::Red))),
-                    Line::from(Span::styled(
-                        "  [q] Cancel",
+                    frame.render_widget(render_title("Deny Reason", Color::Red), chunks[0]);
+
+                    let details = Paragraph::new(vec![Line::from(vec![
+                        Span::raw("  Tool: "),
+                        Span::styled(&args.tool, Style::default().fg(Color::Cyan)),
+                        Span::raw("  Key: "),
+                        Span::styled(&args.key, Style::default().fg(Color::Cyan)),
+                    ])]);
+                    frame.render_widget(details, chunks[1]);
+
+                    let prompt_line = Paragraph::new(Line::from(Span::styled(
+                        "  Reason (optional):",
                         Style::default().fg(Color::DarkGray),
-                    )),
-                ]);
-                let last = chunks.len() - 1;
-                frame.render_widget(deny_cancel, chunks[last]);
-            } else {
-                // No prompt: build option lines dynamically based on once_only
-                let mut option_lines = vec![Line::from(Span::styled(
-                    "  [1] Allow once",
-                    Style::default().fg(Color::Green),
-                ))];
-                if !once_only {
-                    option_lines.push(Line::from(Span::styled(
-                        "  [2] Allow for session",
-                        Style::default().fg(Color::Cyan),
                     )));
-                    option_lines.push(Line::from(Span::styled(
-                        "  [3] Allow for project",
-                        Style::default().fg(Color::Blue),
-                    )));
+                    frame.render_widget(prompt_line, chunks[3]);
+
+                    let input_widget = Paragraph::new(Line::from(vec![
+                        Span::raw("  "),
+                        Span::styled(input.as_str(), Style::default().fg(Color::White)),
+                        Span::styled("\u{2588}", Style::default().fg(Color::White)),
+                    ]));
+                    frame.render_widget(input_widget, chunks[4]);
+
+                    if let Some(err) = error {
+                        let err_line = Paragraph::new(Line::from(vec![
+                            Span::raw("  "),
+                            Span::styled(
+                                format!("\u{26a0} {err}"),
+                                Style::default().fg(Color::Red),
+                            ),
+                        ]));
+                        frame.render_widget(err_line, chunks[5]);
+                    }
+
+                    let instructions = Paragraph::new(vec![Line::from(Span::styled(
+                        "  [Enter] Deny  [Esc] Back to menu  [Ctrl-C] Cancel",
+                        Style::default().fg(Color::DarkGray),
+                    ))]);
+                    frame.render_widget(instructions, chunks[7]);
                 }
-                option_lines.push(Line::from(Span::styled(
-                    "  [4] Deny",
-                    Style::default().fg(Color::Red),
-                )));
-                option_lines.push(Line::from(Span::styled(
-                    "  [q] Cancel",
-                    Style::default().fg(Color::DarkGray),
-                )));
-                let options_height = option_lines.len() as u16;
-
-                let chunks = Layout::vertical([
-                    Constraint::Length(3),              // Title
-                    Constraint::Length(2),              // Details
-                    Constraint::Length(1),              // Blank
-                    Constraint::Length(options_height), // Options
-                    Constraint::Min(0),                 // Spacer
-                ])
-                .split(area);
-
-                frame.render_widget(render_title("Permission Request", Color::Yellow), chunks[0]);
-                frame.render_widget(render_details(args), chunks[1]);
-
-                let options = Paragraph::new(option_lines);
-                frame.render_widget(options, chunks[3]);
             }
         })?;
 
@@ -370,38 +452,109 @@ fn run_approve_loop(
             if key.kind != KeyEventKind::Press {
                 continue;
             }
-            if has_prompt {
-                match key.code {
-                    KeyCode::Up | KeyCode::Char('k') => {
-                        scroll_offset = scroll_offset.saturating_sub(1);
-                        continue;
+
+            // Compute the next phase to transition into (if any). We can't
+            // reassign `phase` while it's borrowed by the match, so we return
+            // an Option<ApprovePhase> and apply it after the match ends.
+            let next_phase: Option<ApprovePhase> = match &mut phase {
+                ApprovePhase::Menu => {
+                    if has_prompt {
+                        match key.code {
+                            KeyCode::Up | KeyCode::Char('k') => {
+                                scroll_offset = scroll_offset.saturating_sub(1);
+                                continue;
+                            }
+                            KeyCode::Down | KeyCode::Char('j') => {
+                                scroll_offset = scroll_offset.saturating_add(1);
+                                continue;
+                            }
+                            _ => {}
+                        }
                     }
-                    KeyCode::Down | KeyCode::Char('j') => {
-                        scroll_offset = scroll_offset.saturating_add(1);
-                        continue;
+                    match key.code {
+                        KeyCode::Char('v') if has_preview => {
+                            return Ok(ApproveResult::ViewPopup);
+                        }
+                        KeyCode::Char('4') => Some(ApprovePhase::DenyReason {
+                            input: String::new(),
+                            error: None,
+                        }),
+                        KeyCode::Char('q') | KeyCode::Esc => {
+                            return Ok(ApproveResult::Cancelled);
+                        }
+                        code => {
+                            let decision = match code {
+                                KeyCode::Char('1') => Some(PermissionDecision::AllowOnce),
+                                KeyCode::Char('2') if !once_only => {
+                                    Some(PermissionDecision::AllowSession)
+                                }
+                                KeyCode::Char('3') if !once_only => {
+                                    Some(PermissionDecision::AllowProject)
+                                }
+                                _ => None,
+                            };
+                            if let Some(decision) = decision {
+                                let pk = make_key(args);
+                                // AllowOnce targets specific invocation; others apply to all
+                                let rid = if matches!(decision, PermissionDecision::AllowOnce) {
+                                    args.request_id.clone()
+                                } else {
+                                    None
+                                };
+                                send_resolve(&args.socket_path, pk, decision, rid)?;
+                                return Ok(ApproveResult::Done);
+                            }
+                            None
+                        }
                     }
-                    _ => {}
                 }
-            }
-            let decision = match key.code {
-                KeyCode::Char('v') if has_preview => return Ok(ApproveResult::ViewPopup),
-                KeyCode::Char('1') => Some(PermissionDecision::AllowOnce),
-                KeyCode::Char('2') if !once_only => Some(PermissionDecision::AllowSession),
-                KeyCode::Char('3') if !once_only => Some(PermissionDecision::AllowProject),
-                KeyCode::Char('4') => Some(PermissionDecision::Deny),
-                KeyCode::Char('q') | KeyCode::Esc => return Ok(ApproveResult::Cancelled),
-                _ => None,
+                ApprovePhase::DenyReason { input, error } => match key.code {
+                    // Ctrl-C cancels the whole popup (request stays pending).
+                    KeyCode::Char('c') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                        return Ok(ApproveResult::Cancelled);
+                    }
+                    // Esc goes back to the Menu phase (does NOT cancel).
+                    KeyCode::Esc => Some(ApprovePhase::Menu),
+                    // Enter resolves with Deny { reason }. Empty / whitespace-only
+                    // input → reason: None. Leading / trailing whitespace is trimmed.
+                    KeyCode::Enter => {
+                        let trimmed = input.trim();
+                        let reason = if trimmed.is_empty() {
+                            None
+                        } else {
+                            Some(trimmed.to_string())
+                        };
+                        let decision = PermissionDecision::Deny { reason };
+                        let pk = make_key(args);
+                        // Deny applies to all waiters (same as the previous [4] behavior).
+                        send_resolve(&args.socket_path, pk, decision, None)?;
+                        return Ok(ApproveResult::Done);
+                    }
+                    KeyCode::Backspace => {
+                        if input.is_empty() {
+                            // Empty + backspace → go back to Menu (mirrors AddPhase::Input).
+                            Some(ApprovePhase::Menu)
+                        } else {
+                            input.pop();
+                            *error = None;
+                            None
+                        }
+                    }
+                    KeyCode::Char(c) => {
+                        if input.chars().count() >= 500 {
+                            *error = Some("Reason too long (500 char max)".to_string());
+                        } else {
+                            input.push(c);
+                            *error = None;
+                        }
+                        None
+                    }
+                    _ => None,
+                },
             };
-            if let Some(decision) = decision {
-                let pk = make_key(args);
-                // AllowOnce targets specific invocation; others apply to all
-                let rid = if matches!(decision, PermissionDecision::AllowOnce) {
-                    args.request_id.clone()
-                } else {
-                    None
-                };
-                send_resolve(&args.socket_path, pk, decision, rid)?;
-                return Ok(ApproveResult::Done);
+
+            if let Some(new_phase) = next_phase {
+                phase = new_phase;
             }
         }
     }

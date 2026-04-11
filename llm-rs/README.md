@@ -31,7 +31,7 @@ Centralized permission management for controlling tool access to sensitive resou
 
 - **`PermissionManager`**: Pure state manager holding session permissions (`HashSet<PermissionKey>`), project permissions (persisted to disk), and pending requests (`HashMap<PermissionKey, PendingRequest>`). Requests with the same `PermissionKey` are deduplicated — multiple waiters share a single prompt. Also supports direct permission addition (bypassing the pending request flow) for user-initiated grants.
 - **`PermissionKey`**: Identifies a permission as `(tool, key, value)` — e.g., `("web_fetch", "hostname", "example.com")`.
-- **`PermissionDecision`**: AllowOnce, AllowSession, AllowProject, or Deny.
+- **`PermissionDecision`**: AllowOnce, AllowSession, AllowProject, or `Deny { reason: Option<String> }`. The deny reason, if provided by the user, is threaded into the tool-call result message so the LLM can react intelligently instead of just re-asking.
 - **`ScopedPermissionManager`**: Tool-scoped handle passed via `ToolContext`. Provides `ask_permission()` (async, blocks until user responds) and `has_permission()` (non-blocking check). A `noop()` constructor always returns true for contexts where permissions are disabled.
 - **`PermissionState`**: Snapshot of all pending, session, and project permissions for UI queries.
 - **Scope/key registry**: `ALL_SCOPES` constant maps each scope to its key names (e.g., `("file_read", &["path"])`). Used by the tree UI to display all available scopes even before any permissions are requested. New tools must register their scope/keys here.

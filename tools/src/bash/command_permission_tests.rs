@@ -226,7 +226,7 @@ async fn wildcard_does_not_bypass_file_write_for_write_command() -> Result<()> {
         key: pending[0].key.clone(),
         value: pending[0].value.clone(),
     };
-    pm.resolve(&key, &PermissionDecision::Deny, None)?;
+    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
     let result = handle.await?;
     assert!(
         result.is_err(),
@@ -267,7 +267,7 @@ async fn wildcard_does_not_bypass_file_read_for_read_command() -> Result<()> {
         key: pending[0].key.clone(),
         value: pending[0].value.clone(),
     };
-    pm.resolve(&key, &PermissionDecision::Deny, None)?;
+    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
     let result = handle.await?;
     let _ = tokio::fs::remove_file(&path).await;
     assert!(
@@ -304,7 +304,7 @@ async fn wildcard_does_not_bypass_redirect_file_write() -> Result<()> {
         key: pending[0].key.clone(),
         value: pending[0].value.clone(),
     };
-    pm.resolve(&key, &PermissionDecision::Deny, None)?;
+    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
     let result = handle.await?;
     assert!(
         result.is_err(),
@@ -434,7 +434,7 @@ async fn non_decomposable_complex_without_wildcard_prompts_once_only() -> Result
         key: pending.key.clone(),
         value: pending.value.clone(),
     };
-    pm.resolve(&key, &PermissionDecision::Deny, None)?;
+    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
     let result = handle.await?;
     assert!(result.is_err());
     Ok(())
@@ -474,7 +474,7 @@ async fn compound_with_read_command_prompts_for_file_read() -> Result<()> {
         key: pending[0].key.clone(),
         value: pending[0].value.clone(),
     };
-    pm.resolve(&key, &PermissionDecision::Deny, None)?;
+    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
     let result = handle.await?;
     let _ = tokio::fs::remove_file(&path).await;
     assert!(

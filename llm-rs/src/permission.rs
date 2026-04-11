@@ -106,7 +106,19 @@ pub enum PermissionDecision {
     AllowOnce,
     AllowSession,
     AllowProject,
-    Deny,
+    Deny { reason: Option<String> },
+}
+
+/// Internal payload delivered to pending permission waiters when a request
+/// is resolved. Allow* decisions deliver `Allowed`; `Deny { reason }` delivers
+/// `Denied(reason.clone())`. Shutdown / external-cancel paths (e.g.
+/// `close_all_pending`) deliver `Cancelled` — semantically distinct from a
+/// user denial, so the scoped manager does not mark itself `denied`.
+#[derive(Debug, Clone)]
+pub(crate) enum ResolveOutcome {
+    Allowed,
+    Denied(Option<String>),
+    Cancelled,
 }
 
 /// Unique key identifying a permission: (tool, key, value).
@@ -146,7 +158,7 @@ pub struct PermissionState {
 /// Internal tracking for a pending permission request with multiple waiters.
 struct PendingRequest {
     prompt: String,
-    waiters: HashMap<String, oneshot::Sender<bool>>,
+    waiters: HashMap<String, oneshot::Sender<ResolveOutcome>>,
     preview_file_path: Option<PathBuf>,
     once_only: bool,
 }
@@ -207,7 +219,7 @@ impl PermissionManager {
     /// Register a pending permission request. If the same key is already pending,
     /// adds a new waiter to the existing entry (dedup). Returns a (request_id, receiver)
     /// pair. The request_id is a UUID identifying this specific invocation.
-    pub fn register_request(
+    pub(crate) fn register_request(
         &self,
         tool: &str,
         prompt: &str,
@@ -215,7 +227,7 @@ impl PermissionManager {
         value: &str,
         preview_file_path: Option<PathBuf>,
         once_only: bool,
-    ) -> (String, oneshot::Receiver<bool>) {
+    ) -> (String, oneshot::Receiver<ResolveOutcome>) {
         let pk = PermissionKey {
             tool: tool.to_string(),
             key: key.to_string(),
@@ -280,7 +292,7 @@ impl PermissionManager {
                 self.project_permissions.lock().insert(key.clone());
                 self.save_project_permissions()?;
             }
-            PermissionDecision::AllowOnce | PermissionDecision::Deny => {}
+            PermissionDecision::AllowOnce | PermissionDecision::Deny { .. } => {}
         }
 
         // Notify waiters if there's a pending request
@@ -294,7 +306,7 @@ impl PermissionManager {
                 (PermissionDecision::AllowOnce, Some(rid)) => {
                     // AllowOnce: only approve the targeted waiter
                     if let Some(tx) = request.waiters.remove(rid)
-                        && tx.send(true).is_err()
+                        && tx.send(ResolveOutcome::Allowed).is_err()
                     {
                         tracing::warn!("permission waiter dropped before AllowOnce was sent");
                     }
@@ -303,14 +315,24 @@ impl PermissionManager {
                         pending.remove(key);
                     }
                 }
-                _ => {
-                    // AllowSession/AllowProject/Deny: notify all and remove
+                (PermissionDecision::AllowSession | PermissionDecision::AllowProject, _) => {
+                    // Notify all waiters with Allowed and remove the entry.
                     let request = pending
                         .remove(key)
                         .expect("key must exist: verified via get_mut under same lock");
-                    let allowed = !matches!(decision, PermissionDecision::Deny);
                     for (_, tx) in request.waiters {
-                        if tx.send(allowed).is_err() {
+                        if tx.send(ResolveOutcome::Allowed).is_err() {
+                            tracing::warn!("permission waiter dropped before decision was sent");
+                        }
+                    }
+                }
+                (PermissionDecision::Deny { reason }, _) => {
+                    // Notify all waiters with Denied(reason.clone()) and remove the entry.
+                    let request = pending
+                        .remove(key)
+                        .expect("key must exist: verified via get_mut under same lock");
+                    for (_, tx) in request.waiters {
+                        if tx.send(ResolveOutcome::Denied(reason.clone())).is_err() {
                             tracing::warn!("permission waiter dropped before decision was sent");
                         }
                     }
@@ -349,14 +371,15 @@ impl PermissionManager {
         Ok(())
     }
 
-    /// Close all pending requests by sending `false` to all waiters.
+    /// Close all pending requests by delivering `Cancelled` to all waiters.
     /// Used on session resume and conversation/tool cancellation to clean up
-    /// stale requests.
+    /// stale requests. Waiters do NOT get marked as denied — the scoped
+    /// manager distinguishes cancel from denial via `was_denied()`.
     pub fn close_all_pending(&self) {
         let mut pending = self.pending_requests.lock();
         for (_key, request) in pending.drain() {
             for (_, tx) in request.waiters {
-                if tx.send(false).is_err() {
+                if tx.send(ResolveOutcome::Cancelled).is_err() {
                     tracing::warn!("permission waiter dropped before close was sent");
                 }
             }
@@ -456,6 +479,8 @@ pub struct ScopedPermissionManager {
     on_approved_fn: Arc<dyn Fn() + Send + Sync>,
     /// Tracks whether the user denied permission during this tool execution.
     denied: Arc<AtomicBool>,
+    /// Reason text provided by the user when denying. Populated alongside `denied`.
+    denied_reason: Arc<parking_lot::Mutex<Option<String>>>,
     /// True while waiting for user approval. Used by `TimeoutStream` to
     /// pause the deadline so approval wait time doesn't count as timeout.
     approval_pending: Arc<AtomicBool>,
@@ -480,6 +505,7 @@ impl ScopedPermissionManager {
             notify_fn,
             on_approved_fn,
             denied: Arc::new(AtomicBool::new(false)),
+            denied_reason: Arc::new(parking_lot::Mutex::new(None)),
             approval_pending: Arc::new(AtomicBool::new(false)),
             session_dir,
             cancel_token: None,
@@ -500,6 +526,7 @@ impl ScopedPermissionManager {
             notify_fn: Arc::new(|| {}),
             on_approved_fn: Arc::new(|| {}),
             denied: Arc::new(AtomicBool::new(false)),
+            denied_reason: Arc::new(parking_lot::Mutex::new(None)),
             approval_pending: Arc::new(AtomicBool::new(false)),
             session_dir: None,
             cancel_token: None,
@@ -653,7 +680,7 @@ impl ScopedPermissionManager {
 
         self.approval_pending.store(true, Ordering::Release);
 
-        let allowed = if let Some(token) = &self.cancel_token {
+        let outcome: ResolveOutcome = if let Some(token) = &self.cancel_token {
             tokio::select! {
                 biased;
                 _ = token.cancelled() => {
@@ -664,10 +691,10 @@ impl ScopedPermissionManager {
                     // The caller (execute_regular_tool) sends PermissionUpdated to refresh the UI.
                     return Err(anyhow!("Tool cancelled while waiting for permission"));
                 }
-                result = rx => result.unwrap_or(false),
+                result = rx => result.unwrap_or(ResolveOutcome::Cancelled),
             }
         } else {
-            rx.await.unwrap_or(false)
+            rx.await.unwrap_or(ResolveOutcome::Cancelled)
         };
 
         // Normal completion — defuse the guard so it doesn't remove the waiter
@@ -678,15 +705,26 @@ impl ScopedPermissionManager {
 
         Self::cleanup_preview_file(&preview_file_path);
 
-        if allowed {
-            (self.on_approved_fn)();
-            Ok(())
-        } else {
-            self.denied.store(true, Ordering::Relaxed);
-            Err(anyhow!(
-                "Permission denied: {} The user chose not to allow this action.",
-                prompt
-            ))
+        match outcome {
+            ResolveOutcome::Allowed => {
+                (self.on_approved_fn)();
+                Ok(())
+            }
+            ResolveOutcome::Denied(reason) => {
+                *self.denied_reason.lock() = reason;
+                self.denied.store(true, Ordering::Relaxed);
+                Err(anyhow!(
+                    "Permission denied: {} The user chose not to allow this action.",
+                    prompt
+                ))
+            }
+            ResolveOutcome::Cancelled => {
+                // Shutdown / external-cancel path (close_all_pending, or a
+                // dropped sender). Do NOT touch `denied` / `denied_reason` —
+                // `was_denied()` must stay false so the caller classifies this
+                // as a cancel, not a user denial.
+                Err(anyhow!("Tool cancelled while waiting for permission"))
+            }
         }
     }
 
@@ -721,6 +759,12 @@ impl ScopedPermissionManager {
     /// Returns true if the user denied permission during this tool execution.
     pub fn was_denied(&self) -> bool {
         self.denied.load(Ordering::Relaxed)
+    }
+
+    /// Returns the deny reason text provided by the user, if any, from the
+    /// most recent denial recorded on this scoped manager.
+    pub fn was_denied_reason(&self) -> Option<String> {
+        self.denied_reason.lock().clone()
     }
 
     /// Returns a shared handle to the approval-pending flag.

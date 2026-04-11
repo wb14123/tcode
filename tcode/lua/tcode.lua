@@ -1261,6 +1261,17 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
         if line ~= '' then
           local ok, event = pcall(vim.json.decode, line)
           if ok and event then
+            -- Normalize Rust serde struct-variant enums that appear as
+            -- nested tables. Specifically: `MessageEndStatus::UserDenied`
+            -- now carries a `reason` payload, so serde serializes it as
+            -- `{"UserDenied": {"reason": ...}}` instead of the plain
+            -- string `"UserDenied"`. All downstream Lua sites only care
+            -- about the tag name (the reason is LLM-facing and not shown
+            -- in the tree UI), so we unwrap it to the tag name here.
+            local _, inner = next(event)
+            if type(inner) == 'table' and type(inner.end_status) == 'table' then
+              inner.end_status = next(inner.end_status)
+            end
             if on_event then
               local variant, event_data = next(event)
               local ev_ok, ev_err = pcall(on_event, variant, event_data)

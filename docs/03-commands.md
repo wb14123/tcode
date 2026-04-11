@@ -338,15 +338,26 @@ tcode --session <id> approve --tool <t> --key <k> --add
 
 **Keybindings by mode:**
 
-Approve mode:
+Approve mode -- Phase 1 (menu):
 
 | Key | Action |
 |-----|--------|
 | `1` | Allow once |
 | `2` | Allow for session |
 | `3` | Allow for project |
-| `4` | Deny |
+| `4` | Deny (proceed to Phase 2 for optional reason) |
 | `q` / `Esc` | Cancel |
+
+Approve mode -- Phase 2 (deny reason, only when `4` was chosen):
+
+| Key | Action |
+|-----|--------|
+| Printable chars | Append to reason input (500 char max) |
+| `Backspace` (non-empty) | Delete last character |
+| `Backspace` (empty) | Go back to Phase 1 |
+| `Enter` | Deny — empty / whitespace-only input denies without a reason |
+| `Esc` | Go back to Phase 1 |
+| `Ctrl-C` | Cancel the popup |
 
 Management mode:
 

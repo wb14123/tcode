@@ -84,9 +84,15 @@ When the agent needs to do something that requires permission, a pending request
    - `1` — Allow once
    - `2` — Allow for session
    - `3` — Allow for project
-   - `4` — Deny
+   - `4` — Deny (with optional reason)
 
 2. **From the permission pane** — navigate to a pending request with `j`/`k`, press **Enter** to open the approval popup.
+
+### Denying with a reason
+
+Pressing `4` in the approval popup does not immediately resolve the request — it opens a small single-line text input where you can type a short reason. Press **Enter** to deny (empty input denies without a reason; leading/trailing whitespace is stripped, so a space-only input is treated the same as empty). Press **Esc** to go back to the approval menu, or **Ctrl-C** to cancel the popup entirely.
+
+The reason, if given, is threaded into the tool-call result the agent sees so it can react intelligently. For example, denying a `grep` call with the reason `"use rg instead"` lets the agent switch to `rg` on its own without re-prompting you. If you deny without a reason, the agent is told only that the request was declined and asked to check in with you.
 
 ## Adding permissions proactively
 

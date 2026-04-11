@@ -390,4 +390,60 @@ mod tests {
         assert!(child.current_cancel_token().is_cancelled());
         assert!(child_tool.is_cancelled());
     }
+
+    // ======== tool denial wrapper text (build_tool_result_content) ========
+
+    #[test]
+    fn tool_denial_with_reason_includes_reason_inline() {
+        use crate::conversation::{MessageEndStatus, build_tool_result_content};
+
+        let status = MessageEndStatus::UserDenied {
+            reason: Some("use rg instead".to_string()),
+        };
+        let wrapped = build_tool_result_content(&status, "raw tool output".to_string());
+
+        // Exact byte-equal text we send on the reason-given path. Uses the
+        // em-dash (U+2014) and a single newline between each sentence.
+        let expected = "The user denied permission for this tool call. This is not a technical error — \
+                        the human operator chose not to allow this action. Do not retry this tool call.\n\
+                        The user's reason: use rg instead\n\
+                        If you are not sure what to do next, ask the user.\n\
+                        Original tool output: raw tool output";
+        assert_eq!(wrapped, expected);
+    }
+
+    #[test]
+    fn tool_denial_without_reason_preserves_original_wrapper() {
+        use crate::conversation::{MessageEndStatus, build_tool_result_content};
+
+        let status = MessageEndStatus::UserDenied { reason: None };
+        let wrapped = build_tool_result_content(&status, "raw tool output".to_string());
+
+        // Exact byte-equal text we send today on the no-reason path. Uses the
+        // em-dash (U+2014) and a single newline between the two sentences.
+        let expected = "The user denied permission for this tool call. This is not a technical error — \
+                        the human operator chose not to allow this action. Do not retry this tool call. \
+                        Instead, ask the user what they would like to do.\n\
+                        Original tool output: raw tool output";
+        assert_eq!(wrapped, expected);
+
+        // Sanity: the reason-given machinery must not leak onto the no-reason path.
+        assert!(!wrapped.contains("The user's reason:"));
+        assert!(!wrapped.contains("If you are not sure what to do next"));
+    }
+
+    #[test]
+    fn tool_denial_non_denied_status_passes_raw_content_through() {
+        use crate::conversation::{MessageEndStatus, build_tool_result_content};
+
+        for status in [
+            MessageEndStatus::Succeeded,
+            MessageEndStatus::Failed,
+            MessageEndStatus::Cancelled,
+            MessageEndStatus::Timeout,
+        ] {
+            let wrapped = build_tool_result_content(&status, "hello".to_string());
+            assert_eq!(wrapped, "hello", "status {status:?} should be pass-through");
+        }
+    }
 }

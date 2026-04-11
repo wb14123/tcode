@@ -3,7 +3,7 @@ mod tests {
     use std::sync::Arc;
 
     use crate::permission::{
-        PermissionDecision, PermissionKey, PermissionManager, PermissionScope,
+        PermissionDecision, PermissionKey, PermissionManager, PermissionScope, ResolveOutcome,
         ScopedPermissionManager, WILDCARD_VALUE,
     };
 
@@ -44,7 +44,7 @@ mod tests {
         );
         let key = make_key("web_fetch", "hostname", "example.com");
         pm.resolve(&key, &PermissionDecision::AllowOnce, Some(&request_id))?;
-        assert!(rx.await?);
+        assert!(matches!(rx.await?, ResolveOutcome::Allowed));
         // AllowOnce does NOT persist to session
         assert!(!pm.has_permission("web_fetch", "hostname", "example.com"));
         Ok(())
@@ -63,7 +63,7 @@ mod tests {
         );
         let key = make_key("web_fetch", "hostname", "example.com");
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
-        assert!(rx.await?);
+        assert!(matches!(rx.await?, ResolveOutcome::Allowed));
         // AllowSession persists in session
         assert!(pm.has_permission("web_fetch", "hostname", "example.com"));
         Ok(())
@@ -75,8 +75,8 @@ mod tests {
         let (_request_id, rx) =
             pm.register_request("web_fetch", "Allow?", "hostname", "evil.com", None, false);
         let key = make_key("web_fetch", "hostname", "evil.com");
-        pm.resolve(&key, &PermissionDecision::Deny, None)?;
-        assert!(!rx.await?);
+        pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
+        assert!(matches!(rx.await?, ResolveOutcome::Denied(_)));
         // Deny does NOT persist
         assert!(!pm.has_permission("web_fetch", "hostname", "evil.com"));
         Ok(())
@@ -103,8 +103,8 @@ mod tests {
         );
         let key = make_key("web_fetch", "hostname", "example.com");
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
-        assert!(rx1.await?);
-        assert!(rx2.await?);
+        assert!(matches!(rx1.await?, ResolveOutcome::Allowed));
+        assert!(matches!(rx2.await?, ResolveOutcome::Allowed));
         Ok(())
     }
 
@@ -130,11 +130,11 @@ mod tests {
         let key = make_key("web_fetch", "hostname", "example.com");
         // AllowOnce should only approve rid1, not rid2
         pm.resolve(&key, &PermissionDecision::AllowOnce, Some(&rid1))?;
-        assert!(rx1.await?);
+        assert!(matches!(rx1.await?, ResolveOutcome::Allowed));
         // rx2 should still be pending (not resolved yet)
         // Resolve the remaining waiter with Deny
-        pm.resolve(&key, &PermissionDecision::Deny, None)?;
-        assert!(!rx2.await?);
+        pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
+        assert!(matches!(rx2.await?, ResolveOutcome::Denied(_)));
         Ok(())
     }
 
@@ -167,7 +167,7 @@ mod tests {
         );
         let key = make_key("web_fetch", "hostname", "example.com");
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
-        assert!(rx.await?);
+        assert!(matches!(rx.await?, ResolveOutcome::Allowed));
         assert!(pm.has_permission("web_fetch", "hostname", "example.com"));
         pm.revoke(&key)?;
         assert!(!pm.has_permission("web_fetch", "hostname", "example.com"));
@@ -175,14 +175,14 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn close_all_pending_sends_false() -> anyhow::Result<()> {
+    async fn close_all_pending_sends_cancelled() -> anyhow::Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
         let (_rid1, rx1) =
             pm.register_request("web_fetch", "Allow?", "hostname", "a.com", None, false);
         let (_rid2, rx2) = pm.register_request("bash", "Allow?", "command", "git", None, false);
         pm.close_all_pending();
-        assert!(!rx1.await?);
-        assert!(!rx2.await?);
+        assert!(matches!(rx1.await?, ResolveOutcome::Cancelled));
+        assert!(matches!(rx2.await?, ResolveOutcome::Cancelled));
         Ok(())
     }
 
@@ -249,7 +249,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         let key = make_key("web_fetch", "hostname", "evil.com");
-        pm_clone.resolve(&key, &PermissionDecision::Deny, None)?;
+        pm_clone.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
         handle.await?;
 
         assert!(scoped.was_denied());
@@ -430,7 +430,7 @@ mod tests {
         tokio::task::yield_now().await;
 
         let key = make_key("web_fetch", "hostname", "evil.com");
-        pm_clone.resolve(&key, &PermissionDecision::Deny, None)?;
+        pm_clone.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
         handle.await?;
 
         assert_eq!(approved_count.load(Ordering::Relaxed), 0);
@@ -614,6 +614,47 @@ mod tests {
                 "revoked wildcard should not re-appear after reload"
             );
         }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn deny_with_reason_surfaces_on_scoped_manager() -> anyhow::Result<()> {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let scoped = ScopedPermissionManager::new(
+            "bash",
+            Arc::clone(&pm),
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+            None,
+        );
+
+        // Spawn the permission wait on a background task.
+        let scoped_clone = scoped.clone();
+        let waiter = tokio::spawn(async move {
+            scoped_clone
+                .ask_permission("Allow running ls?", "command", "ls")
+                .await
+        });
+
+        // Give the task a moment to register the pending request.
+        tokio::task::yield_now().await;
+
+        // Resolve with a deny reason.
+        let key = make_key("bash", "command", "ls");
+        pm.resolve(
+            &key,
+            &PermissionDecision::Deny {
+                reason: Some("because".to_string()),
+            },
+            None,
+        )?;
+
+        // The waiter should have returned an Err, and the scoped manager should
+        // expose the reason.
+        let res = waiter.await?;
+        assert!(res.is_err(), "expected Err from denied permission");
+        assert!(scoped.was_denied());
+        assert_eq!(scoped.was_denied_reason(), Some("because".to_string()));
         Ok(())
     }
 }

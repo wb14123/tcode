@@ -775,7 +775,7 @@ fn run_event_writer(
                             MessageEndStatus::Succeeded => "Done",
                             MessageEndStatus::Failed => "Failed",
                             MessageEndStatus::Cancelled => "Cancelled",
-                            MessageEndStatus::UserDenied => "Denied",
+                            MessageEndStatus::UserDenied { .. } => "Denied",
                             MessageEndStatus::Timeout => "Timeout",
                         };
                         tokio::fs::write(&state.status_file_path, status_text)

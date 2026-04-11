@@ -77,7 +77,7 @@ impl NodeStatus {
             MessageEndStatus::Failed => NodeStatus::Failed,
             MessageEndStatus::Cancelled => NodeStatus::Cancelled,
             MessageEndStatus::Timeout => NodeStatus::Failed,
-            MessageEndStatus::UserDenied => NodeStatus::Denied,
+            MessageEndStatus::UserDenied { .. } => NodeStatus::Denied,
         }
     }
 
@@ -89,7 +89,7 @@ impl NodeStatus {
     /// for `ToolCall` nodes.
     fn from_subagent_end_status(s: &MessageEndStatus) -> Self {
         match s {
-            MessageEndStatus::UserDenied => NodeStatus::Failed,
+            MessageEndStatus::UserDenied { .. } => NodeStatus::Failed,
             _ => Self::from_end_status(s),
         }
     }

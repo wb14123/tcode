@@ -70,13 +70,28 @@ The approval popup appears as a tmux popup and has several modes depending on co
 
 ### Approval mode (pending permissions)
 
+**Phase 1 -- menu:**
+
 | Key | Action |
 |-----|--------|
 | `1` | Allow once |
 | `2` | Allow for session |
 | `3` | Allow for project (persisted) |
-| `4` | Deny |
+| `4` | Deny (proceed to Phase 2 for optional reason) |
 | `q` / `Esc` | Cancel |
+
+**Phase 2 -- deny reason** (only when `4` was chosen in Phase 1):
+
+| Key | Action |
+|-----|--------|
+| Printable chars | Append to reason input (500 char max) |
+| `Backspace` (non-empty) | Delete last character |
+| `Backspace` (empty) | Go back to Phase 1 |
+| `Enter` | Deny — empty / whitespace-only input denies without a reason |
+| `Esc` | Go back to Phase 1 |
+| `Ctrl-C` | Cancel the popup |
+
+The reason, if given, is forwarded to the agent in the tool-call result so it can react intelligently (e.g. picking a different tool) instead of just re-prompting. See [docs/07-permissions.md](07-permissions.md#denying-with-a-reason) for details.
 
 ### Management mode (granted permissions)
 

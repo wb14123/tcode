@@ -183,7 +183,7 @@ When the agent tries to use a tool that requires permission (e.g., reading a fil
   - `1` — Allow once (this invocation only)
   - `2` — Allow for session (until you close tcode)
   - `3` — Allow for project (persisted across sessions)
-  - `4` — Deny
+  - `4` — Deny (opens an optional single-line reason input; press Enter to deny, Esc to go back)
 
 - **From the permission pane:** Navigate to a pending request with `j`/`k` and press **Enter** to open the approval popup.
 
