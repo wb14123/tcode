@@ -76,6 +76,14 @@ local sa_extmark_ids = {}  -- extmark_id -> conversation_id
 local sa_label_marks = {}  -- conversation_id -> { extmark_id, ns, description }
 local sa_input_marks = {}  -- tool_call_id -> { extmark_id, ns, tool_name }
 
+-- Namespace for tool-call / subagent generation-state anchor extmarks.
+-- These extmarks track where content for an in-progress tool call / subagent
+-- lives in the buffer, so that mutations elsewhere (collapse, other tool
+-- calls being inserted below, close-fence insertions) don't invalidate
+-- position references. Rows are resolved from the extmarks at use time, not
+-- stored as stale integers.
+local gen_ns = vim.api.nvim_create_namespace('tcode_gen')
+
 -- Flag to handle the initial empty line in Neovim buffers
 local first_event = true
 
@@ -89,16 +97,28 @@ local thinking_state = {
   last_highlighted_row = nil,  -- track last highlighted row to avoid re-highlighting
 }
 
--- Tool call argument generation state, keyed by tool_call_id
+-- Tool call / subagent argument generation state, keyed by tool_call_id
 local tool_call_gen_state = {}
 -- Each entry: {
---   start_row = nil,        -- row of ">>> TOOL: <name>" line
---   args_start_row = nil,   -- row where args content starts (after opening fence)
---   content_parts = {},     -- accumulated raw chunks
---   tool_name = "",
---   tool_call_index = 0,
---   last_highlighted_row = nil,
+--   args_open_mark_id  = <gen_ns extmark id>,  -- row of opening TC_FENCE line. Uses
+--                                              -- default right_gravity=true so the
+--                                              -- mark rides with the fence character
+--                                              -- if another tool call's closing fence
+--                                              -- is inserted at the same row from above.
+--   args_close_mark_id = <gen_ns extmark id>,  -- row of closing TC_FENCE line, set by
+--                                              -- close_args_fence. nil until then.
+--   content_parts      = {},                   -- accumulated raw arg chunks.
+--   last_highlighted_row = nil,                -- last buffer row highlighted during streaming.
+--                                              -- Protocol invariant: no handler between
+--                                              -- two ArgChunk events for the same id
+--                                              -- mutates rows above the active fence, so
+--                                              -- an absolute integer is safe here.
+--   fence_closed       = false,                -- true once close_args_fence has run.
 -- }
+--
+-- Row positions are ALWAYS resolved via the extmark ids at the moment of use,
+-- not stored as stale integers, because edits for adjacent tool calls /
+-- collapses / fence insertions can shift rows underneath us.
 
 -- Maps tool_call_index -> tool_call_id (to look up state from ArgChunk events)
 local tool_call_index_map = {}
@@ -472,6 +492,15 @@ local function count_visual_lines(buf, lines)
   return total
 end
 
+-- Resolve a gen_ns extmark id to its current 0-indexed buffer row, or nil if
+-- the mark has been deleted or never existed.
+local function get_gen_mark_row(buf, mark_id)
+  if not mark_id then return nil end
+  local pos = vim.api.nvim_buf_get_extmark_by_id(buf, gen_ns, mark_id, {})
+  if pos and pos[1] then return pos[1] end
+  return nil
+end
+
 local function collapse_tool_call_args(buf, tool_call_id)
   local state = tool_call_gen_state[tool_call_id]
   if not state then return end
@@ -484,9 +513,14 @@ local function collapse_tool_call_args(buf, tool_call_id)
   local visual_count = count_visual_lines(buf, content_lines)
   if visual_count <= 2 then return end
 
-  -- Get the row range of the content (between opening fence and closing fence)
-  local args_start = state.args_start_row
-  local args_end = args_start + line_count - 1  -- last content row
+  -- Resolve the current opening-fence row via extmark. It may have shifted
+  -- since the mark was placed (other tool calls / fences being inserted).
+  local args_open_row = get_gen_mark_row(buf, state.args_open_mark_id)
+  if not args_open_row then return end  -- anchor lost; skip collapse
+
+  -- The args content spans rows [args_open_row + 1, args_open_row + line_count].
+  local args_start = args_open_row + 1
+  local args_end = args_start + line_count - 1
 
   -- Compute how much text fits in ~2 visual rows
   local win = vim.fn.bufwinid(buf)
@@ -499,7 +533,11 @@ local function collapse_tool_call_args(buf, tool_call_id)
   local kept_visual = math.max(1, math.ceil(#preview / width))
   local hidden_visual = visual_count - kept_visual
 
-  -- Replace all content lines with the single truncated preview line
+  -- Replace all content lines with the single truncated preview line.
+  -- args_close_mark_id (if already set by close_args_fence) sits at the end
+  -- boundary of the replaced range. With its default right_gravity, nvim
+  -- treats it as "after the replace" and shifts it by (1 - line_count),
+  -- keeping it pointed at the closing-fence row after collapse.
   vim.api.nvim_buf_set_lines(buf, args_start, args_end + 1, false, { preview })
   vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', args_start, 0, -1)
 
@@ -512,6 +550,44 @@ local function collapse_tool_call_args(buf, tool_call_id)
     content = full_content,
     expanded = false,
   }
+end
+
+-- Close the args fenced code block for a tool call / subagent gen_state
+-- entry. Idempotent: returns early if fence_closed is already true.
+--
+-- Uses args_open_mark_id to locate the correct row — NOT end of buffer — so
+-- the closing fence lands inside this tool call's own region even when other
+-- tool calls / content exist below it. After insertion, args_close_mark_id
+-- is set so that subsequent ToolMessageStart / SubAgentStart handlers can
+-- find the row via extmark.
+local function close_args_fence(buf, tool_call_id)
+  local state = tool_call_gen_state[tool_call_id]
+  if not state or state.fence_closed then return end
+
+  if not ensure_buf_modifiable(buf) then return end
+
+  local args_open_row = get_gen_mark_row(buf, state.args_open_mark_id)
+  local close_row
+  if args_open_row == nil then
+    -- Anchor lost (buffer invalidated or mark deleted). Fall back to append.
+    append_lines(buf, { TC_FENCE })
+    close_row = vim.api.nvim_buf_line_count(buf) - 1
+  else
+    -- Compute where the closing fence goes: immediately after the streamed
+    -- args content. The content occupies `content_line_count` rows starting
+    -- at args_open_row + 1 (the row just after the opening fence).
+    local full_content = table.concat(state.content_parts)
+    local content_line_count = #vim.split(full_content, '\n', { plain = true })
+    close_row = args_open_row + 1 + math.max(content_line_count, 1)
+    insert_lines_at(buf, close_row, { TC_FENCE })
+  end
+
+  state.args_close_mark_id = vim.api.nvim_buf_set_extmark(buf, gen_ns, close_row, 0, {})
+
+  -- Collapse has to run AFTER setting args_close_mark_id so that the extmark
+  -- can shift along with the replaced content region.
+  collapse_tool_call_args(buf, tool_call_id)
+  state.fence_closed = true
 end
 
 -- Find a tool call args extmark at the given buffer line (0-indexed)
@@ -626,15 +702,13 @@ local function render_event(buf, ns, event)
     append_text(buf, data.content)
 
   elseif variant == 'AssistantMessageEnd' then
-    -- Close the args fence on any still-generating tool calls, but keep the
-    -- state so that the upcoming ToolMessageStart can find it and reuse the
-    -- existing label line instead of creating a duplicate.
-    for tool_call_id, gen_state in pairs(tool_call_gen_state) do
-      if not gen_state.fence_closed then
-        append_lines(buf, { TC_FENCE })
-        collapse_tool_call_args(buf, tool_call_id)
-        gen_state.fence_closed = true
-      end
+    -- Close the args fence on any still-generating tool calls. Uses per-entry
+    -- extmark anchors so parallel tool calls each get their fence inserted at
+    -- the right mid-buffer position (not stacked at end of buffer). State is
+    -- kept around so the following ToolMessageStart / SubAgentStart can still
+    -- find args_close_mark_id and the label extmark.
+    for tool_call_id, _ in pairs(tool_call_gen_state) do
+      close_args_fence(buf, tool_call_id)
     end
     -- Do NOT clear tool_call_gen_state here — ToolMessageStart still needs it.
     -- It will be cleaned up per-entry inside the ToolMessageStart handler.
@@ -652,7 +726,7 @@ local function render_event(buf, ns, event)
     local tool_call_index = data.tool_call_index or 0
 
     -- Render the tool label line
-    local label_line, label_extmark = render_label(buf, ns, '► TOOL', '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
+    local _, label_extmark = render_label(buf, ns, '► TOOL', '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
 
     -- Store label info for status updates
     tc_tool_names[tool_call_id] = tool_name
@@ -664,18 +738,24 @@ local function render_event(buf, ns, event)
     -- Show [generating] status with cancel hint
     update_tc_label(buf, tool_call_id, 'generating', 'TCodeTool', true)
 
-    -- Open args fenced code block
+    -- Open args fenced code block. Anchor an extmark to the OPENING fence row
+    -- so we can locate the args region later even after other tool calls /
+    -- collapses shift things around. Default right_gravity=true so that if
+    -- another tool call's closing fence is inserted at this exact row from
+    -- above (sibling close colliding with our open), the mark rides with the
+    -- original fence character down to its new row instead of being left
+    -- behind pointing at the sibling's close fence.
     append_lines(buf, { TC_FENCE, '' })
-    local args_start_row = vim.api.nvim_buf_line_count(buf) - 1
+    local open_fence_row = vim.api.nvim_buf_line_count(buf) - 2
+    local args_open_mark_id = vim.api.nvim_buf_set_extmark(buf, gen_ns, open_fence_row, 0, {})
 
-    -- Store generation state
+    -- Store generation state (row positions resolved via extmarks, not stored)
     tool_call_gen_state[tool_call_id] = {
-      start_row = label_line,
-      args_start_row = args_start_row,
+      args_open_mark_id = args_open_mark_id,
+      args_close_mark_id = nil,
       content_parts = {},
-      tool_name = tool_name,
-      tool_call_index = tool_call_index,
       last_highlighted_row = nil,
+      fence_closed = false,
     }
     tool_call_index_map[tool_call_index] = tool_call_id
 
@@ -690,9 +770,13 @@ local function render_event(buf, ns, event)
       append_text(buf, content)
       table.insert(state.content_parts, content)
 
-      -- Highlight new lines with TCodeToolArgs (same pattern as thinking chunks)
+      -- Highlight new lines with TCodeToolArgs (same pattern as thinking chunks).
+      -- Resolve the current args start row via extmark so that preceding
+      -- edits (other tool calls above) don't invalidate the highlight range.
       local current_last_row = vim.api.nvim_buf_line_count(buf) - 1
-      local start_hl = state.last_highlighted_row and (state.last_highlighted_row + 1) or state.args_start_row
+      local args_open_row = get_gen_mark_row(buf, state.args_open_mark_id)
+      local args_start_row = args_open_row and (args_open_row + 1) or current_last_row
+      local start_hl = state.last_highlighted_row and (state.last_highlighted_row + 1) or args_start_row
       for row = start_hl, current_last_row do
         vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', row, 0, -1)
       end
@@ -707,24 +791,48 @@ local function render_event(buf, ns, event)
     local gen_state = tool_call_gen_state[tool_call_id]
 
     if gen_state then
-      -- We were streaming args — close the args fence (if not already closed
-      -- by AssistantMessageEnd) and transition to [running].
-      if not gen_state.fence_closed then
-        append_lines(buf, { TC_FENCE })
-        collapse_tool_call_args(buf, tool_call_id)
-      end
+      -- We were streaming args — close the args fence (idempotent — already
+      -- handled by AssistantMessageEnd in most cases) and transition to
+      -- [running].
+      close_args_fence(buf, tool_call_id)
 
       -- Update label from [generating] to [running]
       update_tc_label(buf, tool_call_id, 'running', 'TCodeTool', true)
 
-      -- Open the tool output fenced code block
-      append_lines(buf, { TC_FENCE, '' })
+      -- Insert the tool-output opening fence + an empty output content row
+      -- immediately after the closing args fence. NOT at end of buffer: with
+      -- parallel tool calls this tool's region may be mid-buffer.
+      local args_close_row = get_gen_mark_row(buf, gen_state.args_close_mark_id)
+      local output_fence_row
+      if args_close_row then
+        output_fence_row = args_close_row + 1
+        insert_lines_at(buf, output_fence_row, { TC_FENCE, '' })
+      else
+        -- Anchor lost — fall back to append at end of buffer.
+        append_lines(buf, { TC_FENCE, '' })
+        output_fence_row = vim.api.nvim_buf_line_count(buf) - 2
+      end
       tc_fence_opened[tool_call_id] = true
 
-      -- Create/update the range extmark for tool call navigation
-      local last_line = vim.api.nvim_buf_line_count(buf) - 1
-      local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, gen_state.start_row, 0, {
-        end_row = last_line, end_col = 0,
+      -- Resolve the label row via tc_label_marks extmark — the label may
+      -- have shifted down since it was first rendered if other tool calls
+      -- were inserted below, or since close_args_fence added a line.
+      local label_info = tc_label_marks[tool_call_id]
+      local label_row
+      if label_info then
+        local pos = vim.api.nvim_buf_get_extmark_by_id(buf, label_info.ns, label_info.extmark_id, {})
+        label_row = pos and pos[1]
+      end
+      if not label_row then
+        label_row = output_fence_row  -- degraded fallback
+      end
+
+      -- Navigation extmark: from the label row through the (empty) output
+      -- content row so that ToolOutputChunk's extmark-based append finds
+      -- the correct insert row.
+      local nav_end_row = output_fence_row + 1
+      local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, label_row, 0, {
+        end_row = nav_end_row, end_col = 0,
       })
       tc_extmark_ids[mark_id] = tool_call_id
 
@@ -872,7 +980,7 @@ local function render_event(buf, ns, event)
     local tool_call_index = data.tool_call_index or 0
 
     -- Render the subagent label line (same style as SubAgentStart but with [generating])
-    local label_line, label_extmark = render_label(buf, ns, '► SUBAGENT', '>>> SUB-AGENT: [generating]', 'TCodeTool', data)
+    local _, label_extmark = render_label(buf, ns, '► SUBAGENT', '>>> SUB-AGENT: [generating]', 'TCodeTool', data)
 
     -- Store in a pending map keyed by tool_call_id
     sa_input_marks[tool_call_id] = {
@@ -880,19 +988,20 @@ local function render_event(buf, ns, event)
       tool_name = tool_name,
     }
 
-    -- Open args fenced code block (same as AssistantToolCallStart)
+    -- Open args fenced code block and anchor an extmark to the opening fence
+    -- row (same pattern as AssistantToolCallStart — default right_gravity so
+    -- the mark rides with the fence character on sibling mid-row inserts).
     append_lines(buf, { TC_FENCE, '' })
-    local args_start_row = vim.api.nvim_buf_line_count(buf) - 1
+    local open_fence_row = vim.api.nvim_buf_line_count(buf) - 2
+    local args_open_mark_id = vim.api.nvim_buf_set_extmark(buf, gen_ns, open_fence_row, 0, {})
 
     -- Store generation state (reuse tool_call_gen_state keyed by tool_call_id)
     tool_call_gen_state[tool_call_id] = {
-      start_row = label_line,
-      args_start_row = args_start_row,
+      args_open_mark_id = args_open_mark_id,
+      args_close_mark_id = nil,
       content_parts = {},
-      tool_name = tool_name,
-      tool_call_index = tool_call_index,
       last_highlighted_row = nil,
-      is_subagent = true,
+      fence_closed = false,
     }
     tool_call_index_map[tool_call_index] = tool_call_id
 
@@ -905,9 +1014,12 @@ local function render_event(buf, ns, event)
       local content = tostring(data.content)
       append_text(buf, content)
       table.insert(state.content_parts, content)
-      -- Highlight with TCodeToolArgs
+      -- Highlight with TCodeToolArgs. Resolve the current args start row via
+      -- extmark so it's correct even if preceding edits shifted rows.
       local current_last_row = vim.api.nvim_buf_line_count(buf) - 1
-      local start_hl = state.last_highlighted_row and (state.last_highlighted_row + 1) or state.args_start_row
+      local args_open_row = get_gen_mark_row(buf, state.args_open_mark_id)
+      local args_start_row = args_open_row and (args_open_row + 1) or current_last_row
+      local start_hl = state.last_highlighted_row and (state.last_highlighted_row + 1) or args_start_row
       for row = start_hl, current_last_row do
         vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', row, 0, -1)
       end
@@ -922,26 +1034,26 @@ local function render_event(buf, ns, event)
     -- Check if we have a pending input label from SubAgentInputStart
     local pending = tool_call_id and sa_input_marks[tool_call_id]
     if pending then
-      -- Close/collapse the args fence from SubAgentInputStart if still open
-      if tool_call_gen_state[tool_call_id] then
-        local gen_state = tool_call_gen_state[tool_call_id]
-        if not gen_state.fence_closed then
-          append_lines(buf, { TC_FENCE })
-          collapse_tool_call_args(buf, tool_call_id)
-          gen_state.fence_closed = true
-        end
-        tool_call_gen_state[tool_call_id] = nil
+      -- Close the args fence from SubAgentInputStart if still open. This is
+      -- idempotent — AssistantMessageEnd may have already closed it. Uses
+      -- extmark anchors so the closing fence lands mid-buffer at the right
+      -- row even with other parallel tool calls below.
+      local gen_state = tool_call_id and tool_call_gen_state[tool_call_id]
+      if gen_state then
+        close_args_fence(buf, tool_call_id)
       end
 
-      -- Update existing label from [generating] to [running] description
+      -- Update existing label from [generating] to [running] description.
+      -- Resolve the label row via the pending extmark (shifts with edits).
       local virt = {
         { '>>> SUB-AGENT: ', 'TCodeTool' },
         { '[running]', 'TCodeTool' },
         { ' ' .. description, 'TCodeTool' },
       }
       local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, pending.ns, pending.extmark_id, {})
-      if mark_pos and mark_pos[1] then
-        vim.api.nvim_buf_set_extmark(buf, pending.ns, mark_pos[1], mark_pos[2], {
+      local label_row = mark_pos and mark_pos[1]
+      if label_row then
+        vim.api.nvim_buf_set_extmark(buf, pending.ns, label_row, mark_pos[2], {
           id = pending.extmark_id,
           virt_text = virt,
           virt_text_pos = 'overlay',
@@ -952,14 +1064,30 @@ local function render_event(buf, ns, event)
       sa_label_marks[conv_id] = { extmark_id = pending.extmark_id, ns = pending.ns, description = description }
       sa_input_marks[tool_call_id] = nil
 
-      -- Set up the sa_ns range extmark
-      append_lines(buf, { '' })
-      local label_line = mark_pos and mark_pos[1] or (vim.api.nvim_buf_line_count(buf) - 2)
-      local last_line = vim.api.nvim_buf_line_count(buf) - 1
-      local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_line, 0, {
-        end_row = last_line, end_col = 0,
-      })
-      sa_extmark_ids[mark_id] = conv_id
+      -- Insert a blank line for subagent output content. Subagent content
+      -- is NOT wrapped in an output fence (only the input args are fenced),
+      -- so we just insert a single empty row immediately after the closing
+      -- args fence.
+      local args_close_row = gen_state and get_gen_mark_row(buf, gen_state.args_close_mark_id)
+      local blank_row
+      if args_close_row then
+        blank_row = args_close_row + 1
+        insert_lines_at(buf, blank_row, { '' })
+      else
+        append_lines(buf, { '' })
+        blank_row = vim.api.nvim_buf_line_count(buf) - 1
+      end
+
+      -- Clean up gen state (args_close_mark_id no longer needed).
+      if tool_call_id then tool_call_gen_state[tool_call_id] = nil end
+
+      -- Set up the sa_ns range extmark spanning label through the new blank row.
+      if conv_id and label_row then
+        local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_row, 0, {
+          end_row = blank_row, end_col = 0,
+        })
+        sa_extmark_ids[mark_id] = conv_id
+      end
     else
       -- No pending input (e.g., resumed session) — create label from scratch (existing logic)
       local label_line, label_extmark = render_label(buf, ns, '► SUBAGENT', '>>> SUB-AGENT: [running] ' .. description, 'TCodeTool', data)
@@ -1060,14 +1188,9 @@ local function render_event(buf, ns, event)
 
     -- Clean up any pending input state from SubAgentInputStart
     if tool_call_id and sa_input_marks[tool_call_id] then
-      -- Close/collapse the args fence
+      -- Close/collapse the args fence via extmark-anchored close (idempotent).
       if tool_call_gen_state[tool_call_id] then
-        local gen_state = tool_call_gen_state[tool_call_id]
-        if not gen_state.fence_closed then
-          append_lines(buf, { TC_FENCE })
-          collapse_tool_call_args(buf, tool_call_id)
-          gen_state.fence_closed = true
-        end
+        close_args_fence(buf, tool_call_id)
         tool_call_gen_state[tool_call_id] = nil
       end
       sa_input_marks[tool_call_id] = nil
