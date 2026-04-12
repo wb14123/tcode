@@ -3,7 +3,7 @@ members = ["llm-rs", "llm-rs-macros", "tcode", "tools", "browser-server", "auth"
 resolver = "3"
 
 [workspace.package]
-version = "0.1.4"
+version = "0.1.5"
 
 [workspace.metadata.release]
 shared-version = true
