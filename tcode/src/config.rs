@@ -297,7 +297,7 @@ brainstorm = """\
   Ask me questions if there is anything not clear"""
 plan = """\
   Design and plan first. Do not implement or change any code before I confirm. \
-  Ask me questions if there is anything not clear. \
+  Ask me questions if there is anything not clear: ask them first instead present them with the full plan. \
   Break it into multiple steps if necessary. \
   Do not need to include implementation details like what exact code to add or replace \
   (but can include the important code if it makes sense to be in plan/design doc.)"""
@@ -310,7 +310,8 @@ implement-plan = """\
   Implement plan.md. \
   Ask me questions if there is anything not clear. \
   Use subagent to implement each step if needed, so that you keep your context window \
-  clean for large changes and can supervise the overall correctness."""
+  clean for large changes and can supervise the overall correctness.\
+  When use subagent to implement, let it refer to the doc instead of repeat the steps to it."""
 review = """\
   Use a subagent to review the change. \
   Only include enough info for the subagent to understand the context. \
