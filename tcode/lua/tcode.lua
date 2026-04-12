@@ -501,6 +501,55 @@ local function get_gen_mark_row(buf, mark_id)
   return nil
 end
 
+-- Force render-markdown.nvim to repaint this buffer NOW.
+--
+-- Why: render-markdown.nvim is what conceals fenced code block delimiters
+-- (the `````````` lines) when our buffer's filetype is `tcode` and the
+-- plugin is configured to handle it. Its update path runs through
+-- Decorator:schedule which is a *trailing-edge* debounce — as long as
+-- schedule() calls keep arriving faster than `config.debounce` ms apart,
+-- the running flag stays true forever and only the FIRST callback in the
+-- burst actually fires. During streaming this means most batches never
+-- get re-rendered, leaving newly inserted fence rows on screen as raw
+-- backticks until streaming pauses for >100ms or the user moves the
+-- cursor in the display window.
+--
+-- The mitigation has two parts working together:
+--   1. set_render_markdown_debounce(buf, 0) below removes the rate limit
+--      for our specific buffer, so every schedule() call reaches the
+--      callback path.
+--   2. force_render_markdown(buf), called once per event batch from the
+--      JSONL reader after all events in that batch have been applied,
+--      kicks the plugin so it actually re-runs against the post-batch
+--      buffer state.
+--
+-- Wrapped in pcall so users without render-markdown installed get a
+-- silent no-op. We do not currently integrate with any other markdown
+-- rendering plugin (markview.nvim, headlines.nvim, etc.) — see the
+-- limitation note in setup_display.
+local function force_render_markdown(buf)
+  if not vim.api.nvim_buf_is_valid(buf) then return end
+  pcall(function()
+    require('render-markdown.api').render({ buf = buf })
+  end)
+end
+
+-- Override render-markdown.nvim's debounce for a specific buffer by
+-- mutating the cached buffer config object in place. Must be called
+-- AFTER the plugin's FileType-driven attach has populated the cache for
+-- this buffer (i.e. after `vim.bo[buf].filetype = 'tcode'`). See the
+-- long-form explanation on force_render_markdown above for why this is
+-- necessary. Silent no-op if render-markdown is not installed.
+local function set_render_markdown_debounce(buf, ms)
+  if not vim.api.nvim_buf_is_valid(buf) then return end
+  pcall(function()
+    local cfg = require('render-markdown.state').get(buf)
+    if cfg then
+      cfg.debounce = ms
+    end
+  end)
+end
+
 local function collapse_tool_call_args(buf, tool_call_id)
   local state = tool_call_gen_state[tool_call_id]
   if not state then return end
@@ -1411,6 +1460,13 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
       if vim.api.nvim_buf_is_valid(buf) then
         vim.bo[buf].modifiable = false
       end
+
+      -- Kick render-markdown.nvim once per batch, AFTER all events in this
+      -- batch have been applied to the buffer. With debounce overridden to
+      -- 0 in setup_display, this schedules an immediate repaint that sees
+      -- the post-batch buffer state and applies fence conceals before the
+      -- user's eyes can notice the raw backticks.
+      force_render_markdown(buf)
     end)
   end
 
@@ -1490,6 +1546,29 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   -- Mark the buffer as tcode so our custom tree-sitter grammar handles separator
   -- lines and injects each content region as independent markdown parses.
   vim.bo[buf].filetype = 'tcode'
+
+  -- Setting filetype above synchronously fires the FileType autocmd, which
+  -- causes render-markdown.nvim (if installed and configured for `tcode`)
+  -- to attach and populate its per-buffer config cache with the default
+  -- 100ms debounce. Override that debounce to 0 for this buffer so streaming
+  -- inserts don't get rate-limited away by the plugin's trailing-edge
+  -- debounce. See force_render_markdown for the full explanation. Markdown
+  -- buffers in other windows are unaffected.
+  --
+  -- Compatibility notes:
+  --   - render-markdown.nvim NOT installed: set_render_markdown_debounce
+  --     and the per-batch force_render_markdown call from the JSONL reader
+  --     are both pcall-guarded silent no-ops. Fence concealment, if any,
+  --     comes from nvim's built-in tree-sitter highlighter via the
+  --     markdown injection — which has no debounce of its own and renders
+  --     synchronously during the redraw cycle, so the bug this hack works
+  --     around does not apply.
+  --   - Other markdown rendering plugins (markview.nvim, headlines.nvim,
+  --     noice.nvim, etc.) are NOT specifically integrated. If they have
+  --     a similar trailing-edge debounce on their own update path, the
+  --     same symptom may appear and would need a separate fix wired in
+  --     here against that plugin's API.
+  set_render_markdown_debounce(buf, 0)
 
   -- Reset first_event flag for this display session
   first_event = true
