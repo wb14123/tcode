@@ -147,6 +147,10 @@ The permission pane always shows the full skeleton of all tool categories and ke
 
 Press **f** in the permission pane to toggle between showing all permissions and showing only pending ones.
 
+### Container mode annotations
+
+When running with `-c` (container mode), the permission pane annotates each tool to show where it executes. The `bash` tool is labeled `bash (in container X)` while all other tools (file_read, file_write, web_fetch) are labeled with `(outside container)`. This makes it clear which operations run inside the container sandbox and which operate directly on the host.
+
 ## Tips
 
 - **Start broad for trusted projects.** If you're working in your own project and trust the agent, granting `file_write > path` at the project root and a few command prefixes like `cargo` or `npm` as project permissions will cut down on prompts significantly.

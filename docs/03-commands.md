@@ -11,6 +11,8 @@ If no config file exists at `~/.tcode/config.toml`, `tcode` automatically launch
 ```
 tcode
 tcode -p <profile>
+tcode -c <container-name>
+tcode -c <container-name> --container-runtime podman
 ```
 
 **Flags:**
@@ -19,6 +21,8 @@ tcode -p <profile>
 |------|-------------|
 | `-p <profile>` | Load a specific config profile |
 | `-V`, `--version` | Print version and git commit |
+| `-c <name>`, `--container <name>` | Run bash commands inside a running Docker/Podman container. File tools remain on the host. See [02-configuration.md](02-configuration.md#container-mode). |
+| `--container-runtime <runtime>` | Container runtime CLI: `docker` (default) or `podman`. Requires `-c`. |
 
 ---
 

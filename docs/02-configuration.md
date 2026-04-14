@@ -24,9 +24,19 @@ See [03-commands.md](03-commands.md#tcode-config) for the full `tcode config` co
 tcode                          # start with default config
 tcode -p work                  # start with ~/.tcode/config-work.toml
 tcode --session <id> attach    # attach to existing session
+tcode -c my-container          # run bash commands inside a Docker container
+tcode -c my-container --container-runtime podman  # same, using Podman
 ```
 
-The CLI only accepts `--session`, `-p`/`--profile`, and `-V`/`--version`. All other settings live in the config file.
+| Flag | Description |
+|------|-------------|
+| `-p <profile>` | Load a specific config profile |
+| `--session <id>` | Target a specific session |
+| `-V`, `--version` | Print version and git commit |
+| `-c <name>`, `--container <name>` | Run bash commands inside a running container (see [Container Mode](#container-mode)) |
+| `--container-runtime <runtime>` | Container runtime CLI: `docker` (default) or `podman`. Requires `-c`. |
+
+All other settings live in the config file.
 
 ## Full Config Reference
 
@@ -150,6 +160,30 @@ my-shortcut = "Custom shortcut text here."
 ```
 
 Use TOML multi-line strings (`"""\...\"""`) with trailing backslashes for long templates. Setting `[shortcuts]` to an empty section disables all shortcuts.
+
+## Container Mode
+
+The `-c`/`--container` flag enables container sandbox mode. When active, the bash tool executes commands inside the specified Docker or Podman container via `docker exec` (or `podman exec`), while all file tools (read, write, edit, grep, glob) continue operating on the host filesystem.
+
+```sh
+tcode -c my-dev-container
+tcode -c my-dev-container --container-runtime podman
+```
+
+**Requirements:**
+
+- The container must already be running -- tcode does not start, stop, or restart containers.
+- The project directory must be mounted at the same absolute path inside the container (e.g., `-v /home/user/project:/home/user/project`).
+- Bash must be available inside the container.
+
+**Startup validation:** On launch, tcode checks that the runtime CLI is available, the container is running, bash works inside it, and the project directory is mounted at the correct path. If any check fails, tcode exits with a descriptive error.
+
+**Behavior changes in container mode:**
+
+- Bash commands run as your host UID/GID inside the container.
+- Only the `HOME` environment variable is forwarded; the container provides its own environment.
+- The system prompt tells the agent that bash commands execute inside the container and file tools operate on the host.
+- The permission UI annotates tool names: `bash (in container X)` for the bash tool and `(outside container)` for all other tools.
 
 ## CLAUDE.md
 
