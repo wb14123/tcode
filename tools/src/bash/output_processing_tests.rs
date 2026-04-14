@@ -421,9 +421,10 @@ mod e2e {
         Ok(())
     }
 
-    // 7a. head = 0
+    // 7a. head = 0 is normalized to None (not an error) — some models (OpenAI)
+    // send 0 for unused optional integer params instead of omitting them.
     #[tokio::test]
-    async fn head_zero_is_validation_error() -> Result<()> {
+    async fn head_zero_is_treated_as_none() -> Result<()> {
         let stream = crate::bash::bash(
             ctx(),
             "echo hi".to_string(),
@@ -435,15 +436,14 @@ mod e2e {
             "test".to_string(),
         );
         let (chunks, err) = collect(Box::pin(stream)).await;
-        assert!(chunks.is_empty());
-        let err = err.expect("validation error expected");
-        assert!(err.contains("'head' must be greater than 0"), "got: {err}");
+        assert!(err.is_none(), "head=0 should not be an error, got: {err:?}");
+        assert!(!chunks.is_empty(), "should produce output");
         Ok(())
     }
 
-    // 7b. tail = 0
+    // 7b. tail = 0 is normalized to None (not an error).
     #[tokio::test]
-    async fn tail_zero_is_validation_error() -> Result<()> {
+    async fn tail_zero_is_treated_as_none() -> Result<()> {
         let stream = crate::bash::bash(
             ctx(),
             "echo hi".to_string(),
@@ -455,9 +455,52 @@ mod e2e {
             "test".to_string(),
         );
         let (chunks, err) = collect(Box::pin(stream)).await;
-        assert!(chunks.is_empty());
-        let err = err.expect("validation error expected");
-        assert!(err.contains("'tail' must be greater than 0"), "got: {err}");
+        assert!(err.is_none(), "tail=0 should not be an error, got: {err:?}");
+        assert!(!chunks.is_empty(), "should produce output");
+        Ok(())
+    }
+
+    // 7c. head=0 + tail=0 both normalize to None, so no mutual-exclusion error.
+    #[tokio::test]
+    async fn head_zero_tail_zero_is_treated_as_none() -> Result<()> {
+        let stream = crate::bash::bash(
+            ctx(),
+            "echo hi".to_string(),
+            None,
+            None,
+            None,
+            Some(0),
+            Some(0),
+            "test".to_string(),
+        );
+        let (chunks, err) = collect(Box::pin(stream)).await;
+        assert!(
+            err.is_none(),
+            "head=0 + tail=0 should not be an error, got: {err:?}"
+        );
+        assert!(!chunks.is_empty(), "should produce output");
+        Ok(())
+    }
+
+    // 7d. head=N + tail=0 normalizes to just head=N (no mutual-exclusion error).
+    #[tokio::test]
+    async fn head_nonzero_tail_zero_is_treated_as_head_only() -> Result<()> {
+        let stream = crate::bash::bash(
+            ctx(),
+            "echo hi".to_string(),
+            None,
+            None,
+            None,
+            Some(2),
+            Some(0),
+            "test".to_string(),
+        );
+        let (chunks, err) = collect(Box::pin(stream)).await;
+        assert!(
+            err.is_none(),
+            "head=2 + tail=0 should not be an error, got: {err:?}"
+        );
+        assert!(!chunks.is_empty(), "should produce output");
         Ok(())
     }
 

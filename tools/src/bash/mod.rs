@@ -157,18 +157,17 @@ pub fn bash(
             None
         };
 
+        // Normalize optional parameters: some models (notably OpenAI) always fill
+        // in every schema field, sending `0` for unused integer options and `""` for
+        // unused string options instead of omitting them.  Treat these as `None`.
+        let head = head.filter(|&v| v > 0);
+        let tail = tail.filter(|&v| v > 0);
+        let filter = filter.filter(|s| !s.is_empty());
+
         // Validate post-processing parameters BEFORE spawning the process —
         // never waste a 2-minute `cargo test` run on a bad parameter.
         if head.is_some() && tail.is_some() {
             yield Err(anyhow!("'head' and 'tail' are mutually exclusive"));
-            return;
-        }
-        if head == Some(0) {
-            yield Err(anyhow!("'head' must be greater than 0"));
-            return;
-        }
-        if tail == Some(0) {
-            yield Err(anyhow!("'tail' must be greater than 0"));
             return;
         }
         let compiled_filter: Option<Regex> = match filter.as_deref() {
