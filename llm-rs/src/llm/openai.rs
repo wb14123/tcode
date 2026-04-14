@@ -45,6 +45,11 @@ struct ResponsesRequest<'a> {
     tools: Option<Vec<FunctionToolDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningConfig>,
+    /// Request encrypted reasoning content so it can be round-tripped in
+    /// subsequent turns.  Without this the server cannot reconstruct the
+    /// reasoning context from the raw output items we send back.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    include: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     prompt_cache_key: Option<String>,
 }
@@ -247,6 +252,43 @@ impl OpenAI {
 // Message conversion: LLMMessage -> InputItem
 // ============================================================================
 
+/// Build the raw output array for round-tripping from the `response.completed`
+/// (or `response.incomplete`) payload.
+///
+/// The ChatGPT proxy may return an empty output array.  When that happens we
+/// fall back to the items collected from `response.output_item.done` events
+/// during streaming — this preserves reasoning, message, **and** function_call
+/// items.  When the output array *is* populated (standard API) we still merge
+/// in any function_calls that were seen during streaming but missing from the
+/// output array (another ChatGPT proxy quirk).
+fn build_raw_output(
+    response_output: &[serde_json::Value],
+    streamed_output_items: &[serde_json::Value],
+    saw_function_calls: bool,
+) -> Vec<serde_json::Value> {
+    if response_output.is_empty() && !streamed_output_items.is_empty() {
+        return streamed_output_items.to_vec();
+    }
+
+    let mut output = response_output.to_vec();
+    if saw_function_calls {
+        let has_fc_in_output = output
+            .iter()
+            .any(|item| item.get("type").and_then(|t| t.as_str()) == Some("function_call"));
+        if !has_fc_in_output {
+            output.extend(
+                streamed_output_items
+                    .iter()
+                    .filter(|item| {
+                        item.get("type").and_then(|t| t.as_str()) == Some("function_call")
+                    })
+                    .cloned(),
+            );
+        }
+    }
+    output
+}
+
 /// Convert LLM messages into Responses API input items.
 /// Returns `(instructions, input_items)` — the system message is extracted
 /// as the top-level `instructions` field (required by the ChatGPT backend proxy),
@@ -274,17 +316,23 @@ fn convert_messages(msgs: &[LLMMessage]) -> (Option<String>, Vec<InputItem>) {
                 tool_calls,
                 raw,
             } => {
-                if let Some(raw_value) = raw {
-                    // Use raw output items directly - preserves reasoning + message pairing
-                    if let Some(arr) = raw_value.as_array() {
-                        for item_json in arr {
-                            items.push(InputItem::Item(item_json.clone()));
-                        }
+                // Prefer the raw output items (preserves reasoning + message pairing
+                // exactly as the server returned them).  Fall back to reconstruction
+                // from `content`/`tool_calls` when raw is absent **or empty** — the
+                // ChatGPT proxy may return an empty output array in response.completed,
+                // leaving raw as `Some([])`.
+                let raw_items: Option<&Vec<serde_json::Value>> = raw
+                    .as_ref()
+                    .and_then(|v| v.as_array())
+                    .filter(|arr| !arr.is_empty());
+
+                if let Some(arr) = raw_items {
+                    for item_json in arr {
+                        items.push(InputItem::Item(item_json.clone()));
                     }
                 } else {
-                    // Fallback: reconstruct from fields (for messages not from OpenAI).
-                    // For assistant turns that did NOT originate from an OpenAI response
-                    // (so we have no phase to preserve); `None` is the only sensible value.
+                    // Reconstruct from fields (for messages not from OpenAI, or when
+                    // the raw output was empty / missing).
                     if !content.is_empty() {
                         items.push(InputItem::EasyMessage(EasyInputMessage {
                             role: "assistant",
@@ -414,6 +462,14 @@ impl LLM for OpenAI {
                 }
             };
 
+            // When reasoning is enabled, ask the server to return encrypted
+            // reasoning content so we can round-trip it in later turns.
+            let include = if reasoning.is_some() {
+                vec!["reasoning.encrypted_content".to_string()]
+            } else {
+                Vec::new()
+            };
+
             let request_body = ResponsesRequest {
                 model: &model,
                 input: input_items,
@@ -423,6 +479,7 @@ impl LLM for OpenAI {
                 max_output_tokens,
                 tools,
                 reasoning,
+                include,
                 prompt_cache_key: Some(cache_key.clone()),
             };
 
@@ -454,9 +511,11 @@ impl LLM for OpenAI {
             let mut emitted_start = false;
             let mut tool_call_counter: usize = 0;
             let mut saw_function_calls = false;
-            // Collect raw function_call items from output_item.done events,
-            // in case the response.completed output array omits them (ChatGPT proxy).
-            let mut streamed_function_calls: Vec<serde_json::Value> = Vec::new();
+            // Collect ALL raw output items from output_item.done events
+            // (reasoning, message, function_call, etc.).  The ChatGPT proxy
+            // may return an empty output array in response.completed, so we
+            // use these streamed items as a fallback for round-tripping.
+            let mut streamed_output_items: Vec<serde_json::Value> = Vec::new();
             let mut sse_events = sse::sse_stream(response);
 
             while let Some(event_result) = sse_events.next().await {
@@ -519,14 +578,18 @@ impl LLM for OpenAI {
                         }
                     }
 
-                    // Output item done — handle function calls
+                    // Output item done — collect for round-tripping and handle function calls
                     "response.output_item.done" => {
                         if let Ok(parsed) = serde_json::from_str::<OutputItemDonePayload>(data) {
-                            let item = &parsed.item;
+                            // Move the item into the collection first, then
+                            // borrow from the vec to extract fields — avoids a
+                            // deep clone of potentially large reasoning items.
+                            streamed_output_items.push(parsed.item);
+                            let item = streamed_output_items.last().expect("just pushed");
                             let item_type = item.get("type").and_then(|t| t.as_str());
+
                             if item_type == Some("function_call") {
                                 saw_function_calls = true;
-                                streamed_function_calls.push(parsed.item.clone());
                                 let call_id = item.get("call_id")
                                     .and_then(|v| v.as_str())
                                     .unwrap_or_default()
@@ -570,18 +633,11 @@ impl LLM for OpenAI {
                         if let Ok(parsed) = serde_json::from_str::<ResponsePayload>(data) {
                             let resp = parsed.response;
 
-                            // Serialize full output for round-tripping.
-                            // If the response.completed output array is missing function calls
-                            // that we saw during streaming (ChatGPT proxy behavior), merge them in.
-                            let mut output = resp.output.clone();
-                            if saw_function_calls {
-                                let has_fc_in_output = output.iter().any(|item| {
-                                    item.get("type").and_then(|t| t.as_str()) == Some("function_call")
-                                });
-                                if !has_fc_in_output {
-                                    output.extend(streamed_function_calls.iter().cloned());
-                                }
-                            }
+                            let output = build_raw_output(
+                                &resp.output,
+                                &streamed_output_items,
+                                saw_function_calls,
+                            );
                             let raw_output = serde_json::Value::Array(output);
 
                             let (input_tokens, output_tokens, reasoning_tokens, cached_tokens) =
@@ -644,17 +700,11 @@ impl LLM for OpenAI {
                         if let Ok(parsed) = serde_json::from_str::<ResponsePayload>(data) {
                             let resp = parsed.response;
 
-                            // Merge streamed function calls if missing from
-                            // the output array (same as response.completed).
-                            let mut output = resp.output.clone();
-                            if saw_function_calls {
-                                let has_fc_in_output = output.iter().any(|item| {
-                                    item.get("type").and_then(|t| t.as_str()) == Some("function_call")
-                                });
-                                if !has_fc_in_output {
-                                    output.extend(streamed_function_calls.iter().cloned());
-                                }
-                            }
+                            let output = build_raw_output(
+                                &resp.output,
+                                &streamed_output_items,
+                                saw_function_calls,
+                            );
                             let raw_output = serde_json::Value::Array(output);
 
                             let (input_tokens, output_tokens, reasoning_tokens, cached_tokens) =
