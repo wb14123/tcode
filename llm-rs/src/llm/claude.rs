@@ -13,24 +13,10 @@ use tokio_stream::{Stream, StreamExt};
 
 use super::sse;
 use super::{
-    ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall,
+    ChatOptions, GetTokenFn, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason,
+    TokenProvider, ToolCall,
 };
 use crate::tool::Tool;
-
-// ============================================================================
-// Token getter type
-// ============================================================================
-
-/// Function type for getting an access token. Called before each API request.
-/// For static tokens, returns the same token. For OAuth, may trigger refresh.
-pub type GetTokenFn =
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync>;
-
-/// Trait for types that can provide an access token (e.g. OAuth token managers).
-/// Implement this to use [`Claude::with_token_provider`].
-pub trait TokenProvider {
-    fn get_access_token(&self) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
-}
 
 // ============================================================================
 // Claude client

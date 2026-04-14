@@ -43,15 +43,17 @@ All other settings live in the config file.
 `provider` is required — there is no default. A config file missing the `provider` line causes tcode to exit with an error listing the valid values.
 
 ```toml
-provider = "claude"              # REQUIRED. claude | claude-oauth | open-ai | open-router
+provider = "claude"              # REQUIRED. claude | claude-oauth | open-ai | open-ai-oauth | open-router
                                  # "claude" is strictly API-key mode. "claude-oauth"
                                  # is its own provider — loads tokens from
                                  # `tcode claude-auth` and ignores api_key / env var.
+                                 # "open-ai-oauth" works the same way for OpenAI,
+                                 # using tokens from `tcode openai-auth`.
 api_key = ""                     # optional. Empty string and omitting the line behave
                                  # identically: both fall back to the provider env var
                                  # (see Providers table), then to "" (no auth) if the
                                  # env var is also unset. Ignored when
-                                 # provider = "claude-oauth".
+                                 # provider = "claude-oauth" or "open-ai-oauth".
 model = "claude-opus-4-6"        # defaults per provider
 base_url = ""                    # defaults per provider
 max_subagent_depth = 10
@@ -66,18 +68,21 @@ brainstorm = "..."
 
 ## Providers
 
-| Provider     | Config value    | Env Variable          | Default Model          | Default Base URL                |
-|--------------|-----------------|-----------------------|------------------------|---------------------------------|
-| Claude       | `claude`        | `ANTHROPIC_API_KEY`   | `claude-opus-4-6`      | `https://api.anthropic.com`     |
-| Claude OAuth | `claude-oauth`  | *(none — OAuth-only)* | `claude-opus-4-6`      | `https://api.anthropic.com`     |
-| OpenAI       | `open-ai`       | `OPENAI_API_KEY`      | `gpt-5-nano`           | `https://api.openai.com/v1`     |
-| OpenRouter   | `open-router`   | `OPENROUTER_API_KEY`  | `deepseek/deepseek-r1` | `https://openrouter.ai/api/v1`  |
+| Provider     | Config value    | Env Variable          | Default Model          | Default Base URL                         |
+|--------------|-----------------|-----------------------|------------------------|------------------------------------------|
+| Claude       | `claude`        | `ANTHROPIC_API_KEY`   | `claude-opus-4-6`      | `https://api.anthropic.com`              |
+| Claude OAuth | `claude-oauth`  | *(none — OAuth-only)* | `claude-opus-4-6`      | `https://api.anthropic.com`              |
+| OpenAI       | `open-ai`       | `OPENAI_API_KEY`      | `gpt-5-nano`           | `https://api.openai.com/v1`              |
+| OpenAI OAuth | `open-ai-oauth` | *(none — OAuth-only)* | `gpt-5.4`              | `https://chatgpt.com/backend-api/codex`  |
+| OpenRouter   | `open-router`   | `OPENROUTER_API_KEY`  | `deepseek/deepseek-r1` | `https://openrouter.ai/api/v1`           |
 
-`claude-oauth` ignores both `api_key` in the config file and `$ANTHROPIC_API_KEY` in the environment — it authenticates exclusively via the tokens written by `tcode claude-auth`.
+`claude-oauth` ignores both `api_key` in the config file and `$ANTHROPIC_API_KEY` in the environment — it authenticates exclusively via the tokens written by `tcode claude-auth`. Likewise, `open-ai-oauth` ignores `api_key` and `$OPENAI_API_KEY` — it authenticates via the tokens written by `tcode openai-auth`.
 
 **API-key resolution.** For the three API-key providers (`claude`, `open-ai`, `open-router`), tcode resolves the credential in this order: (1) a non-empty `api_key` in the config file, (2) otherwise a non-empty value from the provider's environment variable, (3) otherwise the empty string, which is passed through to the HTTP client as-is. tcode no longer errors at startup on a missing API key — if neither source is set, the first LLM call inside the TUI fails with an HTTP 401/403 from the provider. This is convenient for self-hosted endpoints that do not require auth and a minor nuisance otherwise.
 
 **Claude Pro/Max subscribers** can use their subscription credits via the API instead of paying for API usage separately. In the `tcode config` wizard, choose **`claude-oauth`** instead of **`claude`**. The wizard skips both the base URL and API-key prompts and writes `provider = "claude-oauth"` to the config file — this is a distinct provider value, not a wizard-level label. After the wizard exits, run `tcode claude-auth` to complete OAuth. At runtime the `claude-oauth` provider loads tokens from `tcode claude-auth` and ignores `api_key` and `$ANTHROPIC_API_KEY` entirely, so there is no need to unset the env var.
+
+**OpenAI Codex / ChatGPT Pro subscribers** can use their subscription via OAuth in the same way. In the `tcode config` wizard, choose **`open-ai-oauth`** instead of **`open-ai`**. The wizard skips both the base URL and API-key prompts and writes `provider = "open-ai-oauth"` to the config file. After the wizard exits, run `tcode openai-auth` to complete OAuth. At runtime the `open-ai-oauth` provider loads tokens from `~/.tcode/auth/openai_tokens.json` and ignores `api_key` and `$OPENAI_API_KEY` entirely.
 
 **Migration note.** Earlier versions of tcode treated `provider = "claude"` with no `api_key` and no `$ANTHROPIC_API_KEY` as an implicit fallback to OAuth. That fallback is gone: `provider = "claude"` is now strictly API-key mode. If you were relying on the implicit fallback, edit your config and change the line to `provider = "claude-oauth"`.
 

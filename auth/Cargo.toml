@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 llm-rs = { path = "../llm-rs" }
 anyhow = "1"
+base64 = "0.22"
 reqwest = { version = "0.13", features = ["json"] }
 tokio = { version = "1", features = ["sync", "fs"] }
 serde = { version = "1", features = ["derive"] }
@@ -13,3 +14,4 @@ serde_json = "1"
 dirs = "6"
 tracing = "0.1"
 chrono = "0.4"
+async-trait = "0.1"

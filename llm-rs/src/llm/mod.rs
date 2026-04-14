@@ -12,10 +12,11 @@ mod sse;
 #[cfg(test)]
 mod openai_tests;
 
-pub use claude::{Claude, GetTokenFn, TokenProvider};
+pub use claude::Claude;
 pub use openai::OpenAI;
 pub use openrouter::OpenRouter;
 
+use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
@@ -23,6 +24,21 @@ use tokio_stream::Stream;
 use serde::{Deserialize, Serialize};
 
 use crate::tool::Tool;
+
+// ============================================================================
+// Shared auth types (used by Claude, OpenAI, and auth crate)
+// ============================================================================
+
+/// Function type for getting an access token. Called before each API request.
+/// For static tokens, returns the same token. For OAuth, may trigger refresh.
+pub type GetTokenFn =
+    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync>;
+
+/// Trait for types that can provide an access token (e.g. OAuth token managers).
+/// Implement this to use [`Claude::with_token_provider`] or [`OpenAI::with_token_provider`].
+pub trait TokenProvider: Send + Sync {
+    fn get_access_token(&self) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
+}
 
 // ============================================================================
 // Reasoning / Thinking types

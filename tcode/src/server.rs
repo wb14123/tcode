@@ -58,7 +58,7 @@ pub struct Server {
     chat_options: ChatOptions,
     max_subagent_depth: usize,
     subagent_model_selection: bool,
-    token_manager: Option<auth::TokenManager>,
+    token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
     container_config: Option<ContainerConfig>,
 }
 
@@ -76,7 +76,7 @@ impl Server {
         chat_options: ChatOptions,
         max_subagent_depth: usize,
         subagent_model_selection: bool,
-        token_manager: Option<auth::TokenManager>,
+        token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
         container_config: Option<ContainerConfig>,
     ) -> Self {
         Self {
@@ -396,18 +396,18 @@ impl Server {
 
         // Periodic usage polling (OAuth only, every 5 min)
         if let Some(ref tm) = token_manager {
-            let tm = tm.clone();
+            let tm = Arc::clone(tm);
             let uf = usage_file.clone();
             let mut usage_rx = shutdown_tx.subscribe();
             tokio::spawn(async move {
                 // Initial fetch
-                write_usage_file(&tm, &uf).await;
+                write_usage_file(tm.as_ref(), &uf).await;
                 loop {
                     tokio::select! {
                         biased;
                         _ = usage_rx.recv() => break,
                         _ = tokio::time::sleep(tokio::time::Duration::from_secs(300)) => {
-                            write_usage_file(&tm, &uf).await;
+                            write_usage_file(tm.as_ref(), &uf).await;
                         }
                     }
                 }
@@ -451,25 +451,13 @@ impl Server {
 }
 
 /// Fetch subscription usage and write a human-readable summary to the usage file.
-async fn write_usage_file(tm: &auth::TokenManager, usage_file: &Path) {
+async fn write_usage_file(tm: &dyn auth::OAuthTokenManager, usage_file: &Path) {
     let result: Result<()> = async {
-        let token = tm
-            .get_access_token()
-            .await
-            .context("Failed to get access token")?;
-        let usage = auth::usage::fetch_usage(tm.client(), &token).await?;
-        let five_hour = usage.five_hour.context("No five_hour usage window")?;
-        let mut text = format!("{:.0}% used", five_hour.utilization);
-        if let Some(resets_in) = five_hour
-            .resets_at
-            .as_deref()
-            .and_then(auth::usage::format_resets_in)
-        {
-            text.push_str(&format!(", resets in {}", resets_in));
+        if let Some(text) = tm.fetch_formatted_usage().await? {
+            tokio::fs::write(usage_file, &text)
+                .await
+                .context("Failed to write usage file")?;
         }
-        tokio::fs::write(usage_file, &text)
-            .await
-            .context("Failed to write usage file")?;
         Ok(())
     }
     .await;

@@ -43,10 +43,10 @@ tcode -p <profile> config
 
 **Behavior:**
 
-- **Provider choices.** The wizard menu offers four options: `claude` (Anthropic API key), `claude-oauth` (Claude Pro/Max subscription via OAuth), `open-ai` (OpenAI API key), and `open-router` (OpenRouter API key). `claude-oauth` is a distinct provider value: the wizard skips both the base URL and API-key prompts, writes `provider = "claude-oauth"` to the config file, and tells you to run `tcode claude-auth` afterward. At runtime, `claude-oauth` loads tokens from `tcode claude-auth` and ignores both `api_key` in the config and `$ANTHROPIC_API_KEY` in the environment.
+- **Provider choices.** The wizard menu offers five options: `claude` (Anthropic API key), `claude-oauth` (Claude Pro/Max subscription via OAuth), `open-ai` (OpenAI API key), `open-ai-oauth` (OpenAI Codex/ChatGPT Pro subscription via OAuth), and `open-router` (OpenRouter API key). The two OAuth providers (`claude-oauth`, `open-ai-oauth`) are distinct provider values: the wizard skips both the base URL and API-key prompts, writes the corresponding `provider = "..."` to the config file, and tells you to run the matching auth command (`tcode claude-auth` or `tcode openai-auth`) afterward. At runtime, OAuth providers load tokens from disk and ignore both `api_key` in the config and the provider's environment variable.
 - **Refuses to overwrite.** If the target file already exists, the wizard errors with ``Config already exists at <path>. Edit it directly, or delete it first and re-run `tcode config`.`` To regenerate, delete the file first and re-run the wizard.
 - **File permissions.** On Unix the file is written with `0600` permissions via a temp-file + rename dance, so a crash or Ctrl-C mid-wizard does not leave a partial file at the real path.
-- **Next-steps output.** After writing, the wizard prints the config file's absolute path and points at [02-configuration.md](02-configuration.md) for the full reference. For `claude-oauth`, it also prints a reminder to run `tcode claude-auth`.
+- **Next-steps output.** After writing, the wizard prints the config file's absolute path and points at [02-configuration.md](02-configuration.md) for the full reference. For `claude-oauth`, it also prints a reminder to run `tcode claude-auth`; for `open-ai-oauth`, a reminder to run `tcode openai-auth`.
 
 See [02-configuration.md](02-configuration.md#config-file-location) for the wizard's first-run auto-launch behavior and the full list of options you can uncomment later.
 
@@ -129,6 +129,16 @@ Authenticates with Claude via OAuth. Intended for Claude Pro/Max subscribers who
 
 ```
 tcode claude-auth
+```
+
+---
+
+### `tcode openai-auth`
+
+Authenticates with OpenAI via OAuth. Intended for OpenAI Codex / ChatGPT Pro subscribers who want to use their subscription via the API. Starts a local HTTP server on port 1455 and opens the browser for login (PKCE authorization code flow). On success, saves tokens to `~/.tcode/auth/openai_tokens.json`.
+
+```
+tcode openai-auth
 ```
 
 ---

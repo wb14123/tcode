@@ -4,8 +4,8 @@ use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::io::{self, Write};
 
-use auth::{CLIENT_ID, OAuthTokens};
-pub use auth::{TokenManager, load_token_manager};
+use auth::OAuthTokens;
+use auth::claude::{CLIENT_ID, TokenManager};
 
 const REDIRECT_URI: &str = "https://console.anthropic.com/oauth/code/callback";
 const SCOPES: &str = "org:create_api_key user:profile user:inference";
@@ -93,6 +93,7 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OAuthTokens> {
         access_token,
         refresh_token,
         expires_at,
+        account_id: None,
     })
 }
 
@@ -126,7 +127,11 @@ pub async fn run() -> Result<()> {
 
     // Save tokens to file for persistence
     let storage_path = TokenManager::default_storage_path();
-    let manager = TokenManager::new(tokens.clone(), storage_path.clone());
+    let manager = TokenManager::new(
+        tokens.clone(),
+        storage_path.clone(),
+        auth::claude::ClaudeRefresher,
+    );
     manager.save_tokens().await?;
 
     println!();

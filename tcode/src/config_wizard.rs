@@ -50,11 +50,13 @@ fn validate_no_control_chars(field: &str, value: &str) -> anyhow::Result<()> {
 /// `provider = "claude-oauth"` to the config file and skips both the
 /// base URL and API-key prompts; at runtime tcode loads OAuth tokens via
 /// `tcode claude-auth` and ignores `api_key` / `$ANTHROPIC_API_KEY`.
+/// `OpenAiOauth` is analogous, writing `provider = "open-ai-oauth"`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WizardChoice {
     Claude,
     ClaudeOauth,
     OpenAi,
+    OpenAiOauth,
     OpenRouter,
 }
 
@@ -64,22 +66,23 @@ impl WizardChoice {
             WizardChoice::Claude => "claude",
             WizardChoice::ClaudeOauth => "claude-oauth",
             WizardChoice::OpenAi => "open-ai",
+            WizardChoice::OpenAiOauth => "open-ai-oauth",
             WizardChoice::OpenRouter => "open-router",
         }
     }
 
     /// Environment variable name for the provider's API key.
     ///
-    /// Not defined for `ClaudeOauth`: the OAuth flow skips the API-key
-    /// prompt entirely, so this function is structurally unreachable for
-    /// that variant.
+    /// Not defined for `ClaudeOauth` or `OpenAiOauth`: the OAuth flows
+    /// skip the API-key prompt entirely, so this function is structurally
+    /// unreachable for those variants.
     fn env_var_name(&self) -> &'static str {
         match self {
             WizardChoice::Claude => "ANTHROPIC_API_KEY",
             WizardChoice::OpenAi => "OPENAI_API_KEY",
             WizardChoice::OpenRouter => "OPENROUTER_API_KEY",
-            WizardChoice::ClaudeOauth => {
-                unreachable!("env_var_name called on WizardChoice::ClaudeOauth")
+            WizardChoice::ClaudeOauth | WizardChoice::OpenAiOauth => {
+                unreachable!("env_var_name called on an OAuth WizardChoice variant")
             }
         }
     }
@@ -112,9 +115,10 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
     println!("  1) claude           — Anthropic API key");
     println!("  2) claude-oauth     — Claude Pro/Max subscription (OAuth)");
     println!("  3) open-ai          — OpenAI API key");
-    println!("  4) open-router      — OpenRouter API key");
+    println!("  4) open-ai-oauth    — OpenAI with Codex subscription (OAuth login)");
+    println!("  5) open-router      — OpenRouter API key");
     let choice = loop {
-        let line = match rl.readline("Enter a number [1-4]: ") {
+        let line = match rl.readline("Enter a number [1-5]: ") {
             Ok(s) => s,
             Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
                 bail!("wizard cancelled");
@@ -127,16 +131,19 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
             "1" => break WizardChoice::Claude,
             "2" => break WizardChoice::ClaudeOauth,
             "3" => break WizardChoice::OpenAi,
-            "4" => break WizardChoice::OpenRouter,
+            "4" => break WizardChoice::OpenAiOauth,
+            "5" => break WizardChoice::OpenRouter,
             other => {
-                println!("Invalid choice {other:?}; please enter 1, 2, 3, or 4.");
+                println!("Invalid choice {other:?}; please enter 1, 2, 3, 4, or 5.");
             }
         }
     };
     let provider_str = choice.provider_str();
 
-    // --- Base URL input (skipped for claude-oauth) -----------------------
-    let base_url_override: Option<String> = if choice == WizardChoice::ClaudeOauth {
+    // --- Base URL input (skipped for OAuth providers) ---------------------
+    let base_url_override: Option<String> = if choice == WizardChoice::ClaudeOauth
+        || choice == WizardChoice::OpenAiOauth
+    {
         None
     } else {
         let default_base_url = default_base_url_for(provider_str);
@@ -161,35 +168,36 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
         }
     };
 
-    // --- API key input (skipped for claude-oauth) ------------------------
+    // --- API key input (skipped for OAuth providers) ----------------------
     //
-    // For the three API-key providers, empty input is a real value: it
+    // For the API-key providers, empty input is a real value: it
     // writes an uncommented `api_key = ""` line to the config file. At
     // runtime, an empty `api_key` in the config falls back to the env var
     // if set, or passes "" through to the LLM client (for self-hosted
     // unauthenticated endpoints).
-    let api_key_override: Option<String> = if choice == WizardChoice::ClaudeOauth {
-        None
-    } else {
-        let prompt = format!(
-            "API key (empty means no auth or use ${}): ",
-            choice.env_var_name()
-        );
-        let raw = match rl.readline(&prompt) {
-            Ok(s) => s,
-            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
-                bail!("wizard cancelled");
+    let api_key_override: Option<String> =
+        if choice == WizardChoice::ClaudeOauth || choice == WizardChoice::OpenAiOauth {
+            None
+        } else {
+            let prompt = format!(
+                "API key (empty means no auth or use ${}): ",
+                choice.env_var_name()
+            );
+            let raw = match rl.readline(&prompt) {
+                Ok(s) => s,
+                Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                    bail!("wizard cancelled");
+                }
+                Err(e) => {
+                    return Err(anyhow::Error::new(e).context("API key input failed"));
+                }
+            };
+            let trimmed = raw.trim();
+            if !trimmed.is_empty() {
+                validate_no_control_chars("API key", trimmed)?;
             }
-            Err(e) => {
-                return Err(anyhow::Error::new(e).context("API key input failed"));
-            }
+            Some(trimmed.to_string())
         };
-        let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            validate_no_control_chars("API key", trimmed)?;
-        }
-        Some(trimmed.to_string())
-    };
 
     // --- Render file contents ---------------------------------------------
     let contents = substitute_template(
@@ -215,6 +223,12 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
         println!();
         println!("Next: run `tcode claude-auth` to authenticate with your Claude");
         println!("Pro/Max account.");
+    }
+
+    if choice == WizardChoice::OpenAiOauth {
+        println!();
+        println!("Next: run `tcode openai-auth` to authenticate with your OpenAI");
+        println!("Codex subscription.");
     }
 
     if first_run {

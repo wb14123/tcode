@@ -5,6 +5,7 @@ mod config_wizard;
 mod container;
 mod display;
 mod edit;
+mod openai_auth;
 mod permission_ui;
 mod protocol;
 mod server;
@@ -25,6 +26,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
@@ -52,6 +54,7 @@ enum Provider {
     Claude,
     ClaudeOauth,
     OpenAi,
+    OpenAiOauth,
     OpenRouter,
 }
 
@@ -60,6 +63,7 @@ impl Provider {
         match self {
             Provider::Claude | Provider::ClaudeOauth => "claude-opus-4-6",
             Provider::OpenAi => "gpt-5-nano",
+            Provider::OpenAiOauth => "gpt-5.4",
             Provider::OpenRouter => "deepseek/deepseek-r1",
         }
     }
@@ -68,22 +72,23 @@ impl Provider {
         match self {
             Provider::Claude | Provider::ClaudeOauth => "https://api.anthropic.com",
             Provider::OpenAi => "https://api.openai.com/v1",
+            Provider::OpenAiOauth => "https://chatgpt.com/backend-api/codex",
             Provider::OpenRouter => "https://openrouter.ai/api/v1",
         }
     }
 
     /// Environment variable name for the provider's API key.
     ///
-    /// Not defined for `ClaudeOauth`: the `create_llm` OAuth branch never
-    /// calls `get_api_key`, so this function is structurally unreachable for
-    /// that variant.
+    /// Not defined for `ClaudeOauth` or `OpenAiOauth`: the `create_llm` OAuth
+    /// branches never call `get_api_key`, so this function is structurally
+    /// unreachable for those variants.
     fn env_var_name(&self) -> &'static str {
         match self {
             Provider::Claude => "ANTHROPIC_API_KEY",
             Provider::OpenAi => "OPENAI_API_KEY",
             Provider::OpenRouter => "OPENROUTER_API_KEY",
-            Provider::ClaudeOauth => {
-                unreachable!("env_var_name called on Provider::ClaudeOauth")
+            Provider::ClaudeOauth | Provider::OpenAiOauth => {
+                unreachable!("env_var_name called on an OAuth provider variant")
             }
         }
     }
@@ -132,8 +137,8 @@ use tool_call_display::ToolCallDisplayClient;
 /// Whitespace-only values in a hand-edited config are passed through as-is;
 /// the wizard already trims user input, so this only affects manual edits.
 ///
-/// Not called for [`Provider::ClaudeOauth`] (that branch of `create_llm`
-/// loads tokens from `claude_auth::load_token_manager` instead).
+/// Not called for [`Provider::ClaudeOauth`] or [`Provider::OpenAiOauth`]
+/// (those branches of `create_llm` load OAuth tokens instead).
 fn get_api_key(config: &config::TcodeConfig, provider: Provider) -> String {
     if let Some(k) = config.api_key.as_ref()
         && !k.is_empty()
@@ -156,17 +161,21 @@ fn build_chat_options() -> ChatOptions {
     }
 }
 
+/// Return type for [`create_llm`]: (LLM instance, model name, optional OAuth manager).
+type CreateLlmResult = (
+    Box<dyn LLM>,
+    String,
+    Option<Arc<dyn auth::OAuthTokenManager>>,
+);
+
 /// Create an LLM instance from config options
-fn create_llm(
-    config: &config::TcodeConfig,
-    profile: Option<&str>,
-) -> Result<(Box<dyn LLM>, String, Option<claude_auth::TokenManager>)> {
+fn create_llm(config: &config::TcodeConfig, profile: Option<&str>) -> Result<CreateLlmResult> {
     let provider_str = config.provider.as_deref().ok_or_else(|| {
         let path = config::config_path_for(profile)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string());
         anyhow!(
-            "provider is required in {}. Expected one of: claude | claude-oauth | open-ai | open-router.",
+            "provider is required in {}. Expected one of: claude | claude-oauth | open-ai | open-ai-oauth | open-router.",
             path
         )
     })?;
@@ -180,34 +189,63 @@ fn create_llm(
         .clone()
         .unwrap_or_else(|| provider.default_base_url().to_string());
 
-    let (llm, token_manager): (Box<dyn LLM>, Option<claude_auth::TokenManager>) = match provider {
-        Provider::Claude => {
-            // May be "" — an empty key is a real value (self-hosted unauthenticated
-            // endpoint). The HTTP request will fail naturally if the server
-            // rejects the empty Authorization header.
-            let api_key = get_api_key(config, provider);
-            (Box::new(Claude::with_base_url(&api_key, &base_url)), None)
-        }
-        Provider::ClaudeOauth => {
-            // OAuth-only: ignore config.api_key and $ANTHROPIC_API_KEY entirely.
-            let manager = claude_auth::load_token_manager().ok_or_else(|| {
-                anyhow!("No Claude OAuth tokens found. Run `tcode claude-auth` to authenticate.")
-            })?;
-            let llm = Box::new(Claude::with_token_provider(manager.clone(), &base_url));
-            (llm, Some(manager))
-        }
-        Provider::OpenAi => {
-            let api_key = get_api_key(config, provider);
-            (Box::new(OpenAI::with_base_url(&api_key, &base_url)), None)
-        }
-        Provider::OpenRouter => {
-            let api_key = get_api_key(config, provider);
-            (
-                Box::new(OpenRouter::with_base_url(&api_key, &base_url)),
-                None,
-            )
-        }
-    };
+    let (llm, token_manager): (Box<dyn LLM>, Option<Arc<dyn auth::OAuthTokenManager>>) =
+        match provider {
+            Provider::Claude => {
+                // May be "" — an empty key is a real value (self-hosted unauthenticated
+                // endpoint). The HTTP request will fail naturally if the server
+                // rejects the empty Authorization header.
+                let api_key = get_api_key(config, provider);
+                (Box::new(Claude::with_base_url(&api_key, &base_url)), None)
+            }
+            Provider::ClaudeOauth => {
+                // OAuth-only: ignore config.api_key and $ANTHROPIC_API_KEY entirely.
+                let manager = auth::claude::load_token_manager().ok_or_else(|| {
+                    anyhow!(
+                        "No Claude OAuth tokens found. Run `tcode claude-auth` to authenticate."
+                    )
+                })?;
+                let llm = Box::new(Claude::with_token_provider(manager.clone(), &base_url));
+                (
+                    llm,
+                    Some(Arc::new(manager) as Arc<dyn auth::OAuthTokenManager>),
+                )
+            }
+            Provider::OpenAi => {
+                let api_key = get_api_key(config, provider);
+                (Box::new(OpenAI::with_base_url(&api_key, &base_url)), None)
+            }
+            Provider::OpenAiOauth => {
+                // OAuth-only: load tokens from ~/.tcode/auth/openai_tokens.json
+                let manager = auth::openai::load_token_manager().ok_or_else(|| {
+                    anyhow!(
+                        "No OpenAI OAuth tokens found. Run `tcode openai-auth` to authenticate."
+                    )
+                })?;
+                // Extract account_id synchronously — safe because the lock was just
+                // created and no task holds a write guard yet.
+                let account_id = manager
+                    .tokens()
+                    .try_read()
+                    .ok()
+                    .and_then(|t| t.account_id.clone());
+                let llm = Box::new(
+                    OpenAI::with_token_provider(manager.clone(), &base_url)
+                        .with_account_id(account_id),
+                );
+                (
+                    llm,
+                    Some(Arc::new(manager) as Arc<dyn auth::OAuthTokenManager>),
+                )
+            }
+            Provider::OpenRouter => {
+                let api_key = get_api_key(config, provider);
+                (
+                    Box::new(OpenRouter::with_base_url(&api_key, &base_url)),
+                    None,
+                )
+            }
+        };
 
     Ok((llm, model, token_manager))
 }
@@ -217,9 +255,10 @@ fn parse_provider(s: &str) -> Result<Provider> {
         "claude" => Ok(Provider::Claude),
         "claude-oauth" => Ok(Provider::ClaudeOauth),
         "open-ai" | "openai" => Ok(Provider::OpenAi),
+        "open-ai-oauth" | "openai-oauth" => Ok(Provider::OpenAiOauth),
         "open-router" | "openrouter" => Ok(Provider::OpenRouter),
         other => bail!(
-            "unknown provider \"{other}\" in config file, expected: claude, claude-oauth, open-ai, open-router"
+            "unknown provider \"{other}\" in config file, expected: claude, claude-oauth, open-ai, open-ai-oauth, open-router"
         ),
     }
 }
@@ -278,6 +317,8 @@ enum Commands {
     Browser,
     /// Authenticate with Claude via OAuth and get an API key
     ClaudeAuth,
+    /// Authenticate with OpenAI via OAuth (Codex subscription)
+    OpenaiAuth,
     /// Interactively create a new config file
     Config,
     /// Attach to an existing session and resume the conversation
@@ -734,6 +775,7 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Browser) => run_browser().await,
         Some(Commands::ClaudeAuth) => claude_auth::run().await,
+        Some(Commands::OpenaiAuth) => openai_auth::run().await,
         Some(Commands::Config) => config_wizard::run(profile.as_deref(), false),
     }
 }
@@ -1051,7 +1093,7 @@ async fn run_unified_with_session(
     model: String,
     chat_options: ChatOptions,
     config: &config::TcodeConfig,
-    token_manager: Option<claude_auth::TokenManager>,
+    token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
     label: &str,
     container_config: Option<llm_rs::tool::ContainerConfig>,
 ) -> Result<()> {

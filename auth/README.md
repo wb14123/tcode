@@ -1,40 +1,63 @@
 # auth
 
-OAuth token management for Claude Max. Handles loading, refreshing, and persisting OAuth tokens so that tcode can authenticate against the Anthropic API using a Claude Max subscription.
+OAuth token management for LLM providers (Claude and OpenAI). Handles loading, refreshing, and persisting OAuth tokens so that tcode can authenticate against provider APIs using subscription credentials.
 
-## Overview
+## Architecture
 
-Tokens are stored at `~/.tcode/auth/claude_tokens.json`. The initial OAuth login (PKCE authorization code flow) lives in `tcode/src/claude_auth.rs`; this crate handles everything after that: loading persisted tokens, transparently refreshing them when they expire, and querying subscription usage.
+The crate is split into a shared generic core and provider-specific submodules:
+
+```
+auth/src/
+  lib.rs          # OAuthTokens, TokenRefresher trait, BaseTokenManager<R>, OAuthTokenManager trait
+  claude/
+    mod.rs        # ClaudeRefresher, TokenManager type alias, load_token_manager()
+    usage.rs      # Claude subscription usage (rate-limit windows)
+  openai/
+    mod.rs        # OpenAiRefresher, TokenManager type alias, load_token_manager()
+    usage.rs      # OpenAI subscription usage
+```
 
 ## Key Types
 
 ### `OAuthTokens`
 
-Serializable struct holding `access_token`, `refresh_token`, and `expires_at` (unix timestamp). Knows whether it is expired or about to expire (within a 5-minute buffer).
+Serializable struct holding `access_token`, `refresh_token`, `expires_at` (unix timestamp), and an optional `account_id` (used by OpenAI). Knows whether it is expired or about to expire (within a 5-minute buffer).
 
-### `TokenManager`
+### `TokenRefresher` trait
 
-Thread-safe (`Arc<RwLock<OAuthTokens>>`) manager shared across async tasks. Core API:
+Provider-specific token refresh logic. Each provider implements a single async method:
 
-- `load_from_file(path)` / `load_token_manager()` -- load persisted tokens from disk
-- `get_access_token()` -- returns a valid access token, refreshing via the Anthropic token endpoint if necessary (double-checked locking to avoid redundant refreshes)
-- `save_tokens()` -- persist current tokens back to disk
-- Implements `llm_rs::llm::TokenProvider`, so it plugs directly into the `Claude` LLM backend
+```rust
+async fn refresh(&self, client: &reqwest::Client, refresh_token: &str) -> Result<OAuthTokens>;
+```
 
-## Modules
+Implementations: `ClaudeRefresher` (calls the Anthropic token endpoint) and `OpenAiRefresher` (calls the OpenAI token endpoint).
 
-### `usage`
+### `BaseTokenManager<R: TokenRefresher>`
 
-Fetches Claude subscription rate-limit data from `GET https://api.anthropic.com/api/oauth/usage`.
+Generic, thread-safe (`Arc<RwLock<OAuthTokens>>`) token manager parameterized over a `TokenRefresher`. Handles:
 
-- `SubscriptionUsage` -- top-level response with optional 5-hour, 7-day, 7-day-sonnet, and 7-day-opus windows
-- `UsageWindow` -- utilization percentage (0-100) and optional reset timestamp
-- `fetch_usage(client, access_token)` -- makes the API call
-- `format_resets_in(resets_at)` -- formats a reset timestamp as a human-readable duration like `"2h 13m"`
+- Loading tokens from a JSON file on disk
+- Persisting tokens with 0600 permissions
+- Double-checked-locking refresh (avoids redundant concurrent refreshes)
+- Implements `llm_rs::llm::TokenProvider`, so it plugs directly into LLM backends
+
+Each provider module exposes a `TokenManager` type alias (e.g., `claude::TokenManager = BaseTokenManager<ClaudeRefresher>`).
+
+### `OAuthTokenManager` trait
+
+Extends `TokenProvider` with HTTP client access and formatted usage fetching. Implemented by both provider `TokenManager` types so the server can treat them uniformly.
+
+## Token Storage
+
+| Provider | Token File |
+|----------|------------|
+| Claude   | `~/.tcode/auth/claude_tokens.json` |
+| OpenAI   | `~/.tcode/auth/openai_tokens.json` |
 
 ## How tcode Uses This
 
-1. `tcode claude-auth` runs the PKCE flow (in `tcode/src/claude_auth.rs`), exchanges the authorization code for tokens, and saves them via `TokenManager::save_tokens()`.
-2. On startup, `tcode` calls `auth::load_token_manager()` to load persisted tokens.
-3. The `TokenManager` is passed to the `Claude` LLM backend as a `TokenProvider`. Each API request calls `get_access_token()`, which transparently refreshes if needed.
-4. The server periodically calls `auth::usage::fetch_usage()` to write rate-limit status to a file for the TUI status bar.
+1. **Initial login.** `tcode claude-auth` or `tcode openai-auth` runs the PKCE OAuth flow, exchanges the authorization code for tokens, and saves them via the provider's `TokenManager`.
+2. **Startup.** tcode calls the provider's `load_token_manager()` to load persisted tokens from disk.
+3. **Runtime.** The `TokenManager` is passed to the LLM backend as a `TokenProvider`. Each API request calls `get_access_token()`, which transparently refreshes if needed.
+4. **Usage display.** The server periodically calls the provider's usage module to fetch rate-limit status for the TUI status bar.

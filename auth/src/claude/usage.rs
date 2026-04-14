@@ -4,7 +4,6 @@
 //! to retrieve rate-limit window utilisation and reset times.
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 /// Top-level response from `GET /api/oauth/usage`.
@@ -62,32 +61,19 @@ pub async fn fetch_usage(
     Ok(usage)
 }
 
-/// Format the time remaining until a usage window resets as a human-readable string.
+/// Format a [`SubscriptionUsage`] into a human-readable one-line summary.
 ///
-/// Accepts ISO 8601 / RFC 3339 timestamps (with or without fractional seconds).
-///
-/// Returns strings like `"2h 13m"`, `"45m"`, `"3h 0m"`, or `"now"` when the
-/// reset time is already in the past.  Returns `None` if the timestamp cannot
-/// be parsed.
-pub fn format_resets_in(resets_at: &str) -> Option<String> {
-    let reset_time: DateTime<Utc> = DateTime::parse_from_rfc3339(resets_at)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))?;
-
-    let now = Utc::now();
-    let duration = reset_time.signed_duration_since(now);
-
-    if duration.num_seconds() <= 0 {
-        return Some("now".to_string());
-    }
-
-    let total_minutes = duration.num_minutes();
-    let hours = total_minutes / 60;
-    let minutes = total_minutes % 60;
-
-    if hours > 0 {
-        Some(format!("{}h {}m", hours, minutes))
+/// Shows the 5-hour window utilisation percentage and time until reset.
+pub fn format_usage(usage: &SubscriptionUsage) -> String {
+    if let Some(ref window) = usage.five_hour {
+        let pct = window.utilization.round() as i64;
+        let reset_str = window
+            .resets_at
+            .as_deref()
+            .and_then(crate::format_resets_in)
+            .unwrap_or_else(|| "unknown".to_string());
+        format!("{}% used, resets in {}", pct, reset_str)
     } else {
-        Some(format!("{}m", minutes))
+        "no usage data".to_string()
     }
 }
