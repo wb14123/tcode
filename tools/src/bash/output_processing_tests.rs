@@ -354,6 +354,7 @@ mod e2e {
         ToolContext {
             cancel_token: CancellationToken::new(),
             permission: ScopedPermissionManager::always_allow("bash"),
+            container_config: None,
         }
     }
 

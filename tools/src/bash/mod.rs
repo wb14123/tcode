@@ -123,6 +123,8 @@ pub fn bash(
     description: String,
 ) -> impl tokio_stream::Stream<Item = Result<String>> {
     async_stream::stream! {
+        let container_config = ctx.container_config.clone();
+
         if command.trim().is_empty() {
             yield Err(anyhow!("command must not be empty"));
             return;
@@ -189,24 +191,66 @@ pub fn bash(
         let timeout_ms = timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
         let timeout_duration = std::time::Duration::from_millis(timeout_ms);
 
-        // Spawn bash -c <command> with its own process group
-        let mut cmd_builder = Command::new("bash");
-        cmd_builder
-            .arg("-c")
-            .arg(&command)
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .stdin(Stdio::null())
-            .process_group(0);
+        // Spawn the command — either directly via `bash -c` or via
+        // `<runtime> exec ... bash -c` when container mode is active.
+        let mut cmd_builder = if let Some(ref config) = container_config {
+            // Container mode: run inside the container via `docker exec` / `podman exec`
+            let mut cmd = Command::new(&config.runtime);
+            cmd.arg("exec")
+                .arg("--user")
+                .arg(format!("{}:{}", config.uid, config.gid))
+                .arg("-e")
+                .arg(format!("HOME={}", config.home))
+                .arg("-w");
 
-        if let Some(ref dir) = work_dir {
-            cmd_builder.current_dir(dir);
-        }
+            // Use explicit workdir if provided, otherwise fall back to the
+            // current working directory on the host (which should be mounted
+            // at the same path inside the container).
+            if let Some(ref dir) = work_dir {
+                cmd.arg(dir.as_os_str());
+            } else {
+                match std::env::current_dir() {
+                    Ok(dir) => cmd.arg(dir),
+                    Err(e) => {
+                        yield Err(anyhow!("Failed to determine current directory for container workdir: {}", e));
+                        return;
+                    }
+                };
+            }
+
+            cmd.arg(&config.name)
+                .arg("bash")
+                .arg("-c")
+                .arg(&command)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdin(Stdio::null())
+                .process_group(0);
+            cmd
+        } else {
+            // Host mode: direct bash execution
+            let mut cmd = Command::new("bash");
+            cmd.arg("-c")
+                .arg(&command)
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .stdin(Stdio::null())
+                .process_group(0);
+
+            if let Some(ref dir) = work_dir {
+                cmd.current_dir(dir);
+            }
+            cmd
+        };
 
         let mut child = match cmd_builder.spawn() {
             Ok(c) => c,
             Err(e) => {
-                yield Err(anyhow!("Failed to spawn bash: {}", e));
+                if container_config.is_some() {
+                    yield Err(anyhow!("Failed to spawn container exec: {}", e));
+                } else {
+                    yield Err(anyhow!("Failed to spawn bash: {}", e));
+                }
                 return;
             }
         };
@@ -271,6 +315,38 @@ pub fn bash(
                 return;
             }
         };
+
+        // Container-stopped detection: if in container mode and the exit code
+        // is non-zero, check stderr for patterns indicating the container is
+        // no longer running.
+        if let Some(ref config) = container_config {
+            let is_nonzero = matches!(exit_code, Some(c) if c != 0) || exit_code.is_none();
+            if is_nonzero {
+                let stderr_lines: Vec<&str> = output
+                    .iter()
+                    .filter(|l| l.starts_with(STDERR_TAG))
+                    .map(|l| &l[STDERR_TAG.len()..])
+                    .collect();
+                // Only check the last few lines — Docker/Podman emit their
+                // error at the very end, not mixed in with command output.
+                let tail_stderr: String = stderr_lines
+                    .iter()
+                    .rev()
+                    .take(5)
+                    .rev()
+                    .copied()
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                if is_container_stopped_error(&tail_stderr) {
+                    yield Err(anyhow!(
+                        "Error: Container '{}' is no longer running. \
+                         Ask the user to restart the container before continuing.",
+                        config.name
+                    ));
+                    return;
+                }
+            }
+        }
 
         // Run the post-processing pipeline before yielding the output.
         let processed = post_process(
@@ -538,6 +614,14 @@ fn format_metadata(exit_code: &str, description: &str, error: Option<&anyhow::Er
             exit_code, description
         ),
     }
+}
+
+/// Check if stderr output indicates the container has stopped or disappeared.
+fn is_container_stopped_error(stderr: &str) -> bool {
+    let lower = stderr.to_lowercase();
+    lower.contains("is not running")
+        || lower.contains("no such container")
+        || lower.contains("is restarting")
 }
 
 /// Check if a command starts with `cd` as the first token.

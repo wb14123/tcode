@@ -54,8 +54,10 @@ async fn main() -> anyhow::Result<()> {
     ];
 
     // Create conversation manager and start a conversation
-    let manager =
-        ConversationManager::new(std::env::temp_dir().join("llm-rs-example-permissions.json"));
+    let manager = ConversationManager::new(
+        std::env::temp_dir().join("llm-rs-example-permissions.json"),
+        None,
+    );
     let llm = Box::new(OpenRouter::new(&api_key));
 
     let (_, client) = manager.new_conversation(

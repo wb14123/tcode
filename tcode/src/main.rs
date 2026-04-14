@@ -2,6 +2,7 @@ mod approve_ui;
 mod claude_auth;
 mod config;
 mod config_wizard;
+mod container;
 mod display;
 mod edit;
 mod permission_ui;
@@ -246,6 +247,14 @@ struct Cli {
     /// Config profile to use (loads ~/.tcode/config-<profile>.toml)
     #[arg(short = 'p', long)]
     profile: Option<String>,
+
+    /// Name or ID of a running container to exec bash commands into
+    #[arg(short = 'c', long = "container")]
+    container: Option<String>,
+
+    /// Container runtime CLI to use (default: docker)
+    #[arg(long = "container-runtime", default_value = "docker", value_parser = ["docker", "podman"], requires = "container")]
+    container_runtime: String,
 }
 
 #[derive(Subcommand)]
@@ -451,6 +460,8 @@ async fn main() -> Result<()> {
         command,
         session,
         profile,
+        container,
+        container_runtime,
     } = cli;
 
     // Helper to require --session flag for subcommands
@@ -460,6 +471,21 @@ async fn main() -> Result<()> {
 
     // Helper: load config lazily (only called by branches that need it)
     let load_cfg = || config::load_config(profile.as_deref());
+
+    // Validate container and build ContainerConfig lazily — only called by
+    // branches that actually exec into the container (None, Serve, Attach).
+    // The Permission branch only needs the container name for display.
+    async fn resolve_container_config(
+        container: &Option<String>,
+        runtime: &str,
+    ) -> Result<Option<llm_rs::tool::ContainerConfig>> {
+        if let Some(ref name) = *container {
+            container::validate_container(name, runtime).await?;
+            Ok(Some(container::build_container_config(name, runtime)))
+        } else {
+            Ok(None)
+        }
+    }
 
     match command {
         None => {
@@ -472,7 +498,8 @@ async fn main() -> Result<()> {
                 // Non-TTY: fall through; load_cfg() will surface the hint.
             }
             let config = load_cfg()?;
-            run_unified(config, profile.as_deref()).await
+            let container_config = resolve_container_config(&container, &container_runtime).await?;
+            run_unified(config, profile.as_deref(), container_config).await
         }
         Some(Commands::Serve) => {
             let config = load_cfg()?;
@@ -487,6 +514,7 @@ async fn main() -> Result<()> {
             tools::set_search_engine(search_engine);
             let (llm, model, token_manager) = create_llm(&config, profile.as_deref())?;
             let chat_options = build_chat_options();
+            let container_config = resolve_container_config(&container, &container_runtime).await?;
             let sess = Session::new(session_id)?;
             let server = Server::new(
                 sess.socket_path(),
@@ -501,6 +529,7 @@ async fn main() -> Result<()> {
                 config.max_subagent_depth.unwrap_or(10),
                 config.subagent_model_selection.unwrap_or(false),
                 token_manager,
+                container_config,
             );
             server.run(None).await
         }
@@ -564,6 +593,7 @@ async fn main() -> Result<()> {
             }
             let (llm, model, token_manager) = create_llm(&config, profile.as_deref())?;
             let chat_options = build_chat_options();
+            let container_config = resolve_container_config(&container, &container_runtime).await?;
             run_unified_with_session(
                 sess,
                 session_id,
@@ -573,6 +603,7 @@ async fn main() -> Result<()> {
                 &config,
                 token_manager,
                 "Attaching to session",
+                container_config,
             )
             .await
         }
@@ -658,7 +689,7 @@ async fn main() -> Result<()> {
                 None => return Ok(()),
             };
             let session = Session::new(session_id)?;
-            permission_ui::run_permission_ui(session)
+            permission_ui::run_permission_ui(session, container.clone())
         }
         Some(Commands::ApproveNext) => {
             let session_id = require_session(session)?;
@@ -790,7 +821,11 @@ async fn run_browser() -> Result<()> {
     browser_server::browser::launch_interactive().await
 }
 
-async fn run_unified(config: config::TcodeConfig, profile: Option<&str>) -> Result<()> {
+async fn run_unified(
+    config: config::TcodeConfig,
+    profile: Option<&str>,
+    container_config: Option<llm_rs::tool::ContainerConfig>,
+) -> Result<()> {
     if !is_in_tmux() {
         anyhow::bail!(
             "tcode must be run inside tmux for the unified mode.\nRun `tcode serve` to start the server without tmux."
@@ -811,6 +846,7 @@ async fn run_unified(config: config::TcodeConfig, profile: Option<&str>) -> Resu
         &config,
         token_manager,
         "Session",
+        container_config,
     )
     .await
 }
@@ -1017,6 +1053,7 @@ async fn run_unified_with_session(
     config: &config::TcodeConfig,
     token_manager: Option<claude_auth::TokenManager>,
     label: &str,
+    container_config: Option<llm_rs::tool::ContainerConfig>,
 ) -> Result<()> {
     let max_subagent_depth = config.max_subagent_depth.unwrap_or(10);
     let subagent_model_selection = config.subagent_model_selection.unwrap_or(false);
@@ -1058,6 +1095,7 @@ async fn run_unified_with_session(
         max_subagent_depth,
         subagent_model_selection,
         token_manager,
+        container_config,
     );
 
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

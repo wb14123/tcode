@@ -17,6 +17,7 @@ async fn main() {
     let ctx = ToolContext {
         cancel_token: CancellationToken::new(),
         permission: llm_rs::permission::ScopedPermissionManager::always_allow("web_search"),
+        container_config: None,
     };
     let json_params = serde_json::json!({ "query": query }).to_string();
     let mut stream = tool.execute(ctx, json_params);

@@ -45,6 +45,7 @@ mod tests {
         Ok(ToolContext {
             cancel_token: CancellationToken::new(),
             permission: scoped,
+            container_config: None,
         })
     }
 
@@ -119,6 +120,7 @@ mod tests {
         let ctx = ToolContext {
             cancel_token: CancellationToken::new(),
             permission: ScopedPermissionManager::always_allow("write"),
+            container_config: None,
         };
         let stream =
             crate::write::write(ctx, "relative/path.txt".to_string(), "content".to_string());
@@ -144,6 +146,7 @@ mod tests {
         let ctx = ToolContext {
             cancel_token: CancellationToken::new(),
             permission: ScopedPermissionManager::always_allow("write"),
+            container_config: None,
         };
         let stream = crate::write::write(
             ctx,

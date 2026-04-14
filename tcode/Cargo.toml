@@ -20,7 +20,7 @@ anyhow = "1"
 futures = "0.3"
 bytes = "1"
 notify = "8.2.0"
-nix = { version = "0.31", features = ["term", "signal", "fs"] }
+nix = { version = "0.31", features = ["term", "signal", "fs", "user"] }
 parking_lot = "0.12"
 tokio-stream = "0.1.18"
 tracing = "0.1"
@@ -32,3 +32,4 @@ rand = "0.10"
 urlencoding = "2.1"
 ratatui = "0.30"
 rustyline = { version = "18", default-features = false }
+uuid = { version = "1", features = ["v4"] }

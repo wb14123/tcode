@@ -10,6 +10,7 @@ mod tests {
         ToolContext {
             cancel_token: CancellationToken::new(),
             permission: crate::permission::ScopedPermissionManager::always_allow("test"),
+            container_config: None,
         }
     }
 
@@ -311,6 +312,7 @@ mod tests {
         let ctx = ToolContext {
             cancel_token: cancel_token.clone(),
             permission: crate::permission::ScopedPermissionManager::always_allow("test"),
+            container_config: None,
         };
 
         let json_args = r#"{"message": "test"}"#.to_string();
@@ -391,6 +393,7 @@ mod tests {
             ToolContext {
                 cancel_token: CancellationToken::new(),
                 permission: crate::permission::ScopedPermissionManager::always_allow("test"),
+                container_config: None,
             }
         }
 

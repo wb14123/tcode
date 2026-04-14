@@ -104,10 +104,12 @@ struct PermissionTreeState {
     frame_count: u64,
     /// Whether we've already sent a terminal bell for the current pending batch.
     bell_sent: bool,
+    /// When set, annotates tool names in the display to show container context.
+    container_name: Option<String>,
 }
 
 impl PermissionTreeState {
-    fn new(session_id: String) -> Self {
+    fn new(session_id: String, container_name: Option<String>) -> Self {
         PermissionTreeState {
             arena: Vec::new(),
             visible: Vec::new(),
@@ -116,6 +118,7 @@ impl PermissionTreeState {
             session_id,
             frame_count: 0,
             bell_sent: false,
+            container_name,
         }
     }
 
@@ -665,8 +668,15 @@ fn render_tree(
                             })
                         });
                         let status_icon = if has_pending { " ?" } else { "" };
+                        let display_name = match &state.container_name {
+                            Some(cn) if name == "bash" => {
+                                format!("{} (in container {})", name, cn)
+                            }
+                            Some(_) => format!("{} (outside container)", name),
+                            None => name.clone(),
+                        };
                         let line = Line::from(vec![
-                            Span::raw(format!("{}{} {}", indent, prefix, name)),
+                            Span::raw(format!("{}{} {}", indent, prefix, display_name)),
                             Span::styled(status_icon, Style::default().fg(Color::Yellow)),
                         ]);
                         ListItem::new(line)
@@ -1076,7 +1086,7 @@ fn check_for_permission_updates(display_path: &PathBuf, offset: &mut u64) -> boo
 // Main entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_permission_ui(session: Session) -> Result<()> {
+pub fn run_permission_ui(session: Session, container_name: Option<String>) -> Result<()> {
     let session_dir = session.session_dir().clone();
     let session_id = session_dir
         .file_name()
@@ -1106,7 +1116,7 @@ pub fn run_permission_ui(session: Session) -> Result<()> {
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let mut state = PermissionTreeState::new(session_id);
+    let mut state = PermissionTreeState::new(session_id, container_name);
 
     // Initial query
     let mut file_offset: u64 = 0;

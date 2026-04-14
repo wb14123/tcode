@@ -12,7 +12,7 @@ use llm_rs::conversation::{
     create_continue_subagent_tool, create_subagent_tool, format_subagent_result,
 };
 use llm_rs::llm::{ChatOptions, LLM};
-use llm_rs::tool::Tool;
+use llm_rs::tool::{ContainerConfig, Tool};
 use sha2::Digest;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
@@ -59,6 +59,7 @@ pub struct Server {
     max_subagent_depth: usize,
     subagent_model_selection: bool,
     token_manager: Option<auth::TokenManager>,
+    container_config: Option<ContainerConfig>,
 }
 
 impl Server {
@@ -76,6 +77,7 @@ impl Server {
         max_subagent_depth: usize,
         subagent_model_selection: bool,
         token_manager: Option<auth::TokenManager>,
+        container_config: Option<ContainerConfig>,
     ) -> Self {
         Self {
             socket_path,
@@ -90,6 +92,7 @@ impl Server {
             max_subagent_depth,
             subagent_model_selection,
             token_manager,
+            container_config,
         }
     }
 
@@ -153,7 +156,7 @@ impl Server {
             .join("projects")
             .join(&hash)
             .join("permissions.json");
-        let manager = ConversationManager::new(permissions_path);
+        let manager = ConversationManager::new(permissions_path, self.container_config.clone());
 
         // Scan skills
         let (skills, skill_warnings) = llm_rs::skill::scan_skills();

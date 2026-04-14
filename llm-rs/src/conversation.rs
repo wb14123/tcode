@@ -6,7 +6,7 @@ use std::sync::atomic::AtomicI32;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
-use crate::tool::{CancellationToken, Tool, ToolContext};
+use crate::tool::{CancellationToken, ContainerConfig, Tool, ToolContext};
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -87,7 +87,10 @@ shell pipeline only when the processing cannot be expressed with \
 3. Delegate large-output tasks to subagents when a summary suffices; \
 call tools directly when you need verbatim content";
 
-fn build_system_prompt(subagent_depth: usize) -> String {
+fn build_system_prompt(
+    subagent_depth: usize,
+    container_config: Option<&ContainerConfig>,
+) -> String {
     let role = if subagent_depth == 0 {
         "You are the main agent coordinating the user's task. \
          Plan the approach and delegate work to subagents. Delegate based on context \
@@ -129,6 +132,18 @@ fn build_system_prompt(subagent_depth: usize) -> String {
                 tracing::warn!("Failed to read CLAUDE.md: {}", e);
             }
         }
+    }
+
+    if let Some(config) = container_config {
+        prompt.push_str(&format!(
+            "\n\n## Container Mode\n\n\
+            Your bash commands execute inside container `{}` (via {}). \
+            File tools (read, write, edit, grep, glob) operate on the host filesystem outside the container. \
+            The project directory is mounted at the same absolute path inside the container, \
+            so file paths are consistent between bash and file tools. \
+            Some tools or commands available on the host may not be available inside the container.",
+            config.name, config.runtime
+        ));
     }
 
     prompt
@@ -519,6 +534,8 @@ struct ConversationEnv {
     state_dir: Option<PathBuf>,
     /// Permission manager shared across all conversations.
     permission_manager: Arc<crate::permission::PermissionManager>,
+    /// Optional container configuration for Docker/Podman sandbox mode.
+    container_config: Option<Arc<ContainerConfig>>,
 }
 
 /// Create the `subagent` tool with a dynamic description listing available models.
@@ -598,17 +615,20 @@ pub struct ConversationManager {
     subagent_parents: parking_lot::Mutex<HashMap<String, (String, String)>>,
     /// Permission manager shared across all conversations.
     permission_manager: Arc<crate::permission::PermissionManager>,
+    /// Optional container configuration for Docker/Podman sandbox mode.
+    container_config: Option<Arc<ContainerConfig>>,
 }
 
 /// Manages conversations so that any new client can attach to an existing conversation.
 impl ConversationManager {
-    pub fn new(permissions_path: PathBuf) -> Arc<Self> {
+    pub fn new(permissions_path: PathBuf, container_config: Option<ContainerConfig>) -> Arc<Self> {
         let permission_manager =
             Arc::new(crate::permission::PermissionManager::new(permissions_path));
         Arc::new(Self {
             conversations: parking_lot::RwLock::new(HashMap::new()),
             subagent_parents: parking_lot::Mutex::new(HashMap::new()),
             permission_manager,
+            container_config: container_config.map(Arc::new),
         })
     }
 
@@ -661,7 +681,7 @@ impl ConversationManager {
         state_dir: Option<PathBuf>,
     ) -> Result<(String, Arc<ConversationClient>)> {
         let (tools_map, input_rx, client) = prepare_conversation(&mut *llm, tools, 0);
-        let system_prompt = build_system_prompt(subagent_depth);
+        let system_prompt = build_system_prompt(subagent_depth, self.container_config.as_deref());
         let llm_msgs = vec![LLMMessage::System(system_prompt)];
         let conversation = Conversation {
             id: conversation_id.clone(),
@@ -693,6 +713,7 @@ impl ConversationManager {
                 max_subagent_depth,
                 state_dir,
                 permission_manager: Arc::clone(&self.permission_manager),
+                container_config: self.container_config.clone(),
             },
         };
         self.spawn_conversation(conversation)
@@ -841,6 +862,7 @@ impl ConversationManager {
                 max_subagent_depth,
                 state_dir,
                 permission_manager: Arc::clone(&self.permission_manager),
+                container_config: self.container_config.clone(),
             },
         };
         self.spawn_conversation(conversation)
@@ -2036,6 +2058,7 @@ async fn execute_regular_tool(
     let tool_ctx = ToolContext {
         cancel_token: cancel_token.clone(),
         permission: scoped_pm,
+        container_config: env.container_config.clone(),
     };
     let (end_status, tool_result) = if let Some(tool) = tool_arc {
         tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");

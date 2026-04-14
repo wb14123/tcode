@@ -102,6 +102,7 @@ async fn main() {
                                     llm_rs::permission::ScopedPermissionManager::always_allow(
                                         &tool_call.name,
                                     ),
+                                container_config: None,
                             };
                             let mut result_stream = tool.execute(ctx, tool_call.arguments.clone());
                             let mut result = String::new();
