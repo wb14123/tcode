@@ -90,9 +90,25 @@ fn main() {
         "C compiler failed to build tree-sitter-tcode"
     );
 
+    // Emit git short hash for version string.
+    if let Ok(output) = Command::new("git")
+        .args(["rev-parse", "--short", "HEAD"])
+        .output()
+    {
+        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        if !hash.is_empty() {
+            println!("cargo:rustc-env=GIT_HASH={hash}");
+        }
+    }
+
     // Re-run if sources change.
     println!("cargo:rerun-if-changed={}", grammar_js.display());
     println!("cargo:rerun-if-changed={}", scanner_c.display());
     println!("cargo:rerun-if-changed={}", parser_c.display());
     println!("cargo:rerun-if-env-changed=CC");
+    // Re-run on git HEAD change (new commits, checkouts, etc.)
+    let git_head = manifest_dir.join("../.git/HEAD");
+    if git_head.exists() {
+        println!("cargo:rerun-if-changed={}", git_head.display());
+    }
 }

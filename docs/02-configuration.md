@@ -26,7 +26,7 @@ tcode -p work                  # start with ~/.tcode/config-work.toml
 tcode --session <id> attach    # attach to existing session
 ```
 
-The CLI only accepts `--session` and `-p`/`--profile`. All other settings live in the config file.
+The CLI only accepts `--session`, `-p`/`--profile`, and `-V`/`--version`. All other settings live in the config file.
 
 ## Full Config Reference
 

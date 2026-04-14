@@ -18,6 +18,7 @@ tcode -p <profile>
 | Flag | Description |
 |------|-------------|
 | `-p <profile>` | Load a specific config profile |
+| `-V`, `--version` | Print version and git commit |
 
 ---
 

@@ -35,6 +35,12 @@ Install the latest release:
 curl -sSL https://raw.githubusercontent.com/wb14123/tcode/refs/heads/master/install.sh | sh
 ```
 
+Verify it works:
+
+```sh
+tcode --version
+```
+
 Then follow the [Getting Started](docs/01-getting-started.md) guide for prerequisites, configuration, and a walkthrough of the UI.
 
 More user docs:

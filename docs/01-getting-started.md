@@ -65,6 +65,13 @@ git clone https://github.com/wb14123/tcode.git && cd tcode
 
 `install-from-source.sh` runs `cargo build --release` and then installs `tcode`, `browser-server`, and the tree-sitter shared library into `<prefix>/bin` and `<prefix>/lib`.
 
+### Verify the installation
+
+```sh
+tcode --version
+# tcode 0.1.5 (a3f9b2c)
+```
+
 To uninstall:
 
 ```sh

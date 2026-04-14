@@ -233,6 +233,7 @@ fn parse_search_engine(s: &str) -> Result<browser_server::SearchEngineKind> {
 
 #[derive(Parser)]
 #[command(name = "tcode")]
+#[command(version = concat!(env!("CARGO_PKG_VERSION"), " (", env!("GIT_HASH"), ")"))]
 #[command(about = "Terminal-based LLM conversation interface with neovim")]
 struct Cli {
     #[command(subcommand)]
