@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1.0.102"
+chrono = "0.4"
 async-openai = { version = "0.34", features = ["responses"] }
 async-stream = "0.3"
 futures = "0.3"
@@ -23,4 +24,3 @@ tracing = "0.1"
 uuid = { version = "1.23.0", features = ["v4"] }
 
 [dev-dependencies]
-chrono = "0.4"

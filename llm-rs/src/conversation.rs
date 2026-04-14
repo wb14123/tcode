@@ -106,12 +106,15 @@ fn build_system_prompt(subagent_depth: usize) -> String {
             tracing::warn!("Failed to get current directory: {}", e);
             "unknown".to_string()
         });
+    let start_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z");
     let mut prompt = format!(
         "{role}\n\n{rules}\n\nCurrent directory: {cwd}\n\
-         If you need the current date or time, use the `current_time` tool.",
+         This conversation started at: {start_time}. Note that time may have passed since then; \
+         use the `current_time` tool to get the accurate current time if needed.",
         role = role,
         rules = SUBAGENT_RULES,
         cwd = cwd,
+        start_time = start_time,
     );
 
     // Append CLAUDE.md content if the file exists in the current directory.
