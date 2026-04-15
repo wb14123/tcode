@@ -1,7 +1,7 @@
 //! OpenAI OAuth token management.
 //!
 //! Handles loading, refreshing, and persisting OAuth tokens from
-//! `~/.tcode/auth/openai_tokens.json`.
+//! the provider's profile-aware `~/.tcode/auth/openai_tokens*.json` files.
 
 pub mod usage;
 
@@ -141,13 +141,31 @@ pub async fn refresh_tokens(client: &reqwest::Client, refresh_token: &str) -> Re
 pub type TokenManager = crate::BaseTokenManager<OpenAiRefresher>;
 
 impl TokenManager {
+    /// Resolve the token storage path for an optional profile.
+    pub fn storage_path(profile: Option<&str>) -> PathBuf {
+        crate::oauth_token_storage_path(crate::OAuthProvider::OpenAi, profile)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn storage_path_in(home_dir: &std::path::Path, profile: Option<&str>) -> PathBuf {
+        crate::oauth_token_storage_path_in(home_dir, crate::OAuthProvider::OpenAi, profile)
+    }
+
     /// Default token storage path: `~/.tcode/auth/openai_tokens.json`.
     pub fn default_storage_path() -> PathBuf {
-        dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".tcode")
-            .join("auth")
-            .join("openai_tokens.json")
+        Self::storage_path(None)
+    }
+
+    /// Load a token manager for an optional profile.
+    pub fn load(profile: Option<&str>) -> Option<Self> {
+        let path = Self::storage_path(profile);
+        Self::load_from_file(&path, OpenAiRefresher)
+    }
+
+    #[cfg(test)]
+    pub(crate) fn load_in(home_dir: &std::path::Path, profile: Option<&str>) -> Option<Self> {
+        let path = Self::storage_path_in(home_dir, profile);
+        Self::load_from_file(&path, OpenAiRefresher)
     }
 
     /// Get the stored ChatGPT account ID (if present).
@@ -174,6 +192,5 @@ impl crate::OAuthTokenManager for TokenManager {
 /// Load a token manager from the default storage location.
 /// Returns `None` if no stored tokens exist.
 pub fn load_token_manager() -> Option<TokenManager> {
-    let path = TokenManager::default_storage_path();
-    TokenManager::load_from_file(&path, OpenAiRefresher)
+    TokenManager::load(None)
 }

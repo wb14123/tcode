@@ -4,6 +4,7 @@ use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::io::{BufRead, Write as _};
 use std::net::TcpListener;
+use std::path::PathBuf;
 
 use auth::openai::{CLIENT_ID, OAuthTokens, TokenManager, parse_jwt_exp};
 
@@ -196,7 +197,11 @@ async fn exchange_code(code: &str, verifier: &str) -> Result<OAuthTokens> {
     })
 }
 
-pub async fn run() -> Result<()> {
+pub(crate) fn token_storage_path(profile: Option<&str>) -> PathBuf {
+    TokenManager::storage_path(profile)
+}
+
+pub async fn run(profile: Option<&str>) -> Result<()> {
     let verifier = generate_code_verifier();
     let challenge = generate_code_challenge(&verifier);
     let state = generate_state();
@@ -236,7 +241,7 @@ pub async fn run() -> Result<()> {
     let tokens = exchange_code(&code, &verifier).await?;
 
     // Save tokens
-    let storage_path = TokenManager::default_storage_path();
+    let storage_path = token_storage_path(profile);
     let manager = TokenManager::new(tokens, storage_path.clone(), auth::openai::OpenAiRefresher);
     manager.save_tokens().await?;
 

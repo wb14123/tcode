@@ -22,6 +22,9 @@ mod config_tests;
 #[cfg(test)]
 mod config_wizard_tests;
 
+#[cfg(test)]
+mod oauth_profile_tests;
+
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -46,6 +49,13 @@ pub(crate) fn lua_escape(s: &str) -> String {
         .replace('\'', "\\'")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
+}
+
+pub(crate) fn auth_command_for_profile(profile: Option<&str>, command: &str) -> String {
+    match profile {
+        Some(profile) => format!("tcode -p {profile} {command}"),
+        None => format!("tcode {command}"),
+    }
 }
 
 /// LLM provider selection
@@ -200,9 +210,13 @@ fn create_llm(config: &config::TcodeConfig, profile: Option<&str>) -> Result<Cre
             }
             Provider::ClaudeOauth => {
                 // OAuth-only: ignore config.api_key and $ANTHROPIC_API_KEY entirely.
-                let manager = auth::claude::load_token_manager().ok_or_else(|| {
+                let manager = auth::claude::TokenManager::load(profile).ok_or_else(|| {
+                    let auth_command = auth_command_for_profile(profile, "claude-auth");
+                    let storage_path = auth::claude::TokenManager::storage_path(profile);
                     anyhow!(
-                        "No Claude OAuth tokens found. Run `tcode claude-auth` to authenticate."
+                        "No Claude OAuth tokens found at {}. Run `{}` to authenticate.",
+                        storage_path.display(),
+                        auth_command
                     )
                 })?;
                 let llm = Box::new(Claude::with_token_provider(manager.clone(), &base_url));
@@ -216,10 +230,14 @@ fn create_llm(config: &config::TcodeConfig, profile: Option<&str>) -> Result<Cre
                 (Box::new(OpenAI::with_base_url(&api_key, &base_url)), None)
             }
             Provider::OpenAiOauth => {
-                // OAuth-only: load tokens from ~/.tcode/auth/openai_tokens.json
-                let manager = auth::openai::load_token_manager().ok_or_else(|| {
+                // OAuth-only: ignore config.api_key and $OPENAI_API_KEY entirely.
+                let manager = auth::openai::TokenManager::load(profile).ok_or_else(|| {
+                    let auth_command = auth_command_for_profile(profile, "openai-auth");
+                    let storage_path = auth::openai::TokenManager::storage_path(profile);
                     anyhow!(
-                        "No OpenAI OAuth tokens found. Run `tcode openai-auth` to authenticate."
+                        "No OpenAI OAuth tokens found at {}. Run `{}` to authenticate.",
+                        storage_path.display(),
+                        auth_command
                     )
                 })?;
                 // Extract account_id synchronously — safe because the lock was just
@@ -774,8 +792,8 @@ async fn main() -> Result<()> {
             }
         }
         Some(Commands::Browser) => run_browser().await,
-        Some(Commands::ClaudeAuth) => claude_auth::run().await,
-        Some(Commands::OpenaiAuth) => openai_auth::run().await,
+        Some(Commands::ClaudeAuth) => claude_auth::run(profile.as_deref()).await,
+        Some(Commands::OpenaiAuth) => openai_auth::run(profile.as_deref()).await,
         Some(Commands::Config) => config_wizard::run(profile.as_deref(), false),
     }
 }

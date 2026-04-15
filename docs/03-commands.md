@@ -43,10 +43,10 @@ tcode -p <profile> config
 
 **Behavior:**
 
-- **Provider choices.** The wizard menu offers five options: `claude` (Anthropic API key), `claude-oauth` (Claude Pro/Max subscription via OAuth), `open-ai` (OpenAI API key), `open-ai-oauth` (OpenAI Codex/ChatGPT Pro subscription via OAuth), and `open-router` (OpenRouter API key). The two OAuth providers (`claude-oauth`, `open-ai-oauth`) are distinct provider values: the wizard skips both the base URL and API-key prompts, writes the corresponding `provider = "..."` to the config file, and tells you to run the matching auth command (`tcode claude-auth` or `tcode openai-auth`) afterward. At runtime, OAuth providers load tokens from disk and ignore both `api_key` in the config and the provider's environment variable.
+- **Provider choices.** The wizard menu offers five options: `claude` (Anthropic API key), `claude-oauth` (Claude Pro/Max subscription via OAuth), `open-ai` (OpenAI API key), `open-ai-oauth` (OpenAI Codex/ChatGPT Pro subscription via OAuth), and `open-router` (OpenRouter API key). The two OAuth providers (`claude-oauth`, `open-ai-oauth`) are distinct provider values: the wizard skips both the base URL and API-key prompts, writes the corresponding `provider = "..."` to the config file, and tells you to run the matching auth command (`tcode claude-auth` or `tcode openai-auth`, with `-p <profile>` as needed) afterward. At runtime, OAuth providers load tokens from disk using the selected profile and ignore both `api_key` in the config and the provider's environment variable.
 - **Refuses to overwrite.** If the target file already exists, the wizard errors with ``Config already exists at <path>. Edit it directly, or delete it first and re-run `tcode config`.`` To regenerate, delete the file first and re-run the wizard.
 - **File permissions.** On Unix the file is written with `0600` permissions via a temp-file + rename dance, so a crash or Ctrl-C mid-wizard does not leave a partial file at the real path.
-- **Next-steps output.** After writing, the wizard prints the config file's absolute path and points at [02-configuration.md](02-configuration.md) for the full reference. For `claude-oauth`, it also prints a reminder to run `tcode claude-auth`; for `open-ai-oauth`, a reminder to run `tcode openai-auth`.
+- **Next-steps output.** After writing, the wizard prints the config file's absolute path and points at [02-configuration.md](02-configuration.md) for the full reference. For `claude-oauth`, it also prints a reminder to run the matching `claude-auth` command for the selected profile; for `open-ai-oauth`, a reminder to run the matching `openai-auth` command for the selected profile.
 
 See [02-configuration.md](02-configuration.md#config-file-location) for the wizard's first-run auto-launch behavior and the full list of options you can uncomment later.
 
@@ -125,21 +125,27 @@ tcode browser
 
 ### `tcode claude-auth`
 
-Authenticates with Claude via OAuth. Intended for Claude Pro/Max subscribers who want to use their subscription credits via the API. Opens an authorization URL in the browser; the user pastes the returned code back into the terminal. Outputs OAuth tokens as JSON on success.
+Authenticates with Claude via OAuth. Intended for Claude Pro/Max subscribers who want to use their subscription credits via the API. Opens an authorization URL in the browser; the user pastes the returned code back into the terminal. On success, saves tokens to the profile-aware Claude token file: `~/.tcode/auth/claude_tokens.json` with no profile, or `~/.tcode/auth/claude_tokens-<profile>.json` when run with `-p <profile>`.
 
 ```
 tcode claude-auth
+tcode -p <profile> claude-auth
 ```
+
+The same profile must be used later at runtime; `tcode -p <profile> ...` loads the matching `claude_tokens-<profile>.json` file and does not fall back to the default token file.
 
 ---
 
 ### `tcode openai-auth`
 
-Authenticates with OpenAI via OAuth. Intended for OpenAI Codex / ChatGPT Pro subscribers who want to use their subscription via the API. Starts a local HTTP server on port 1455 and opens the browser for login (PKCE authorization code flow). On success, saves tokens to `~/.tcode/auth/openai_tokens.json`.
+Authenticates with OpenAI via OAuth. Intended for OpenAI Codex / ChatGPT Pro subscribers who want to use their subscription via the API. Starts a local HTTP server on port 1455 and opens the browser for login (PKCE authorization code flow). On success, saves tokens to the profile-aware OpenAI token file: `~/.tcode/auth/openai_tokens.json` with no profile, or `~/.tcode/auth/openai_tokens-<profile>.json` when run with `-p <profile>`.
 
 ```
 tcode openai-auth
+tcode -p <profile> openai-auth
 ```
+
+The same profile must be used later at runtime; `tcode -p <profile> ...` loads the matching `openai_tokens-<profile>.json` file and does not fall back to the default token file.
 
 ---
 

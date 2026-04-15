@@ -8,6 +8,9 @@
 pub mod claude;
 pub mod openai;
 
+#[cfg(test)]
+mod token_storage_tests;
+
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -15,6 +18,44 @@ use std::sync::Arc;
 use anyhow::{Context, Result};
 use chrono::{DateTime, TimeZone, Utc};
 use tokio::sync::RwLock;
+
+/// OAuth providers with file-backed token storage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OAuthProvider {
+    Claude,
+    OpenAi,
+}
+
+impl OAuthProvider {
+    fn token_filename(self, profile: Option<&str>) -> String {
+        let stem = match self {
+            Self::Claude => "claude_tokens",
+            Self::OpenAi => "openai_tokens",
+        };
+
+        match profile {
+            Some(profile) => format!("{stem}-{profile}.json"),
+            None => format!("{stem}.json"),
+        }
+    }
+}
+
+/// Resolve the OAuth token storage path for a provider and optional profile.
+pub fn oauth_token_storage_path(provider: OAuthProvider, profile: Option<&str>) -> PathBuf {
+    let home_dir = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+    oauth_token_storage_path_in(&home_dir, provider, profile)
+}
+
+fn oauth_token_storage_path_in(
+    home_dir: &Path,
+    provider: OAuthProvider,
+    profile: Option<&str>,
+) -> PathBuf {
+    home_dir
+        .join(".tcode")
+        .join("auth")
+        .join(provider.token_filename(profile))
+}
 
 // ---------------------------------------------------------------------------
 // Shared OAuthTokens

@@ -3,6 +3,7 @@ use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use rand::RngExt;
 use sha2::{Digest, Sha256};
 use std::io::{self, Write};
+use std::path::PathBuf;
 
 use auth::OAuthTokens;
 use auth::claude::{CLIENT_ID, TokenManager};
@@ -105,7 +106,11 @@ fn read_line() -> Result<String> {
     Ok(input.trim().to_string())
 }
 
-pub async fn run() -> Result<()> {
+pub(crate) fn token_storage_path(profile: Option<&str>) -> PathBuf {
+    TokenManager::storage_path(profile)
+}
+
+pub async fn run(profile: Option<&str>) -> Result<()> {
     let verifier = generate_code_verifier();
     let challenge = generate_code_challenge(&verifier);
 
@@ -126,7 +131,7 @@ pub async fn run() -> Result<()> {
     let tokens = exchange_code(&code, &verifier).await?;
 
     // Save tokens to file for persistence
-    let storage_path = TokenManager::default_storage_path();
+    let storage_path = token_storage_path(profile);
     let manager = TokenManager::new(
         tokens.clone(),
         storage_path.clone(),

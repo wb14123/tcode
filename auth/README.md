@@ -50,14 +50,18 @@ Extends `TokenProvider` with HTTP client access and formatted usage fetching. Im
 
 ## Token Storage
 
-| Provider | Token File |
-|----------|------------|
-| Claude   | `~/.tcode/auth/claude_tokens.json` |
-| OpenAI   | `~/.tcode/auth/openai_tokens.json` |
+Token files are profile-aware and mirror tcode's config profile naming:
+
+| Provider | No Profile | Profile `work` |
+|----------|------------|----------------|
+| Claude   | `~/.tcode/auth/claude_tokens.json` | `~/.tcode/auth/claude_tokens-work.json` |
+| OpenAI   | `~/.tcode/auth/openai_tokens.json` | `~/.tcode/auth/openai_tokens-work.json` |
+
+`TokenManager::storage_path(profile)` is the source of truth for this naming. `TokenManager::load(profile)` loads only the resolved file for that profile and does not fall back to the unsuffixed default file.
 
 ## How tcode Uses This
 
-1. **Initial login.** `tcode claude-auth` or `tcode openai-auth` runs the PKCE OAuth flow, exchanges the authorization code for tokens, and saves them via the provider's `TokenManager`.
-2. **Startup.** tcode calls the provider's `load_token_manager()` to load persisted tokens from disk.
+1. **Initial login.** `tcode claude-auth` or `tcode openai-auth` runs the PKCE OAuth flow, exchanges the authorization code for tokens, and saves them via the provider's `TokenManager`. With `tcode -p <profile> ...`, the same auth commands save to the matching profile-specific token file.
+2. **Startup.** tcode calls the provider's `TokenManager::load(profile)` to load persisted tokens from disk for the active profile.
 3. **Runtime.** The `TokenManager` is passed to the LLM backend as a `TokenProvider`. Each API request calls `get_access_token()`, which transparently refreshes if needed.
 4. **Usage display.** The server periodically calls the provider's usage module to fetch rate-limit status for the TUI status bar.

@@ -221,13 +221,19 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
 
     if choice == WizardChoice::ClaudeOauth {
         println!();
-        println!("Next: run `tcode claude-auth` to authenticate with your Claude");
+        println!(
+            "Next: run `{}` to authenticate with your Claude",
+            crate::auth_command_for_profile(profile, "claude-auth")
+        );
         println!("Pro/Max account.");
     }
 
     if choice == WizardChoice::OpenAiOauth {
         println!();
-        println!("Next: run `tcode openai-auth` to authenticate with your OpenAI");
+        println!(
+            "Next: run `{}` to authenticate with your OpenAI",
+            crate::auth_command_for_profile(profile, "openai-auth")
+        );
         println!("Codex subscription.");
     }
 
