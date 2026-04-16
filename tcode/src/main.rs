@@ -399,6 +399,31 @@ enum Commands {
         #[arg(long)]
         once_only: bool,
     },
+    /// Start the web backend for browser access (PoC, localhost only).
+    ///
+    /// Binds to 127.0.0.1 only — connect via http://127.0.0.1:<port>,
+    /// not http://localhost:<port> (IPv6 dual-stack may misroute the latter).
+    ///
+    /// `-p <profile>` is accepted at the top level but not used yet;
+    /// reserved for a future login/session ticket.
+    ///
+    /// Prefer `TCODE_REMOTE_PASSWORD=<secret>` over `--password` to avoid
+    /// leaking the secret into `ps` / shell history. The password is stored
+    /// as-received (no trimming), so leading/trailing whitespace in the
+    /// secret is significant at login time.
+    Remote {
+        /// TCP port to bind on 127.0.0.1. Required — no default, so the
+        /// operator always chooses a port and avoids silent collisions.
+        /// `--port 0` is rejected at parse time; pick a concrete port.
+        #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
+        port: u16,
+
+        /// Shared secret used for the single-user login flow.
+        /// Prefer passing via env (TCODE_REMOTE_PASSWORD).
+        // NOTE: if `Cli`/`Commands` ever derives `Debug`/`Display`, wrap `password` in a redacted newtype — Secret in tcode-web does not extend to this CLI-layer struct.
+        #[arg(long, env = "TCODE_REMOTE_PASSWORD")]
+        password: String,
+    },
 }
 
 /// Embedded Lua source, compiled into the binary.
@@ -795,7 +820,54 @@ async fn main() -> Result<()> {
         Some(Commands::ClaudeAuth) => claude_auth::run(profile.as_deref()).await,
         Some(Commands::OpenaiAuth) => openai_auth::run(profile.as_deref()).await,
         Some(Commands::Config) => config_wizard::run(profile.as_deref(), false),
+        Some(Commands::Remote { port, password }) => {
+            // Ordering is load-bearing: init_remote_tracing() MUST run before
+            // try_new() so the warnings/advisories emitted inside try_new()
+            // are actually delivered.
+            init_remote_tracing();
+
+            // `profile` is the already-destructured Option<String> binding
+            // from the top of `main`. It is accepted for forward
+            // compatibility but has no effect on `remote` in this PoC.
+            if let Some(p) = profile.as_deref() {
+                tracing::info!(
+                    profile = %p,
+                    "-p/--profile is accepted but has no effect on 'remote' in this PoC"
+                );
+            }
+
+            let password_on_argv = password_on_argv();
+            let cfg = tcode_web::RemoteConfig::try_new(port, password, password_on_argv)?;
+            tcode_web::run(cfg).await
+        }
     }
+}
+
+/// Scan argv for `--password` / `--password=...` without parsing. Used to
+/// emit an argv-leak warning; the actual password value is resolved by clap
+/// (including `TCODE_REMOTE_PASSWORD`).
+fn password_on_argv() -> bool {
+    std::env::args_os().any(|arg| {
+        let bytes = arg.as_encoded_bytes();
+        bytes == b"--password" || bytes.starts_with(b"--password=")
+    })
+}
+
+/// Initialize a stderr-writing tracing subscriber for the `tcode remote`
+/// entry point. The existing `init_tracing(session_id)` writes to a
+/// session-specific log file; the web backend has no session dir, so we
+/// install a fresh subscriber here.
+///
+/// Uses `.init()` (not `try_init()`) — `tcode remote` is a fresh process
+/// that never had a subscriber installed before this point, so a double-
+/// install would be a bug we want to surface loudly.
+fn init_remote_tracing() {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info"));
+    tracing_subscriber::fmt()
+        .with_env_filter(filter)
+        .with_writer(std::io::stderr)
+        .init();
 }
 
 fn init_tracing(session_id: &str) {

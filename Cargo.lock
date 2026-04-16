@@ -3478,6 +3478,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tcode-web",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -3488,6 +3489,20 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webbrowser",
+]
+
+[[package]]
+name = "tcode-web"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "axum",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
 ]
 
 [[package]]

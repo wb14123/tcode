@@ -12,7 +12,7 @@ This file turns `poc.md` and `api.md` into an implementation checklist.
 
 ## Milestone 1 — Backend bootstrap and security baseline
 
-- [ ] Add a `tcode remote` startup path that launches the web backend, accepts `--port` and `--password`, and binds to localhost by default.
+- [x] Add a `tcode remote` startup path that launches the web backend, accepts `--port` and `--password`, and binds to localhost by default.
   - Verify: start the server with `tcode -p <profile> remote --port <port> --password <secret>` and confirm it only listens on `127.0.0.1` unless an explicit non-local bind option is added.
   - Verify: open `http://127.0.0.1:<port>/api/auth/session` before login and confirm the request is rejected or reports `authenticated: false`.
 
