@@ -35,15 +35,29 @@ pub(crate) struct SessionStatus {
 /// Cookie name used for the server-side session token.
 pub(crate) const SESSION_COOKIE_NAME: &str = "tcode_session";
 
-/// Helper: a cookie that clears `tcode_session` at Path=/ (name+path match
-/// the issued cookie). Without an explicit `Path=/`, the `CookieJar::remove`
-/// emission would default to the request path (e.g. `/api/auth/logout`),
-/// which the browser treats as a different cookie — and the original
-/// Path=/ cookie would survive.
+/// Helper: a cookie that clears `tcode_session`. Its attribute set
+/// (name, Path=/, HttpOnly, Secure, SameSite=Strict) must mirror the
+/// cookie issued by `post_login`. Browsers store cookies keyed by
+/// (name, domain, path) per RFC 6265, but the `Secure`, `HttpOnly`,
+/// and `SameSite` attributes gate *which* request a cookie applies
+/// to: a clearing `Set-Cookie` that diverges on those attributes can
+/// be filtered out on requests where the original is still attached,
+/// so the clear fails to take effect. Mirroring all attributes keeps
+/// logout reliable.
+///
+/// The `Secure` attribute is set unconditionally. Chromium, Firefox,
+/// and Safari treat `http://localhost`, `http://127.0.0.1`, and
+/// `http://[::1]` as potentially-trustworthy / secure contexts per
+/// the W3C Secure Contexts spec, so `Secure` cookies still round-trip
+/// over plain HTTP on the loopback-only PoC binding (see
+/// `RemoteConfig::with_loopback_defaults`). Any non-loopback
+/// deployment is expected to terminate TLS at a proxy, at which
+/// point `Secure` becomes load-bearing.
 fn clear_cookie() -> Cookie<'static> {
     Cookie::build((SESSION_COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
+        .secure(true)
         .same_site(SameSite::Strict)
         .build()
 }
@@ -93,6 +107,7 @@ pub(crate) async fn post_login(
     let cookie = Cookie::build((SESSION_COOKIE_NAME, token))
         .path("/")
         .http_only(true)
+        .secure(true)
         .same_site(SameSite::Strict)
         .build();
     (

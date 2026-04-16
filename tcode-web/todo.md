@@ -21,7 +21,7 @@ This file turns `poc.md` and `api.md` into an implementation checklist.
   - Verify: `GET /api/auth/session` returns `{ "authenticated": true }` after login.
   - Verify: `POST /api/auth/logout` clears the cookie and `GET /api/auth/session` no longer reports an authenticated session.
 
-- [ ] Set secure cookie attributes for the auth cookie: `HttpOnly`, `Secure`, and `SameSite=Strict`.
+- [x] Set secure cookie attributes for the auth cookie: `HttpOnly`, `Secure`, and `SameSite=Strict`.
   - Verify: inspect the `Set-Cookie` response header and confirm all three attributes are present.
   - Verify: confirm auth is cookie-based and no token appears in URL query parameters.
 

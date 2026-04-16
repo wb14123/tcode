@@ -111,11 +111,7 @@ async fn login_with_correct_password_succeeds() -> anyhow::Result<()> {
     assert_eq!(cookie.path(), Some("/"));
     assert_eq!(cookie.http_only(), Some(true));
     assert_eq!(cookie.same_site(), Some(SameSite::Strict));
-    assert_eq!(
-        cookie.secure(),
-        None,
-        "Secure is intentionally not set by this ticket"
-    );
+    assert_eq!(cookie.secure(), Some(true));
     assert!(
         cookie.domain().is_none(),
         "Domain= must not be set; a misconfigured Domain would broaden the cookie to sibling hosts"
@@ -425,6 +421,7 @@ async fn logout_clears_cookie_and_revokes_session() -> anyhow::Result<()> {
     );
     assert_eq!(cleared.path(), Some("/"));
     assert_eq!(cleared.http_only(), Some(true));
+    assert_eq!(cleared.secure(), Some(true));
     assert_eq!(cleared.same_site(), Some(SameSite::Strict));
     // The `cookie` crate's removal path sets `Max-Age=0`. Assert via the
     // parsed `max_age()` so we don't have to name the `time::Duration`
