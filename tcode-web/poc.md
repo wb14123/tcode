@@ -27,6 +27,31 @@ It have 3 parts:
   e. The backend may manage multiple sessions at the same time. Each session keeps its own session dir and server socket, while sharing global tool/browser config for the PoC.
 3. tcode frontend: the frontend to listen on web-server events, render it to user, and call tcode web-server for things like sending a new message.
 
+## Tech Stack
+
+### Backend
+
+- Rust
+- HTTP APIs and SSE streams
+- Reuse the existing in-process tcode server and session runtime where practical
+
+### Frontend
+
+- Lit for UI components and rendering
+- Vite for development and bundling
+- TypeScript for application code
+- Plain CSS with CSS custom properties for shared theme tokens
+
+### Rationale
+
+The frontend should remain lightweight for the PoC. The backend already exposes structured APIs and SSE streams, so a small component-based frontend is a better fit than mixing multiple frontend paradigms.
+
+Do not use htmx or Alpine in this PoC.
+
+Do not use Tailwind CSS by default. Plain CSS is sufficient for a consistent UI theme and aligns better with Lit's component model.
+
+Re-evaluate the frontend framework choice only if the web UI grows substantially in scope or complexity.
+
 ## User Interface
 
 The user interface is mainly a sidebar on the left, and a main display on the right.
