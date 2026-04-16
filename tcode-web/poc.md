@@ -98,6 +98,8 @@ The authentication cookie should be HttpOnly, Secure, and SameSite=Strict.
 
 Do not put authentication tokens in URL query parameters.
 
-All state-changing APIs should require authentication and validate request origin.
+All API and SSE endpoints should require authentication.
+
+For browser requests, validate request origin, with strict enforcement on all state-changing APIs.
 
 If the server is exposed remotely, it should be used behind HTTPS or a trusted tunnel/proxy.
