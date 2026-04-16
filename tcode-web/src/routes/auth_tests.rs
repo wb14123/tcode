@@ -2,46 +2,20 @@ use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use axum::response::Response;
-use axum_extra::extract::cookie::{Cookie, SameSite};
-use http_body_util::BodyExt;
+use axum_extra::extract::cookie::SameSite;
 use tower::ServiceExt;
 
-use super::auth::{SESSION_COOKIE_NAME, SessionStatus};
+use super::SESSION_COOKIE_NAME;
+use super::auth::SessionStatus;
 use super::build_router;
+use super::test_support::{VALID_PASSWORD, find_session_cookie, login_body, parse_session_body};
 use crate::state::{AppState, SESSION_TOKEN_B64_LEN};
-
-const VALID_PASSWORD: &str = "valid-password-16chars!";
 
 /// Build a fresh router for each test. `Arc::new` + `build_router` avoids
 /// cross-test state bleed; each call gets an isolated `AppState`.
 fn fresh_app() -> axum::Router {
     let state = Arc::new(AppState::new(VALID_PASSWORD.into()));
     build_router(state)
-}
-
-/// Robustly pull the `tcode_session` cookie out of all `Set-Cookie` headers.
-/// Surfaces parse errors so a malformed `Set-Cookie` shows up as a test
-/// failure rather than a silent "no cookie".
-fn find_session_cookie(resp: &Response) -> anyhow::Result<Option<Cookie<'static>>> {
-    for h in resp.headers().get_all(axum::http::header::SET_COOKIE) {
-        let s = h.to_str()?;
-        let parsed = Cookie::parse(s.to_owned())
-            .map_err(|e| anyhow::anyhow!("malformed Set-Cookie {s:?}: {e}"))?;
-        if parsed.name() == SESSION_COOKIE_NAME {
-            return Ok(Some(parsed));
-        }
-    }
-    Ok(None)
-}
-
-async fn parse_session_body(resp: Response) -> anyhow::Result<SessionStatus> {
-    let bytes = resp.into_body().collect().await?.to_bytes();
-    Ok(serde_json::from_slice::<SessionStatus>(&bytes)?)
-}
-
-fn login_body(secret: &str) -> String {
-    serde_json::json!({ "secret": secret }).to_string()
 }
 
 #[tokio::test]
@@ -116,8 +90,20 @@ async fn login_with_correct_password_succeeds() -> anyhow::Result<()> {
         cookie.domain().is_none(),
         "Domain= must not be set; a misconfigured Domain would broaden the cookie to sibling hosts"
     );
-    assert!(cookie.max_age().is_none(), "expected session cookie");
-    assert!(cookie.expires().is_none(), "expected session cookie");
+    // Cookie `Max-Age` mirrors the server-side `SESSION_TTL` (currently
+    // 7 days) so the browser drops the cookie in lockstep with server
+    // expiry. `expires()` is not set — `Max-Age` takes precedence per
+    // RFC 6265 §5.3 and is what we contractually emit.
+    let expected_max_age = time::Duration::seconds(crate::state::SESSION_TTL.as_secs() as i64);
+    assert_eq!(
+        cookie.max_age(),
+        Some(expected_max_age),
+        "Max-Age should mirror SESSION_TTL"
+    );
+    assert!(
+        cookie.expires().is_none(),
+        "we set Max-Age, not Expires; both is redundant"
+    );
 
     let body = parse_session_body(resp).await?;
     assert_eq!(

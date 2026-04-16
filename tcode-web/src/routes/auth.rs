@@ -6,7 +6,7 @@ use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 use serde::Deserialize;
 use serde::Serialize;
 
-use crate::state::AppState;
+use crate::state::{AppState, SESSION_TTL};
 
 /// Request body for `POST /api/auth/login`.
 ///
@@ -104,11 +104,18 @@ pub(crate) async fn post_login(
             );
         }
     };
+    // `Max-Age` mirrors the server-side `SESSION_TTL` so the browser
+    // forgets the cookie in lockstep with server-side expiry. The
+    // server is the authority — `verify_session` enforces TTL even if
+    // a misbehaving client ignores `Max-Age`. The cast is safe because
+    // `SESSION_TTL` is a hardcoded const well below `i64::MAX` seconds.
+    let max_age = time::Duration::seconds(SESSION_TTL.as_secs() as i64);
     let cookie = Cookie::build((SESSION_COOKIE_NAME, token))
         .path("/")
         .http_only(true)
         .secure(true)
         .same_site(SameSite::Strict)
+        .max_age(max_age)
         .build();
     (
         StatusCode::OK,

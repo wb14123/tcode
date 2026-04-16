@@ -1,5 +1,6 @@
-use std::collections::HashSet;
+use std::collections::HashMap;
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use base64::Engine;
 use subtle::ConstantTimeEq;
@@ -9,11 +10,23 @@ use zeroize::{Zeroize, ZeroizeOnDrop};
 const SESSION_TOKEN_BYTES: usize = 32;
 /// Byte length of every minted token. Used as a cheap prefilter in
 /// `verify_session` to reject obviously wrong-length cookie values
-/// before the `HashSet` lookup.
+/// before the `HashMap` lookup.
 pub(crate) const SESSION_TOKEN_B64_LEN: usize = 43;
 // Compile-time sanity check tying the two constants together.
 // base64url-NO-PAD length = ceil(bytes * 4 / 3).
 const _: () = assert!(SESSION_TOKEN_B64_LEN == (SESSION_TOKEN_BYTES * 4).div_ceil(3));
+
+/// Absolute lifetime of a minted session token. Once `SESSION_TTL` has
+/// elapsed since `mint_session`, the token is rejected by `verify_session`
+/// (and lazily evicted on the rejecting call). The login cookie's
+/// `Max-Age` is set to the same value so the browser drops the cookie
+/// in lockstep — the server is the authority, the browser-side
+/// expiration is defense-in-depth.
+///
+/// Chosen as 7 days for a single-user PoC: long enough to avoid
+/// nuisance re-logins for an actively-used remote, short enough to
+/// bound the blast radius of a leaked cookie.
+pub(crate) const SESSION_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// A shared secret. Custom `Debug` impl redacts the value.
 ///
@@ -63,16 +76,21 @@ pub(crate) struct AppState {
     /// Configured shared secret. Compared against incoming login payloads via
     /// [`Secret::verify`]; never exposed directly.
     pub(crate) password: Secret,
-    /// Live session tokens.
+    /// Live session tokens, mapped to their absolute expiry instant.
     ///
     /// PoC note: we store the raw token strings. A memory-dump attacker with
-    /// access to this set already has access to the single configured password
+    /// access to this map already has access to the single configured password
     /// too, so hashing the stored tokens does not change the threat model.
     /// Hash-at-rest with a constant-time compare is a later hardening step.
-    // TODO(poc-limitation): `sessions` grows unbounded on repeated logins.
-    // Acceptable for single-user PoC; a later hardening pass should add a
-    // per-token TTL or a cap with oldest-eviction.
-    sessions: parking_lot::RwLock<HashSet<String>>,
+    ///
+    /// Eviction policy: lazy. `verify_session` evicts an expired entry on
+    /// the rejecting call; `revoke_session` removes by key. There is no
+    /// background sweeper, so a token minted and never re-checked stays
+    /// in the map until something looks it up. For a single-user PoC the
+    /// resulting bounded growth (one entry per login over a 7-day window)
+    /// is acceptable; a future hardening pass may add an opportunistic
+    /// sweep on `mint_session` or a periodic background task.
+    sessions: parking_lot::RwLock<HashMap<String, Instant>>,
 }
 
 impl AppState {
@@ -87,11 +105,12 @@ impl AppState {
     pub(crate) fn from_secret(password: Secret) -> Self {
         Self {
             password,
-            sessions: parking_lot::RwLock::new(HashSet::new()),
+            sessions: parking_lot::RwLock::new(HashMap::new()),
         }
     }
 
-    /// Mint a fresh random session token, store it, return the base64url
+    /// Mint a fresh random session token, store it with an absolute expiry
+    /// of `Instant::now() + SESSION_TTL`, and return the base64url
     /// (unpadded, `SESSION_TOKEN_B64_LEN`-char) string for the cookie value.
     ///
     /// Returns an error if the OS CSPRNG is unavailable; the caller maps that
@@ -100,17 +119,43 @@ impl AppState {
         let mut buf = [0u8; SESSION_TOKEN_BYTES];
         getrandom::fill(&mut buf)?;
         let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
-        self.sessions.write().insert(token.clone());
+        let expires_at = Instant::now() + SESSION_TTL;
+        self.sessions.write().insert(token.clone(), expires_at);
         Ok(token)
     }
 
-    /// Verify that `candidate` names a live session.
+    /// Test-only: insert a synthetic token with an arbitrary expiry, so
+    /// expiry-related tests can observe past/future deadlines without
+    /// blocking on real time. Returns the inserted token.
+    #[cfg(test)]
+    pub(crate) fn insert_session_with_expiry(
+        &self,
+        expires_at: Instant,
+    ) -> Result<String, getrandom::Error> {
+        let mut buf = [0u8; SESSION_TOKEN_BYTES];
+        getrandom::fill(&mut buf)?;
+        let token = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(buf);
+        self.sessions.write().insert(token.clone(), expires_at);
+        Ok(token)
+    }
+
+    /// Test-only: number of entries currently in the session map. Used
+    /// by tests to confirm lazy eviction actually removed an expired
+    /// entry rather than just rejecting it.
+    #[cfg(test)]
+    pub(crate) fn sessions_len_for_test(&self) -> usize {
+        self.sessions.read().len()
+    }
+
+    /// Verify that `candidate` names a live, non-expired session.
     ///
-    /// PoC note: `HashSet::contains` does a non-constant-time equality
-    /// check, but every stored token carries 256 bits of CSPRNG entropy —
-    /// a remote attacker cannot feasibly guess even the first byte, so
-    /// the timing side-channel has nothing to act on. A later hardening
-    /// pass may switch to hash-stored tokens with constant-time compare.
+    /// On expiry the entry is evicted in place (lazy cleanup), so a
+    /// subsequent call cannot resurrect it without a fresh `mint_session`.
+    /// PoC note: `HashMap::get` does a non-constant-time equality check,
+    /// but every stored token carries 256 bits of CSPRNG entropy — a
+    /// remote attacker cannot feasibly guess even the first byte, so the
+    /// timing side-channel has nothing to act on. A later hardening pass
+    /// may switch to hash-stored tokens with constant-time compare.
     /// Do NOT log `candidate`.
     pub(crate) fn verify_session(&self, candidate: &str) -> bool {
         // Fast reject on obviously wrong lengths — protects the hash path
@@ -118,10 +163,32 @@ impl AppState {
         if candidate.len() != SESSION_TOKEN_B64_LEN {
             return false;
         }
-        self.sessions.read().contains(candidate)
+        // Read-lock-only fast path for the overwhelmingly common case
+        // (live, non-expired token). We only escalate to a write lock
+        // when we actually need to evict.
+        let now = Instant::now();
+        if let Some(&expires_at) = self.sessions.read().get(candidate) {
+            if now < expires_at {
+                return true;
+            }
+        } else {
+            return false;
+        }
+        // Token was present but expired. Re-check under the write lock
+        // (a concurrent `revoke_session` or `insert_session_with_expiry`
+        // may have changed state) and evict if still expired.
+        let mut guard = self.sessions.write();
+        match guard.get(candidate) {
+            Some(&expires_at) if now >= expires_at => {
+                guard.remove(candidate);
+                false
+            }
+            Some(_) => true, // Refreshed under write lock — accept.
+            None => false,
+        }
     }
 
-    /// Remove `candidate` from the live session set, if present. Idempotent.
+    /// Remove `candidate` from the live session map, if present. Idempotent.
     /// Do NOT log `candidate`.
     pub(crate) fn revoke_session(&self, candidate: &str) {
         self.sessions.write().remove(candidate);

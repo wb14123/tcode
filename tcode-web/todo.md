@@ -25,7 +25,7 @@ This file turns `poc.md` and `api.md` into an implementation checklist.
   - Verify: inspect the `Set-Cookie` response header and confirm all three attributes are present.
   - Verify: confirm auth is cookie-based and no token appears in URL query parameters.
 
-- [ ] Enforce authentication on all API and SSE endpoints.
+- [x] Enforce authentication on all API and SSE endpoints.
   - Verify: call a protected JSON endpoint without logging in and confirm it returns `401 Unauthorized`.
   - Verify: attempt to connect to a protected `.jsonl` SSE endpoint without logging in and confirm the connection is rejected.
 
