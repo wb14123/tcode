@@ -12,9 +12,19 @@ It have 3 parts:
 
 1. tcode server: like what the existing tcode server do: listen on Conversation events and write them to display files under session dir. Just call existing code.
 2. tcode web-server: the backend of tcode web.
-  a. It provides APIs and stream the jsonl events from the session files. For example, `/sessions/:id/display.jsonl` stream the `display.jsonl` file in the session dir.
-  b. commands like send messages and so on, the same as what `tcode server` accepts
+  a. It provides HTTP APIs and SSE streams for session events. For example, `/api/sessions/:id/events` streams updates from the session files such as `display.jsonl`.
+  b. It proxies the existing in-process tcode server handlers for the current supported commands:
+    - send message
+    - finish user request
+    - cancel tool
+    - cancel conversation
+    - get permission state
+    - resolve permission
+    - add permission
+    - revoke permission
   c. In addition to that, it provides APIs to list existing sessions, and be able to create a new session.
+  d. The web backend is the single owner of session runtimes. Each session id has at most one in-process tcode runtime, and all browser clients for that session attach to the same backend-owned runtime.
+  e. The backend may manage multiple sessions at the same time. Each session keeps its own session dir and server socket, while sharing global tool/browser config for the PoC.
 3. tcode frontend: the frontend to listen on web-server events, render it to user, and call tcode web-server for things like sending a new message.
 
 ## User Interface
@@ -47,8 +57,22 @@ Do not need to implement the current tcode tree UI.
 
 ## CLI Interface
 
-`tcode -p <profile> remote --port <port> --password <password>` starts a new remote server
+`tcode -p <profile> remote --port <port> --password <password>` starts a new remote server. The remote server should bind to localhost by default, and require explicit configuration to listen on non-local addresses.
 
 ## Security
 
-The server should always be protected by a token/password. Do not need to have user management for now.
+The server should always be protected by authentication. Do not need to have user management for now.
+
+For the PoC, use a single-user login flow:
+1. The server starts with a configured password or token.
+2. The client logs in with that secret using a login API.
+3. The server returns an authenticated session cookie.
+4. The browser uses that cookie for normal API calls and SSE connections.
+
+The authentication cookie should be HttpOnly, Secure, and SameSite=Strict.
+
+Do not put authentication tokens in URL query parameters.
+
+All state-changing APIs should require authentication and validate request origin.
+
+If the server is exposed remotely, it should be used behind HTTPS or a trusted tunnel/proxy.
