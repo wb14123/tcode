@@ -7,6 +7,8 @@ mod state;
 mod config_tests;
 #[cfg(test)]
 mod server_tests;
+#[cfg(test)]
+mod state_tests;
 
 pub use config::RemoteConfig;
 pub use server::run;

@@ -2,6 +2,8 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::bail;
 
+use crate::state::Secret;
+
 /// Configuration for the `tcode remote` web backend.
 ///
 /// Constructed via [`RemoteConfig::try_new`], which enforces password
@@ -11,10 +13,12 @@ use anyhow::bail;
 pub struct RemoteConfig {
     bind_addr: IpAddr,
     pub(crate) port: u16,
-    /// Plaintext password, stored exactly as received (no trimming).
-    /// The future login handler will compare byte-for-byte, so whitespace
+    /// Shared secret, stored exactly as received (no trimming). Wrapped in
+    /// [`Secret`] so the plaintext is zeroized on drop — including when
+    /// `RemoteConfig` is dropped on an early error path before reaching
+    /// `AppState`. The login handler compares byte-for-byte, so whitespace
     /// in the operator's secret is significant.
-    pub(crate) password: String,
+    pub(crate) password: Secret,
 }
 
 impl RemoteConfig {
@@ -70,7 +74,7 @@ impl RemoteConfig {
         Self {
             bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port,
-            password,
+            password: Secret::new(password),
         }
     }
 

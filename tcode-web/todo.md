@@ -16,7 +16,7 @@ This file turns `poc.md` and `api.md` into an implementation checklist.
   - Verify: start the server with `tcode -p <profile> remote --port <port> --password <secret>` and confirm it only listens on `127.0.0.1` unless an explicit non-local bind option is added.
   - Verify: open `http://127.0.0.1:<port>/api/auth/session` before login and confirm the request is rejected or reports `authenticated: false`.
 
-- [ ] Implement `POST /api/auth/login`, `POST /api/auth/logout`, and `GET /api/auth/session` using a cookie-based auth flow.
+- [x] Implement `POST /api/auth/login`, `POST /api/auth/logout`, and `GET /api/auth/session` using a cookie-based auth flow.
   - Verify: `POST /api/auth/login` with the correct secret succeeds and sets a session cookie.
   - Verify: `GET /api/auth/session` returns `{ "authenticated": true }` after login.
   - Verify: `POST /api/auth/logout` clears the cookie and `GET /api/auth/session` no longer reports an authenticated session.

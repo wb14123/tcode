@@ -48,10 +48,11 @@ pub async fn run(config: RemoteConfig) -> anyhow::Result<()> {
         .local_addr()
         .context("failed to read local_addr after bind")?;
 
-    // Move the plaintext out of `config` exactly once; subsequent access
-    // to the password goes through `AppState::password`.
+    // Move the `Secret` out of `config` exactly once; subsequent access
+    // to the password goes through `AppState::password`. The `Secret`
+    // keeps its zeroize-on-drop guarantee across this move.
     let RemoteConfig { password, .. } = config;
-    let state = Arc::new(AppState::new(password));
+    let state = Arc::new(AppState::from_secret(password));
 
     tracing::info!("tcode remote listening on http://{local}");
     tracing::warn!("localhost-only HTTP PoC; use HTTPS/tunnel for remote access");

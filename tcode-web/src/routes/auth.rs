@@ -1,27 +1,144 @@
-use axum::Json;
+use std::sync::Arc;
+
+use axum::{Json, extract::State, http::StatusCode};
+use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
 #[cfg(test)]
 use serde::Deserialize;
 use serde::Serialize;
 
-/// Response body for `GET /api/auth/session`.
+use crate::state::AppState;
+
+/// Request body for `POST /api/auth/login`.
+///
+/// The final deserialized `secret` buffer is zeroized on drop via
+/// `zeroize::ZeroizeOnDrop`. Intermediate parser and transport buffers
+/// (serde_json unescape scratch, axum/hyper body bytes) are NOT covered
+/// and may linger in freed heap until reuse; that residue is out of
+/// scope for this struct.
+#[derive(serde::Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct LoginRequest {
+    secret: String,
+}
+
+/// Response body for the auth endpoints.
 ///
 /// `Deserialize` is gated behind `#[cfg(test)]` so tests can round-trip
 /// the JSON body without leaking a symmetric wire contract into the
 /// public type — `SessionStatus` is a response-only DTO.
 #[derive(Serialize, Debug, PartialEq, Eq)]
 #[cfg_attr(test, derive(Deserialize))]
-pub struct SessionStatus {
-    pub authenticated: bool,
+pub(crate) struct SessionStatus {
+    pub(crate) authenticated: bool,
 }
 
-/// Stub: always reports unauthenticated.
+/// Cookie name used for the server-side session token.
+pub(crate) const SESSION_COOKIE_NAME: &str = "tcode_session";
+
+/// Helper: a cookie that clears `tcode_session` at Path=/ (name+path match
+/// the issued cookie). Without an explicit `Path=/`, the `CookieJar::remove`
+/// emission would default to the request path (e.g. `/api/auth/logout`),
+/// which the browser treats as a different cookie — and the original
+/// Path=/ cookie would survive.
+fn clear_cookie() -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE_NAME, ""))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .build()
+}
+
+/// `POST /api/auth/login`
 ///
-/// The real cookie-based session check lands with the login/logout ticket,
-/// together with the cookie library choice. The 401 semantics come with
-/// that middleware; `GET /api/auth/session` itself stays unauthenticated-
-/// accessible (it's the SPA's bootstrap probe).
-pub async fn get_session() -> Json<SessionStatus> {
-    Json(SessionStatus {
-        authenticated: false,
-    })
+/// Verifies `body.secret` against the configured shared secret in constant
+/// time. On success mints a fresh session token, stores it, and returns it
+/// to the client as a session cookie. On failure returns 401 without
+/// touching any existing session — a failed login (wrong password or a
+/// typo) must not log the user out.
+pub(crate) async fn post_login(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+    Json(body): Json<LoginRequest>,
+) -> (StatusCode, CookieJar, Json<SessionStatus>) {
+    if !state.password.verify(body.secret.as_bytes()) {
+        // Industry-standard behavior: wrong password → 401, do not touch any
+        // existing session. Revoking/clearing on failed login would create a
+        // CSRF-amplifier / DoS (a typo or a cross-origin POST could log the
+        // user out). Returning the jar unchanged means no `Set-Cookie` is
+        // emitted when no cookie was present, and the user's existing valid
+        // session survives a password typo.
+        return (
+            StatusCode::UNAUTHORIZED,
+            jar,
+            Json(SessionStatus {
+                authenticated: false,
+            }),
+        );
+    }
+    let token = match state.mint_session() {
+        Ok(t) => t,
+        Err(e) => {
+            // Log only the error code; never log derived buffers or the
+            // eventual token. `getrandom::Error` has a stable Display impl.
+            tracing::error!(error = %e, "failed to mint session token");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                jar,
+                Json(SessionStatus {
+                    authenticated: false,
+                }),
+            );
+        }
+    };
+    let cookie = Cookie::build((SESSION_COOKIE_NAME, token))
+        .path("/")
+        .http_only(true)
+        .same_site(SameSite::Strict)
+        .build();
+    (
+        StatusCode::OK,
+        jar.add(cookie),
+        Json(SessionStatus {
+            authenticated: true,
+        }),
+    )
+}
+
+/// `POST /api/auth/logout`
+///
+/// Idempotent: always returns 200. When the client sent a session cookie,
+/// revoke the server-side token and emit a clearing `Set-Cookie` that
+/// matches the original name+path.
+pub(crate) async fn post_logout(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> (StatusCode, CookieJar) {
+    // We need the cookie value anyway in order to revoke the server-side
+    // token, so the guard is load-bearing for that. Emitting (or not) a
+    // clearing `Set-Cookie` when there was no incoming cookie is a
+    // behavioral detail of `CookieJar::remove` (no-op when the original
+    // jar is empty); the explicit if-let keeps the "no incoming cookie →
+    // 200 with no `Set-Cookie`" contract readable.
+    if let Some(c) = jar.get(SESSION_COOKIE_NAME) {
+        state.revoke_session(c.value());
+        return (StatusCode::OK, jar.remove(clear_cookie()));
+    }
+    (StatusCode::OK, jar)
+}
+
+/// `GET /api/auth/session`
+///
+/// SPA bootstrap probe. Returns `{authenticated: bool}` based on whether
+/// the presented session cookie (if any) names a live session. Status is
+/// always 200 — the real 401 semantics come from the middleware that will
+/// gate every other endpoint.
+pub(crate) async fn get_session(
+    State(state): State<Arc<AppState>>,
+    jar: CookieJar,
+) -> Json<SessionStatus> {
+    let authenticated = jar
+        .get(SESSION_COOKIE_NAME)
+        .map(|c| state.verify_session(c.value()))
+        .unwrap_or(false);
+    Json(SessionStatus { authenticated })
 }
