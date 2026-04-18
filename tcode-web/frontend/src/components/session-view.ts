@@ -61,6 +61,8 @@ class TcodeSessionView extends LitElement {
     if (changed.has('sessionId')) {
       this.startView();
     }
+
+    this.syncComposerHeight();
   }
 
   private startView(): void {
@@ -164,6 +166,35 @@ class TcodeSessionView extends LitElement {
   private isGenerating(): boolean {
     const status = this.statusText.trim().toLowerCase();
     return status.includes('stream') || status.includes('thinking');
+  }
+
+  private syncComposerHeight(textarea?: HTMLTextAreaElement | null): void {
+    const composerInput = textarea ?? this.querySelector<HTMLTextAreaElement>('.chat-composer-input');
+    if (!composerInput) {
+      return;
+    }
+
+    composerInput.style.height = 'auto';
+    const maxHeight = Number.parseFloat(window.getComputedStyle(composerInput).maxHeight) || 160;
+    const nextHeight = Math.min(composerInput.scrollHeight, maxHeight);
+    composerInput.style.height = `${nextHeight}px`;
+    composerInput.style.overflowY = composerInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
+  }
+
+  private renderSendIcon() {
+    return html`
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M3.4 20.4 19.85 13.35a1.5 1.5 0 0 0 0-2.76L3.4 3.6a1 1 0 0 0-1.37 1.22l2.36 6.49a1 1 0 0 0 .94.66h7.36a1 1 0 1 1 0 2H5.33a1 1 0 0 0-.94.66l-2.36 6.49A1 1 0 0 0 3.4 20.4Z"></path>
+      </svg>
+    `;
+  }
+
+  private renderCancelIcon() {
+    return html`
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M7 7h10v10H7z"></path>
+      </svg>
+    `;
   }
 
   private async scheduleScrollToBottom(force = false): Promise<void> {
@@ -309,6 +340,7 @@ class TcodeSessionView extends LitElement {
   private onComposerInput(event: Event): void {
     const target = event.target as HTMLTextAreaElement;
     this.composerText = target.value;
+    this.syncComposerHeight(target);
     this.requestUpdate();
   }
 
@@ -341,6 +373,9 @@ class TcodeSessionView extends LitElement {
     try {
       await api.sendSessionMessage(this.sessionId, text);
       this.composerText = '';
+      this.requestUpdate();
+      await this.updateComplete;
+      this.syncComposerHeight();
       this.showToast('Message sent.', 'info', 3000);
       this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
       this.scheduleScrollToBottom(true);
@@ -503,33 +538,47 @@ class TcodeSessionView extends LitElement {
           </section>
 
           <div class="chat-bottom-stack">
-            <form class="panel composer chat-composer" @submit=${this.submitMessage}>
-              <textarea
-                class="chat-composer-input"
-                placeholder="Message tcode…"
-                .value=${this.composerText}
-                @input=${this.onComposerInput}
-                @keydown=${this.onComposerKeyDown}
-              ></textarea>
-              <div class="chat-composer-footer">
-                ${this.isGenerating()
-                  ? html`
-                      <button class="button danger" type="button" @click=${this.cancelConversation} ?disabled=${this.cancelling}>
-                        ${this.cancelling ? 'Cancelling…' : 'Cancel'}
-                      </button>
-                    `
-                  : html`
-                      <button class="button" type="submit" ?disabled=${this.sending || !this.composerText.trim()}>
-                        ${this.sending ? 'Sending…' : 'Send'}
-                      </button>
-                    `}
-              </div>
-            </form>
-
             <footer class="chat-status-bar">
               <span class="pill pill-${statusTone}">${this.statusSummary()}</span>
               ${combinedUsage ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${combinedUsage}</span>` : nothing}
             </footer>
+
+            <form class="panel chat-composer" @submit=${this.submitMessage}>
+              <div class="chat-composer-row">
+                <textarea
+                  class="chat-composer-input"
+                  rows="1"
+                  placeholder="Message tcode…"
+                  .value=${this.composerText}
+                  @input=${this.onComposerInput}
+                  @keydown=${this.onComposerKeyDown}
+                ></textarea>
+                ${this.isGenerating()
+                  ? html`
+                      <button
+                        class="button danger chat-composer-action"
+                        type="button"
+                        @click=${this.cancelConversation}
+                        ?disabled=${this.cancelling}
+                        aria-label=${this.cancelling ? 'Cancelling conversation' : 'Cancel conversation'}
+                        title=${this.cancelling ? 'Cancelling…' : 'Cancel conversation'}
+                      >
+                        ${this.renderCancelIcon()}
+                      </button>
+                    `
+                  : html`
+                      <button
+                        class="button chat-composer-action"
+                        type="submit"
+                        ?disabled=${this.sending || !this.composerText.trim()}
+                        aria-label=${this.sending ? 'Sending message' : 'Send message'}
+                        title=${this.sending ? 'Sending…' : 'Send message'}
+                      >
+                        ${this.renderSendIcon()}
+                      </button>
+                    `}
+              </div>
+            </form>
           </div>
         </div>
 

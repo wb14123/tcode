@@ -696,42 +696,65 @@ tcode-session-view {
   position: sticky;
   bottom: 0;
   z-index: 5;
-  padding: 0 1rem max(0.5rem, env(safe-area-inset-bottom));
+  padding: 0;
   background: linear-gradient(180deg, rgba(238, 247, 242, 0) 0%, rgba(238, 247, 242, 0.9) 28%, rgba(238, 247, 242, 0.98) 100%);
   backdrop-filter: blur(10px);
 }
 
 .chat-composer {
-  gap: 0.5rem;
-  border-radius: 10px;
-  padding: 0.55rem;
+  display: flex;
+  flex-direction: column;
+  gap: 0;
+  margin: 0;
+  padding: 0.7rem 1rem max(0.8rem, env(safe-area-inset-bottom));
+  border-right: 0;
+  border-bottom: 0;
+  border-left: 0;
+  border-radius: 0;
+}
+
+.chat-composer-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.75rem;
 }
 
 .chat-composer-input {
-  min-height: 56px;
+  flex: 1 1 auto;
+  min-height: 44px;
   max-height: 160px;
-  resize: vertical;
-  border-radius: 8px;
-  padding: 0.7rem 0.8rem;
+  resize: none;
+  border-radius: 10px;
+  padding: 0.68rem 0.82rem;
+  line-height: 1.45;
+  overflow-y: hidden;
 }
 
-.chat-composer-footer {
-  display: flex;
-  align-items: center;
-  justify-content: flex-end;
-  gap: 0.5rem;
+.chat-composer-action {
+  flex: 0 0 auto;
+  width: 44px;
+  height: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border-radius: 999px;
+}
+
+.chat-composer-action svg {
+  width: 1.05rem;
+  height: 1.05rem;
+  fill: currentColor;
 }
 
 .chat-status-bar {
   display: flex;
   align-items: center;
   gap: 0.45rem;
-  margin-top: 0.2rem;
-  padding: 0.25rem 0;
-  border-top: 1px solid var(--border);
+  margin: 0;
+  padding: 0.45rem 1rem 0.35rem;
   background: transparent;
   font-size: 0.75rem;
-  white-space: nowrap;
+  min-width: 0;
   overflow: hidden;
 }
 
@@ -743,9 +766,11 @@ tcode-session-view {
 .chat-usage-text {
   color: var(--text-muted);
   font-size: 0.75rem;
+  flex: 1 1 auto;
   min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .pill-generating {
@@ -966,15 +991,19 @@ tcode-session-view {
   }
 
   .chat-bottom-stack {
-    padding: 0 0.75rem max(0.5rem, env(safe-area-inset-bottom));
+    padding: 0;
+  }
+
+  .chat-status-bar {
+    padding: 0.4rem 0.85rem 0.3rem;
   }
 
   .chat-composer {
-    padding: 0.5rem;
+    padding: 0.6rem 0.85rem max(0.7rem, env(safe-area-inset-bottom));
   }
 
   .chat-composer-input {
-    min-height: 52px;
+    min-height: 42px;
   }
 
   .session-details-header {
