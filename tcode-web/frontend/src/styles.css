@@ -1,23 +1,47 @@
 :root {
-  color-scheme: dark;
+  color-scheme: light;
   font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   line-height: 1.5;
   font-weight: 400;
-  background: #0b1020;
-  color: #edf2ff;
-  --bg: #0b1020;
-  --panel: #111831;
-  --panel-soft: #16203f;
-  --panel-strong: #1c2952;
-  --text: #edf2ff;
-  --text-muted: #9eb0d1;
-  --border: rgba(159, 179, 214, 0.2);
-  --accent: #6ea8fe;
-  --accent-strong: #8db6ff;
-  --danger: #ff7f8f;
-  --warning: #f7c66a;
-  --success: #58d5a9;
-  --shadow: 0 20px 50px rgba(3, 7, 18, 0.45);
+  background: #eef7f2;
+  color: #314a43;
+  --bg: #eef7f2;
+  --bg-top: #f7fbf8;
+  --bg-bottom: #e5efe9;
+  --panel: #f8fbf8;
+  --panel-soft: #f1f7f2;
+  --panel-strong: #e7efe9;
+  --sidebar-bg: rgba(246, 250, 247, 0.86);
+  --input-bg: #fbfdfb;
+  --pre-bg: #f2f7f3;
+  --text: #314a43;
+  --text-muted: #70887d;
+  --text-subtle: #8a9d95;
+  --border: #d7e3dc;
+  --border-strong: #becfc5;
+  --accent: #2c9678;
+  --accent-strong: #247b63;
+  --accent-soft: #e8f5f0;
+  --success: #6e8b74;
+  --success-soft: #eef4ef;
+  --success-border: #cad8cc;
+  --success-text: #5c7762;
+  --warning: #b78b26;
+  --warning-soft: #f8f3e6;
+  --warning-border: #e3d3a8;
+  --warning-text: #80631d;
+  --danger: #aa6a4c;
+  --danger-soft: #f7eeea;
+  --danger-border: #dfc3b6;
+  --danger-text: #8b563c;
+  --subagent: #74759b;
+  --subagent-soft: #f2f1f8;
+  --system: #7b8d86;
+  --signal: #9aa9a2;
+  --focus-ring: rgba(44, 150, 120, 0.18);
+  --focus-border: #79b9a5;
+  --overlay: rgba(49, 74, 67, 0.16);
+  --shadow: 0 16px 36px rgba(49, 74, 67, 0.06);
 }
 
 * {
@@ -28,7 +52,7 @@ html,
 body {
   margin: 0;
   min-height: 100%;
-  background: radial-gradient(circle at top, #16203f 0%, #0b1020 45%, #070c18 100%);
+  background: radial-gradient(circle at top, var(--bg-top) 0%, var(--bg) 48%, var(--bg-bottom) 100%);
   color: var(--text);
 }
 
@@ -57,10 +81,11 @@ button {
 }
 
 textarea,
-input {
+input,
+select {
   width: 100%;
   color: var(--text);
-  background: rgba(10, 15, 30, 0.85);
+  background: var(--input-bg);
   border: 1px solid var(--border);
   border-radius: 12px;
   padding: 0.85rem 1rem;
@@ -69,9 +94,9 @@ input {
 textarea:focus,
 input:focus,
 select:focus {
-  outline: 2px solid rgba(110, 168, 254, 0.35);
+  outline: 2px solid var(--focus-ring);
   outline-offset: 1px;
-  border-color: rgba(110, 168, 254, 0.55);
+  border-color: var(--focus-border);
 }
 
 pre {
@@ -93,8 +118,8 @@ code {
 
 .sidebar {
   border-right: 1px solid var(--border);
-  background: rgba(9, 14, 28, 0.85);
-  backdrop-filter: blur(14px);
+  background: var(--sidebar-bg);
+  backdrop-filter: blur(16px);
   padding: 1rem;
   display: flex;
   flex-direction: column;
@@ -144,40 +169,54 @@ code {
   gap: 0.5rem;
   padding: 0.75rem 1rem;
   border-radius: 12px;
-  border: 1px solid rgba(141, 182, 255, 0.3);
-  background: linear-gradient(180deg, rgba(110, 168, 254, 0.22), rgba(82, 125, 201, 0.18));
-  color: var(--text);
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  box-shadow: 0 6px 16px rgba(44, 150, 120, 0.14);
+  color: #f8fbf8;
   min-height: 42px;
+  transition: transform 120ms ease, background 120ms ease, border-color 120ms ease, box-shadow 120ms ease;
 }
 
 .button:hover {
   text-decoration: none;
-  filter: brightness(1.08);
+  transform: translateY(-1px);
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+  box-shadow: 0 10px 20px rgba(44, 150, 120, 0.18);
 }
 
 .button.secondary {
-  background: rgba(22, 32, 63, 0.95);
-  border-color: var(--border);
+  background: var(--panel);
+  border-color: var(--border-strong);
+  box-shadow: none;
+  color: var(--text);
 }
 
 .button.danger {
-  background: rgba(179, 56, 80, 0.22);
-  border-color: rgba(255, 127, 143, 0.45);
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+  box-shadow: none;
+  color: var(--danger-text);
 }
 
 .button.success {
-  background: rgba(40, 124, 95, 0.26);
-  border-color: rgba(88, 213, 169, 0.4);
+  background: var(--success-soft);
+  border-color: var(--success-border);
+  box-shadow: none;
+  color: var(--success-text);
 }
 
 .button.ghost {
   background: transparent;
-  border-color: var(--border);
+  border-color: var(--border-strong);
+  box-shadow: none;
+  color: var(--text);
 }
 
 .button:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+  transform: none;
 }
 
 .session-list {
@@ -193,15 +232,18 @@ code {
   padding: 0.9rem 1rem;
   border-radius: 16px;
   border: 1px solid var(--border);
-  background: rgba(17, 24, 49, 0.85);
+  background: var(--panel);
+  box-shadow: 0 6px 18px rgba(49, 74, 67, 0.04);
   color: inherit;
+  transition: border-color 120ms ease, background 120ms ease, transform 120ms ease;
 }
 
 .session-link:hover,
 .session-link.active {
   text-decoration: none;
-  border-color: rgba(110, 168, 254, 0.45);
-  background: rgba(26, 38, 75, 0.96);
+  border-color: var(--focus-border);
+  background: var(--panel-strong);
+  transform: translateY(-1px);
 }
 
 .session-link-title {
@@ -236,7 +278,7 @@ code {
 .login-card,
 .modal-card,
 .empty-state {
-  background: rgba(17, 24, 49, 0.9);
+  background: var(--panel);
   border: 1px solid var(--border);
   border-radius: 20px;
   box-shadow: var(--shadow);
@@ -318,8 +360,8 @@ code {
 }
 
 .timeline-pre {
-  background: rgba(6, 10, 20, 0.65);
-  border: 1px solid rgba(159, 179, 214, 0.12);
+  background: var(--pre-bg);
+  border: 1px solid var(--border);
   border-radius: 14px;
   padding: 1rem;
   overflow: auto;
@@ -336,28 +378,28 @@ code {
 }
 
 .timeline-user {
-  border-left: 4px solid rgba(110, 168, 254, 0.55);
+  border-left: 4px solid var(--accent);
 }
 
 .timeline-assistant {
-  border-left: 4px solid rgba(88, 213, 169, 0.55);
+  border-left: 4px solid var(--success);
 }
 
 .timeline-tool {
-  border-left: 4px solid rgba(247, 198, 106, 0.55);
+  border-left: 4px solid var(--warning);
 }
 
 .timeline-subagent {
-  border-left: 4px solid rgba(174, 138, 255, 0.55);
+  border-left: 4px solid var(--subagent);
 }
 
 .timeline-system {
-  border-left: 4px solid rgba(255, 127, 143, 0.55);
+  border-left: 4px solid var(--system);
 }
 
 .timeline-signal,
 .timeline-raw {
-  border-left: 4px solid rgba(159, 179, 214, 0.35);
+  border-left: 4px solid var(--signal);
 }
 
 .inline-alert {
@@ -367,21 +409,21 @@ code {
 }
 
 .inline-alert.error {
-  color: #ffd6dc;
-  background: rgba(131, 34, 49, 0.28);
-  border-color: rgba(255, 127, 143, 0.35);
+  color: var(--danger-text);
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
 }
 
 .inline-alert.warning {
-  color: #ffecc1;
-  background: rgba(108, 81, 23, 0.28);
-  border-color: rgba(247, 198, 106, 0.32);
+  color: var(--warning-text);
+  background: var(--warning-soft);
+  border-color: var(--warning-border);
 }
 
 .inline-alert.info {
-  color: #d6e4ff;
-  background: rgba(35, 62, 109, 0.28);
-  border-color: rgba(110, 168, 254, 0.32);
+  color: var(--accent-strong);
+  background: var(--accent-soft);
+  border-color: var(--focus-border);
 }
 
 .pill {
@@ -390,8 +432,8 @@ code {
   border-radius: 999px;
   padding: 0.2rem 0.65rem;
   border: 1px solid var(--border);
-  background: rgba(18, 27, 54, 0.95);
-  color: var(--text);
+  background: var(--panel-soft);
+  color: var(--text-muted);
   font-size: 0.82rem;
 }
 
@@ -400,8 +442,9 @@ code {
 .pill-info,
 .pill-live,
 .pill-connected {
-  border-color: rgba(88, 213, 169, 0.4);
-  color: #b4f4dc;
+  background: var(--success-soft);
+  border-color: var(--success-border);
+  color: var(--success-text);
 }
 
 .pill-failed,
@@ -409,8 +452,9 @@ code {
 .pill-denied,
 .pill-cancelled,
 .pill-timeout {
-  border-color: rgba(255, 127, 143, 0.4);
-  color: #ffc6cf;
+  background: var(--danger-soft);
+  border-color: var(--danger-border);
+  color: var(--danger-text);
 }
 
 .pill-waiting,
@@ -418,8 +462,9 @@ code {
 .pill-allowonce,
 .pill-allowsession,
 .pill-allowproject {
-  border-color: rgba(247, 198, 106, 0.4);
-  color: #ffe6a7;
+  background: var(--warning-soft);
+  border-color: var(--warning-border);
+  color: var(--warning-text);
 }
 
 .composer {
@@ -454,7 +499,7 @@ details > summary {
 .modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(4, 8, 18, 0.7);
+  background: var(--overlay);
   display: grid;
   place-items: center;
   padding: 1rem;
