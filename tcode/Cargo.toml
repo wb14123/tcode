@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 browser-server = { path = "../browser-server" }
 tcode-web = { path = "../tcode-web" }
+tcode-runtime = { path = "../tcode-runtime" }
 dirs = "6"
 auth = { path = "../auth" }
 lsp-client = { path = "../lsp-client" }

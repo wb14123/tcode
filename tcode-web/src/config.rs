@@ -1,6 +1,7 @@
 use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::bail;
+use llm_rs::tool::ContainerConfig;
 
 use crate::state::Secret;
 
@@ -19,6 +20,8 @@ pub struct RemoteConfig {
     /// `AppState`. The login handler compares byte-for-byte, so whitespace
     /// in the operator's secret is significant.
     pub(crate) password: Secret,
+    pub(crate) profile: Option<String>,
+    pub(crate) container_config: Option<ContainerConfig>,
 }
 
 impl RemoteConfig {
@@ -67,6 +70,16 @@ impl RemoteConfig {
         Self::with_loopback_defaults(port, password)
     }
 
+    pub fn with_runtime_options(
+        mut self,
+        profile: Option<String>,
+        container_config: Option<ContainerConfig>,
+    ) -> Self {
+        self.profile = profile;
+        self.container_config = container_config;
+        self
+    }
+
     /// Shared builder used by both `try_new` (after validation) and
     /// `for_test` (which skips validation). Keeping the default bind address
     /// in one place guards against the two paths drifting.
@@ -75,6 +88,8 @@ impl RemoteConfig {
             bind_addr: IpAddr::V4(Ipv4Addr::LOCALHOST),
             port,
             password: Secret::new(password),
+            profile: None,
+            container_config: None,
         }
     }
 

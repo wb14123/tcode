@@ -2,8 +2,10 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
+use anyhow::{Result, anyhow};
 use base64::Engine;
 use subtle::ConstantTimeEq;
+use tcode_runtime::bootstrap::RuntimeSettings;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Raw token byte length (32 = 256 bits of entropy).
@@ -68,6 +70,16 @@ impl fmt::Debug for Secret {
     }
 }
 
+struct RuntimeHandle {
+    task: tokio::task::JoinHandle<()>,
+}
+
+struct RuntimeState {
+    settings: RuntimeSettings,
+    runtimes: parking_lot::Mutex<HashMap<String, RuntimeHandle>>,
+    start_lock: tokio::sync::Mutex<()>,
+}
+
 /// Shared application state handed to every axum handler via `with_state`.
 ///
 /// `Debug` is intentionally not derived so the password cannot be printed
@@ -91,6 +103,7 @@ pub(crate) struct AppState {
     /// is acceptable; a future hardening pass may add an opportunistic
     /// sweep on `mint_session` or a periodic background task.
     sessions: parking_lot::RwLock<HashMap<String, Instant>>,
+    runtime: Option<RuntimeState>,
 }
 
 impl AppState {
@@ -102,10 +115,27 @@ impl AppState {
         Self::from_secret(Secret::new(password))
     }
 
+    #[cfg(test)]
     pub(crate) fn from_secret(password: Secret) -> Self {
         Self {
             password,
             sessions: parking_lot::RwLock::new(HashMap::new()),
+            runtime: None,
+        }
+    }
+
+    pub(crate) fn from_secret_and_runtime(
+        password: Secret,
+        runtime_settings: RuntimeSettings,
+    ) -> Self {
+        Self {
+            password,
+            sessions: parking_lot::RwLock::new(HashMap::new()),
+            runtime: Some(RuntimeState {
+                settings: runtime_settings,
+                runtimes: parking_lot::Mutex::new(HashMap::new()),
+                start_lock: tokio::sync::Mutex::new(()),
+            }),
         }
     }
 
@@ -192,5 +222,42 @@ impl AppState {
     /// Do NOT log `candidate`.
     pub(crate) fn revoke_session(&self, candidate: &str) {
         self.sessions.write().remove(candidate);
+    }
+
+    pub(crate) async fn ensure_runtime(&self, session_id: &str) -> Result<()> {
+        let runtime = self
+            .runtime
+            .as_ref()
+            .ok_or_else(|| anyhow!("session runtime support is not configured"))?;
+
+        if Self::runtime_is_live(&runtime.runtimes, session_id) {
+            return Ok(());
+        }
+
+        let _guard = runtime.start_lock.lock().await;
+        if Self::runtime_is_live(&runtime.runtimes, session_id) {
+            return Ok(());
+        }
+
+        let handle = runtime.settings.start_runtime(session_id).await?;
+        runtime
+            .runtimes
+            .lock()
+            .insert(session_id.to_string(), RuntimeHandle { task: handle });
+        Ok(())
+    }
+
+    fn runtime_is_live(
+        runtimes: &parking_lot::Mutex<HashMap<String, RuntimeHandle>>,
+        session_id: &str,
+    ) -> bool {
+        let mut guard = runtimes.lock();
+        if let Some(handle) = guard.get(session_id)
+            && !handle.task.is_finished()
+        {
+            return true;
+        }
+        guard.remove(session_id);
+        false
     }
 }

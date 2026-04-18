@@ -1,20 +1,19 @@
 mod approve_ui;
 mod claude_auth;
-mod config;
 mod config_wizard;
 mod container;
 mod display;
 mod edit;
 mod openai_auth;
 mod permission_ui;
-mod protocol;
-mod server;
-mod session;
 mod session_picker;
 mod tool_call_display;
 mod tree;
 mod tree_nav;
 mod tty_stdio;
+
+pub(crate) use tcode_runtime::bootstrap::{auth_command_for_profile, create_llm};
+pub(crate) use tcode_runtime::{config, protocol, server, session};
 
 #[cfg(test)]
 mod config_tests;
@@ -33,12 +32,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
-use bytes::Bytes;
 use clap::{Parser, Subcommand};
-use futures::{SinkExt, StreamExt};
-use tokio::net::UnixStream;
 use tokio::process::Child;
-use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use tracing_subscriber::EnvFilter;
 
 /// Escape a string for use inside a Lua single-quoted string literal.
@@ -49,59 +44,6 @@ pub(crate) fn lua_escape(s: &str) -> String {
         .replace('\'', "\\'")
         .replace('\n', "\\n")
         .replace('\r', "\\r")
-}
-
-pub(crate) fn auth_command_for_profile(profile: Option<&str>, command: &str) -> String {
-    match profile {
-        Some(profile) => format!("tcode -p {profile} {command}"),
-        None => format!("tcode {command}"),
-    }
-}
-
-/// LLM provider selection
-#[derive(Clone, Copy, Debug)]
-enum Provider {
-    Claude,
-    ClaudeOauth,
-    OpenAi,
-    OpenAiOauth,
-    OpenRouter,
-}
-
-impl Provider {
-    fn default_model(&self) -> &'static str {
-        match self {
-            Provider::Claude | Provider::ClaudeOauth => "claude-opus-4-6",
-            Provider::OpenAi => "gpt-5-nano",
-            Provider::OpenAiOauth => "gpt-5.4",
-            Provider::OpenRouter => "deepseek/deepseek-r1",
-        }
-    }
-
-    fn default_base_url(&self) -> &'static str {
-        match self {
-            Provider::Claude | Provider::ClaudeOauth => "https://api.anthropic.com",
-            Provider::OpenAi => "https://api.openai.com/v1",
-            Provider::OpenAiOauth => "https://chatgpt.com/backend-api/codex",
-            Provider::OpenRouter => "https://openrouter.ai/api/v1",
-        }
-    }
-
-    /// Environment variable name for the provider's API key.
-    ///
-    /// Not defined for `ClaudeOauth` or `OpenAiOauth`: the `create_llm` OAuth
-    /// branches never call `get_api_key`, so this function is structurally
-    /// unreachable for those variants.
-    fn env_var_name(&self) -> &'static str {
-        match self {
-            Provider::Claude => "ANTHROPIC_API_KEY",
-            Provider::OpenAi => "OPENAI_API_KEY",
-            Provider::OpenRouter => "OPENROUTER_API_KEY",
-            Provider::ClaudeOauth | Provider::OpenAiOauth => {
-                unreachable!("env_var_name called on an OAuth provider variant")
-            }
-        }
-    }
 }
 
 /// Gracefully stop a neovim child: SIGTERM with timeout, then SIGKILL.
@@ -125,169 +67,13 @@ pub(crate) async fn terminate_child(child: &mut Child) -> Result<()> {
 
 use display::DisplayClient;
 use edit::EditClient;
-use llm_rs::llm::{ChatOptions, Claude, LLM, OpenAI, OpenRouter, ReasoningEffort};
+use llm_rs::llm::{ChatOptions, LLM};
 use server::Server;
 use session::Session;
+use tcode_runtime::bootstrap::{
+    browser_server_socket_path, build_chat_options, init_browser_client, parse_search_engine,
+};
 use tool_call_display::ToolCallDisplayClient;
-
-/// Resolve the API key for a provider.
-///
-/// Fallback chain:
-/// 1. Non-empty `config.api_key` wins.
-/// 2. Otherwise, non-empty `$<PROVIDER_ENV_VAR>`.
-/// 3. Otherwise, empty string — passed through to the LLM client so the
-///    HTTP request fails naturally if the server requires auth.
-///
-/// Note that `api_key = ""` in the config and omitting the line entirely
-/// are equivalent at runtime — both fall through to the env var. The
-/// wizard's API-key prompt text explicitly says so ("empty means no auth
-/// or use $<ENV>"), so users opting into "no auth" for a self-hosted
-/// endpoint should also unset the provider env var in their shell.
-///
-/// Whitespace-only values in a hand-edited config are passed through as-is;
-/// the wizard already trims user input, so this only affects manual edits.
-///
-/// Not called for [`Provider::ClaudeOauth`] or [`Provider::OpenAiOauth`]
-/// (those branches of `create_llm` load OAuth tokens instead).
-fn get_api_key(config: &config::TcodeConfig, provider: Provider) -> String {
-    if let Some(k) = config.api_key.as_ref()
-        && !k.is_empty()
-    {
-        return k.clone();
-    }
-    if let Ok(k) = std::env::var(provider.env_var_name())
-        && !k.is_empty()
-    {
-        return k;
-    }
-    String::new()
-}
-
-/// Build ChatOptions
-fn build_chat_options() -> ChatOptions {
-    ChatOptions {
-        reasoning_effort: Some(ReasoningEffort::High),
-        ..Default::default()
-    }
-}
-
-/// Return type for [`create_llm`]: (LLM instance, model name, optional OAuth manager).
-type CreateLlmResult = (
-    Box<dyn LLM>,
-    String,
-    Option<Arc<dyn auth::OAuthTokenManager>>,
-);
-
-/// Create an LLM instance from config options
-fn create_llm(config: &config::TcodeConfig, profile: Option<&str>) -> Result<CreateLlmResult> {
-    let provider_str = config.provider.as_deref().ok_or_else(|| {
-        let path = config::config_path_for(profile)
-            .map(|p| p.display().to_string())
-            .unwrap_or_else(|_| "<unknown>".to_string());
-        anyhow!(
-            "provider is required in {}. Expected one of: claude | claude-oauth | open-ai | open-ai-oauth | open-router.",
-            path
-        )
-    })?;
-    let provider = parse_provider(provider_str)?;
-    let model = config
-        .model
-        .clone()
-        .unwrap_or_else(|| provider.default_model().to_string());
-    let base_url = config
-        .base_url
-        .clone()
-        .unwrap_or_else(|| provider.default_base_url().to_string());
-
-    let (llm, token_manager): (Box<dyn LLM>, Option<Arc<dyn auth::OAuthTokenManager>>) =
-        match provider {
-            Provider::Claude => {
-                // May be "" — an empty key is a real value (self-hosted unauthenticated
-                // endpoint). The HTTP request will fail naturally if the server
-                // rejects the empty Authorization header.
-                let api_key = get_api_key(config, provider);
-                (Box::new(Claude::with_base_url(&api_key, &base_url)), None)
-            }
-            Provider::ClaudeOauth => {
-                // OAuth-only: ignore config.api_key and $ANTHROPIC_API_KEY entirely.
-                let manager = auth::claude::TokenManager::load(profile).ok_or_else(|| {
-                    let auth_command = auth_command_for_profile(profile, "claude-auth");
-                    let storage_path = auth::claude::TokenManager::storage_path(profile);
-                    anyhow!(
-                        "No Claude OAuth tokens found at {}. Run `{}` to authenticate.",
-                        storage_path.display(),
-                        auth_command
-                    )
-                })?;
-                let llm = Box::new(Claude::with_token_provider(manager.clone(), &base_url));
-                (
-                    llm,
-                    Some(Arc::new(manager) as Arc<dyn auth::OAuthTokenManager>),
-                )
-            }
-            Provider::OpenAi => {
-                let api_key = get_api_key(config, provider);
-                (Box::new(OpenAI::with_base_url(&api_key, &base_url)), None)
-            }
-            Provider::OpenAiOauth => {
-                // OAuth-only: ignore config.api_key and $OPENAI_API_KEY entirely.
-                let manager = auth::openai::TokenManager::load(profile).ok_or_else(|| {
-                    let auth_command = auth_command_for_profile(profile, "openai-auth");
-                    let storage_path = auth::openai::TokenManager::storage_path(profile);
-                    anyhow!(
-                        "No OpenAI OAuth tokens found at {}. Run `{}` to authenticate.",
-                        storage_path.display(),
-                        auth_command
-                    )
-                })?;
-                // Extract account_id synchronously — safe because the lock was just
-                // created and no task holds a write guard yet.
-                let account_id = manager
-                    .tokens()
-                    .try_read()
-                    .ok()
-                    .and_then(|t| t.account_id.clone());
-                let llm = Box::new(
-                    OpenAI::with_token_provider(manager.clone(), &base_url)
-                        .with_account_id(account_id),
-                );
-                (
-                    llm,
-                    Some(Arc::new(manager) as Arc<dyn auth::OAuthTokenManager>),
-                )
-            }
-            Provider::OpenRouter => {
-                let api_key = get_api_key(config, provider);
-                (
-                    Box::new(OpenRouter::with_base_url(&api_key, &base_url)),
-                    None,
-                )
-            }
-        };
-
-    Ok((llm, model, token_manager))
-}
-
-fn parse_provider(s: &str) -> Result<Provider> {
-    match s {
-        "claude" => Ok(Provider::Claude),
-        "claude-oauth" => Ok(Provider::ClaudeOauth),
-        "open-ai" | "openai" => Ok(Provider::OpenAi),
-        "open-ai-oauth" | "openai-oauth" => Ok(Provider::OpenAiOauth),
-        "open-router" | "openrouter" => Ok(Provider::OpenRouter),
-        other => bail!(
-            "unknown provider \"{other}\" in config file, expected: claude, claude-oauth, open-ai, open-ai-oauth, open-router"
-        ),
-    }
-}
-
-fn parse_search_engine(s: &str) -> Result<browser_server::SearchEngineKind> {
-    match s {
-        "kagi" => Ok(browser_server::SearchEngineKind::Kagi),
-        "google" => Ok(browser_server::SearchEngineKind::Google),
-        other => bail!("unknown search_engine \"{other}\" in config file, expected: kagi, google"),
-    }
-}
 
 #[derive(Parser)]
 #[command(name = "tcode")]
@@ -507,14 +293,10 @@ async fn send_server_message(
     msg: protocol::ClientMessage,
     success_msg: &str,
 ) -> Result<()> {
-    let stream = UnixStream::connect(session.socket_path())
+    let response = tcode_runtime::bootstrap::send_socket_message(session.socket_path(), &msg)
         .await
         .context("Failed to connect to server socket. Is the server running?")?;
-    let mut framed = Framed::new(stream, LengthDelimitedCodec::new());
-    let json = serde_json::to_vec(&msg)?;
-    framed.send(Bytes::from(json)).await?;
-    if let Some(Ok(resp)) = framed.next().await {
-        let resp: protocol::ServerMessage = serde_json::from_slice(&resp)?;
+    if let Some(resp) = response {
         match resp {
             protocol::ServerMessage::Ack => println!("{}", success_msg),
             protocol::ServerMessage::Error { message } => eprintln!("Error: {}", message),
@@ -826,18 +608,10 @@ async fn main() -> Result<()> {
             // are actually delivered.
             init_remote_tracing();
 
-            // `profile` is the already-destructured Option<String> binding
-            // from the top of `main`. It is accepted for forward
-            // compatibility but has no effect on `remote` in this PoC.
-            if let Some(p) = profile.as_deref() {
-                tracing::info!(
-                    profile = %p,
-                    "-p/--profile is accepted but has no effect on 'remote' in this PoC"
-                );
-            }
-
+            let container_config = resolve_container_config(&container, &container_runtime).await?;
             let password_on_argv = password_on_argv();
-            let cfg = tcode_web::RemoteConfig::try_new(port, password, password_on_argv)?;
+            let cfg = tcode_web::RemoteConfig::try_new(port, password, password_on_argv)?
+                .with_runtime_options(profile.clone(), container_config);
             tcode_web::run(cfg).await
         }
     }
@@ -1312,47 +1086,4 @@ async fn run_unified_with_session(
             Err(anyhow::anyhow!(e).context("Display process failed"))
         }
     }
-}
-
-/// Default browser-server Unix socket path.
-fn browser_server_socket_path() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tcode")
-        .join("browser-server.sock")
-}
-
-/// Initialize the global browser client.
-/// If `browser_server_url` is provided, connect to a remote TCP server.
-/// Otherwise, auto-start a local browser-server via Unix socket with auto-restart on idle timeout.
-async fn init_browser_client(
-    browser_server_url: Option<String>,
-    browser_server_token: Option<String>,
-) -> Result<()> {
-    use tools::browser_client::{BrowserClient, set_global_client};
-
-    if let Some(url) = browser_server_url {
-        let token = browser_server_token.unwrap_or_default();
-        set_global_client(BrowserClient::tcp(url, token));
-        return Ok(());
-    }
-
-    // Auto-start local browser-server via Unix socket
-    let socket_path = browser_server_socket_path();
-    let browser_server_exe = std::env::current_exe()
-        .context("Failed to determine current executable")?
-        .parent()
-        .ok_or_else(|| anyhow!("No parent directory for executable"))?
-        .join("browser-server");
-
-    // Create client with auto-restart: if the browser-server exits after idle timeout,
-    // the client will automatically respawn it on the next request.
-    let client = BrowserClient::unix(socket_path.clone())?
-        .with_auto_restart(socket_path, browser_server_exe);
-
-    // Eagerly start the server (or reuse an existing one) so the first request is fast.
-    client.ensure_server_running().await;
-
-    set_global_client(client);
-    Ok(())
 }

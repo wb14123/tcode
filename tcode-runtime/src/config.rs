@@ -277,7 +277,7 @@ fn default_shortcuts() -> HashMap<String, String> {
     ])
 }
 
-pub(crate) const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
+pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # Uncomment and modify values as needed.
 
 # provider = "claude"              # REQUIRED. one of: claude | claude-oauth | open-ai | open-router

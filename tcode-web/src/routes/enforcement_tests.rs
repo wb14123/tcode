@@ -529,20 +529,13 @@ async fn unmatched_path_without_cookie_returns_404_not_401() -> anyhow::Result<(
     Ok(())
 }
 
-/// Lock-in: production `protected_routes()` must remain empty for this PR.
-/// Once milestone 2 adds the first real protected route, this test will
-/// fail and the failing test is the implementer's prompt to:
-///   1. delete the empty-router `else` branch in `protected_routes()`,
-///   2. refactor `build_router_with_protected_probes` in `test_support`
-///      to chain off `super::protected_routes(state)` rather than build
-///      its own protected subrouter, so the same-`Arc` invariant is
-///      exercised end-to-end by the `enforcement_tests` suite.
+/// Production `protected_routes()` now contains the real authenticated API surface.
 #[tokio::test]
-async fn protected_routes_is_empty_until_milestone_2() {
+async fn protected_routes_register_real_endpoints() {
     let state = Arc::new(AppState::new(VALID_PASSWORD.into()));
     let router = super::protected_routes(state);
     assert!(
-        !router.has_routes(),
-        "protected_routes() now has routes — see test doc for required follow-ups"
+        router.has_routes(),
+        "protected_routes() should register the authenticated API endpoints"
     );
 }

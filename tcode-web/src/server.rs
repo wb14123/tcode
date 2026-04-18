@@ -43,6 +43,12 @@ pub(crate) async fn serve(
 /// 4. Log the startup URL and the localhost-only warning.
 /// 5. Call [`serve`] with a Ctrl-C-driven shutdown future.
 pub async fn run(config: RemoteConfig) -> anyhow::Result<()> {
+    let runtime_settings = tcode_runtime::bootstrap::RuntimeSettings::load(
+        config.profile.clone(),
+        config.container_config.clone(),
+    )?;
+    runtime_settings.init_globals().await?;
+
     let listener = bind_listener(&config).await?;
     let local = listener
         .local_addr()
@@ -52,7 +58,10 @@ pub async fn run(config: RemoteConfig) -> anyhow::Result<()> {
     // to the password goes through `AppState::password`. The `Secret`
     // keeps its zeroize-on-drop guarantee across this move.
     let RemoteConfig { password, .. } = config;
-    let state = Arc::new(AppState::from_secret(password));
+    let state = Arc::new(AppState::from_secret_and_runtime(
+        password,
+        runtime_settings,
+    ));
 
     tracing::info!("tcode remote listening on http://{local}");
     tracing::warn!("localhost-only HTTP PoC; use HTTPS/tunnel for remote access");

@@ -3512,6 +3512,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tcode-runtime",
  "tcode-web",
  "tokio",
  "tokio-stream",
@@ -3526,6 +3527,31 @@ dependencies = [
 ]
 
 [[package]]
+name = "tcode-runtime"
+version = "0.1.6"
+dependencies = [
+ "anyhow",
+ "auth",
+ "browser-server",
+ "bytes",
+ "dirs",
+ "futures",
+ "llm-rs",
+ "lsp-client",
+ "parking_lot",
+ "rand 0.10.0",
+ "serde",
+ "serde_json",
+ "sha2 0.11.0",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "toml",
+ "tools",
+ "tracing",
+]
+
+[[package]]
 name = "tcode-web"
 version = "0.1.6"
 dependencies = [
@@ -3535,10 +3561,12 @@ dependencies = [
  "base64",
  "getrandom 0.3.4",
  "http-body-util",
+ "llm-rs",
  "parking_lot",
  "serde",
  "serde_json",
  "subtle",
+ "tcode-runtime",
  "time",
  "tokio",
  "tokio-stream",
