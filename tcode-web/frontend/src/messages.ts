@@ -523,6 +523,8 @@ function statusBadge(status: string | null, flavor?: string): TemplateResult | t
 export interface TimelineRenderContext {
   sessionId: string;
   currentSubagentId?: string;
+  expandedSubagentIds?: ReadonlySet<string>;
+  toggleSubagentExpansion?: (conversationId: string) => void;
 }
 
 function toolRoute(sessionId: string, toolCallId: string, currentSubagentId?: string): AppRoute {
@@ -544,26 +546,21 @@ function toolRoute(sessionId: string, toolCallId: string, currentSubagentId?: st
 
 function renderUser(item: UserTimelineItem): TemplateResult {
   return html`
-    <article class="timeline-card timeline-user">
-      <header class="timeline-card-header">
-        <span class="timeline-title">User</span>
-        <span class="timeline-meta">${formatTimestamp(item.createdAt)}</span>
-      </header>
-      <pre class="timeline-pre">${item.content}</pre>
+    <article class="chat-bubble chat-bubble-user timeline-user">
+      <div class="message-meta">You · ${formatTimestamp(item.createdAt)}</div>
+      <pre class="timeline-pre message-bubble-content">${item.content}</pre>
     </article>
   `;
 }
 
 function renderAssistant(item: AssistantTimelineItem): TemplateResult {
   return html`
-    <article class="timeline-card timeline-assistant">
-      <header class="timeline-card-header">
-        <span class="timeline-title">Assistant</span>
-        <div class="timeline-meta-row">
-          ${statusBadge(item.endStatus)}
-          <span class="timeline-meta">${formatTimestamp(item.createdAt)}</span>
-        </div>
-      </header>
+    <article class="chat-bubble chat-bubble-assistant timeline-assistant">
+      <div class="message-meta">
+        <span>tcode</span>
+        ${statusBadge(item.endStatus)}
+        <span>${formatTimestamp(item.createdAt)}</span>
+      </div>
       ${item.thinking
         ? html`
             <details class="thinking-panel">
@@ -572,15 +569,12 @@ function renderAssistant(item: AssistantTimelineItem): TemplateResult {
             </details>
           `
         : nothing}
-      ${item.content ? html`<pre class="timeline-pre">${item.content}</pre>` : nothing}
-      ${item.error
-        ? html`<div class="inline-alert error">${item.error}</div>`
-        : nothing}
+      ${item.content ? html`<pre class="timeline-pre message-bubble-content">${item.content}</pre>` : nothing}
+      ${item.error ? html`<div class="inline-alert error">${item.error}</div>` : nothing}
       ${(item.inputTokens ?? item.outputTokens ?? item.reasoningTokens) !== null
         ? html`
             <footer class="timeline-footer">
-              in ${item.inputTokens ?? 0} · out ${item.outputTokens ?? 0} · reasoning
-              ${item.reasoningTokens ?? 0}
+              in ${item.inputTokens ?? 0} · out ${item.outputTokens ?? 0} · reasoning ${item.reasoningTokens ?? 0}
             </footer>
           `
         : nothing}
@@ -590,13 +584,13 @@ function renderAssistant(item: AssistantTimelineItem): TemplateResult {
 
 function renderTool(item: ToolTimelineItem, context: TimelineRenderContext): TemplateResult {
   return html`
-    <article class="timeline-card timeline-tool">
-      <header class="timeline-card-header">
+    <article class="timeline-card chat-card chat-card-tool timeline-tool">
+      <header class="chat-card-header">
         <div>
-          <span class="timeline-title">Tool ${item.toolName || item.toolCallId}</span>
-          <div class="timeline-meta">${formatTimestamp(item.createdAt)}</div>
+          <div class="chat-card-title">Tool · ${item.toolName || item.toolCallId}</div>
+          <div class="chat-card-subtitle">${formatTimestamp(item.createdAt)}</div>
         </div>
-        <div class="timeline-meta-row">
+        <div class="chat-card-actions">
           ${statusBadge(item.endStatus)}
           ${item.permissionState ? statusBadge(item.permissionState, item.permissionState) : nothing}
         </div>
@@ -617,25 +611,26 @@ function renderTool(item: ToolTimelineItem, context: TimelineRenderContext): Tem
             </details>
           `
         : html`<div class="timeline-empty">Waiting for tool output…</div>`}
-      <footer class="timeline-footer link-row">
+      <footer class="chat-card-footer">
         <span>tool call id: ${item.toolCallId}</span>
-        <a href="${hrefForRoute(toolRoute(context.sessionId, item.toolCallId, context.currentSubagentId))}">
-          Open detail
-        </a>
+        <a href="${hrefForRoute(toolRoute(context.sessionId, item.toolCallId, context.currentSubagentId))}">Open detail</a>
       </footer>
     </article>
   `;
 }
 
 function renderSubagent(item: SubagentTimelineItem, context: TimelineRenderContext): TemplateResult {
+  const expanded = context.expandedSubagentIds?.has(item.conversationId) ?? false;
+  const canToggle = Boolean(context.toggleSubagentExpansion);
+
   return html`
-    <article class="timeline-card timeline-subagent">
-      <header class="timeline-card-header">
+    <article class="timeline-card chat-card chat-card-subagent timeline-subagent">
+      <header class="chat-card-header">
         <div>
-          <span class="timeline-title">Subagent ${item.conversationId}</span>
-          <div class="timeline-meta">${item.description || 'Subagent task'}</div>
+          <div class="chat-card-title">Subagent</div>
+          <div class="chat-card-subtitle">${item.description || 'Subagent task'} · ${formatTimestamp(item.createdAt)}</div>
         </div>
-        <div class="timeline-meta-row">
+        <div class="chat-card-actions">
           ${statusBadge(item.endStatus)}
           ${item.permissionState ? statusBadge(item.permissionState, item.permissionState) : nothing}
         </div>
@@ -650,13 +645,26 @@ function renderSubagent(item: SubagentTimelineItem, context: TimelineRenderConte
         : nothing}
       ${item.response
         ? html`
-            <details open>
-              <summary>Latest response</summary>
-              <pre class="timeline-pre">${item.response}</pre>
-            </details>
+            <section>
+              <div class="chat-card-subtitle">Latest response</div>
+              <div class="subagent-response ${expanded ? 'subagent-response-expanded' : 'subagent-response-collapsed'}">
+                <pre class="timeline-pre">${item.response}</pre>
+              </div>
+              ${canToggle
+                ? html`
+                    <button
+                      class="button ghost subagent-toggle"
+                      type="button"
+                      @click=${() => context.toggleSubagentExpansion?.(item.conversationId)}
+                    >
+                      ${expanded ? 'Show less' : 'Show more'}
+                    </button>
+                  `
+                : nothing}
+            </section>
           `
         : html`<div class="timeline-empty">Waiting for subagent response…</div>`}
-      <footer class="timeline-footer link-row">
+      <footer class="chat-card-footer">
         <span>${item.toolCallId ? `spawned by ${item.toolCallId}` : 'subagent session'}</span>
         <a
           href="${hrefForRoute({
@@ -674,10 +682,10 @@ function renderSubagent(item: SubagentTimelineItem, context: TimelineRenderConte
 
 function renderSystem(item: SystemTimelineItem): TemplateResult {
   return html`
-    <article class="timeline-card timeline-system">
-      <header class="timeline-card-header">
-        <span class="timeline-title">System</span>
-        <div class="timeline-meta-row">
+    <article class="timeline-card chat-card compact-card chat-card-system timeline-system">
+      <header class="chat-card-header">
+        <div class="chat-card-title">System</div>
+        <div class="chat-card-actions">
           ${statusBadge(item.level, item.level)}
           <span class="timeline-meta">${formatTimestamp(item.createdAt)}</span>
         </div>
@@ -689,9 +697,9 @@ function renderSystem(item: SystemTimelineItem): TemplateResult {
 
 function renderSignal(item: SignalTimelineItem): TemplateResult {
   return html`
-    <article class="timeline-card timeline-signal">
-      <header class="timeline-card-header">
-        <span class="timeline-title">Event</span>
+    <article class="timeline-card chat-card compact-card chat-card-signal timeline-signal">
+      <header class="chat-card-header">
+        <div class="chat-card-title">Event</div>
       </header>
       <div class="timeline-text">${item.label}</div>
       ${item.details ? html`<pre class="timeline-pre">${item.details}</pre>` : nothing}
@@ -701,9 +709,9 @@ function renderSignal(item: SignalTimelineItem): TemplateResult {
 
 function renderRaw(item: RawTimelineItem): TemplateResult {
   return html`
-    <article class="timeline-card timeline-raw">
-      <header class="timeline-card-header">
-        <span class="timeline-title">${item.label}</span>
+    <article class="timeline-card chat-card compact-card chat-card-raw timeline-raw">
+      <header class="chat-card-header">
+        <div class="chat-card-title">${item.label}</div>
       </header>
       <pre class="timeline-pre">${prettyJson(item.rawJson)}</pre>
     </article>

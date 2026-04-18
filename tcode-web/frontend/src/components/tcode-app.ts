@@ -28,6 +28,7 @@ class TcodeApp extends LitElement {
   private newSessionError = '';
   private denyReason = '';
   private resolvingPermission = false;
+  private sidebarOpen = false;
 
   createRenderRoot(): this {
     return this;
@@ -50,6 +51,7 @@ class TcodeApp extends LitElement {
 
   private handleRouteChange = (): void => {
     this.route = parseRoute();
+    this.sidebarOpen = false;
     this.resetPermissionPolling();
     this.requestUpdate();
   };
@@ -206,6 +208,21 @@ class TcodeApp extends LitElement {
     window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
+  private openSidebar = (): void => {
+    this.sidebarOpen = true;
+    this.requestUpdate();
+  };
+
+  private closeSidebar = (): void => {
+    this.sidebarOpen = false;
+    this.requestUpdate();
+  };
+
+  private toggleSidebar = (): void => {
+    this.sidebarOpen = !this.sidebarOpen;
+    this.requestUpdate();
+  };
+
   private onLoginSecretInput = (event: Event): void => {
     this.loginSecret = (event.target as HTMLInputElement).value;
     this.requestUpdate();
@@ -270,6 +287,7 @@ class TcodeApp extends LitElement {
   }
 
   private openNewSessionModal = (): void => {
+    this.sidebarOpen = false;
     this.newSessionOpen = true;
     this.newSessionError = '';
     this.requestUpdate();
@@ -436,11 +454,16 @@ class TcodeApp extends LitElement {
           <div class="brand">
             <div>
               <div class="brand-title">tcode web</div>
-              <div class="brand-subtitle">Lit + Vite + TypeScript</div>
+              <div class="brand-subtitle">Conversations</div>
             </div>
-            <button class="button ghost" @click=${this.logout} ?disabled=${this.logoutBusy}>
-              ${this.logoutBusy ? 'Logging out…' : 'Log out'}
-            </button>
+            <div class="sidebar-top-actions">
+              <button class="button ghost sidebar-close" type="button" @click=${this.closeSidebar} aria-label="Close conversations">
+                ✕
+              </button>
+              <button class="button ghost" @click=${this.logout} ?disabled=${this.logoutBusy}>
+                ${this.logoutBusy ? 'Logging out…' : 'Log out'}
+              </button>
+            </div>
           </div>
           <div class="sidebar-actions">
             <button class="button" @click=${this.openNewSessionModal}>New conversation</button>
@@ -456,6 +479,7 @@ class TcodeApp extends LitElement {
                   <a
                     class="session-link ${currentSession === session.id ? 'active' : ''}"
                     href="${hrefForRoute({ kind: 'session', sessionId: session.id })}"
+                    @click=${this.closeSidebar}
                   >
                     <div class="session-link-title">${session.description || session.id}</div>
                     ${session.description && session.description !== session.id
@@ -475,6 +499,17 @@ class TcodeApp extends LitElement {
             : html`<div class="empty-copy">No sessions yet. Start a new conversation to populate the sidebar.</div>`}
         </section>
       </aside>
+    `;
+  }
+
+  private renderMobileTopbar() {
+    return html`
+      <header class="mobile-topbar">
+        <button class="button ghost mobile-topbar-button" type="button" @click=${this.toggleSidebar} aria-label="Open conversations">
+          ☰
+        </button>
+        <button class="button ghost mobile-topbar-button" type="button" @click=${this.openNewSessionModal}>New</button>
+      </header>
     `;
   }
 
@@ -605,9 +640,13 @@ class TcodeApp extends LitElement {
     }
 
     return html`
-      <div class="app-shell" @click=${this.handleShellClick}>
+      <div class="app-shell ${this.sidebarOpen ? 'sidebar-open' : ''}" @click=${this.handleShellClick}>
+        <div class="sidebar-backdrop" @click=${this.closeSidebar}></div>
         ${this.renderSidebar()}
-        <main class="main-column">${this.renderMainView()}</main>
+        <main class="main-column">
+          ${this.renderMobileTopbar()}
+          ${this.renderMainView()}
+        </main>
       </div>
       ${this.renderNewSessionModal()} ${this.renderPermissionModal()}
     `;

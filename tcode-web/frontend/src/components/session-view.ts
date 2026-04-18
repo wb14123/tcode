@@ -4,6 +4,12 @@ import { ApiError, ReplayAwareBuffer, api, openEventStream } from '../api';
 import { buildConversationTimeline, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
 import type { ConversationState, RawStreamEvent, SessionMeta, TimelineItem } from '../types';
 
+interface ToastNotice {
+  id: number;
+  tone: 'error' | 'info';
+  message: string;
+}
+
 class TcodeSessionView extends LitElement {
   static properties = {
     sessionId: { type: String },
@@ -20,14 +26,18 @@ class TcodeSessionView extends LitElement {
   private composerText = '';
   private loading = true;
   private streamState = 'connecting';
-  private errorMessage = '';
-  private actionMessage = '';
   private sending = false;
-  private finishing = false;
   private cancelling = false;
   private pollHandle: number | null = null;
   private eventSource: EventSource | null = null;
   private replayBuffer = new ReplayAwareBuffer();
+  private toasts: ToastNotice[] = [];
+  private toastCounter = 0;
+  private toastTimeouts = new Map<number, number>();
+  private detailsOpen = false;
+  private expandedSubagentIds = new Set<string>();
+  private stickToBottom = true;
+  private lastSnapshotError = '';
 
   createRenderRoot(): this {
     return this;
@@ -41,6 +51,10 @@ class TcodeSessionView extends LitElement {
   disconnectedCallback(): void {
     super.disconnectedCallback();
     this.stopView();
+    for (const timeout of this.toastTimeouts.values()) {
+      window.clearTimeout(timeout);
+    }
+    this.toastTimeouts.clear();
   }
 
   updated(changed: Map<string, unknown>): void {
@@ -64,8 +78,13 @@ class TcodeSessionView extends LitElement {
     this.timeline = [];
     this.loading = true;
     this.streamState = 'connecting';
-    this.errorMessage = '';
-    this.actionMessage = '';
+    this.sending = false;
+    this.cancelling = false;
+    this.detailsOpen = false;
+    this.expandedSubagentIds = new Set<string>();
+    this.stickToBottom = true;
+    this.lastSnapshotError = '';
+    this.clearToasts();
     this.replayBuffer.reset();
     this.requestUpdate();
     void this.refreshSnapshots(true);
@@ -85,6 +104,116 @@ class TcodeSessionView extends LitElement {
     this.eventSource = null;
   }
 
+  private clearToasts(): void {
+    for (const timeout of this.toastTimeouts.values()) {
+      window.clearTimeout(timeout);
+    }
+    this.toastTimeouts.clear();
+    this.toasts = [];
+  }
+
+  private showToast(message: string, tone: 'error' | 'info', durationMs = 5000): void {
+    const id = ++this.toastCounter;
+    const timeout = window.setTimeout(() => {
+      this.dismissToast(id);
+    }, durationMs);
+
+    this.toastTimeouts.set(id, timeout);
+    this.toasts = [...this.toasts, { id, tone, message }];
+    this.requestUpdate();
+  }
+
+  private dismissToast(id: number): void {
+    const timeout = this.toastTimeouts.get(id);
+    if (timeout !== undefined) {
+      window.clearTimeout(timeout);
+      this.toastTimeouts.delete(id);
+    }
+
+    const nextToasts = this.toasts.filter((toast) => toast.id !== id);
+    if (nextToasts.length !== this.toasts.length) {
+      this.toasts = nextToasts;
+      this.requestUpdate();
+    }
+  }
+
+  private combinedUsageText(): string {
+    return [this.tokenUsageText, this.usageText].filter((value) => value.trim()).join(' │ ');
+  }
+
+  private statusTone(): 'generating' | 'idle' | 'connecting' {
+    if (this.loading && !this.statusText.trim()) {
+      return 'connecting';
+    }
+    if (this.isGenerating()) {
+      return 'generating';
+    }
+    return 'idle';
+  }
+
+  private statusSummary(): string {
+    if (this.statusText.trim()) {
+      return this.statusText.trim();
+    }
+    if (this.loading) {
+      return 'Connecting…';
+    }
+    return 'Ready';
+  }
+
+  private isGenerating(): boolean {
+    const status = this.statusText.trim().toLowerCase();
+    return status.includes('stream') || status.includes('thinking');
+  }
+
+  private async scheduleScrollToBottom(force = false): Promise<void> {
+    if (!force && !this.stickToBottom) {
+      return;
+    }
+
+    await this.updateComplete;
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const scroller = this.querySelector<HTMLElement>('.chat-scroll-area');
+        if (!scroller) {
+          return;
+        }
+        scroller.scrollTop = scroller.scrollHeight;
+      });
+    });
+  }
+
+  private onChatScroll = (event: Event): void => {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const remaining = target.scrollHeight - target.scrollTop - target.clientHeight;
+    this.stickToBottom = remaining < 80;
+  };
+
+  private toggleDetails = (): void => {
+    this.detailsOpen = !this.detailsOpen;
+    this.requestUpdate();
+  };
+
+  private closeDetails = (): void => {
+    this.detailsOpen = false;
+    this.requestUpdate();
+  };
+
+  private toggleSubagentExpansion = (conversationId: string): void => {
+    const nextExpanded = new Set(this.expandedSubagentIds);
+    if (nextExpanded.has(conversationId)) {
+      nextExpanded.delete(conversationId);
+    } else {
+      nextExpanded.add(conversationId);
+    }
+    this.expandedSubagentIds = nextExpanded;
+    this.requestUpdate();
+  };
+
   private async refreshSnapshots(initial: boolean): Promise<void> {
     try {
       const [meta, state, statusText, usageText, tokenUsageText] = await Promise.all([
@@ -99,17 +228,25 @@ class TcodeSessionView extends LitElement {
       this.statusText = statusText.trim();
       this.usageText = usageText.trim();
       this.tokenUsageText = tokenUsageText.trim();
-      this.errorMessage = '';
+      this.lastSnapshotError = '';
       if (initial) {
         this.loading = false;
+        this.scheduleScrollToBottom(true);
       }
       this.requestUpdate();
     } catch (error) {
-      if (error instanceof ApiError && error.status === 404) {
-        this.errorMessage = 'Session snapshots are not available yet. Waiting for runtime output…';
-      } else {
-        this.errorMessage = error instanceof Error ? error.message : 'Failed to load session data';
+      const message =
+        error instanceof ApiError && error.status === 404
+          ? 'Session snapshots are not available yet. Waiting for runtime output…'
+          : error instanceof Error
+            ? error.message
+            : 'Failed to load session data';
+
+      if (message !== this.lastSnapshotError) {
+        this.showToast(message, 'error');
+        this.lastSnapshotError = message;
       }
+
       if (initial) {
         this.loading = false;
       }
@@ -159,6 +296,7 @@ class TcodeSessionView extends LitElement {
         );
       }
       this.requestUpdate();
+      this.scheduleScrollToBottom();
     };
 
     source.onerror = () => {
@@ -174,81 +312,83 @@ class TcodeSessionView extends LitElement {
     this.requestUpdate();
   }
 
+  private onComposerKeyDown = (event: KeyboardEvent): void => {
+    if (
+      event.key !== 'Enter' ||
+      event.shiftKey ||
+      event.altKey ||
+      event.ctrlKey ||
+      event.metaKey ||
+      event.isComposing
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    void this.submitMessage(event);
+  };
+
   private async submitMessage(event: Event): Promise<void> {
     event.preventDefault();
     const text = this.composerText.trim();
-    if (!text || this.sending) {
+    if (!text || this.sending || this.isGenerating()) {
       return;
     }
 
     this.sending = true;
-    this.actionMessage = '';
-    this.errorMessage = '';
     this.requestUpdate();
 
     try {
       await api.sendSessionMessage(this.sessionId, text);
       this.composerText = '';
-      this.actionMessage = 'Message sent.';
+      this.showToast('Message sent.', 'info', 3000);
       this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
+      this.scheduleScrollToBottom(true);
     } catch (error) {
-      this.errorMessage = error instanceof Error ? error.message : 'Failed to send message';
+      this.showToast(error instanceof Error ? error.message : 'Failed to send message', 'error');
     } finally {
       this.sending = false;
       this.requestUpdate();
     }
   }
 
-  private async finishConversation(): Promise<void> {
-    if (this.finishing) {
-      return;
-    }
-
-    this.finishing = true;
-    this.actionMessage = '';
-    this.errorMessage = '';
-    this.requestUpdate();
-
-    try {
-      await api.finishSession(this.sessionId);
-      this.actionMessage = 'Finish requested.';
-      this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
-    } catch (error) {
-      this.errorMessage = error instanceof Error ? error.message : 'Failed to finish conversation';
-    } finally {
-      this.finishing = false;
-      this.requestUpdate();
-    }
-  }
-
   private async cancelConversation(): Promise<void> {
-    if (this.cancelling) {
+    if (this.cancelling || !this.isGenerating()) {
       return;
     }
 
     this.cancelling = true;
-    this.actionMessage = '';
-    this.errorMessage = '';
     this.requestUpdate();
 
     try {
       await api.cancelSession(this.sessionId);
-      this.actionMessage = 'Cancel requested.';
+      this.showToast('Cancel requested.', 'info', 3000);
       this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
     } catch (error) {
-      this.errorMessage = error instanceof Error ? error.message : 'Failed to cancel conversation';
+      this.showToast(error instanceof Error ? error.message : 'Failed to cancel conversation', 'error');
     } finally {
       this.cancelling = false;
       this.requestUpdate();
     }
   }
 
-  private renderStats() {
+  private renderDetailsModal() {
+    if (!this.detailsOpen) {
+      return nothing;
+    }
+
     return html`
-      <section class="panel-grid">
-        <section class="panel">
-          <h3>Session snapshot</h3>
-          <dl class="meta-list">
+      <div class="modal-backdrop" @click=${this.closeDetails}>
+        <section class="modal-card session-details-modal" @click=${(event: Event) => event.stopPropagation()}>
+          <div class="session-details-header">
+            <div>
+              <h2 class="page-title">Session details</h2>
+              <p class="page-subtitle">Less-frequent metadata lives here instead of taking over the chat view.</p>
+            </div>
+            <button class="button secondary" type="button" @click=${this.closeDetails}>Close</button>
+          </div>
+
+          <dl class="meta-list session-details-list">
             <div>
               <dt>Description</dt>
               <dd>${this.meta?.description || '—'}</dd>
@@ -258,113 +398,142 @@ class TcodeSessionView extends LitElement {
               <dd>${this.state?.model || '—'}</dd>
             </div>
             <div>
-              <dt>Created</dt>
-              <dd>${this.meta?.created_at ? new Date(this.meta.created_at).toLocaleString() : '—'}</dd>
-            </div>
-            <div>
-              <dt>Last active</dt>
-              <dd>
-                ${this.meta?.last_active_at ? new Date(this.meta.last_active_at).toLocaleString() : '—'}
-              </dd>
+              <dt>Session id</dt>
+              <dd>${this.sessionId}</dd>
             </div>
             <div>
               <dt>Conversation id</dt>
               <dd>${this.state?.id || 'pending'}</dd>
             </div>
             <div>
-              <dt>Stream</dt>
+              <dt>Created</dt>
+              <dd>${this.meta?.created_at ? new Date(this.meta.created_at).toLocaleString() : '—'}</dd>
+            </div>
+            <div>
+              <dt>Last active</dt>
+              <dd>${this.meta?.last_active_at ? new Date(this.meta.last_active_at).toLocaleString() : '—'}</dd>
+            </div>
+            <div>
+              <dt>Transport</dt>
               <dd>${this.streamState}</dd>
             </div>
-          </dl>
-        </section>
-        <section class="panel">
-          <h3>Usage</h3>
-          <dl class="meta-list">
             <div>
-              <dt>Total input</dt>
-              <dd>${this.state?.total_input_tokens ?? 0}</dd>
-            </div>
-            <div>
-              <dt>Total output</dt>
-              <dd>${this.state?.total_output_tokens ?? 0}</dd>
-            </div>
-            <div>
-              <dt>Aggregate input</dt>
-              <dd>${this.state?.aggregate_input_tokens ?? 0}</dd>
-            </div>
-            <div>
-              <dt>Aggregate output</dt>
-              <dd>${this.state?.aggregate_output_tokens ?? 0}</dd>
+              <dt>Status</dt>
+              <dd>${this.statusSummary()}</dd>
             </div>
           </dl>
-          ${this.usageText ? html`<pre class="timeline-pre">${this.usageText}</pre>` : nothing}
-          ${this.tokenUsageText ? html`<pre class="timeline-pre">${this.tokenUsageText}</pre>` : nothing}
+
+          ${this.tokenUsageText
+            ? html`
+                <section>
+                  <h3>Token usage</h3>
+                  <pre class="timeline-pre">${this.tokenUsageText}</pre>
+                </section>
+              `
+            : nothing}
+          ${this.usageText
+            ? html`
+                <section>
+                  <h3>Usage</h3>
+                  <pre class="timeline-pre">${this.usageText}</pre>
+                </section>
+              `
+            : nothing}
         </section>
-      </section>
+      </div>
+    `;
+  }
+
+  private renderToasts() {
+    if (!this.toasts.length) {
+      return nothing;
+    }
+
+    return html`
+      <div class="toast-stack" aria-live="polite" aria-atomic="true">
+        ${this.toasts.map(
+          (toast) => html`
+            <div class="toast toast-${toast.tone}" role="status">
+              <div class="toast-message">${toast.message}</div>
+              <button class="toast-close" type="button" @click=${() => this.dismissToast(toast.id)} aria-label="Dismiss notification">
+                ×
+              </button>
+            </div>
+          `,
+        )}
+      </div>
     `;
   }
 
   render() {
+    const combinedUsage = this.combinedUsageText();
+    const statusTone = this.statusTone();
+    const showProgress = this.loading || this.sending || this.isGenerating();
+
     return html`
-      <section class="page">
-        <header class="page-header">
-          <div>
-            <h1 class="page-title">Session ${this.sessionId}</h1>
-            <p class="page-subtitle">Live conversation stream with polling snapshots and session controls.</p>
+      <section class="page chat-page">
+        <div class="chat-shell">
+          ${showProgress
+            ? html`
+                <div class="chat-progress-wrap" aria-label="Conversation progress">
+                  <div class="chat-progress-bar"></div>
+                </div>
+              `
+            : nothing}
+          <section class="chat-scroll-area" @scroll=${this.onChatScroll}>
+            ${this.loading
+              ? html`<div class="chat-empty-state">Loading session…</div>`
+              : this.timeline.length
+                ? html`
+                    <div class="timeline chat-timeline">
+                      ${this.timeline.map((item) =>
+                        renderTimelineItem(item, {
+                          sessionId: this.sessionId,
+                          expandedSubagentIds: this.expandedSubagentIds,
+                          toggleSubagentExpansion: this.toggleSubagentExpansion,
+                        }),
+                      )}
+                    </div>
+                  `
+                : html`
+                    <div class="chat-empty-state">
+                      Waiting for streamed events… Send a message below to get started.
+                    </div>
+                  `}
+          </section>
+
+          <div class="chat-bottom-stack">
+            <form class="panel composer chat-composer" @submit=${this.submitMessage}>
+              <textarea
+                class="chat-composer-input"
+                placeholder="Message tcode…"
+                .value=${this.composerText}
+                @input=${this.onComposerInput}
+                @keydown=${this.onComposerKeyDown}
+              ></textarea>
+              <div class="chat-composer-footer">
+                ${this.isGenerating()
+                  ? html`
+                      <button class="button danger" type="button" @click=${this.cancelConversation} ?disabled=${this.cancelling}>
+                        ${this.cancelling ? 'Cancelling…' : 'Cancel'}
+                      </button>
+                    `
+                  : html`
+                      <button class="button" type="submit" ?disabled=${this.sending || !this.composerText.trim()}>
+                        ${this.sending ? 'Sending…' : 'Send'}
+                      </button>
+                    `}
+              </div>
+            </form>
+
+            <footer class="chat-status-bar">
+              <span class="pill pill-${statusTone}">${this.statusSummary()}</span>
+              ${combinedUsage ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${combinedUsage}</span>` : nothing}
+            </footer>
           </div>
-          <div class="header-actions">
-            <span class="pill pill-${this.streamState}">${this.streamState}</span>
-            <button class="button secondary" @click=${this.finishConversation} ?disabled=${this.finishing}>
-              ${this.finishing ? 'Finishing…' : 'Finish'}
-            </button>
-            <button class="button danger" @click=${this.cancelConversation} ?disabled=${this.cancelling}>
-              ${this.cancelling ? 'Cancelling…' : 'Cancel'}
-            </button>
-          </div>
-        </header>
+        </div>
 
-        ${this.errorMessage ? html`<div class="inline-alert error">${this.errorMessage}</div>` : nothing}
-        ${this.actionMessage ? html`<div class="inline-alert info">${this.actionMessage}</div>` : nothing}
-        ${this.renderStats()}
-
-        <section class="panel">
-          <h3>Composer</h3>
-          <form class="composer" @submit=${this.submitMessage}>
-            <textarea
-              placeholder="Ask tcode to inspect code, run tools, or continue the session…"
-              .value=${this.composerText}
-              @input=${this.onComposerInput}
-            ></textarea>
-            <div class="form-actions">
-              <button class="button" type="submit" ?disabled=${this.sending || !this.composerText.trim()}>
-                ${this.sending ? 'Sending…' : 'Send message'}
-              </button>
-              <span class="muted">Tip: the backend only exposes root-session messaging, so this composer targets the main session conversation.</span>
-            </div>
-          </form>
-        </section>
-
-        <section class="panel">
-          <h3>Status</h3>
-          <pre class="timeline-pre">${this.statusText || 'No status text yet.'}</pre>
-        </section>
-
-        <section class="panel">
-          <h3>Conversation</h3>
-          ${this.loading
-            ? html`<div class="timeline-empty">Loading session…</div>`
-            : this.timeline.length
-              ? html`
-                  <div class="timeline">
-                    ${this.timeline.map((item) =>
-                      renderTimelineItem(item, {
-                        sessionId: this.sessionId,
-                      }),
-                    )}
-                  </div>
-                `
-              : html`<div class="timeline-empty">Waiting for streamed events…</div>`}
-        </section>
+        ${this.renderDetailsModal()} ${this.renderToasts()}
       </section>
     `;
   }
