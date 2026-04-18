@@ -1,7 +1,7 @@
 import { LitElement, html, nothing } from 'lit';
 
 import { ReplayAwareBuffer, api, openEventStream } from '../api';
-import { buildConversationTimeline, parseStreamLine, renderTimelineItem } from '../messages';
+import { buildConversationTimeline, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
 import { hrefForRoute } from '../router';
 import type { RawStreamEvent, TimelineItem } from '../types';
 
@@ -129,6 +129,32 @@ class TcodeToolCallView extends LitElement {
 
       this.events = [...this.events, parsed];
       this.timeline = buildConversationTimeline(this.events);
+      const variant = rawVariant(parsed);
+      const systemNotification = extractSystemNotification(parsed);
+      if (systemNotification?.message) {
+        this.dispatchEvent(
+          new CustomEvent('system-notification', {
+            detail: systemNotification,
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      }
+      if (
+        variant === 'PermissionUpdated' ||
+        variant === 'ToolRequestPermission' ||
+        variant === 'ToolPermissionApproved' ||
+        variant === 'SubAgentWaitingPermission' ||
+        variant === 'SubAgentPermissionApproved' ||
+        variant === 'SubAgentPermissionDenied'
+      ) {
+        this.dispatchEvent(
+          new CustomEvent('permissions-refresh-requested', {
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      }
       this.requestUpdate();
     };
 

@@ -15,6 +15,12 @@ import type {
   WireMessageEnvelope,
 } from './types';
 
+export interface SystemNotification {
+  createdAt: number | null;
+  level: string | null;
+  message: string;
+}
+
 function asRecord(value: unknown): Record<string, unknown> | null {
   if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
     return value as Record<string, unknown>;
@@ -194,6 +200,10 @@ function getOrCreateSubagent(
 }
 
 function shouldRenderTimelineItem(item: TimelineItem): boolean {
+  if (item.kind === 'signal' || item.kind === 'system') {
+    return false;
+  }
+
   if (item.kind !== 'assistant') {
     return true;
   }
@@ -494,6 +504,19 @@ export function buildConversationTimeline(events: RawStreamEvent[]): TimelineIte
   return items.filter(shouldRenderTimelineItem);
 }
 
+export function extractSystemNotification(event: RawStreamEvent): SystemNotification | null {
+  const wire = event.wire;
+  if (!wire || wire.variant !== 'SystemMessage') {
+    return null;
+  }
+
+  return {
+    createdAt: asNumber(wire.payload.created_at),
+    level: asString(wire.payload.level),
+    message: asString(wire.payload.message) ?? '',
+  };
+}
+
 function formatTimestamp(timestamp: number | null | undefined): string {
   if (!timestamp) {
     return '—';
@@ -557,8 +580,7 @@ function renderAssistant(item: AssistantTimelineItem): TemplateResult {
   return html`
     <article class="chat-bubble chat-bubble-assistant timeline-assistant">
       <div class="message-meta">
-        <span>tcode</span>
-        ${statusBadge(item.endStatus)}
+        <span>Assistant</span>
         <span>${formatTimestamp(item.createdAt)}</span>
       </div>
       ${item.thinking

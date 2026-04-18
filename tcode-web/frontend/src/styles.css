@@ -804,7 +804,8 @@ tcode-session-view {
 }
 
 .chat-bubble-assistant {
-  align-self: flex-start;
+  align-self: stretch;
+  max-width: none;
 }
 
 .message-meta {
@@ -832,6 +833,15 @@ tcode-session-view {
 .chat-bubble-user .message-bubble-content {
   background: var(--accent-soft);
   border-color: var(--focus-border);
+}
+
+.chat-bubble-assistant .message-bubble-content,
+.chat-bubble-assistant .timeline-pre {
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+  overflow: visible;
 }
 
 .chat-card {
@@ -934,6 +944,10 @@ tcode-session-view {
   width: min(24rem, calc(100vw - 2rem));
 }
 
+.app-toast-stack {
+  top: calc(max(0.75rem, env(safe-area-inset-top)) + 4.5rem);
+}
+
 .toast {
   display: flex;
   align-items: flex-start;
@@ -950,6 +964,12 @@ tcode-session-view {
   background: rgba(247, 238, 234, 0.98);
   border-color: var(--danger-border);
   color: var(--danger-text);
+}
+
+.toast-warning {
+  background: rgba(248, 243, 230, 0.98);
+  border-color: var(--warning-border);
+  color: var(--warning-text);
 }
 
 .toast-info {

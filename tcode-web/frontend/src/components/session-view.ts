@@ -1,7 +1,7 @@
 import { LitElement, html, nothing } from 'lit';
 
 import { ApiError, ReplayAwareBuffer, api, openEventStream } from '../api';
-import { buildConversationTimeline, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
+import { buildConversationTimeline, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
 import type { ConversationState, RawStreamEvent, SessionMeta, TimelineItem } from '../types';
 
 interface ToastNotice {
@@ -311,6 +311,16 @@ class TcodeSessionView extends LitElement {
       this.events = [...this.events, parsed];
       this.timeline = buildConversationTimeline(this.events);
       const variant = rawVariant(parsed);
+      const systemNotification = extractSystemNotification(parsed);
+      if (systemNotification?.message) {
+        this.dispatchEvent(
+          new CustomEvent('system-notification', {
+            detail: systemNotification,
+            bubbles: true,
+            composed: true,
+          }),
+        );
+      }
       if (
         variant === 'PermissionUpdated' ||
         variant === 'ToolRequestPermission' ||

@@ -9,6 +9,18 @@ import './session-view';
 import './subagent-view';
 import './tool-call-view';
 
+interface ToastNotice {
+  id: number;
+  tone: 'error' | 'info' | 'warning';
+  message: string;
+}
+
+interface SystemNotificationDetail {
+  createdAt: number | null;
+  level: string | null;
+  message: string;
+}
+
 class TcodeApp extends LitElement {
   private authState: 'loading' | 'authenticated' | 'unauthenticated' = 'loading';
   private route: AppRoute = parseRoute();
@@ -28,6 +40,9 @@ class TcodeApp extends LitElement {
   private denyReason = '';
   private resolvingPermission = false;
   private sidebarOpen = false;
+  private toasts: ToastNotice[] = [];
+  private toastCounter = 0;
+  private toastTimeouts = new Map<number, number>();
 
   createRenderRoot(): this {
     return this;
@@ -46,6 +61,7 @@ class TcodeApp extends LitElement {
     window.removeEventListener('tcode-auth-required', this.handleAuthRequired as EventListener);
     this.stopSessionsPolling();
     this.stopPermissionsPolling();
+    this.clearToasts();
   }
 
   private handleRouteChange = (): void => {
@@ -157,6 +173,60 @@ class TcodeApp extends LitElement {
     }
     this.requestUpdate();
   }
+
+  private clearToasts(): void {
+    for (const timeout of this.toastTimeouts.values()) {
+      window.clearTimeout(timeout);
+    }
+    this.toastTimeouts.clear();
+    this.toasts = [];
+  }
+
+  private dismissToast(id: number): void {
+    const timeout = this.toastTimeouts.get(id);
+    if (timeout !== undefined) {
+      window.clearTimeout(timeout);
+      this.toastTimeouts.delete(id);
+    }
+
+    const nextToasts = this.toasts.filter((toast) => toast.id !== id);
+    if (nextToasts.length !== this.toasts.length) {
+      this.toasts = nextToasts;
+      this.requestUpdate();
+    }
+  }
+
+  private showToast(message: string, tone: ToastNotice['tone'], durationMs = 5000): void {
+    const id = ++this.toastCounter;
+    const timeout = window.setTimeout(() => {
+      this.dismissToast(id);
+    }, durationMs);
+
+    this.toastTimeouts.set(id, timeout);
+    this.toasts = [...this.toasts, { id, tone, message }];
+    this.requestUpdate();
+  }
+
+  private systemToastTone(level: string | null): ToastNotice['tone'] {
+    const normalized = level?.trim().toLowerCase() ?? '';
+    if (normalized.includes('error') || normalized.includes('fatal')) {
+      return 'error';
+    }
+    if (normalized.includes('warn')) {
+      return 'warning';
+    }
+    return 'info';
+  }
+
+  private handleSystemNotification = (event: Event): void => {
+    const customEvent = event as CustomEvent<SystemNotificationDetail>;
+    const detail = customEvent.detail;
+    if (!detail?.message?.trim()) {
+      return;
+    }
+
+    this.showToast(detail.message.trim(), this.systemToastTone(detail.level), 7000);
+  };
 
   private async refreshPermissions(): Promise<void> {
     const sessionId = activeSessionId(this.route);
@@ -393,6 +463,7 @@ class TcodeApp extends LitElement {
             @permissions-refresh-requested=${() => {
               void this.refreshPermissions();
             }}
+            @system-notification=${this.handleSystemNotification}
           ></tcode-session-view>
         `;
       case 'subagent':
@@ -403,6 +474,7 @@ class TcodeApp extends LitElement {
             @permissions-refresh-requested=${() => {
               void this.refreshPermissions();
             }}
+            @system-notification=${this.handleSystemNotification}
           ></tcode-subagent-view>
         `;
       case 'tool':
@@ -410,6 +482,10 @@ class TcodeApp extends LitElement {
           <tcode-tool-call-view
             .sessionId=${this.route.sessionId}
             .toolCallId=${this.route.toolCallId}
+            @permissions-refresh-requested=${() => {
+              void this.refreshPermissions();
+            }}
+            @system-notification=${this.handleSystemNotification}
           ></tcode-tool-call-view>
         `;
       case 'subagent-tool':
@@ -418,6 +494,10 @@ class TcodeApp extends LitElement {
             .sessionId=${this.route.sessionId}
             .subagentId=${this.route.subagentId}
             .toolCallId=${this.route.toolCallId}
+            @permissions-refresh-requested=${() => {
+              void this.refreshPermissions();
+            }}
+            @system-notification=${this.handleSystemNotification}
           ></tcode-tool-call-view>
         `;
       case 'login':
@@ -580,6 +660,27 @@ class TcodeApp extends LitElement {
     `;
   }
 
+  private renderToasts() {
+    if (!this.toasts.length) {
+      return nothing;
+    }
+
+    return html`
+      <div class="toast-stack app-toast-stack" aria-live="polite" aria-atomic="true">
+        ${this.toasts.map(
+          (toast) => html`
+            <div class="toast toast-${toast.tone}" role="status">
+              <div class="toast-message">${toast.message}</div>
+              <button class="toast-close" type="button" @click=${() => this.dismissToast(toast.id)} aria-label="Dismiss notification">
+                ×
+              </button>
+            </div>
+          `,
+        )}
+      </div>
+    `;
+  }
+
   render() {
     if (this.authState === 'loading') {
       return html`
@@ -605,7 +706,7 @@ class TcodeApp extends LitElement {
           ${this.renderMainView()}
         </main>
       </div>
-      ${this.renderNewSessionModal()} ${this.renderPermissionModal()}
+      ${this.renderNewSessionModal()} ${this.renderPermissionModal()} ${this.renderToasts()}
     `;
   }
 }
