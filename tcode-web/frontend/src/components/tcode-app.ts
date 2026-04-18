@@ -17,7 +17,6 @@ class TcodeApp extends LitElement {
   private loginSecret = '';
   private loginError = '';
   private loginBusy = false;
-  private logoutBusy = false;
   private sessionsPollHandle: number | null = null;
   private permissionsPollHandle: number | null = null;
   private permissionState: PermissionState | null = null;
@@ -270,22 +269,6 @@ class TcodeApp extends LitElement {
     }
   }
 
-  private async logout(): Promise<void> {
-    if (this.logoutBusy) {
-      return;
-    }
-
-    this.logoutBusy = true;
-    this.requestUpdate();
-
-    try {
-      await api.logout();
-    } finally {
-      this.logoutBusy = false;
-      this.handleAuthRequired();
-    }
-  }
-
   private openNewSessionModal = (): void => {
     this.sidebarOpen = false;
     this.newSessionOpen = true;
@@ -362,7 +345,7 @@ class TcodeApp extends LitElement {
     return html`
       <div class="login-shell" @click=${this.handleShellClick}>
         <form class="login-card" @submit=${this.submitLogin}>
-          <h1 class="page-title">tcode web</h1>
+          <h1 class="page-title">TCode</h1>
           <p class="page-subtitle">
             Same-origin cookie auth for the remote tcode session server. API and router bases are
             centralized so later hosting changes stay localized, though cross-origin/static hosting
@@ -388,11 +371,8 @@ class TcodeApp extends LitElement {
       <section class="page">
         <div class="empty-state">
           <div class="empty-copy">
-            <h1 class="page-title">Choose a session</h1>
-            <p>
-              Pick an existing conversation from the sidebar or create a new one with an initial prompt.
-              Sessions, tool-call, and subagent routes all use path-based navigation.
-            </p>
+            <h1 class="page-title">No conversation selected</h1>
+            <p>Select a conversation from the sidebar or start a new one to get going.</p>
           </div>
         </div>
       </section>
@@ -452,22 +432,10 @@ class TcodeApp extends LitElement {
       <aside class="sidebar">
         <section class="sidebar-header">
           <div class="brand">
-            <div>
-              <div class="brand-title">tcode web</div>
-              <div class="brand-subtitle">Conversations</div>
-            </div>
-            <div class="sidebar-top-actions">
-              <button class="button ghost sidebar-close" type="button" @click=${this.closeSidebar} aria-label="Close conversations">
-                ✕
-              </button>
-              <button class="button ghost" @click=${this.logout} ?disabled=${this.logoutBusy}>
-                ${this.logoutBusy ? 'Logging out…' : 'Log out'}
-              </button>
-            </div>
+            <a class="brand-title" href="${hrefForRoute({ kind: 'home' })}" @click=${this.closeSidebar}>TCode</a>
           </div>
           <div class="sidebar-actions">
             <button class="button" @click=${this.openNewSessionModal}>New conversation</button>
-            <a class="button secondary" href="${hrefForRoute({ kind: 'home' })}">Dashboard</a>
           </div>
           ${this.sessionsError ? html`<div class="inline-alert error">${this.sessionsError}</div>` : nothing}
         </section>
@@ -481,18 +449,7 @@ class TcodeApp extends LitElement {
                     href="${hrefForRoute({ kind: 'session', sessionId: session.id })}"
                     @click=${this.closeSidebar}
                   >
-                    <div class="session-link-title">${session.description || session.id}</div>
-                    ${session.description && session.description !== session.id
-                      ? html`<div class="session-link-meta">${session.id}</div>`
-                      : nothing}
-                    <div class="session-link-meta">${session.status || 'No status yet'}</div>
-                    <div class="session-link-meta">
-                      ${session.last_active_at
-                        ? `Active ${new Date(session.last_active_at).toLocaleString()}`
-                        : session.created_at
-                          ? `Created ${new Date(session.created_at).toLocaleString()}`
-                          : 'No timestamps yet'}
-                    </div>
+                    <div class="session-link-title">${session.description || 'Untitled conversation'}</div>
                   </a>
                 `,
               )
@@ -628,7 +585,7 @@ class TcodeApp extends LitElement {
       return html`
         <div class="login-shell">
           <div class="login-card">
-            <h1 class="page-title">tcode web</h1>
+            <h1 class="page-title">TCode</h1>
             <p class="page-subtitle">Checking authentication session…</p>
           </div>
         </div>
