@@ -80,6 +80,7 @@ pub(crate) struct SessionsResponse {
 #[derive(Serialize)]
 struct SessionSummary {
     id: String,
+    description: Option<String>,
     created_at: Option<u64>,
     last_active_at: Option<u64>,
     status: String,
@@ -142,6 +143,7 @@ pub(crate) async fn get_sessions() -> ApiResult<Json<SessionsResponse>> {
             .unwrap_or_default();
         sessions.push(SessionSummary {
             id: session_id,
+            description: meta.as_ref().and_then(|m| m.description.clone()),
             created_at: meta.as_ref().and_then(|m| m.created_at),
             last_active_at: meta.as_ref().and_then(|m| m.last_active_at),
             status,
@@ -174,6 +176,7 @@ pub(crate) async fn post_sessions(
         },
     )
     .await?;
+
     Ok(Json(CreateSessionResponse { id: session_id }))
 }
 

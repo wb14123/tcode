@@ -8,6 +8,7 @@ mod api;
 mod auth;
 mod auth_middleware;
 mod origin_middleware;
+mod spa;
 
 use auth_middleware::require_auth;
 
@@ -144,6 +145,9 @@ pub(crate) fn build_router(state: Arc<AppState>) -> axum::Router {
         .route("/api/auth/session", axum::routing::get(auth::get_session));
 
     let protected = protected_routes(Arc::clone(&state));
+    let frontend = axum::Router::<Arc<AppState>>::new()
+        .route("/", axum::routing::any(spa::serve_frontend))
+        .route("/{*path}", axum::routing::any(spa::serve_frontend));
 
-    public.merge(protected).with_state(state)
+    public.merge(protected).merge(frontend).with_state(state)
 }
