@@ -6,6 +6,9 @@ use axum::{
     response::{IntoResponse, Response},
 };
 
+const FRONTEND_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const FRONTEND_REFERRER_POLICY: &str = "no-referrer";
+
 pub(crate) async fn serve_frontend(method: Method, uri: Uri) -> Response {
     let request_path = uri.path();
     if is_api_path(request_path) {
@@ -163,6 +166,14 @@ async fn file_response(
         response.headers_mut().insert(
             header::CACHE_CONTROL,
             header::HeaderValue::from_static("no-cache"),
+        );
+        response.headers_mut().insert(
+            header::HeaderName::from_static("content-security-policy"),
+            header::HeaderValue::from_static(FRONTEND_CONTENT_SECURITY_POLICY),
+        );
+        response.headers_mut().insert(
+            header::HeaderName::from_static("referrer-policy"),
+            header::HeaderValue::from_static(FRONTEND_REFERRER_POLICY),
         );
     }
     Ok(response)

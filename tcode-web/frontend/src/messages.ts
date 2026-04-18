@@ -1,5 +1,7 @@
 import { html, nothing, type TemplateResult } from 'lit';
+import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
+import { renderMarkdownToHtml } from './markdown';
 import { hrefForRoute } from './router';
 import type {
   AppRoute,
@@ -591,7 +593,9 @@ function renderAssistant(item: AssistantTimelineItem): TemplateResult {
             </details>
           `
         : nothing}
-      ${item.content ? html`<pre class="timeline-pre message-bubble-content">${item.content}</pre>` : nothing}
+      ${item.content
+        ? html`<div class="message-bubble-content markdown-content">${unsafeHTML(renderMarkdownToHtml(item.content))}</div>`
+        : nothing}
       ${item.error ? html`<div class="inline-alert error">${item.error}</div>` : nothing}
       ${(item.inputTokens ?? item.outputTokens ?? item.reasoningTokens) !== null
         ? html`
