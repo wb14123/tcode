@@ -1,6 +1,7 @@
 import { LitElement, html, nothing } from 'lit';
 
 import { ApiError, ReplayAwareBuffer, api, openEventStream } from '../api';
+import { navigate } from '../router';
 import { buildConversationTimeline, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
 import type { ConversationState, RawStreamEvent, SessionMeta, TimelineItem } from '../types';
 
@@ -13,9 +14,13 @@ interface ToastNotice {
 class TcodeSessionView extends LitElement {
   static properties = {
     sessionId: { type: String },
+    draftMode: { type: Boolean },
+    draftVersion: { type: Number },
   };
 
   sessionId = '';
+  draftMode = false;
+  draftVersion = 0;
   private meta: SessionMeta | null = null;
   private state: ConversationState | null = null;
   private statusText = '';
@@ -58,7 +63,7 @@ class TcodeSessionView extends LitElement {
   }
 
   updated(changed: Map<string, unknown>): void {
-    if (changed.has('sessionId')) {
+    if (changed.has('sessionId') || changed.has('draftMode') || changed.has('draftVersion')) {
       this.startView();
     }
 
@@ -66,10 +71,6 @@ class TcodeSessionView extends LitElement {
   }
 
   private startView(): void {
-    if (!this.sessionId) {
-      return;
-    }
-
     this.stopView();
     this.meta = null;
     this.state = null;
@@ -78,6 +79,7 @@ class TcodeSessionView extends LitElement {
     this.tokenUsageText = '';
     this.events = [];
     this.timeline = [];
+    this.composerText = '';
     this.loading = true;
     this.streamState = 'connecting';
     this.sending = false;
@@ -88,6 +90,14 @@ class TcodeSessionView extends LitElement {
     this.lastSnapshotError = '';
     this.clearToasts();
     this.replayBuffer.reset();
+
+    if (!this.sessionId) {
+      this.loading = false;
+      this.streamState = 'draft';
+      this.requestUpdate();
+      return;
+    }
+
     this.requestUpdate();
     void this.refreshSnapshots(true);
     this.openStream();
@@ -159,6 +169,9 @@ class TcodeSessionView extends LitElement {
     }
     if (this.loading) {
       return 'Connecting…';
+    }
+    if (this.draftMode && !this.sessionId) {
+      return 'Ready to start';
     }
     return 'Ready';
   }
@@ -381,6 +394,17 @@ class TcodeSessionView extends LitElement {
     this.requestUpdate();
 
     try {
+      if (this.draftMode && !this.sessionId) {
+        const created = await api.createSession(text);
+        this.composerText = '';
+        this.requestUpdate();
+        await this.updateComplete;
+        this.syncComposerHeight();
+        this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
+        navigate({ kind: 'session', sessionId: created.id }, false);
+        return;
+      }
+
       await api.sendSessionMessage(this.sessionId, text);
       this.composerText = '';
       this.requestUpdate();
@@ -542,7 +566,9 @@ class TcodeSessionView extends LitElement {
                   `
                 : html`
                     <div class="chat-empty-state">
-                      Waiting for streamed events… Send a message below to get started.
+                      ${this.draftMode && !this.sessionId
+                        ? 'Send a message below to start a new conversation.'
+                        : 'Waiting for streamed events… Send a message below to get started.'}
                     </div>
                   `}
           </section>

@@ -33,10 +33,7 @@ class TcodeApp extends LitElement {
   private permissionsPollHandle: number | null = null;
   private permissionState: PermissionState | null = null;
   private permissionsError = '';
-  private newSessionOpen = false;
-  private newSessionPrompt = '';
-  private newSessionBusy = false;
-  private newSessionError = '';
+  private draftVersion = 0;
   private denyReason = '';
   private resolvingPermission = false;
   private sidebarOpen = false;
@@ -297,11 +294,6 @@ class TcodeApp extends LitElement {
     this.requestUpdate();
   };
 
-  private onNewSessionPromptInput = (event: Event): void => {
-    this.newSessionPrompt = (event.target as HTMLTextAreaElement).value;
-    this.requestUpdate();
-  };
-
   private onDenyReasonInput = (event: Event): void => {
     this.denyReason = (event.target as HTMLTextAreaElement).value;
     this.requestUpdate();
@@ -339,50 +331,14 @@ class TcodeApp extends LitElement {
     }
   }
 
-  private openNewSessionModal = (): void => {
+  private startNewConversation = (): void => {
     this.sidebarOpen = false;
-    this.newSessionOpen = true;
-    this.newSessionError = '';
+    this.draftVersion += 1;
+    navigate({ kind: 'home' }, this.route.kind === 'home');
+    this.route = { kind: 'home' };
+    this.resetPermissionPolling();
     this.requestUpdate();
   };
-
-  private closeNewSessionModal = (): void => {
-    if (this.newSessionBusy) {
-      return;
-    }
-
-    this.newSessionOpen = false;
-    this.newSessionPrompt = '';
-    this.newSessionError = '';
-    this.requestUpdate();
-  };
-
-  private async createSession(event: Event): Promise<void> {
-    event.preventDefault();
-    const prompt = this.newSessionPrompt.trim();
-    if (!prompt || this.newSessionBusy) {
-      return;
-    }
-
-    this.newSessionBusy = true;
-    this.newSessionError = '';
-    this.requestUpdate();
-
-    try {
-      const created = await api.createSession(prompt);
-      this.newSessionOpen = false;
-      this.newSessionPrompt = '';
-      await this.refreshSessions();
-      navigate({ kind: 'session', sessionId: created.id }, false);
-      this.route = { kind: 'session', sessionId: created.id };
-      this.resetPermissionPolling();
-    } catch (error) {
-      this.newSessionError = error instanceof Error ? error.message : 'Failed to create session';
-    } finally {
-      this.newSessionBusy = false;
-      this.requestUpdate();
-    }
-  }
 
   private async resolvePermission(decision: PermissionDecisionPayload): Promise<void> {
     const sessionId = activeSessionId(this.route);
@@ -436,17 +392,25 @@ class TcodeApp extends LitElement {
     `;
   }
 
-  private renderHome() {
+  private renderConversationView(sessionId: string, draftMode: boolean) {
     return html`
-      <section class="page">
-        <div class="empty-state">
-          <div class="empty-copy">
-            <h1 class="page-title">No conversation selected</h1>
-            <p>Select a conversation from the sidebar or start a new one to get going.</p>
-          </div>
-        </div>
-      </section>
+      <tcode-session-view
+        .sessionId=${sessionId}
+        .draftMode=${draftMode}
+        .draftVersion=${this.draftVersion}
+        @sessions-refresh-requested=${() => {
+          void this.refreshSessions();
+        }}
+        @permissions-refresh-requested=${() => {
+          void this.refreshPermissions();
+        }}
+        @system-notification=${this.handleSystemNotification}
+      ></tcode-session-view>
     `;
+  }
+
+  private renderHome() {
+    return this.renderConversationView('', true);
   }
 
   private renderMainView() {
@@ -454,18 +418,7 @@ class TcodeApp extends LitElement {
       case 'home':
         return this.renderHome();
       case 'session':
-        return html`
-          <tcode-session-view
-            .sessionId=${this.route.sessionId}
-            @sessions-refresh-requested=${() => {
-              void this.refreshSessions();
-            }}
-            @permissions-refresh-requested=${() => {
-              void this.refreshPermissions();
-            }}
-            @system-notification=${this.handleSystemNotification}
-          ></tcode-session-view>
-        `;
+        return this.renderConversationView(this.route.sessionId, false);
       case 'subagent':
         return html`
           <tcode-subagent-view
@@ -515,7 +468,7 @@ class TcodeApp extends LitElement {
             <a class="brand-title" href="${hrefForRoute({ kind: 'home' })}" @click=${this.closeSidebar}>TCode</a>
           </div>
           <div class="sidebar-actions">
-            <button class="button" @click=${this.openNewSessionModal}>New conversation</button>
+            <button class="button" @click=${this.startNewConversation}>New conversation</button>
           </div>
           ${this.sessionsError ? html`<div class="inline-alert error">${this.sessionsError}</div>` : nothing}
         </section>
@@ -545,7 +498,7 @@ class TcodeApp extends LitElement {
         <button class="button ghost mobile-topbar-button" type="button" @click=${this.toggleSidebar} aria-label="Open conversations">
           ☰
         </button>
-        <button class="button ghost mobile-topbar-button" type="button" @click=${this.openNewSessionModal}>New</button>
+        <button class="button ghost mobile-topbar-button" type="button" @click=${this.startNewConversation}>New</button>
       </header>
     `;
   }
@@ -627,39 +580,6 @@ class TcodeApp extends LitElement {
     `;
   }
 
-  private renderNewSessionModal() {
-    if (!this.newSessionOpen) {
-      return nothing;
-    }
-
-    return html`
-      <div class="modal-backdrop" @click=${this.closeNewSessionModal}>
-        <form class="modal-card" @submit=${this.createSession} @click=${(event: Event) => event.stopPropagation()}>
-          <div>
-            <h2 class="page-title">New conversation</h2>
-            <p class="page-subtitle">
-              This action creates the session and immediately sends your first prompt to start the run.
-            </p>
-          </div>
-          ${this.newSessionError ? html`<div class="inline-alert error">${this.newSessionError}</div>` : nothing}
-          <textarea
-            placeholder="Example: Review the repo and propose a cleanup plan."
-            .value=${this.newSessionPrompt}
-            @input=${this.onNewSessionPromptInput}
-          ></textarea>
-          <div class="modal-actions">
-            <button class="button" type="submit" ?disabled=${this.newSessionBusy || !this.newSessionPrompt.trim()}>
-              ${this.newSessionBusy ? 'Creating…' : 'Create session'}
-            </button>
-            <button class="button secondary" type="button" @click=${this.closeNewSessionModal} ?disabled=${this.newSessionBusy}>
-              Close
-            </button>
-          </div>
-        </form>
-      </div>
-    `;
-  }
-
   private renderToasts() {
     if (!this.toasts.length) {
       return nothing;
@@ -706,7 +626,7 @@ class TcodeApp extends LitElement {
           ${this.renderMainView()}
         </main>
       </div>
-      ${this.renderNewSessionModal()} ${this.renderPermissionModal()} ${this.renderToasts()}
+      ${this.renderPermissionModal()} ${this.renderToasts()}
     `;
   }
 }
