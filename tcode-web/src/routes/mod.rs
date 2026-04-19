@@ -19,6 +19,8 @@ mod auth_tests;
 #[cfg(test)]
 mod enforcement_tests;
 #[cfg(test)]
+mod subagent_api_tests;
+#[cfg(test)]
 pub(crate) mod test_support;
 
 pub(crate) fn protected_routes(state: Arc<AppState>) -> axum::Router<Arc<AppState>> {
@@ -96,12 +98,24 @@ pub(crate) fn protected_routes(state: Arc<AppState>) -> axum::Router<Arc<AppStat
             axum::routing::post(api::post_session_message),
         )
         .route(
+            "/api/sessions/{session_id}/subagents/{subagent_id}/messages",
+            axum::routing::post(api::post_subagent_message),
+        )
+        .route(
             "/api/sessions/{session_id}/finish",
             axum::routing::post(api::post_session_finish),
         )
         .route(
+            "/api/sessions/{session_id}/subagents/{subagent_id}/finish",
+            axum::routing::post(api::post_subagent_finish),
+        )
+        .route(
             "/api/sessions/{session_id}/cancel",
             axum::routing::post(api::post_session_cancel),
+        )
+        .route(
+            "/api/sessions/{session_id}/subagents/{subagent_id}/cancel",
+            axum::routing::post(api::post_subagent_cancel),
         )
         .route(
             "/api/sessions/{session_id}/tool-calls/{tool_call_id}/cancel",

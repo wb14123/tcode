@@ -3572,6 +3572,7 @@ dependencies = [
  "tokio-stream",
  "tower",
  "tracing",
+ "uuid",
  "zeroize",
 ]
 

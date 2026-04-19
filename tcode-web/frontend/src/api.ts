@@ -1,15 +1,12 @@
 import { runtimeConfig } from './config';
 import type {
   AuthSessionStatus,
-  ConversationState,
   CreateSessionResponse,
   PendingPermissionInfo,
   PermissionDecisionPayload,
   PermissionKey,
   PermissionState,
-  SessionMeta,
   SessionsResponse,
-  SubagentMetaResponse,
 } from './types';
 
 function authExpired(): void {
@@ -71,17 +68,6 @@ async function request(path: string, init?: RequestInit): Promise<Response> {
 async function jsonRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await request(path, init);
   return (await response.json()) as T;
-}
-
-async function jsonRequestOptional<T>(path: string): Promise<T | null> {
-  try {
-    return await jsonRequest<T>(path);
-  } catch (error) {
-    if (error instanceof ApiError && error.status === 404) {
-      return null;
-    }
-    throw error;
-  }
 }
 
 async function textRequest(path: string): Promise<string> {
@@ -151,16 +137,6 @@ export const api = {
     });
   },
 
-  getSessionMeta(sessionId: string): Promise<SessionMeta | null> {
-    return jsonRequestOptional<SessionMeta>(`api/sessions/${encodeURIComponent(sessionId)}/session-meta.json`);
-  },
-
-  getSessionConversationState(sessionId: string): Promise<ConversationState | null> {
-    return jsonRequestOptional<ConversationState>(
-      `api/sessions/${encodeURIComponent(sessionId)}/conversation-state.json`,
-    );
-  },
-
   getSessionStatus(sessionId: string): Promise<string> {
     return textRequest(`api/sessions/${encodeURIComponent(sessionId)}/status.txt`);
   },
@@ -177,12 +153,6 @@ export const api = {
     return request(`api/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: 'POST',
       body: jsonBody({ text }),
-    }).then(() => undefined);
-  },
-
-  finishSession(sessionId: string): Promise<void> {
-    return request(`api/sessions/${encodeURIComponent(sessionId)}/finish`, {
-      method: 'POST',
     }).then(() => undefined);
   },
 
@@ -213,18 +183,6 @@ export const api = {
     ).then(() => undefined);
   },
 
-  getSubagentMeta(sessionId: string, subagentId: string): Promise<SubagentMetaResponse | null> {
-    return jsonRequestOptional<SubagentMetaResponse>(
-      `api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}/session-meta.json`,
-    );
-  },
-
-  getSubagentConversationState(sessionId: string, subagentId: string): Promise<ConversationState | null> {
-    return jsonRequestOptional<ConversationState>(
-      `api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}/conversation-state.json`,
-    );
-  },
-
   getSubagentStatus(sessionId: string, subagentId: string): Promise<string> {
     return textRequest(
       `api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}/status.txt`,
@@ -235,6 +193,34 @@ export const api = {
     return textRequest(
       `api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}/token_usage.txt`,
     );
+  },
+
+  sendSubagentMessage(sessionId: string, subagentId: string, text: string): Promise<void> {
+    return request(
+      `api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}/messages`,
+      {
+        method: 'POST',
+        body: jsonBody({ text }),
+      },
+    ).then(() => undefined);
+  },
+
+  finishSubagent(sessionId: string, subagentId: string): Promise<void> {
+    return request(
+      `api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}/finish`,
+      {
+        method: 'POST',
+      },
+    ).then(() => undefined);
+  },
+
+  cancelSubagent(sessionId: string, subagentId: string): Promise<void> {
+    return request(
+      `api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}/cancel`,
+      {
+        method: 'POST',
+      },
+    ).then(() => undefined);
   },
 
   subagentDisplayPath(sessionId: string, subagentId: string): string {

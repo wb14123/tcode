@@ -3,7 +3,7 @@ import { LitElement, html, nothing } from 'lit';
 import { ApiError, ReplayAwareBuffer, api, openEventStream } from '../api';
 import { navigate } from '../router';
 import { buildConversationTimeline, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
-import type { ConversationState, RawStreamEvent, SessionMeta, TimelineItem } from '../types';
+import type { RawStreamEvent, TimelineItem } from '../types';
 
 interface ToastNotice {
   id: number;
@@ -21,8 +21,6 @@ class TcodeSessionView extends LitElement {
   sessionId = '';
   draftMode = false;
   draftVersion = 0;
-  private meta: SessionMeta | null = null;
-  private state: ConversationState | null = null;
   private statusText = '';
   private usageText = '';
   private tokenUsageText = '';
@@ -30,7 +28,6 @@ class TcodeSessionView extends LitElement {
   private timeline: TimelineItem[] = [];
   private composerText = '';
   private loading = true;
-  private streamState = 'connecting';
   private sending = false;
   private cancelling = false;
   private pollHandle: number | null = null;
@@ -39,7 +36,6 @@ class TcodeSessionView extends LitElement {
   private toasts: ToastNotice[] = [];
   private toastCounter = 0;
   private toastTimeouts = new Map<number, number>();
-  private detailsOpen = false;
   private expandedSubagentIds = new Set<string>();
   private stickToBottom = true;
   private lastSnapshotError = '';
@@ -72,8 +68,6 @@ class TcodeSessionView extends LitElement {
 
   private startView(): void {
     this.stopView();
-    this.meta = null;
-    this.state = null;
     this.statusText = '';
     this.usageText = '';
     this.tokenUsageText = '';
@@ -81,10 +75,8 @@ class TcodeSessionView extends LitElement {
     this.timeline = [];
     this.composerText = '';
     this.loading = true;
-    this.streamState = 'connecting';
     this.sending = false;
     this.cancelling = false;
-    this.detailsOpen = false;
     this.expandedSubagentIds = new Set<string>();
     this.stickToBottom = true;
     this.lastSnapshotError = '';
@@ -93,7 +85,6 @@ class TcodeSessionView extends LitElement {
 
     if (!this.sessionId) {
       this.loading = false;
-      this.streamState = 'draft';
       this.requestUpdate();
       return;
     }
@@ -237,16 +228,6 @@ class TcodeSessionView extends LitElement {
     this.stickToBottom = remaining < 80;
   };
 
-  private toggleDetails = (): void => {
-    this.detailsOpen = !this.detailsOpen;
-    this.requestUpdate();
-  };
-
-  private closeDetails = (): void => {
-    this.detailsOpen = false;
-    this.requestUpdate();
-  };
-
   private toggleSubagentExpansion = (conversationId: string): void => {
     const nextExpanded = new Set(this.expandedSubagentIds);
     if (nextExpanded.has(conversationId)) {
@@ -260,15 +241,11 @@ class TcodeSessionView extends LitElement {
 
   private async refreshSnapshots(initial: boolean): Promise<void> {
     try {
-      const [meta, state, statusText, usageText, tokenUsageText] = await Promise.all([
-        api.getSessionMeta(this.sessionId),
-        api.getSessionConversationState(this.sessionId),
+      const [statusText, usageText, tokenUsageText] = await Promise.all([
         api.getSessionStatus(this.sessionId),
         api.getSessionUsage(this.sessionId),
         api.getSessionTokenUsage(this.sessionId),
       ]);
-      this.meta = meta;
-      this.state = state;
       this.statusText = statusText.trim();
       this.usageText = usageText.trim();
       this.tokenUsageText = tokenUsageText.trim();
@@ -305,7 +282,6 @@ class TcodeSessionView extends LitElement {
     this.eventSource = source;
 
     source.onopen = () => {
-      this.streamState = 'live';
       this.replayBuffer.beginReplay();
       this.requestUpdate();
     };
@@ -354,7 +330,6 @@ class TcodeSessionView extends LitElement {
     };
 
     source.onerror = () => {
-      this.streamState = 'reconnecting';
       this.replayBuffer.beginReplay();
       this.requestUpdate();
     };
@@ -439,78 +414,6 @@ class TcodeSessionView extends LitElement {
       this.cancelling = false;
       this.requestUpdate();
     }
-  }
-
-  private renderDetailsModal() {
-    if (!this.detailsOpen) {
-      return nothing;
-    }
-
-    return html`
-      <div class="modal-backdrop" @click=${this.closeDetails}>
-        <section class="modal-card session-details-modal" @click=${(event: Event) => event.stopPropagation()}>
-          <div class="session-details-header">
-            <div>
-              <h2 class="page-title">Session details</h2>
-              <p class="page-subtitle">Less-frequent metadata lives here instead of taking over the chat view.</p>
-            </div>
-            <button class="button secondary" type="button" @click=${this.closeDetails}>Close</button>
-          </div>
-
-          <dl class="meta-list session-details-list">
-            <div>
-              <dt>Description</dt>
-              <dd>${this.meta?.description || '—'}</dd>
-            </div>
-            <div>
-              <dt>Model</dt>
-              <dd>${this.state?.model || '—'}</dd>
-            </div>
-            <div>
-              <dt>Session id</dt>
-              <dd>${this.sessionId}</dd>
-            </div>
-            <div>
-              <dt>Conversation id</dt>
-              <dd>${this.state?.id || 'pending'}</dd>
-            </div>
-            <div>
-              <dt>Created</dt>
-              <dd>${this.meta?.created_at ? new Date(this.meta.created_at).toLocaleString() : '—'}</dd>
-            </div>
-            <div>
-              <dt>Last active</dt>
-              <dd>${this.meta?.last_active_at ? new Date(this.meta.last_active_at).toLocaleString() : '—'}</dd>
-            </div>
-            <div>
-              <dt>Transport</dt>
-              <dd>${this.streamState}</dd>
-            </div>
-            <div>
-              <dt>Status</dt>
-              <dd>${this.statusSummary()}</dd>
-            </div>
-          </dl>
-
-          ${this.tokenUsageText
-            ? html`
-                <section>
-                  <h3>Token usage</h3>
-                  <pre class="timeline-pre">${this.tokenUsageText}</pre>
-                </section>
-              `
-            : nothing}
-          ${this.usageText
-            ? html`
-                <section>
-                  <h3>Usage</h3>
-                  <pre class="timeline-pre">${this.usageText}</pre>
-                </section>
-              `
-            : nothing}
-        </section>
-      </div>
-    `;
   }
 
   private renderToasts() {
@@ -618,7 +521,7 @@ class TcodeSessionView extends LitElement {
           </div>
         </div>
 
-        ${this.renderDetailsModal()} ${this.renderToasts()}
+        ${this.renderToasts()}
       </section>
     `;
   }

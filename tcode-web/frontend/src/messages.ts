@@ -639,7 +639,13 @@ function renderTool(item: ToolTimelineItem, context: TimelineRenderContext): Tem
         : html`<div class="timeline-empty">Waiting for tool output…</div>`}
       <footer class="chat-card-footer">
         <span>tool call id: ${item.toolCallId}</span>
-        <a href="${hrefForRoute(toolRoute(context.sessionId, item.toolCallId, context.currentSubagentId))}">Open detail</a>
+        <a
+          href="${hrefForRoute(toolRoute(context.sessionId, item.toolCallId, context.currentSubagentId))}"
+          target="_blank"
+          rel="noopener noreferrer"
+        >
+          Open detail
+        </a>
       </footer>
     </article>
   `;
@@ -698,8 +704,10 @@ function renderSubagent(item: SubagentTimelineItem, context: TimelineRenderConte
             sessionId: context.sessionId,
             subagentId: item.conversationId,
           })}"
+          target="_blank"
+          rel="noopener noreferrer"
         >
-          Open detail
+          Open conversation
         </a>
       </footer>
     </article>

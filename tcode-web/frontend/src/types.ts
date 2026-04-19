@@ -18,41 +18,6 @@ export interface CreateSessionResponse {
   id: string;
 }
 
-export interface SessionMeta {
-  description?: string | null;
-  created_at?: number | null;
-  last_active_at?: number | null;
-}
-
-export interface ConversationState {
-  id: string;
-  model: string;
-  msg_id_counter: number;
-  total_input_tokens: number;
-  total_output_tokens: number;
-  total_cache_creation_tokens: number;
-  total_cache_read_tokens: number;
-  aggregate_input_tokens: number;
-  aggregate_output_tokens: number;
-  aggregate_cache_creation_tokens: number;
-  aggregate_cache_read_tokens: number;
-  single_turn: boolean;
-  subagent_depth: number;
-  llm_msgs: unknown[];
-  chat_options: unknown;
-}
-
-export interface ParentContext {
-  kind: 'session' | 'subagent' | string;
-  conversation_id: string;
-  tool_call_id?: string | null;
-}
-
-export interface SubagentMetaResponse {
-  meta: SessionMeta;
-  parent: ParentContext;
-}
-
 export interface PermissionKey {
   tool: string;
   key: string;

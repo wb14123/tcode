@@ -625,7 +625,8 @@ details > summary {
   }
 }
 
-tcode-session-view {
+tcode-session-view,
+tcode-subagent-view {
   display: flex;
   flex: 1;
   min-height: 0;
@@ -728,6 +729,18 @@ tcode-session-view {
   padding: 0.68rem 0.82rem;
   line-height: 1.45;
   overflow-y: hidden;
+}
+
+.chat-composer-actions {
+  display: flex;
+  align-items: flex-end;
+  gap: 0.6rem;
+  flex: 0 0 auto;
+}
+
+.chat-composer-done {
+  min-height: 44px;
+  white-space: nowrap;
 }
 
 .chat-composer-action {
@@ -1042,21 +1055,6 @@ tcode-session-view {
   margin-top: 0.55rem;
 }
 
-.session-details-modal {
-  width: min(720px, 100%);
-}
-
-.session-details-header {
-  display: flex;
-  align-items: flex-start;
-  justify-content: space-between;
-  gap: 1rem;
-}
-
-.session-details-list {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
 .toast-stack {
   position: fixed;
   top: max(0.75rem, env(safe-area-inset-top));
@@ -1150,11 +1148,6 @@ tcode-session-view {
     min-height: 42px;
   }
 
-  .session-details-header {
-    flex-direction: column;
-    align-items: stretch;
-  }
-
   .chat-bubble {
     max-width: 96%;
   }
@@ -1163,9 +1156,5 @@ tcode-session-view {
     right: 0.75rem;
     left: 0.75rem;
     width: auto;
-  }
-
-  .session-details-list {
-    grid-template-columns: 1fr;
   }
 }

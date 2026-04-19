@@ -340,6 +340,25 @@ pub(crate) async fn post_session_message(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub(crate) async fn post_subagent_message(
+    State(state): State<std::sync::Arc<AppState>>,
+    AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
+    Json(body): Json<MessageRequest>,
+) -> ApiResult<StatusCode> {
+    let session_dir = existing_session_dir(&session_id)?;
+    find_subagent_dir(&session_dir, &subagent_id)?;
+    send_runtime_message(
+        &state,
+        &session_id,
+        ClientMessage::SendMessage {
+            conversation_id: Some(subagent_id),
+            content: body.text,
+        },
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(crate) async fn post_session_finish(
     State(state): State<std::sync::Arc<AppState>>,
     AxumPath(session_id): AxumPath<String>,
@@ -361,6 +380,23 @@ pub(crate) async fn post_session_finish(
     Ok(StatusCode::NO_CONTENT)
 }
 
+pub(crate) async fn post_subagent_finish(
+    State(state): State<std::sync::Arc<AppState>>,
+    AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let session_dir = existing_session_dir(&session_id)?;
+    find_subagent_dir(&session_dir, &subagent_id)?;
+    send_runtime_message(
+        &state,
+        &session_id,
+        ClientMessage::UserRequestEnd {
+            conversation_id: subagent_id,
+        },
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(crate) async fn post_session_cancel(
     State(state): State<std::sync::Arc<AppState>>,
     AxumPath(session_id): AxumPath<String>,
@@ -376,6 +412,23 @@ pub(crate) async fn post_session_cancel(
         &session_id,
         ClientMessage::CancelConversation {
             conversation_id: root_id,
+        },
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn post_subagent_cancel(
+    State(state): State<std::sync::Arc<AppState>>,
+    AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
+) -> ApiResult<StatusCode> {
+    let session_dir = existing_session_dir(&session_id)?;
+    find_subagent_dir(&session_dir, &subagent_id)?;
+    send_runtime_message(
+        &state,
+        &session_id,
+        ClientMessage::CancelConversation {
+            conversation_id: subagent_id,
         },
     )
     .await?;

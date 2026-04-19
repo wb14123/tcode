@@ -424,6 +424,9 @@ class TcodeApp extends LitElement {
           <tcode-subagent-view
             .sessionId=${this.route.sessionId}
             .subagentId=${this.route.subagentId}
+            @sessions-refresh-requested=${() => {
+              void this.refreshSessions();
+            }}
             @permissions-refresh-requested=${() => {
               void this.refreshPermissions();
             }}
