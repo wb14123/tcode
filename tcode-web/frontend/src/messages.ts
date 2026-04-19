@@ -391,16 +391,13 @@ export function buildConversationTimeline(events: RawStreamEvent[]): TimelineIte
           break;
         }
 
-        let item = getOrCreateSubagent(items, subagents, conversationId);
-        if (toolCallId) {
-          const pending = pendingSubagentsByToolCall.get(toolCallId);
-          if (pending) {
-            pending.conversationId = conversationId;
-            subagents.set(conversationId, pending);
-            pendingSubagentsByToolCall.delete(toolCallId);
-            item = pending;
-          }
+        const pending = toolCallId ? pendingSubagentsByToolCall.get(toolCallId) : undefined;
+        if (pending && toolCallId) {
+          pending.conversationId = conversationId;
+          subagents.set(conversationId, pending);
+          pendingSubagentsByToolCall.delete(toolCallId);
         }
+        const item = pending ?? getOrCreateSubagent(items, subagents, conversationId);
 
         item.msgId = asNumber(payload.msg_id);
         item.toolCallId = toolCallId ?? item.toolCallId;
