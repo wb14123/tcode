@@ -213,20 +213,50 @@ function shouldRenderTimelineItem(item: TimelineItem): boolean {
   return Boolean(item.content.trim() || item.thinking.trim() || item.error);
 }
 
-export function buildConversationTimeline(events: RawStreamEvent[]): TimelineItem[] {
-  const items: TimelineItem[] = [];
-  let activeAssistant: AssistantTimelineItem | null = null;
-  const tools = new Map<string, ToolTimelineItem>();
-  const toolCallIdByIndex = new Map<number, string>();
-  const subagents = new Map<string, SubagentTimelineItem>();
-  const pendingSubagentsByToolCall = new Map<string, SubagentTimelineItem>();
-  const pendingSubagentToolByIndex = new Map<number, string>();
+export class ConversationTimelineBuilder {
+  private items: TimelineItem[] = [];
+  private visibleItems: TimelineItem[] = [];
+  private activeAssistant: AssistantTimelineItem | null = null;
+  private tools = new Map<string, ToolTimelineItem>();
+  private toolCallIdByIndex = new Map<number, string>();
+  private subagents = new Map<string, SubagentTimelineItem>();
+  private pendingSubagentsByToolCall = new Map<string, SubagentTimelineItem>();
+  private pendingSubagentToolByIndex = new Map<number, string>();
+  private visibleSet = new Set<TimelineItem>();
 
-  for (const event of events) {
+  get timeline(): TimelineItem[] {
+    return this.visibleItems;
+  }
+
+  reset(): void {
+    this.items = [];
+    this.visibleItems = [];
+    this.activeAssistant = null;
+    this.tools = new Map<string, ToolTimelineItem>();
+    this.toolCallIdByIndex = new Map<number, string>();
+    this.subagents = new Map<string, SubagentTimelineItem>();
+    this.pendingSubagentsByToolCall = new Map<string, SubagentTimelineItem>();
+    this.pendingSubagentToolByIndex = new Map<number, string>();
+    this.visibleSet = new Set<TimelineItem>();
+  }
+
+  appendEvent(event: RawStreamEvent): TimelineItem[] {
+    const items = this.items;
+    let activeAssistant = this.activeAssistant;
+    const tools = this.tools;
+    const toolCallIdByIndex = this.toolCallIdByIndex;
+    const subagents = this.subagents;
+    const pendingSubagentsByToolCall = this.pendingSubagentsByToolCall;
+    const pendingSubagentToolByIndex = this.pendingSubagentToolByIndex;
+    const previousItemCount = items.length;
+    const visibilityCandidates: TimelineItem[] = [];
+
     const wire = event.wire;
     if (!wire) {
       items.push(createRawItem(event, 'Raw event'));
-      continue;
+      this.syncNewItems(previousItemCount);
+      this.activeAssistant = activeAssistant;
+      return this.visibleItems;
     }
 
     const { variant, payload } = wire;
@@ -253,6 +283,7 @@ export function buildConversationTimeline(events: RawStreamEvent[]): TimelineIte
         const item = ensureActiveAssistant(items, activeAssistant);
         item.msgId ??= asNumber(payload.msg_id);
         item.content += asString(payload.content) ?? '';
+        visibilityCandidates.push(item);
         activeAssistant = item;
         break;
       }
@@ -260,6 +291,7 @@ export function buildConversationTimeline(events: RawStreamEvent[]): TimelineIte
         const item = ensureActiveAssistant(items, activeAssistant);
         item.msgId ??= asNumber(payload.msg_id);
         item.thinking += asString(payload.content) ?? '';
+        visibilityCandidates.push(item);
         activeAssistant = item;
         break;
       }
@@ -271,6 +303,7 @@ export function buildConversationTimeline(events: RawStreamEvent[]): TimelineIte
         item.inputTokens = asNumber(payload.input_tokens);
         item.outputTokens = asNumber(payload.output_tokens);
         item.reasoningTokens = asNumber(payload.reasoning_tokens);
+        visibilityCandidates.push(item);
         activeAssistant = null;
         break;
       }
@@ -498,9 +531,58 @@ export function buildConversationTimeline(events: RawStreamEvent[]): TimelineIte
         items.push(createRawItem(event, variant));
         break;
     }
+
+    this.syncNewItems(previousItemCount);
+    for (const item of visibilityCandidates) {
+      this.syncItemVisibility(item);
+    }
+    this.activeAssistant = activeAssistant;
+    return this.visibleItems;
   }
 
-  return items.filter(shouldRenderTimelineItem);
+  private syncNewItems(previousItemCount: number): void {
+    for (let index = previousItemCount; index < this.items.length; index += 1) {
+      this.syncItemVisibility(this.items[index]);
+    }
+  }
+
+  private syncItemVisibility(item: TimelineItem): void {
+    const shouldRender = shouldRenderTimelineItem(item);
+    const isVisible = this.visibleSet.has(item);
+
+    if (shouldRender && !isVisible) {
+      this.insertVisibleItem(item);
+      return;
+    }
+
+    if (!shouldRender && isVisible) {
+      const visibleIndex = this.visibleItems.indexOf(item);
+      if (visibleIndex !== -1) {
+        this.visibleItems.splice(visibleIndex, 1);
+      }
+      this.visibleSet.delete(item);
+    }
+  }
+
+  private insertVisibleItem(item: TimelineItem): void {
+    const itemIndex = this.items.indexOf(item);
+    if (itemIndex === -1) {
+      return;
+    }
+
+    for (let index = itemIndex - 1; index >= 0; index -= 1) {
+      const previousItem = this.items[index];
+      if (this.visibleSet.has(previousItem)) {
+        const visibleIndex = this.visibleItems.indexOf(previousItem);
+        this.visibleItems.splice(visibleIndex + 1, 0, item);
+        this.visibleSet.add(item);
+        return;
+      }
+    }
+
+    this.visibleItems.unshift(item);
+    this.visibleSet.add(item);
+  }
 }
 
 export function extractSystemNotification(event: RawStreamEvent): SystemNotification | null {

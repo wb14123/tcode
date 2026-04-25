@@ -1,9 +1,9 @@
 import { LitElement, html, nothing } from 'lit';
 
 import { api, openEventStream, sessionLeaseManager, type LeaseSnapshot } from '../api';
-import { buildConversationTimeline, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
+import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
 import { hrefForRoute } from '../router';
-import type { RawStreamEvent, TimelineItem } from '../types';
+import type { TimelineItem } from '../types';
 
 class TcodeToolCallView extends LitElement {
   static properties = {
@@ -16,8 +16,8 @@ class TcodeToolCallView extends LitElement {
   toolCallId = '';
   subagentId = '';
   private statusText = '';
-  private events: RawStreamEvent[] = [];
-  private timeline: TimelineItem[] = [];
+  private timelineBuilder = new ConversationTimelineBuilder();
+  private timeline: TimelineItem[] = this.timelineBuilder.timeline;
   private streamState = 'connecting';
   private loading = true;
   private errorMessage = '';
@@ -29,6 +29,7 @@ class TcodeToolCallView extends LitElement {
   private sessionDisconnected = false;
   private reconnecting = false;
   private leaseErrorMessage = '';
+  private streamUpdateFrame: number | null = null;
 
   createRenderRoot(): this {
     return this;
@@ -57,8 +58,8 @@ class TcodeToolCallView extends LitElement {
 
     this.stopView();
     this.statusText = '';
-    this.events = [];
-    this.timeline = [];
+    this.timelineBuilder.reset();
+    this.timeline = this.timelineBuilder.timeline;
     this.streamState = 'connecting';
     this.loading = true;
     this.errorMessage = '';
@@ -86,6 +87,11 @@ class TcodeToolCallView extends LitElement {
 
     this.eventSource?.close();
     this.eventSource = null;
+
+    if (this.streamUpdateFrame !== null) {
+      window.cancelAnimationFrame(this.streamUpdateFrame);
+      this.streamUpdateFrame = null;
+    }
   }
 
   private attachLease(): void {
@@ -136,6 +142,17 @@ class TcodeToolCallView extends LitElement {
       : api.sessionToolCallDisplayPath(this.sessionId, this.toolCallId);
   }
 
+  private scheduleStreamUpdate(): void {
+    if (this.streamUpdateFrame !== null) {
+      return;
+    }
+
+    this.streamUpdateFrame = window.requestAnimationFrame(() => {
+      this.streamUpdateFrame = null;
+      this.requestUpdate();
+    });
+  }
+
   private openStream(): void {
     const source = openEventStream(this.displayPath());
     this.eventSource = source;
@@ -156,8 +173,7 @@ class TcodeToolCallView extends LitElement {
         return;
       }
 
-      this.events = [...this.events, parsed];
-      this.timeline = buildConversationTimeline(this.events);
+      this.timelineBuilder.appendEvent(parsed);
       const variant = rawVariant(parsed);
       const systemNotification = extractSystemNotification(parsed);
       if (systemNotification?.message) {
@@ -184,7 +200,7 @@ class TcodeToolCallView extends LitElement {
           }),
         );
       }
-      this.requestUpdate();
+      this.scheduleStreamUpdate();
     };
 
     source.onerror = () => {

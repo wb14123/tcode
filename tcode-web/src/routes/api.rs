@@ -781,6 +781,8 @@ fn text_response(text: Option<String>) -> Response {
         .into_response()
 }
 
+const JSONL_READ_CHUNK_BYTES: usize = 16 * 1024;
+
 fn sse_jsonl(
     path: PathBuf,
     wait_for_file: bool,
@@ -792,27 +794,15 @@ fn sse_jsonl(
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     tokio::spawn(async move {
         let mut offset = 0u64;
-        let mut pending = String::new();
+        let mut partial_line = Vec::new();
         loop {
             if tx.is_closed() {
                 return;
             }
-            match read_appended_utf8(&path, offset).await {
-                Ok(Some((new_offset, chunk))) => {
-                    offset = new_offset;
-                    pending.push_str(&chunk);
-                    while let Some(newline_idx) = pending.find('\n') {
-                        let line = pending[..newline_idx].trim_end_matches('\r').to_string();
-                        pending.drain(..=newline_idx);
-                        if tx.send(Ok(Event::default().data(line))).await.is_err() {
-                            return;
-                        }
-                    }
-                }
-                Ok(None) => {}
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "jsonl stream reader error; retrying");
-                }
+            if let Err(e) =
+                send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await
+            {
+                tracing::warn!(path = %path.display(), error = %e, "jsonl stream reader error; retrying");
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -825,55 +815,101 @@ fn sse_jsonl(
     ))
 }
 
-pub(crate) async fn read_appended_utf8(
+pub(crate) async fn send_appended_jsonl_events(
     path: &Path,
-    offset: u64,
-) -> Result<Option<(u64, String)>, std::io::Error> {
+    offset: &mut u64,
+    partial_line: &mut Vec<u8>,
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+) -> Result<(), std::io::Error> {
     let mut file = match tokio::fs::File::open(path).await {
         Ok(file) => file,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
         Err(e) => return Err(e),
     };
     let metadata = file.metadata().await?;
     let snapshot_len = metadata.len();
-    let start = offset;
-    if snapshot_len <= start {
-        return Ok(None);
+    if snapshot_len <= *offset {
+        return Ok(());
     }
 
-    file.seek(SeekFrom::Start(start)).await?;
-    let max_bytes = snapshot_len.saturating_sub(start);
-    let mut buf = Vec::new();
-    let bytes_read = file.take(max_bytes).read_to_end(&mut buf).await? as u64;
-    if bytes_read == 0 {
-        return Ok(None);
-    }
+    file.seek(SeekFrom::Start(*offset)).await?;
+    let mut remaining = snapshot_len.saturating_sub(*offset);
+    let mut read_buf = vec![0u8; JSONL_READ_CHUNK_BYTES];
+    while remaining > 0 {
+        if tx.is_closed() {
+            return Ok(());
+        }
+        let bytes_to_read = read_buf.len().min(remaining as usize);
+        let bytes_read = file.read(&mut read_buf[..bytes_to_read]).await?;
+        if bytes_read == 0 {
+            return Ok(());
+        }
+        remaining = remaining.saturating_sub(bytes_read as u64);
 
-    match String::from_utf8(buf) {
-        Ok(text) => Ok(Some((start + bytes_read, text))),
-        Err(e) => {
-            let valid_up_to = e.utf8_error().valid_up_to();
-            let error_len = e.utf8_error().error_len();
-            let bytes = e.into_bytes();
-            if valid_up_to > 0 {
-                let text = std::str::from_utf8(&bytes[..valid_up_to])
-                    .map_err(|utf8_error| {
-                        std::io::Error::new(std::io::ErrorKind::InvalidData, utf8_error.to_string())
-                    })?
-                    .to_string();
-                return Ok(Some((start + valid_up_to as u64, text)));
-            }
-
-            if error_len.is_none() {
-                return Ok(None);
-            }
-
-            Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "invalid UTF-8 in event stream",
-            ))
+        if !send_jsonl_events_from_chunk(&read_buf[..bytes_read], offset, partial_line, tx).await? {
+            return Ok(());
         }
     }
+    Ok(())
+}
+
+async fn send_jsonl_events_from_chunk(
+    chunk: &[u8],
+    offset: &mut u64,
+    partial_line: &mut Vec<u8>,
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+) -> Result<bool, std::io::Error> {
+    let mut start = 0;
+    let mut consumed = 0;
+    while let Some(relative_newline_idx) = chunk[start..].iter().position(|byte| *byte == b'\n') {
+        let newline_idx = start + relative_newline_idx;
+        let line_bytes = &chunk[start..newline_idx];
+        let sent = if partial_line.is_empty() {
+            send_jsonl_event(line_bytes, tx).await?
+        } else {
+            let mut completed_line = Vec::with_capacity(partial_line.len() + line_bytes.len());
+            completed_line.extend_from_slice(partial_line);
+            completed_line.extend_from_slice(line_bytes);
+            send_jsonl_event(&completed_line, tx).await?
+        };
+        if !sent {
+            return Ok(false);
+        }
+
+        partial_line.clear();
+        let consumed_through_line = newline_idx + 1;
+        *offset += (consumed_through_line - consumed) as u64;
+        consumed = consumed_through_line;
+        start = consumed_through_line;
+    }
+
+    if start < chunk.len() {
+        partial_line.extend_from_slice(&chunk[start..]);
+        *offset += (chunk.len() - consumed) as u64;
+    }
+    Ok(true)
+}
+
+async fn send_jsonl_event(
+    line_bytes: &[u8],
+    tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
+) -> Result<bool, std::io::Error> {
+    let line = jsonl_line_from_bytes(line_bytes)?;
+    Ok(tx.send(Ok(Event::default().data(line))).await.is_ok())
+}
+
+pub(crate) fn jsonl_line_from_bytes(line_bytes: &[u8]) -> Result<String, std::io::Error> {
+    let line_bytes = trim_trailing_cr(line_bytes);
+    std::str::from_utf8(line_bytes)
+        .map(str::to_string)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))
+}
+
+fn trim_trailing_cr(mut bytes: &[u8]) -> &[u8] {
+    while bytes.last() == Some(&b'\r') {
+        bytes = &bytes[..bytes.len() - 1];
+    }
+    bytes
 }
 
 fn find_subagent_dir(session_dir: &Path, subagent_id: &str) -> ApiResult<PathBuf> {

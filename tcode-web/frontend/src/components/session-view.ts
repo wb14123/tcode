@@ -2,8 +2,8 @@ import { LitElement, html, nothing } from 'lit';
 
 import { ApiError, api, openEventStream, sessionLeaseManager, type LeaseSnapshot } from '../api';
 import { navigate } from '../router';
-import { buildConversationTimeline, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
-import type { RawStreamEvent, SessionRuntimeInfo, TimelineItem } from '../types';
+import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
+import type { SessionRuntimeInfo, TimelineItem } from '../types';
 
 interface ToastNotice {
   id: number;
@@ -24,8 +24,8 @@ class TcodeSessionView extends LitElement {
   private statusText = '';
   private usageText = '';
   private tokenUsageText = '';
-  private events: RawStreamEvent[] = [];
-  private timeline: TimelineItem[] = [];
+  private timelineBuilder = new ConversationTimelineBuilder();
+  private timeline: TimelineItem[] = this.timelineBuilder.timeline;
   private composerText = '';
   private loading = true;
   private sending = false;
@@ -43,6 +43,9 @@ class TcodeSessionView extends LitElement {
   private expandedSubagentIds = new Set<string>();
   private stickToBottom = true;
   private lastSnapshotError = '';
+  private streamUpdateFrame: number | null = null;
+  private streamScrollPending = false;
+  private streamScrollForce = false;
 
   createRenderRoot(): this {
     return this;
@@ -75,8 +78,8 @@ class TcodeSessionView extends LitElement {
     this.statusText = '';
     this.usageText = '';
     this.tokenUsageText = '';
-    this.events = [];
-    this.timeline = [];
+    this.timelineBuilder.reset();
+    this.timeline = this.timelineBuilder.timeline;
     this.composerText = '';
     this.loading = true;
     this.sending = false;
@@ -116,6 +119,13 @@ class TcodeSessionView extends LitElement {
 
     this.eventSource?.close();
     this.eventSource = null;
+
+    if (this.streamUpdateFrame !== null) {
+      window.cancelAnimationFrame(this.streamUpdateFrame);
+      this.streamUpdateFrame = null;
+    }
+    this.streamScrollPending = false;
+    this.streamScrollForce = false;
   }
 
   private clearToasts(): void {
@@ -293,6 +303,31 @@ class TcodeSessionView extends LitElement {
     });
   }
 
+  private scheduleStreamUpdate(scrollToBottom = false, forceScroll = false): void {
+    if (scrollToBottom && (forceScroll || this.stickToBottom)) {
+      this.streamScrollPending = true;
+      this.streamScrollForce ||= forceScroll;
+    }
+
+    if (this.streamUpdateFrame !== null) {
+      return;
+    }
+
+    this.streamUpdateFrame = window.requestAnimationFrame(() => {
+      this.streamUpdateFrame = null;
+      this.requestUpdate();
+
+      if (!this.streamScrollPending) {
+        return;
+      }
+
+      const force = this.streamScrollForce;
+      this.streamScrollPending = false;
+      this.streamScrollForce = false;
+      this.scheduleScrollToBottom(force);
+    });
+  }
+
   private onChatScroll = (event: Event): void => {
     const target = event.currentTarget;
     if (!(target instanceof HTMLElement)) {
@@ -372,8 +407,7 @@ class TcodeSessionView extends LitElement {
         return;
       }
 
-      this.events = [...this.events, parsed];
-      this.timeline = buildConversationTimeline(this.events);
+      this.timelineBuilder.appendEvent(parsed);
       const variant = rawVariant(parsed);
       const systemNotification = extractSystemNotification(parsed);
       if (systemNotification?.message) {
@@ -400,8 +434,7 @@ class TcodeSessionView extends LitElement {
           }),
         );
       }
-      this.requestUpdate();
-      this.scheduleScrollToBottom();
+      this.scheduleStreamUpdate(true);
     };
 
     source.onerror = () => {

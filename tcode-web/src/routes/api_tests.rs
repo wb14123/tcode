@@ -4,7 +4,7 @@ use axum::response::IntoResponse;
 
 use super::api::{
     empty_permission_state, ensure_session_resumable, heartbeat_interval_seconds,
-    read_appended_utf8, session_dir_for,
+    jsonl_line_from_bytes, send_appended_jsonl_events, session_dir_for,
 };
 
 fn test_root() -> PathBuf {
@@ -112,19 +112,66 @@ async fn ensure_session_resumable_accepts_valid_conversation_state() -> anyhow::
     Ok(())
 }
 
+#[test]
+fn jsonl_line_from_bytes_decodes_utf8_and_trims_cr() -> anyhow::Result<()> {
+    assert_eq!(jsonl_line_from_bytes(b"ok\xE2\x82\xAC\r")?, "ok€");
+    assert_eq!(jsonl_line_from_bytes(b"plain")?, "plain");
+    assert!(jsonl_line_from_bytes(b"bad\xFF").is_err());
+    Ok(())
+}
+
 #[tokio::test]
-async fn read_appended_utf8_leaves_partial_utf8_for_retry() -> anyhow::Result<()> {
+async fn jsonl_stream_reader_retains_partial_utf8_line_between_polls() -> anyhow::Result<()> {
     let dir = temp_dir();
     let path = dir.join("display.jsonl");
     let mut bytes = b"ok".to_vec();
     bytes.push(0xE2);
     tokio::fs::write(&path, bytes).await?;
 
-    let first = read_appended_utf8(&path, 0).await?;
-    assert_eq!(first, Some((2, "ok".to_string())));
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let mut offset = 0;
+    let mut partial_line = Vec::new();
+
+    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await?;
+    assert_eq!(offset, 3);
+    assert_eq!(partial_line, b"ok\xE2");
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
 
     tokio::fs::write(&path, b"ok\xE2\x82\xAC\n").await?;
-    let second = read_appended_utf8(&path, 2).await?;
-    assert_eq!(second, Some((6, "€\n".to_string())));
+    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await?;
+    assert_eq!(offset, 6);
+    assert!(partial_line.is_empty());
+    rx.try_recv()?.map_err(|never| match never {})?;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn jsonl_stream_reader_does_not_advance_past_invalid_utf8_line() -> anyhow::Result<()> {
+    let dir = temp_dir();
+    let path = dir.join("display.jsonl");
+    tokio::fs::write(&path, b"ok\nbad\xFF\nlater\n").await?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let mut offset = 0;
+    let mut partial_line = Vec::new();
+
+    let err = send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx)
+        .await
+        .expect_err("invalid UTF-8 line should fail");
+    assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+    assert_eq!(offset, 3);
+    assert!(partial_line.is_empty());
+    rx.try_recv()?.map_err(|never| match never {})?;
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
     Ok(())
 }
