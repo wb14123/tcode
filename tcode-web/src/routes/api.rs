@@ -828,7 +828,17 @@ pub(crate) async fn send_appended_jsonl_events(
     };
     let metadata = file.metadata().await?;
     let snapshot_len = metadata.len();
-    if snapshot_len <= *offset {
+    if snapshot_len < *offset {
+        tracing::debug!(
+            path = %path.display(),
+            previous_offset = *offset,
+            snapshot_len,
+            "jsonl stream source shrank; restarting from beginning"
+        );
+        *offset = 0;
+        partial_line.clear();
+    }
+    if snapshot_len == *offset {
         return Ok(());
     }
 

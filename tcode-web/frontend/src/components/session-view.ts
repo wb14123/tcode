@@ -44,6 +44,9 @@ class TcodeSessionView extends LitElement {
   private stickToBottom = true;
   private lastSnapshotError = '';
   private streamUpdateFrame: number | null = null;
+  private streamReconnectHandle: number | null = null;
+  private streamRetryDelayMs = 1000;
+  private streamEventsReceived = 0;
   private streamScrollPending = false;
   private streamScrollForce = false;
 
@@ -91,6 +94,8 @@ class TcodeSessionView extends LitElement {
     this.stickToBottom = true;
     this.lastSnapshotError = '';
     this.lastLeaseError = '';
+    this.streamRetryDelayMs = 1000;
+    this.streamEventsReceived = 0;
     this.clearToasts();
 
     if (!this.sessionId) {
@@ -119,6 +124,11 @@ class TcodeSessionView extends LitElement {
 
     this.eventSource?.close();
     this.eventSource = null;
+
+    if (this.streamReconnectHandle !== null) {
+      window.clearTimeout(this.streamReconnectHandle);
+      this.streamReconnectHandle = null;
+    }
 
     if (this.streamUpdateFrame !== null) {
       window.cancelAnimationFrame(this.streamUpdateFrame);
@@ -385,18 +395,78 @@ class TcodeSessionView extends LitElement {
     }
   }
 
+  private resetTimelineFromReplay(): void {
+    this.timelineBuilder.reset();
+    this.timeline = this.timelineBuilder.timeline;
+  }
+
+  private closeStream(): void {
+    this.eventSource?.close();
+    this.eventSource = null;
+  }
+
+  private scheduleStreamReconnect(): void {
+    if (this.streamReconnectHandle !== null || !this.sessionId || this.draftMode) {
+      return;
+    }
+
+    const delayMs = this.streamRetryDelayMs;
+    this.streamRetryDelayMs = Math.min(this.streamRetryDelayMs * 2, 10000);
+    this.streamReconnectHandle = window.setTimeout(() => {
+      this.streamReconnectHandle = null;
+      if (!this.isConnected || !this.sessionId || this.draftMode) {
+        return;
+      }
+      this.restartStreamFromBeginning();
+    }, delayMs);
+  }
+
+  private restartStreamFromBeginning(): void {
+    if (this.streamReconnectHandle !== null) {
+      window.clearTimeout(this.streamReconnectHandle);
+      this.streamReconnectHandle = null;
+    }
+
+    this.closeStream();
+    this.resetTimelineFromReplay();
+    this.requestUpdate();
+    this.openStream();
+  }
+
+  private scheduleSendCatchUp(sessionId: string, eventsBeforeSend: number): void {
+    window.setTimeout(() => {
+      if (!this.isConnected || this.sessionId !== sessionId || this.draftMode) {
+        return;
+      }
+
+      if (this.streamEventsReceived !== eventsBeforeSend) {
+        return;
+      }
+
+      this.restartStreamFromBeginning();
+    }, 1500);
+  }
+
   private openStream(): void {
-    if (this.eventSource) {
+    if (this.eventSource || !this.sessionId || this.draftMode) {
       return;
     }
     const source = openEventStream(api.sessionDisplayPath(this.sessionId));
     this.eventSource = source;
 
     source.onopen = () => {
+      if (this.eventSource !== source) {
+        return;
+      }
+      this.streamRetryDelayMs = 1000;
       this.requestUpdate();
     };
 
     source.onmessage = (message) => {
+      if (this.eventSource !== source) {
+        return;
+      }
+
       const raw = message.data;
       if (typeof raw !== 'string') {
         return;
@@ -407,6 +477,7 @@ class TcodeSessionView extends LitElement {
         return;
       }
 
+      this.streamEventsReceived += 1;
       this.timelineBuilder.appendEvent(parsed);
       const variant = rawVariant(parsed);
       const systemNotification = extractSystemNotification(parsed);
@@ -438,7 +509,13 @@ class TcodeSessionView extends LitElement {
     };
 
     source.onerror = () => {
+      if (this.eventSource !== source) {
+        return;
+      }
+
+      this.closeStream();
       this.requestUpdate();
+      this.scheduleStreamReconnect();
     };
   }
 
@@ -487,7 +564,9 @@ class TcodeSessionView extends LitElement {
         return;
       }
 
+      const eventsBeforeSend = this.streamEventsReceived;
       await api.sendSessionMessage(this.sessionId, text);
+      this.scheduleSendCatchUp(this.sessionId, eventsBeforeSend);
       this.composerText = '';
       this.requestUpdate();
       await this.updateComplete;

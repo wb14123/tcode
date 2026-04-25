@@ -144,7 +144,38 @@ async fn jsonl_stream_reader_retains_partial_utf8_line_between_polls() -> anyhow
     send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await?;
     assert_eq!(offset, 6);
     assert!(partial_line.is_empty());
-    rx.try_recv()?.map_err(|never| match never {})?;
+    drop(rx.try_recv()?.map_err(|never| match never {})?);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn jsonl_stream_reader_restarts_after_truncation() -> anyhow::Result<()> {
+    let dir = temp_dir();
+    let path = dir.join("display.jsonl");
+    let old_partial = b"old partial without newline";
+    tokio::fs::write(&path, old_partial).await?;
+
+    let (tx, mut rx) = tokio::sync::mpsc::channel(4);
+    let mut offset = 0;
+    let mut partial_line = Vec::new();
+
+    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await?;
+    assert_eq!(offset, old_partial.len() as u64);
+    assert_eq!(partial_line, old_partial);
+    assert!(matches!(
+        rx.try_recv(),
+        Err(tokio::sync::mpsc::error::TryRecvError::Empty)
+    ));
+
+    tokio::fs::write(&path, b"new\n").await?;
+    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await?;
+    assert_eq!(offset, 4);
+    assert!(partial_line.is_empty());
+    drop(rx.try_recv()?.map_err(|never| match never {})?);
     assert!(matches!(
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
@@ -168,7 +199,7 @@ async fn jsonl_stream_reader_does_not_advance_past_invalid_utf8_line() -> anyhow
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
     assert_eq!(offset, 3);
     assert!(partial_line.is_empty());
-    rx.try_recv()?.map_err(|never| match never {})?;
+    drop(rx.try_recv()?.map_err(|never| match never {})?);
     assert!(matches!(
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
