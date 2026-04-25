@@ -3535,6 +3535,7 @@ dependencies = [
  "browser-server",
  "bytes",
  "dirs",
+ "fs2",
  "futures",
  "llm-rs",
  "lsp-client",
@@ -3543,12 +3544,14 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "subtle",
  "tokio",
  "tokio-stream",
  "tokio-util",
  "toml",
  "tools",
  "tracing",
+ "uuid",
 ]
 
 [[package]]

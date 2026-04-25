@@ -1,4 +1,52 @@
 use serde::{Deserialize, Serialize};
+use std::time::Duration;
+
+pub const DEFAULT_LEASE_TIMEOUT_SECONDS: u64 = 60;
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RuntimeOwnerKind {
+    Cli,
+    Web,
+    Serve,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum ClientKind {
+    Cli,
+    Web,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ClientLeaseInfo {
+    pub client_id: String,
+    pub lease_timeout_seconds: u64,
+    pub runtime_info: SessionRuntimeInfo,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct SessionRuntimeInfo {
+    pub active: bool,
+    pub owner_kind: RuntimeOwnerKind,
+    pub active_lease_count: usize,
+    pub lease_timeout_seconds: u64,
+    pub runtime_id: String,
+}
+
+impl SessionRuntimeInfo {
+    pub fn inactive() -> Self {
+        Self {
+            active: false,
+            owner_kind: RuntimeOwnerKind::Cli,
+            active_lease_count: 0,
+            lease_timeout_seconds: DEFAULT_LEASE_TIMEOUT_SECONDS,
+            runtime_id: String::new(),
+        }
+    }
+}
+
+pub fn lease_timeout_duration() -> Duration {
+    Duration::from_secs(DEFAULT_LEASE_TIMEOUT_SECONDS)
+}
 
 /// Client -> Server messages
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -31,8 +79,19 @@ pub enum ClientMessage {
     },
     /// Query the current permission state (pending, session, project)
     GetPermissionState,
-    /// Request server shutdown (broadcasts to all clients)
-    Shutdown,
+    /// Register an active UI/client lease with the runtime.
+    RegisterClientLease {
+        client_kind: ClientKind,
+        client_label: Option<String>,
+    },
+    /// Renew a previously registered client lease.
+    HeartbeatClientLease { client_id: String },
+    /// Drop a previously registered client lease.
+    DetachClientLease { client_id: String },
+    /// Query active runtime metadata.
+    GetSessionRuntimeInfo,
+    /// Request server shutdown from the runtime owner/supervisor.
+    AuthorizedShutdown { owner_token: String },
 }
 
 /// Server -> Client messages
@@ -44,4 +103,8 @@ pub enum ServerMessage {
     Error { message: String },
     /// Full permission state snapshot
     PermissionState(llm_rs::permission::PermissionState),
+    /// Client lease registration response.
+    ClientLeaseRegistered(ClientLeaseInfo),
+    /// Runtime metadata snapshot.
+    SessionRuntimeInfo(SessionRuntimeInfo),
 }

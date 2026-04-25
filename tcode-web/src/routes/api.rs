@@ -20,14 +20,13 @@ use llm_rs::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tcode_runtime::{
-    bootstrap::send_socket_message,
-    protocol::{ClientMessage, ServerMessage},
-    session::{Session, base_path, generate_session_id, list_sessions},
+    protocol::{ClientMessage, DEFAULT_LEASE_TIMEOUT_SECONDS, ServerMessage, SessionRuntimeInfo},
+    session::{Session, base_path, generate_session_id, list_sessions, validate_session_id},
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 
-use crate::state::AppState;
+use crate::state::{AppState, SessionRuntimeStatus};
 
 #[derive(Debug)]
 pub(crate) struct ApiError {
@@ -118,6 +117,29 @@ pub(crate) struct AddPermissionRequest {
     scope: PermissionScope,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RegisterLeaseRequest {
+    #[serde(default)]
+    client_label: Option<String>,
+    #[serde(default)]
+    resume: bool,
+}
+
+#[derive(Serialize)]
+pub(crate) struct LeaseResponse {
+    active: bool,
+    client_id: Option<String>,
+    lease_timeout_seconds: u64,
+    heartbeat_interval_seconds: u64,
+    runtime_info: SessionRuntimeInfo,
+}
+
+#[derive(Serialize)]
+pub(crate) struct RuntimeInfoResponse {
+    runtime_info: SessionRuntimeInfo,
+}
+
 #[derive(Serialize)]
 pub(crate) struct SubagentMetaResponse {
     meta: Value,
@@ -134,8 +156,7 @@ struct ParentContext {
 pub(crate) async fn get_sessions() -> ApiResult<Json<SessionsResponse>> {
     let mut sessions = Vec::new();
     for session_id in list_sessions().map_err(|e| ApiError::internal(e.to_string()))? {
-        let session_dir =
-            session_dir_for(&session_id).map_err(|e| ApiError::internal(e.to_string()))?;
+        let session_dir = session_dir_for(&session_id)?;
         let meta =
             read_json_optional::<SessionMeta>(&session_dir.join("session-meta.json")).await?;
         let status = read_optional_text_file(&session_dir.join("status.txt"))
@@ -207,6 +228,61 @@ pub(crate) async fn get_session_status(
     ))
 }
 
+pub(crate) async fn post_session_lease(
+    State(state): State<std::sync::Arc<AppState>>,
+    AxumPath(session_id): AxumPath<String>,
+    Json(body): Json<RegisterLeaseRequest>,
+) -> ApiResult<Json<LeaseResponse>> {
+    let session_dir = existing_session_dir(&session_id)?;
+    if body.resume {
+        ensure_session_resumable(&session_dir).await?;
+    }
+    let lease = state
+        .register_web_client_lease(&session_id, body.client_label, body.resume)
+        .await
+        .map_err(|e| ApiError::conflict(e.to_string()))?;
+
+    if let Some(lease) = lease {
+        let runtime_info = lease.runtime_info.clone();
+        return Ok(Json(LeaseResponse {
+            active: runtime_info.active,
+            client_id: Some(lease.client_id),
+            lease_timeout_seconds: lease.lease_timeout_seconds,
+            heartbeat_interval_seconds: heartbeat_interval_seconds(lease.lease_timeout_seconds),
+            runtime_info,
+        }));
+    }
+
+    Ok(Json(LeaseResponse {
+        active: false,
+        client_id: None,
+        lease_timeout_seconds: DEFAULT_LEASE_TIMEOUT_SECONDS,
+        heartbeat_interval_seconds: heartbeat_interval_seconds(DEFAULT_LEASE_TIMEOUT_SECONDS),
+        runtime_info: SessionRuntimeInfo::inactive(),
+    }))
+}
+
+pub(crate) async fn post_session_lease_heartbeat(
+    State(state): State<std::sync::Arc<AppState>>,
+    AxumPath((session_id, client_id)): AxumPath<(String, String)>,
+) -> ApiResult<Json<RuntimeInfoResponse>> {
+    existing_session_dir(&session_id)?;
+    let runtime_info = state
+        .heartbeat_client_lease(&session_id, client_id)
+        .await
+        .map_err(|e| ApiError::conflict(e.to_string()))?;
+    Ok(Json(RuntimeInfoResponse { runtime_info }))
+}
+
+pub(crate) async fn delete_session_lease(
+    State(state): State<std::sync::Arc<AppState>>,
+    AxumPath((session_id, client_id)): AxumPath<(String, String)>,
+) -> ApiResult<StatusCode> {
+    existing_session_dir(&session_id)?;
+    state.detach_client_lease(&session_id, client_id).await;
+    Ok(StatusCode::NO_CONTENT)
+}
+
 pub(crate) async fn get_session_usage(
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<impl IntoResponse> {
@@ -230,7 +306,7 @@ pub(crate) async fn stream_session_display(
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     let session_dir = existing_session_dir(&session_id)?;
     let path = session_dir.join("display.jsonl");
-    sse_jsonl(path)
+    sse_jsonl(path, true)
 }
 
 pub(crate) async fn stream_session_tool_call(
@@ -239,7 +315,7 @@ pub(crate) async fn stream_session_tool_call(
     let session_dir = existing_session_dir(&session_id)?;
     let tool_call_id = decode_jsonl_file_id(&tool_call_file)?;
     let path = session_dir.join(format!("tool-call-{tool_call_id}.jsonl"));
-    sse_jsonl(path)
+    sse_jsonl(path, false)
 }
 
 pub(crate) async fn get_session_tool_call_status(
@@ -298,7 +374,7 @@ pub(crate) async fn stream_subagent_display(
     let session_dir = existing_session_dir(&session_id)?;
     let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
     let path = subagent_dir.join("display.jsonl");
-    sse_jsonl(path)
+    sse_jsonl(path, true)
 }
 
 pub(crate) async fn stream_subagent_tool_call(
@@ -308,7 +384,7 @@ pub(crate) async fn stream_subagent_tool_call(
     let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
     let tool_call_id = decode_jsonl_file_id(&tool_call_file)?;
     let path = subagent_dir.join(format!("tool-call-{tool_call_id}.jsonl"));
-    sse_jsonl(path)
+    sse_jsonl(path, false)
 }
 
 pub(crate) async fn get_subagent_tool_call_status(
@@ -364,10 +440,6 @@ pub(crate) async fn post_session_finish(
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<StatusCode> {
     let session_dir = existing_session_dir(&session_id)?;
-    state
-        .ensure_runtime(&session_id)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
     let root_id = root_conversation_id(&session_dir).await?;
     send_runtime_message(
         &state,
@@ -402,10 +474,6 @@ pub(crate) async fn post_session_cancel(
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<StatusCode> {
     let session_dir = existing_session_dir(&session_id)?;
-    state
-        .ensure_runtime(&session_id)
-        .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
     let root_id = root_conversation_id(&session_dir).await?;
     send_runtime_message(
         &state,
@@ -478,11 +546,17 @@ pub(crate) async fn get_permissions(
 ) -> ApiResult<Json<PermissionState>> {
     existing_session_dir(&session_id)?;
     let response =
-        send_runtime_message(&state, &session_id, ClientMessage::GetPermissionState).await?;
+        send_runtime_message_if_active(&state, &session_id, ClientMessage::GetPermissionState)
+            .await?;
     match response {
-        ServerMessage::PermissionState(state) => Ok(Json(state)),
-        ServerMessage::Ack => Err(ApiError::internal("unexpected ack from permission query")),
-        ServerMessage::Error { message } => Err(map_runtime_error(message)),
+        Some(ServerMessage::PermissionState(state)) => Ok(Json(state)),
+        Some(ServerMessage::Ack) => Err(ApiError::internal("unexpected ack from permission query")),
+        Some(ServerMessage::Error { message }) => Err(map_runtime_error(message)),
+        Some(ServerMessage::ClientLeaseRegistered(_))
+        | Some(ServerMessage::SessionRuntimeInfo(_)) => Err(ApiError::internal(
+            "unexpected runtime response from permission query",
+        )),
+        None => Ok(Json(empty_permission_state())),
     }
 }
 
@@ -538,22 +612,63 @@ async fn send_runtime_message(
     session_id: &str,
     message: ClientMessage,
 ) -> ApiResult<ServerMessage> {
-    state
-        .ensure_runtime(session_id)
+    match state
+        .runtime_status(session_id)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    let socket_path = session_dir_for(session_id)
         .map_err(|e| ApiError::internal(e.to_string()))?
-        .join("server.sock");
-    let response = send_socket_message(socket_path, &message)
+    {
+        SessionRuntimeStatus::Active => {}
+        SessionRuntimeStatus::Inactive => {
+            return Err(ApiError::conflict(
+                "session runtime is inactive; reconnect/resume the session before sending commands",
+            ));
+        }
+        SessionRuntimeStatus::Unresponsive => {
+            return Err(ApiError::conflict(
+                SessionRuntimeStatus::unavailable_message(),
+            ));
+        }
+    }
+
+    let response = state
+        .send_socket_message(session_id, message)
         .await
-        .map_err(|e| ApiError::internal(e.to_string()))?;
-    let response =
-        response.ok_or_else(|| ApiError::internal("runtime closed socket without responding"))?;
+        .map_err(|e| ApiError::conflict(format!("session runtime is unavailable: {e}")))?;
     if let ServerMessage::Error { message } = &response {
         return Err(map_runtime_error(message.clone()));
     }
     Ok(response)
+}
+
+async fn send_runtime_message_if_active(
+    state: &AppState,
+    session_id: &str,
+    message: ClientMessage,
+) -> ApiResult<Option<ServerMessage>> {
+    let Some(response) = state
+        .send_runtime_message_if_active(session_id, message)
+        .await
+        .map_err(|e| ApiError::conflict(e.to_string()))?
+    else {
+        return Ok(None);
+    };
+
+    if let ServerMessage::Error { message } = &response {
+        return Err(map_runtime_error(message.clone()));
+    }
+    Ok(Some(response))
+}
+
+pub(crate) fn heartbeat_interval_seconds(lease_timeout_seconds: u64) -> u64 {
+    (lease_timeout_seconds / 4).clamp(5, 15)
+}
+
+pub(crate) fn empty_permission_state() -> PermissionState {
+    PermissionState {
+        pending: Vec::new(),
+        session: Vec::new(),
+        project: Vec::new(),
+    }
 }
 
 fn map_runtime_error(message: String) -> ApiError {
@@ -577,16 +692,46 @@ fn create_unique_session_id() -> std::io::Result<String> {
     ))
 }
 
-fn session_dir_for(session_id: &str) -> std::io::Result<PathBuf> {
-    Ok(base_path().map_err(std::io::Error::other)?.join(session_id))
+pub(crate) fn session_dir_for(session_id: &str) -> ApiResult<PathBuf> {
+    validate_session_id(session_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
+    Ok(base_path()
+        .map_err(|e| ApiError::internal(e.to_string()))?
+        .join(session_id))
 }
 
 fn existing_session_dir(session_id: &str) -> ApiResult<PathBuf> {
-    let session_dir = session_dir_for(session_id).map_err(|e| ApiError::internal(e.to_string()))?;
+    let session_dir = session_dir_for(session_id)?;
     if !session_dir.is_dir() {
         return Err(ApiError::not_found("session not found"));
     }
     Ok(session_dir)
+}
+
+pub(crate) async fn ensure_session_resumable(session_dir: &Path) -> ApiResult<()> {
+    let path = session_dir.join("conversation-state.json");
+    let bytes = tokio::fs::read(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ApiError::conflict(
+                "cannot resume historical session: conversation-state.json is missing",
+            )
+        } else {
+            ApiError::conflict(format!(
+                "cannot resume historical session: conversation-state.json is not readable: {e}"
+            ))
+        }
+    })?;
+
+    let state: ConversationState = serde_json::from_slice(&bytes).map_err(|e| {
+        ApiError::conflict(format!(
+            "cannot resume historical session: conversation-state.json is invalid: {e}"
+        ))
+    })?;
+    if state.id.trim().is_empty() {
+        return Err(ApiError::conflict(
+            "cannot resume historical session: conversation-state.json has no conversation id",
+        ));
+    }
+    Ok(())
 }
 
 async fn read_json_value(path: &Path) -> ApiResult<Value> {
@@ -636,8 +781,11 @@ fn text_response(text: Option<String>) -> Response {
         .into_response()
 }
 
-fn sse_jsonl(path: PathBuf) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
-    if !path.is_file() {
+fn sse_jsonl(
+    path: PathBuf,
+    wait_for_file: bool,
+) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
+    if !wait_for_file && !path.is_file() {
         return Err(ApiError::not_found("event stream not found"));
     }
 
@@ -663,8 +811,7 @@ fn sse_jsonl(path: PathBuf) -> ApiResult<Sse<impl Stream<Item = Result<Event, In
                 }
                 Ok(None) => {}
                 Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "jsonl stream reader stopped");
-                    return;
+                    tracing::warn!(path = %path.display(), error = %e, "jsonl stream reader error; retrying");
                 }
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
@@ -678,21 +825,55 @@ fn sse_jsonl(path: PathBuf) -> ApiResult<Sse<impl Stream<Item = Result<Event, In
     ))
 }
 
-async fn read_appended_utf8(
+pub(crate) async fn read_appended_utf8(
     path: &Path,
     offset: u64,
 ) -> Result<Option<(u64, String)>, std::io::Error> {
-    let mut file = tokio::fs::File::open(path).await?;
+    let mut file = match tokio::fs::File::open(path).await {
+        Ok(file) => file,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(e) => return Err(e),
+    };
     let metadata = file.metadata().await?;
-    if metadata.len() <= offset {
+    let snapshot_len = metadata.len();
+    let start = offset;
+    if snapshot_len <= start {
         return Ok(None);
     }
-    file.seek(SeekFrom::Start(offset)).await?;
+
+    file.seek(SeekFrom::Start(start)).await?;
+    let max_bytes = snapshot_len.saturating_sub(start);
     let mut buf = Vec::new();
-    file.read_to_end(&mut buf).await?;
-    let text = String::from_utf8(buf)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-    Ok(Some((metadata.len(), text)))
+    let bytes_read = file.take(max_bytes).read_to_end(&mut buf).await? as u64;
+    if bytes_read == 0 {
+        return Ok(None);
+    }
+
+    match String::from_utf8(buf) {
+        Ok(text) => Ok(Some((start + bytes_read, text))),
+        Err(e) => {
+            let valid_up_to = e.utf8_error().valid_up_to();
+            let error_len = e.utf8_error().error_len();
+            let bytes = e.into_bytes();
+            if valid_up_to > 0 {
+                let text = std::str::from_utf8(&bytes[..valid_up_to])
+                    .map_err(|utf8_error| {
+                        std::io::Error::new(std::io::ErrorKind::InvalidData, utf8_error.to_string())
+                    })?
+                    .to_string();
+                return Ok(Some((start + valid_up_to as u64, text)));
+            }
+
+            if error_len.is_none() {
+                return Ok(None);
+            }
+
+            Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid UTF-8 in event stream",
+            ))
+        }
+    }
 }
 
 fn find_subagent_dir(session_dir: &Path, subagent_id: &str) -> ApiResult<PathBuf> {

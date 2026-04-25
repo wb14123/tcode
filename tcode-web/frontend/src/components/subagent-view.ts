@@ -1,6 +1,6 @@
 import { LitElement, html, nothing } from 'lit';
 
-import { ApiError, ReplayAwareBuffer, api, openEventStream } from '../api';
+import { ApiError, api, openEventStream, sessionLeaseManager, type LeaseSnapshot } from '../api';
 import { buildConversationTimeline, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
 import type { RawStreamEvent, TimelineItem } from '../types';
 
@@ -29,13 +29,17 @@ class TcodeSubagentView extends LitElement {
   private finishing = false;
   private pollHandle: number | null = null;
   private eventSource: EventSource | null = null;
-  private replayBuffer = new ReplayAwareBuffer();
+  private leaseRelease: (() => void) | null = null;
   private toasts: ToastNotice[] = [];
   private toastCounter = 0;
   private toastTimeouts = new Map<number, number>();
   private expandedSubagentIds = new Set<string>();
   private stickToBottom = true;
   private lastSnapshotError = '';
+  private sessionDisconnected = false;
+  private reconnecting = false;
+  private leaseErrorMessage = '';
+  private lastLeaseError = '';
 
   createRenderRoot(): this {
     return this;
@@ -81,10 +85,14 @@ class TcodeSubagentView extends LitElement {
     this.expandedSubagentIds = new Set<string>();
     this.stickToBottom = true;
     this.lastSnapshotError = '';
+    this.sessionDisconnected = false;
+    this.reconnecting = false;
+    this.leaseErrorMessage = '';
+    this.lastLeaseError = '';
     this.clearToasts();
-    this.replayBuffer.reset();
     this.requestUpdate();
     void this.refreshSnapshots(true);
+    this.attachLease();
     this.openStream();
     this.pollHandle = window.setInterval(() => {
       void this.refreshSnapshots(false);
@@ -97,8 +105,37 @@ class TcodeSubagentView extends LitElement {
       this.pollHandle = null;
     }
 
+    this.leaseRelease?.();
+    this.leaseRelease = null;
+
     this.eventSource?.close();
     this.eventSource = null;
+  }
+
+  private attachLease(): void {
+    this.leaseRelease?.();
+    this.leaseRelease = null;
+    if (this.sessionId) {
+      this.leaseRelease = sessionLeaseManager.attach(this.sessionId, (snapshot) => this.onLeaseSnapshot(snapshot));
+    }
+  }
+
+  private onLeaseSnapshot(snapshot: LeaseSnapshot): void {
+    if (snapshot.sessionId !== this.sessionId) {
+      return;
+    }
+
+    this.sessionDisconnected = snapshot.disconnected;
+    this.reconnecting = snapshot.reconnecting;
+    this.leaseErrorMessage = snapshot.errorMessage;
+    if (snapshot.errorMessage && snapshot.errorMessage !== this.lastLeaseError) {
+      this.lastLeaseError = snapshot.errorMessage;
+      this.showToast(snapshot.errorMessage, 'error');
+    }
+    if (!snapshot.errorMessage) {
+      this.lastLeaseError = '';
+    }
+    this.requestUpdate();
   }
 
   private clearToasts(): void {
@@ -149,6 +186,12 @@ class TcodeSubagentView extends LitElement {
   }
 
   private statusSummary(): string {
+    if (this.sessionDisconnected) {
+      return 'Disconnected';
+    }
+    if (this.reconnecting) {
+      return 'Reconnecting…';
+    }
     if (this.statusText.trim()) {
       return this.statusText.trim();
     }
@@ -159,6 +202,9 @@ class TcodeSubagentView extends LitElement {
   }
 
   private isGenerating(): boolean {
+    if (this.sessionDisconnected) {
+      return false;
+    }
     const status = this.statusText.trim().toLowerCase();
     return status.includes('stream') || status.includes('thinking');
   }
@@ -190,6 +236,10 @@ class TcodeSubagentView extends LitElement {
         <path d="M7 7h10v10H7z"></path>
       </svg>
     `;
+  }
+
+  private mutationDisabled(): boolean {
+    return this.sessionDisconnected || this.reconnecting;
   }
 
   private async scheduleScrollToBottom(force = false): Promise<void> {
@@ -247,7 +297,7 @@ class TcodeSubagentView extends LitElement {
     } catch (error) {
       const message =
         error instanceof ApiError && error.status === 404
-          ? 'Subagent snapshots are not available yet. Waiting for runtime output…'
+          ? 'Subagent snapshot files are missing or not available yet; this may be historical/incomplete output or runtime output may still be pending.'
           : error instanceof Error
             ? error.message
             : 'Failed to load subagent data';
@@ -265,19 +315,16 @@ class TcodeSubagentView extends LitElement {
   }
 
   private openStream(): void {
-    this.eventSource?.close();
-    this.replayBuffer.beginReplay();
     const source = openEventStream(api.subagentDisplayPath(this.sessionId, this.subagentId));
     this.eventSource = source;
 
     source.onopen = () => {
-      this.replayBuffer.beginReplay();
       this.requestUpdate();
     };
 
     source.onmessage = (message) => {
       const raw = message.data;
-      if (typeof raw !== 'string' || !this.replayBuffer.accept(raw)) {
+      if (typeof raw !== 'string') {
         return;
       }
 
@@ -319,7 +366,6 @@ class TcodeSubagentView extends LitElement {
     };
 
     source.onerror = () => {
-      this.replayBuffer.beginReplay();
       this.requestUpdate();
     };
   }
@@ -350,7 +396,7 @@ class TcodeSubagentView extends LitElement {
   private async submitMessage(event: Event): Promise<void> {
     event.preventDefault();
     const text = this.composerText.trim();
-    if (!text || this.sending || this.finishing || this.isGenerating()) {
+    if (!text || this.sending || this.finishing || this.isGenerating() || this.mutationDisabled()) {
       return;
     }
 
@@ -388,7 +434,7 @@ class TcodeSubagentView extends LitElement {
   }
 
   private async cancelConversation(): Promise<void> {
-    if (this.cancelling || !this.isGenerating()) {
+    if (this.cancelling || !this.isGenerating() || this.mutationDisabled()) {
       return;
     }
 
@@ -408,7 +454,7 @@ class TcodeSubagentView extends LitElement {
   }
 
   private async finishConversation(): Promise<void> {
-    if (this.finishing || this.sending || this.isGenerating() || !this.canFinishConversation()) {
+    if (this.finishing || this.sending || this.isGenerating() || !this.canFinishConversation() || this.mutationDisabled()) {
       return;
     }
 
@@ -452,6 +498,10 @@ class TcodeSubagentView extends LitElement {
     const combinedUsage = this.combinedUsageText();
     const statusTone = this.statusTone();
     const canFinish = this.canFinishConversation();
+    const mutationsDisabled = this.mutationDisabled();
+    const leaseAlert = this.sessionDisconnected
+      ? this.leaseErrorMessage || 'Session runtime disconnected. Reconnect from the session view before changing this subagent.'
+      : '';
     const showProgress = this.loading || this.sending || this.finishing || this.isGenerating();
 
     return html`
@@ -489,6 +539,8 @@ class TcodeSubagentView extends LitElement {
               ${combinedUsage ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${combinedUsage}</span>` : nothing}
             </footer>
 
+            ${leaseAlert ? html`<div class="inline-alert error">${leaseAlert}</div>` : nothing}
+
             <form class="panel chat-composer" @submit=${this.submitMessage}>
               <div class="chat-composer-row">
                 <textarea
@@ -498,6 +550,7 @@ class TcodeSubagentView extends LitElement {
                   .value=${this.composerText}
                   @input=${this.onComposerInput}
                   @keydown=${this.onComposerKeyDown}
+                  ?disabled=${mutationsDisabled}
                 ></textarea>
                 <div class="chat-composer-actions">
                   ${this.isGenerating()
@@ -507,7 +560,7 @@ class TcodeSubagentView extends LitElement {
                           class="button secondary chat-composer-done"
                           type="button"
                           @click=${this.finishConversation}
-                          ?disabled=${this.finishing || this.sending || !canFinish}
+                          ?disabled=${mutationsDisabled || this.finishing || this.sending || !canFinish}
                           title=${
                             this.finishing
                               ? 'Marking done…'
@@ -525,7 +578,7 @@ class TcodeSubagentView extends LitElement {
                           class="button danger chat-composer-action"
                           type="button"
                           @click=${this.cancelConversation}
-                          ?disabled=${this.cancelling}
+                          ?disabled=${mutationsDisabled || this.cancelling}
                           aria-label=${this.cancelling ? 'Cancelling subagent' : 'Cancel subagent'}
                           title=${this.cancelling ? 'Cancelling…' : 'Cancel subagent'}
                         >
@@ -536,7 +589,7 @@ class TcodeSubagentView extends LitElement {
                         <button
                           class="button chat-composer-action"
                           type="submit"
-                          ?disabled=${this.sending || this.finishing || !this.composerText.trim()}
+                          ?disabled=${mutationsDisabled || this.sending || this.finishing || !this.composerText.trim()}
                           aria-label=${this.sending ? 'Sending message' : 'Send message'}
                           title=${this.sending ? 'Sending…' : 'Send message'}
                         >

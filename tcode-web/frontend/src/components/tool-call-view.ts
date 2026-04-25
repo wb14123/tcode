@@ -1,6 +1,6 @@
 import { LitElement, html, nothing } from 'lit';
 
-import { ReplayAwareBuffer, api, openEventStream } from '../api';
+import { api, openEventStream, sessionLeaseManager, type LeaseSnapshot } from '../api';
 import { buildConversationTimeline, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
 import { hrefForRoute } from '../router';
 import type { RawStreamEvent, TimelineItem } from '../types';
@@ -25,7 +25,10 @@ class TcodeToolCallView extends LitElement {
   private cancelling = false;
   private pollHandle: number | null = null;
   private eventSource: EventSource | null = null;
-  private replayBuffer = new ReplayAwareBuffer();
+  private leaseRelease: (() => void) | null = null;
+  private sessionDisconnected = false;
+  private reconnecting = false;
+  private leaseErrorMessage = '';
 
   createRenderRoot(): this {
     return this;
@@ -60,9 +63,12 @@ class TcodeToolCallView extends LitElement {
     this.loading = true;
     this.errorMessage = '';
     this.actionMessage = '';
-    this.replayBuffer.reset();
+    this.sessionDisconnected = false;
+    this.reconnecting = false;
+    this.leaseErrorMessage = '';
     this.requestUpdate();
     void this.refreshStatus(true);
+    this.attachLease();
     this.openStream();
     this.pollHandle = window.setInterval(() => {
       void this.refreshStatus(false);
@@ -75,8 +81,34 @@ class TcodeToolCallView extends LitElement {
       this.pollHandle = null;
     }
 
+    this.leaseRelease?.();
+    this.leaseRelease = null;
+
     this.eventSource?.close();
     this.eventSource = null;
+  }
+
+  private attachLease(): void {
+    this.leaseRelease?.();
+    this.leaseRelease = null;
+    if (this.sessionId) {
+      this.leaseRelease = sessionLeaseManager.attach(this.sessionId, (snapshot) => this.onLeaseSnapshot(snapshot));
+    }
+  }
+
+  private onLeaseSnapshot(snapshot: LeaseSnapshot): void {
+    if (snapshot.sessionId !== this.sessionId) {
+      return;
+    }
+
+    this.sessionDisconnected = snapshot.disconnected;
+    this.reconnecting = snapshot.reconnecting;
+    this.leaseErrorMessage = snapshot.errorMessage;
+    this.requestUpdate();
+  }
+
+  private mutationDisabled(): boolean {
+    return this.sessionDisconnected || this.reconnecting;
   }
 
   private async refreshStatus(initial: boolean): Promise<void> {
@@ -105,20 +137,17 @@ class TcodeToolCallView extends LitElement {
   }
 
   private openStream(): void {
-    this.eventSource?.close();
-    this.replayBuffer.beginReplay();
     const source = openEventStream(this.displayPath());
     this.eventSource = source;
 
     source.onopen = () => {
       this.streamState = 'live';
-      this.replayBuffer.beginReplay();
       this.requestUpdate();
     };
 
     source.onmessage = (message) => {
       const raw = message.data;
-      if (typeof raw !== 'string' || !this.replayBuffer.accept(raw)) {
+      if (typeof raw !== 'string') {
         return;
       }
 
@@ -160,13 +189,12 @@ class TcodeToolCallView extends LitElement {
 
     source.onerror = () => {
       this.streamState = 'reconnecting';
-      this.replayBuffer.beginReplay();
       this.requestUpdate();
     };
   }
 
   private async cancelToolCall(): Promise<void> {
-    if (this.cancelling) {
+    if (this.cancelling || this.mutationDisabled()) {
       return;
     }
 
@@ -206,6 +234,11 @@ class TcodeToolCallView extends LitElement {
   }
 
   render() {
+    const mutationsDisabled = this.mutationDisabled();
+    const leaseAlert = this.sessionDisconnected
+      ? this.leaseErrorMessage || 'Session runtime disconnected. Reconnect from the session view before cancelling this tool call.'
+      : '';
+
     return html`
       <section class="page">
         <header class="page-header">
@@ -219,13 +252,14 @@ class TcodeToolCallView extends LitElement {
           <div class="header-actions">
             <span class="pill pill-${this.streamState}">${this.streamState}</span>
             <a class="button secondary" href="${this.parentHref()}">Back</a>
-            <button class="button danger" @click=${this.cancelToolCall} ?disabled=${this.cancelling}>
+            <button class="button danger" @click=${this.cancelToolCall} ?disabled=${mutationsDisabled || this.cancelling}>
               ${this.cancelling ? 'Cancelling…' : 'Cancel tool'}
             </button>
           </div>
         </header>
 
         ${this.errorMessage ? html`<div class="inline-alert error">${this.errorMessage}</div>` : nothing}
+        ${leaseAlert ? html`<div class="inline-alert error">${leaseAlert}</div>` : nothing}
         ${this.actionMessage ? html`<div class="inline-alert info">${this.actionMessage}</div>` : nothing}
 
         <section class="panel">

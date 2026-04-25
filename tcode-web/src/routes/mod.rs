@@ -15,6 +15,8 @@ use auth_middleware::require_auth;
 pub(crate) use auth::SESSION_COOKIE_NAME;
 
 #[cfg(test)]
+mod api_tests;
+#[cfg(test)]
 mod auth_tests;
 #[cfg(test)]
 mod enforcement_tests;
@@ -96,6 +98,18 @@ pub(crate) fn protected_routes(state: Arc<AppState>) -> axum::Router<Arc<AppStat
         .route(
             "/api/sessions/{session_id}/messages",
             axum::routing::post(api::post_session_message),
+        )
+        .route(
+            "/api/sessions/{session_id}/leases",
+            axum::routing::post(api::post_session_lease),
+        )
+        .route(
+            "/api/sessions/{session_id}/leases/{client_id}/heartbeat",
+            axum::routing::post(api::post_session_lease_heartbeat),
+        )
+        .route(
+            "/api/sessions/{session_id}/leases/{client_id}",
+            axum::routing::delete(api::delete_session_lease),
         )
         .route(
             "/api/sessions/{session_id}/subagents/{subagent_id}/messages",

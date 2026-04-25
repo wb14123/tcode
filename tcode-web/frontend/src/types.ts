@@ -18,6 +18,33 @@ export interface CreateSessionResponse {
   id: string;
 }
 
+export type RuntimeOwnerKind = 'Cli' | 'Web' | 'Serve';
+
+export interface SessionRuntimeInfo {
+  active: boolean;
+  owner_kind: RuntimeOwnerKind;
+  active_lease_count: number;
+  lease_timeout_seconds: number;
+  runtime_id: string;
+}
+
+export interface RuntimeInfoResponse {
+  runtime_info: SessionRuntimeInfo;
+}
+
+export interface LeaseResponse {
+  active: boolean;
+  client_id: string | null;
+  lease_timeout_seconds: number;
+  heartbeat_interval_seconds: number;
+  runtime_info: SessionRuntimeInfo;
+}
+
+export interface RegisterLeaseRequest {
+  client_label?: string;
+  resume?: boolean;
+}
+
 export interface PermissionKey {
   tool: string;
   key: string;

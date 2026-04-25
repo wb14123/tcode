@@ -33,6 +33,7 @@ class TcodeApp extends LitElement {
   private permissionsPollHandle: number | null = null;
   private permissionState: PermissionState | null = null;
   private permissionsError = '';
+  private lastPermissionsErrorToast = '';
   private draftVersion = 0;
   private denyReason = '';
   private resolvingPermission = false;
@@ -73,6 +74,7 @@ class TcodeApp extends LitElement {
     this.sessions = [];
     this.permissionState = null;
     this.permissionsError = '';
+    this.lastPermissionsErrorToast = '';
     this.stopSessionsPolling();
     this.stopPermissionsPolling();
     if (this.route.kind !== 'login') {
@@ -142,6 +144,7 @@ class TcodeApp extends LitElement {
     if (this.authState !== 'authenticated') {
       this.permissionState = null;
       this.permissionsError = '';
+      this.lastPermissionsErrorToast = '';
       this.requestUpdate();
       return;
     }
@@ -150,6 +153,7 @@ class TcodeApp extends LitElement {
     if (!sessionId) {
       this.permissionState = null;
       this.permissionsError = '';
+      this.lastPermissionsErrorToast = '';
       this.requestUpdate();
       return;
     }
@@ -230,6 +234,7 @@ class TcodeApp extends LitElement {
     if (!sessionId) {
       this.permissionState = null;
       this.permissionsError = '';
+      this.lastPermissionsErrorToast = '';
       this.requestUpdate();
       return;
     }
@@ -237,12 +242,19 @@ class TcodeApp extends LitElement {
     try {
       this.permissionState = await api.getPermissions(sessionId);
       this.permissionsError = '';
+      this.lastPermissionsErrorToast = '';
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
         this.permissionState = null;
         this.permissionsError = '';
+        this.lastPermissionsErrorToast = '';
       } else {
-        this.permissionsError = error instanceof Error ? error.message : 'Failed to load permissions';
+        const message = error instanceof Error ? error.message : 'Failed to load permissions';
+        this.permissionsError = message;
+        if (message !== this.lastPermissionsErrorToast) {
+          this.lastPermissionsErrorToast = message;
+          this.showToast(message, 'error', 7000);
+        }
       }
     }
     this.requestUpdate();
@@ -349,6 +361,7 @@ class TcodeApp extends LitElement {
 
     this.resolvingPermission = true;
     this.permissionsError = '';
+    this.lastPermissionsErrorToast = '';
     this.requestUpdate();
 
     try {
@@ -356,7 +369,9 @@ class TcodeApp extends LitElement {
       this.denyReason = '';
       await this.refreshPermissions();
     } catch (error) {
-      this.permissionsError = error instanceof Error ? error.message : 'Failed to resolve permission';
+      const message = error instanceof Error ? error.message : 'Failed to resolve permission';
+      this.permissionsError = message;
+      this.showToast(message, 'error', 7000);
     } finally {
       this.resolvingPermission = false;
       this.requestUpdate();

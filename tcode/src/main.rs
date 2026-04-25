@@ -1,5 +1,6 @@
 mod approve_ui;
 mod claude_auth;
+mod cli_runtime;
 mod config_wizard;
 mod container;
 mod display;
@@ -14,6 +15,9 @@ mod tty_stdio;
 
 pub(crate) use tcode_runtime::bootstrap::{auth_command_for_profile, create_llm};
 pub(crate) use tcode_runtime::{config, protocol, server, session};
+
+#[cfg(test)]
+mod cli_runtime_tests;
 
 #[cfg(test)]
 mod config_tests;
@@ -71,8 +75,10 @@ use llm_rs::llm::{ChatOptions, LLM};
 use server::Server;
 use session::Session;
 use tcode_runtime::bootstrap::{
-    browser_server_socket_path, build_chat_options, init_browser_client, parse_search_engine,
+    RuntimeProbeStatus, browser_server_socket_path, build_chat_options, init_browser_client,
+    parse_search_engine, probe_runtime_status,
 };
+use tcode_runtime::protocol::RuntimeOwnerKind;
 use tool_call_display::ToolCallDisplayClient;
 
 #[derive(Parser)]
@@ -368,9 +374,32 @@ async fn main() -> Result<()> {
             run_unified(config, profile.as_deref(), container_config).await
         }
         Some(Commands::Serve) => {
-            let config = load_cfg()?;
             let session_id = require_session(session)?;
             init_tracing(&session_id);
+            let sess = Session::new(session_id.clone())?;
+            let socket_path = sess.socket_path();
+            match probe_runtime_status(&socket_path).await? {
+                RuntimeProbeStatus::Active(info) => {
+                    let lease = cli_runtime::register_cli_lease(socket_path.clone(), "serve")
+                        .await
+                        .context("Failed to register serve runtime lease")?;
+                    println!(
+                        "Session '{}' is already active ({:?}); attached to existing runtime.",
+                        session_id, info.owner_kind
+                    );
+                    cli_runtime::wait_for_runtime_end(socket_path).await;
+                    lease.detach().await;
+                    return Ok(());
+                }
+                RuntimeProbeStatus::Unresponsive => {
+                    bail!(
+                        "session runtime socket at {:?} is unresponsive; another runtime may still be starting",
+                        socket_path
+                    );
+                }
+                RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {}
+            }
+            let config = load_cfg()?;
             init_browser_client(
                 config.browser_server_url.clone(),
                 config.browser_server_token.clone(),
@@ -378,12 +407,11 @@ async fn main() -> Result<()> {
             .await?;
             let search_engine = parse_search_engine(config.search_engine_str())?;
             tools::set_search_engine(search_engine);
+            let container_config = resolve_container_config(&container, &container_runtime).await?;
             let (llm, model, token_manager) = create_llm(&config, profile.as_deref())?;
             let chat_options = build_chat_options();
-            let container_config = resolve_container_config(&container, &container_runtime).await?;
-            let sess = Session::new(session_id)?;
-            let server = Server::new(
-                sess.socket_path(),
+            let server = Server::new_with_runtime_options(
+                socket_path,
                 sess.display_file(),
                 sess.status_file(),
                 sess.usage_file(),
@@ -396,6 +424,10 @@ async fn main() -> Result<()> {
                 config.subagent_model_selection.unwrap_or(false),
                 token_manager,
                 container_config,
+                server::ServerRuntimeOptions {
+                    owner_kind: RuntimeOwnerKind::Serve,
+                    ..server::ServerRuntimeOptions::default()
+                },
             );
             server.run(None).await
         }
@@ -457,19 +489,42 @@ async fn main() -> Result<()> {
                     session_id
                 );
             }
-            let (llm, model, token_manager) = create_llm(&config, profile.as_deref())?;
-            let chat_options = build_chat_options();
-            let container_config = resolve_container_config(&container, &container_runtime).await?;
+            let socket_path = sess.socket_path();
+            let runtime_deps = match probe_runtime_status(&socket_path).await? {
+                RuntimeProbeStatus::Active(info) => {
+                    tracing::info!(
+                        owner_kind = ?info.owner_kind,
+                        session_id,
+                        "attaching to already-active runtime without constructing owner dependencies"
+                    );
+                    None
+                }
+                RuntimeProbeStatus::Unresponsive => {
+                    bail!(
+                        "session runtime socket at {:?} is unresponsive; another runtime may still be starting",
+                        socket_path
+                    );
+                }
+                RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {
+                    let (llm, model, token_manager) = create_llm(&config, profile.as_deref())?;
+                    let chat_options = build_chat_options();
+                    let container_config =
+                        resolve_container_config(&container, &container_runtime).await?;
+                    Some(RuntimeDependencies {
+                        llm,
+                        model,
+                        chat_options,
+                        token_manager,
+                        container_config,
+                    })
+                }
+            };
             run_unified_with_session(
                 sess,
                 session_id,
-                llm,
-                model,
-                chat_options,
+                runtime_deps,
                 &config,
-                token_manager,
                 "Attaching to session",
-                container_config,
             )
             .await
         }
@@ -742,19 +797,15 @@ async fn run_unified(
     let session = Session::new(session_id.clone())?;
     let (llm, model, token_manager) = create_llm(&config, profile)?;
     let chat_options = build_chat_options();
-
-    run_unified_with_session(
-        session,
-        session_id,
+    let runtime_deps = Some(RuntimeDependencies {
         llm,
         model,
         chat_options,
-        &config,
         token_manager,
-        "Session",
         container_config,
-    )
-    .await
+    });
+
+    run_unified_with_session(session, session_id, runtime_deps, &config, "Session").await
 }
 
 struct PaneInfo {
@@ -947,19 +998,86 @@ fn setup_layout_panes(
     Ok(panes)
 }
 
+fn cleanup_non_display_panes(panes: &[PaneInfo]) {
+    for pane in panes {
+        if pane.command == config::PanelCommand::Display {
+            continue;
+        }
+        if let Err(e) = Command::new("tmux")
+            .args(["kill-pane", "-t", &pane.pane_id])
+            .output()
+        {
+            tracing::debug!("failed to kill {} pane {}: {e}", pane.command, pane.pane_id);
+        }
+    }
+}
+
+struct RuntimeDependencies {
+    llm: Box<dyn LLM>,
+    model: String,
+    chat_options: ChatOptions,
+    token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
+    container_config: Option<llm_rs::tool::ContainerConfig>,
+}
+
+struct OwnedRuntime {
+    handle: tokio::task::JoinHandle<()>,
+    owner_token: String,
+}
+
+enum RuntimeMode {
+    Owner(OwnedRuntime),
+    Attached,
+}
+
+fn new_owner_token() -> String {
+    format!(
+        "{}{}{}{}",
+        session::generate_session_id(),
+        session::generate_session_id(),
+        session::generate_session_id(),
+        session::generate_session_id()
+    )
+}
+
+async fn shutdown_owned_runtime(session: &Session, owned: OwnedRuntime) {
+    let OwnedRuntime {
+        mut handle,
+        owner_token,
+    } = owned;
+    match tcode_runtime::bootstrap::send_socket_message(
+        session.socket_path(),
+        &protocol::ClientMessage::AuthorizedShutdown { owner_token },
+    )
+    .await
+    {
+        Ok(Some(protocol::ServerMessage::Ack)) | Ok(None) => {}
+        Ok(Some(protocol::ServerMessage::Error { message })) => {
+            tracing::warn!(message, "owner shutdown was rejected");
+        }
+        Ok(Some(other)) => tracing::debug!(?other, "unexpected owner shutdown response"),
+        Err(e) => tracing::warn!(error = %e, "failed to send owner shutdown request"),
+    }
+
+    match tokio::time::timeout(Duration::from_secs(5), &mut handle).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "runtime task join failed during shutdown"),
+        Err(_) => {
+            tracing::warn!("runtime task did not finish after owner shutdown request; aborting");
+            handle.abort();
+        }
+    }
+}
+
 /// Shared entry point for unified mode: redirects stdio, initializes tracing,
 /// starts the server, creates tmux panes, and waits for the display to exit.
 #[allow(clippy::too_many_arguments)]
 async fn run_unified_with_session(
     session: Session,
     session_id: String,
-    llm: Box<dyn LLM>,
-    model: String,
-    chat_options: ChatOptions,
+    runtime_deps: Option<RuntimeDependencies>,
     config: &config::TcodeConfig,
-    token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
     label: &str,
-    container_config: Option<llm_rs::tool::ContainerConfig>,
 ) -> Result<()> {
     let max_subagent_depth = config.max_subagent_depth.unwrap_or(10);
     let subagent_model_selection = config.subagent_model_selection.unwrap_or(false);
@@ -988,61 +1106,151 @@ async fn run_unified_with_session(
     let exe_str = exe_path.to_string_lossy();
     let session_arg = format!("--session={}", session_id);
 
-    let server = Server::new(
-        socket_path,
-        session.display_file(),
-        session.status_file(),
-        session.usage_file(),
-        session.session_dir().clone(),
-        session.conversation_state_file(),
-        llm,
-        model,
-        chat_options,
-        max_subagent_depth,
-        subagent_model_selection,
-        token_manager,
-        container_config,
-    );
-
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let server_handle = tokio::spawn(async move {
-        if let Err(e) = server.run(Some(ready_tx)).await {
-            eprintln!("[Server] Error: {}", e);
-        }
-    });
-
-    match ready_rx.await {
-        Ok(Ok(())) => {}
-        Ok(Err(e)) => return Err(e.context("Server failed to start")),
-        Err(_) => return Err(anyhow::anyhow!("Server task terminated unexpectedly")),
-    }
-
-    // Capture current pane ID before splitting (for layout placement).
+    // Capture current pane ID before starting/attaching runtime so failures do not leak leases.
     let current_pane_id = std::env::var("TMUX_PANE")
         .ok()
         .filter(|s| !s.is_empty())
         .ok_or_else(|| anyhow!("TMUX_PANE not set — cannot determine current tmux pane"))?;
 
+    let runtime_mode = match probe_runtime_status(&socket_path).await? {
+        RuntimeProbeStatus::Active(info) => {
+            tracing::info!(
+                owner_kind = ?info.owner_kind,
+                session_id,
+                "attached to existing runtime"
+            );
+            RuntimeMode::Attached
+        }
+        RuntimeProbeStatus::Unresponsive => {
+            bail!(
+                "session runtime socket at {:?} is unresponsive; another runtime may still be starting",
+                socket_path
+            );
+        }
+        RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {
+            let RuntimeDependencies {
+                llm,
+                model,
+                chat_options,
+                token_manager,
+                container_config,
+            } = runtime_deps.ok_or_else(|| {
+                anyhow!(
+                    "session runtime is not active; cannot attach without owner runtime dependencies"
+                )
+            })?;
+            let owner_token = new_owner_token();
+            let server = Server::new_with_runtime_options(
+                socket_path.clone(),
+                session.display_file(),
+                session.status_file(),
+                session.usage_file(),
+                session.session_dir().clone(),
+                session.conversation_state_file(),
+                llm,
+                model,
+                chat_options,
+                max_subagent_depth,
+                subagent_model_selection,
+                token_manager,
+                container_config,
+                server::ServerRuntimeOptions {
+                    owner_kind: RuntimeOwnerKind::Cli,
+                    owner_shutdown_token: owner_token.clone(),
+                    ..server::ServerRuntimeOptions::default()
+                },
+            );
+
+            let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+            let handle = tokio::spawn(async move {
+                if let Err(e) = server.run(Some(ready_tx)).await {
+                    eprintln!("[Server] Error: {}", e);
+                }
+            });
+
+            match ready_rx.await {
+                Ok(Ok(())) => RuntimeMode::Owner(OwnedRuntime {
+                    handle,
+                    owner_token,
+                }),
+                Ok(Err(e)) => {
+                    handle.abort();
+                    if matches!(
+                        probe_runtime_status(&socket_path).await?,
+                        RuntimeProbeStatus::Active(_)
+                    ) {
+                        RuntimeMode::Attached
+                    } else {
+                        return Err(e.context("Server failed to start"));
+                    }
+                }
+                Err(_) => {
+                    handle.abort();
+                    if matches!(
+                        probe_runtime_status(&socket_path).await?,
+                        RuntimeProbeStatus::Active(_)
+                    ) {
+                        RuntimeMode::Attached
+                    } else {
+                        return Err(anyhow::anyhow!("Server task terminated unexpectedly"));
+                    }
+                }
+            }
+        }
+    };
+
+    let lease = match cli_runtime::register_cli_lease(socket_path.clone(), "unified").await {
+        Ok(lease) => lease,
+        Err(e) => {
+            if let RuntimeMode::Owner(owned) = runtime_mode {
+                shutdown_owned_runtime(&session, owned).await;
+            }
+            return Err(e.context("Failed to register unified runtime lease"));
+        }
+    };
+
     let panes = match setup_layout_panes(&layout, &current_pane_id, &exe_str, &session_arg) {
         Ok(p) => p,
         Err(e) => {
-            server_handle.abort();
+            lease.detach().await;
+            if let RuntimeMode::Owner(owned) = runtime_mode {
+                shutdown_owned_runtime(&session, owned).await;
+            }
             return Err(e.context("Failed to set up layout"));
         }
     };
 
     // Display runs as child process with saved original stdio FDs
     let display_cmd = format!("{} {} display", exe_str, session_arg);
-    let (stdin, stdout, stderr) =
-        tty_stdio::get_original_stdio().context("Failed to get original stdio fds")?;
+    let (stdin, stdout, stderr) = match tty_stdio::get_original_stdio() {
+        Some(stdio) => stdio,
+        None => {
+            cleanup_non_display_panes(&panes);
+            lease.detach().await;
+            if let RuntimeMode::Owner(owned) = runtime_mode {
+                shutdown_owned_runtime(&session, owned).await;
+            }
+            return Err(anyhow!("Failed to get original stdio fds"));
+        }
+    };
 
-    let mut display_child = Command::new("sh")
+    let mut display_child = match Command::new("sh")
         .args(["-c", &display_cmd])
         .stdin(stdin)
         .stdout(stdout)
         .stderr(stderr)
         .spawn()
-        .context("Failed to spawn display process")?;
+    {
+        Ok(child) => child,
+        Err(e) => {
+            cleanup_non_display_panes(&panes);
+            lease.detach().await;
+            if let RuntimeMode::Owner(owned) = runtime_mode {
+                shutdown_owned_runtime(&session, owned).await;
+            }
+            return Err(e).context("Failed to spawn display process");
+        }
+    };
 
     let display_pid: i32 = display_child.id().try_into().unwrap_or(-1);
     let result = {
@@ -1063,20 +1271,14 @@ async fn run_unified_with_session(
         }
     };
 
-    // Clean up: kill all non-display panes, then abort server
-    for pane in &panes {
-        if pane.command == config::PanelCommand::Display {
-            continue;
-        }
-        if let Err(e) = Command::new("tmux")
-            .args(["kill-pane", "-t", &pane.pane_id])
-            .output()
-        {
-            tracing::debug!("failed to kill {} pane {}: {e}", pane.command, pane.pane_id);
-        }
-    }
+    // Clean up panes and release this CLI client's runtime lease/lifecycle role.
+    cleanup_non_display_panes(&panes);
 
-    server_handle.abort();
+    lease.detach().await;
+
+    if let RuntimeMode::Owner(owned) = runtime_mode {
+        shutdown_owned_runtime(&session, owned).await;
+    }
 
     match result {
         Ok(_) => Ok(()),

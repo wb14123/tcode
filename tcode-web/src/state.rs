@@ -2,10 +2,14 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use base64::Engine;
 use subtle::ConstantTimeEq;
-use tcode_runtime::bootstrap::RuntimeSettings;
+use tcode_runtime::{
+    bootstrap::{RuntimeProbeStatus, RuntimeSettings, probe_runtime_status, send_socket_message},
+    protocol::{ClientKind, ClientLeaseInfo, ClientMessage, ServerMessage, SessionRuntimeInfo},
+    session::{base_path, validate_session_id},
+};
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
 /// Raw token byte length (32 = 256 bits of entropy).
@@ -78,6 +82,18 @@ struct RuntimeState {
     settings: RuntimeSettings,
     runtimes: parking_lot::Mutex<HashMap<String, RuntimeHandle>>,
     start_lock: tokio::sync::Mutex<()>,
+}
+
+pub(crate) enum SessionRuntimeStatus {
+    Active,
+    Inactive,
+    Unresponsive,
+}
+
+impl SessionRuntimeStatus {
+    pub(crate) fn unavailable_message() -> &'static str {
+        "session runtime is unavailable; runtime may still be starting"
+    }
 }
 
 /// Shared application state handed to every axum handler via `with_state`.
@@ -245,6 +261,139 @@ impl AppState {
             .lock()
             .insert(session_id.to_string(), RuntimeHandle { task: handle });
         Ok(())
+    }
+
+    pub(crate) async fn runtime_status(&self, session_id: &str) -> Result<SessionRuntimeStatus> {
+        let socket_path = Self::socket_path_for_session(session_id)?;
+        Ok(match probe_runtime_status(&socket_path).await? {
+            RuntimeProbeStatus::Active(_) => SessionRuntimeStatus::Active,
+            RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {
+                SessionRuntimeStatus::Inactive
+            }
+            RuntimeProbeStatus::Unresponsive => SessionRuntimeStatus::Unresponsive,
+        })
+    }
+
+    pub(crate) async fn register_web_client_lease(
+        &self,
+        session_id: &str,
+        client_label: Option<String>,
+        resume_if_inactive: bool,
+    ) -> Result<Option<ClientLeaseInfo>> {
+        if resume_if_inactive {
+            self.ensure_runtime(session_id).await?;
+            match self.runtime_status(session_id).await? {
+                SessionRuntimeStatus::Active => {}
+                SessionRuntimeStatus::Inactive | SessionRuntimeStatus::Unresponsive => {
+                    return Err(anyhow!(SessionRuntimeStatus::unavailable_message()));
+                }
+            }
+        } else {
+            match self.runtime_status(session_id).await? {
+                SessionRuntimeStatus::Active => {}
+                SessionRuntimeStatus::Inactive => return Ok(None),
+                SessionRuntimeStatus::Unresponsive => {
+                    return Err(anyhow!(SessionRuntimeStatus::unavailable_message()));
+                }
+            }
+        }
+
+        let response = self
+            .send_socket_message(
+                session_id,
+                ClientMessage::RegisterClientLease {
+                    client_kind: ClientKind::Web,
+                    client_label,
+                },
+            )
+            .await?;
+        match response {
+            ServerMessage::ClientLeaseRegistered(info) => Ok(Some(info)),
+            ServerMessage::Error { message } => Err(anyhow!(message)),
+            other => Err(anyhow!(
+                "unexpected runtime response to client lease registration: {other:?}"
+            )),
+        }
+    }
+
+    pub(crate) async fn heartbeat_client_lease(
+        &self,
+        session_id: &str,
+        client_id: String,
+    ) -> Result<SessionRuntimeInfo> {
+        let response = match self
+            .send_socket_message(
+                session_id,
+                ClientMessage::HeartbeatClientLease { client_id },
+            )
+            .await
+        {
+            Ok(response) => response,
+            Err(e) => {
+                tracing::debug!(session_id, error = %e, "client lease heartbeat failed");
+                return match self.runtime_status(session_id).await? {
+                    SessionRuntimeStatus::Active | SessionRuntimeStatus::Unresponsive => {
+                        Err(anyhow!(SessionRuntimeStatus::unavailable_message()))
+                    }
+                    SessionRuntimeStatus::Inactive => Ok(SessionRuntimeInfo::inactive()),
+                };
+            }
+        };
+
+        match response {
+            ServerMessage::SessionRuntimeInfo(info) => Ok(info),
+            ServerMessage::Error { message } => Err(anyhow!(message)),
+            other => Err(anyhow!(
+                "unexpected runtime response to client lease heartbeat: {other:?}"
+            )),
+        }
+    }
+
+    pub(crate) async fn detach_client_lease(&self, session_id: &str, client_id: String) {
+        match self
+            .send_socket_message(session_id, ClientMessage::DetachClientLease { client_id })
+            .await
+        {
+            Ok(_) => {}
+            Err(e) => {
+                tracing::debug!(session_id, error = %e, "client lease detach failed");
+            }
+        }
+    }
+
+    pub(crate) async fn send_runtime_message_if_active(
+        &self,
+        session_id: &str,
+        message: ClientMessage,
+    ) -> Result<Option<ServerMessage>> {
+        match self.runtime_status(session_id).await? {
+            SessionRuntimeStatus::Active => {}
+            SessionRuntimeStatus::Inactive => return Ok(None),
+            SessionRuntimeStatus::Unresponsive => {
+                return Err(anyhow!(SessionRuntimeStatus::unavailable_message()));
+            }
+        }
+
+        self.send_socket_message(session_id, message)
+            .await
+            .map(Some)
+            .with_context(|| format!("active runtime message failed for session {session_id}"))
+    }
+
+    pub(crate) async fn send_socket_message(
+        &self,
+        session_id: &str,
+        message: ClientMessage,
+    ) -> Result<ServerMessage> {
+        let response = send_socket_message(Self::socket_path_for_session(session_id)?, &message)
+            .await?
+            .ok_or_else(|| anyhow!("runtime closed socket without responding"))?;
+        Ok(response)
+    }
+
+    fn socket_path_for_session(session_id: &str) -> Result<std::path::PathBuf> {
+        validate_session_id(session_id)?;
+        Ok(base_path()?.join(session_id).join("server.sock"))
     }
 
     fn runtime_is_live(

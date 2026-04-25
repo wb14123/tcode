@@ -86,15 +86,9 @@ impl EditClient {
             .and_then(|n| n.to_str())
             .unwrap_or("unknown")
             .to_string();
-        let mut nvim = spawn_nvim(
-            &self.lua_dir,
-            &msg_file,
-            is_subagent,
-            &session_id,
-            &exe_path,
-        )?;
 
-        // Set up file watcher using inotify
+        // Set up file watcher before acquiring runtime leases or spawning nvim so setup failures
+        // cannot leave a lease/child process behind.
         let (tx, rx) = mpsc::channel();
         let mut watcher: RecommendedWatcher = notify::recommended_watcher(move |res| {
             if let Ok(event) = res
@@ -124,22 +118,40 @@ impl EditClient {
             }
         });
 
+        let lease = crate::cli_runtime::register_cli_lease(socket_path.clone(), "edit")
+            .await
+            .context("Failed to register edit runtime lease")?;
+        let mut nvim = match spawn_nvim(
+            &self.lua_dir,
+            &msg_file,
+            is_subagent,
+            &session_id,
+            &exe_path,
+        ) {
+            Ok(nvim) => nvim,
+            Err(e) => {
+                lease.detach().await;
+                return Err(e);
+            }
+        };
+
+        let mut nvim_exited = false;
+        let mut result = Ok(());
         loop {
             tokio::select! {
                 biased;
-                _ = nvim.wait() => {
-                    if self.conversation_id.is_none() {
-                        let json = serde_json::to_vec(&ClientMessage::Shutdown)?;
-                        if let Err(e) = sink.send(Bytes::from(json)).await {
-                            tracing::warn!(error = %e, "failed to send shutdown message to server");
-                        }
+                wait_result = nvim.wait() => {
+                    nvim_exited = true;
+                    if let Err(e) = wait_result {
+                        result = Err(e).context("Failed to wait for nvim edit process");
                     }
                     break;
                 }
                 msg = server_stream.next() => {
                     match msg {
                         None | Some(Err(_)) => {
-                            crate::terminate_child(&mut nvim).await?;
+                            result = crate::terminate_child(&mut nvim).await;
+                            nvim_exited = true;
                             break;
                         }
                         Some(Ok(_)) => {}
@@ -148,14 +160,33 @@ impl EditClient {
                 Some(event) = file_events.recv() => {
                     if is_msg_file_event(&event, &msg_file) && let Some(content) = read_message_file(&msg_file).await {
                         let msg = self.build_client_message(&content);
-                        let json = serde_json::to_vec(&msg)?;
-                        sink.send(Bytes::from(json)).await?;
+                        match serde_json::to_vec(&msg) {
+                            Ok(json) => {
+                                if let Err(e) = sink.send(Bytes::from(json)).await {
+                                    result = Err(e).context("Failed to send edit message to runtime");
+                                    break;
+                                }
+                            }
+                            Err(e) => {
+                                result = Err(e).context("Failed to serialize edit message");
+                                break;
+                            }
+                        }
                     }
                 }
             }
         }
 
-        Ok(())
+        if !nvim_exited && let Err(e) = crate::terminate_child(&mut nvim).await {
+            if result.is_ok() {
+                result = Err(e);
+            } else {
+                tracing::warn!(error = %e, "failed to terminate nvim after edit error");
+            }
+        }
+        lease.detach().await;
+
+        result
     }
 
     /// Build the appropriate `ClientMessage` based on conversation_id and content.

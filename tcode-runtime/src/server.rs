@@ -3,9 +3,11 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
+use fs2::FileExt;
 use futures::{SinkExt, Stream, StreamExt};
 use llm_rs::conversation::{
     ConversationManager, ConversationState, Message, MessageEndStatus,
@@ -14,6 +16,7 @@ use llm_rs::conversation::{
 use llm_rs::llm::{ChatOptions, LLM};
 use llm_rs::tool::{ContainerConfig, Tool};
 use sha2::Digest;
+use subtle::ConstantTimeEq;
 use tokio::fs::OpenOptions;
 use tokio::io::AsyncWriteExt;
 use tokio::net::{UnixListener, UnixStream};
@@ -24,7 +27,10 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
 use llm_rs::conversation::ConversationClient;
 
-use crate::protocol::{ClientMessage, ServerMessage};
+use crate::protocol::{
+    ClientKind, ClientLeaseInfo, ClientMessage, RuntimeOwnerKind, ServerMessage,
+    SessionRuntimeInfo, lease_timeout_duration,
+};
 
 /// Shared map from tool_call_id -> ConversationClient that owns the tool.
 /// Populated by event writers on ToolMessageStart, cleaned up on ToolMessageEnd.
@@ -45,6 +51,252 @@ struct SubAgentState {
 }
 
 const PREVIEW_MAX_CHARS: usize = 200;
+const LEASE_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
+const SOCKET_START_LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
+
+#[derive(Debug)]
+struct SocketStartLock {
+    file: std::fs::File,
+    path: PathBuf,
+}
+
+impl Drop for SocketStartLock {
+    fn drop(&mut self) {
+        if let Err(e) = self.file.unlock() {
+            tracing::warn!(lock = %self.path.display(), error = %e, "failed to unlock runtime socket start lock");
+        }
+    }
+}
+
+fn socket_start_lock_path(socket_path: &Path) -> PathBuf {
+    if let Some(file_name) = socket_path.file_name() {
+        socket_path.with_file_name(format!("{}.lock", file_name.to_string_lossy()))
+    } else {
+        socket_path.with_extension("lock")
+    }
+}
+
+async fn acquire_socket_start_lock(socket_path: &Path) -> Result<SocketStartLock> {
+    let lock_path = socket_start_lock_path(socket_path);
+    if let Some(parent) = lock_path.parent() {
+        std::fs::create_dir_all(parent).with_context(|| {
+            format!(
+                "Failed to create runtime socket lock directory {:?}",
+                parent
+            )
+        })?;
+    }
+
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+        .with_context(|| format!("Failed to open runtime socket start lock {:?}", lock_path))?;
+
+    loop {
+        match file.try_lock_exclusive() {
+            Ok(()) => {
+                tracing::debug!(lock = %lock_path.display(), "acquired runtime socket start lock");
+                return Ok(SocketStartLock {
+                    file,
+                    path: lock_path,
+                });
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                tokio::time::sleep(SOCKET_START_LOCK_RETRY_DELAY).await;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "Failed to acquire runtime socket start lock {:?}",
+                        lock_path
+                    )
+                });
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct ServerRuntimeOptions {
+    pub owner_kind: RuntimeOwnerKind,
+    pub owner_shutdown_token: String,
+    pub lease_timeout: Duration,
+}
+
+impl Default for ServerRuntimeOptions {
+    fn default() -> Self {
+        Self {
+            owner_kind: RuntimeOwnerKind::Cli,
+            owner_shutdown_token: generate_runtime_secret(),
+            lease_timeout: lease_timeout_duration(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub(crate) struct ClientLeaseRecord {
+    pub(crate) client_kind: ClientKind,
+    pub(crate) client_label: Option<String>,
+    pub(crate) last_heartbeat: Instant,
+}
+
+#[derive(Debug)]
+pub(crate) struct ClientLeaseTracker {
+    leases: parking_lot::Mutex<HashMap<String, ClientLeaseRecord>>,
+    lease_timeout: Duration,
+}
+
+impl ClientLeaseTracker {
+    pub(crate) fn new(lease_timeout: Duration) -> Self {
+        Self {
+            leases: parking_lot::Mutex::new(HashMap::new()),
+            lease_timeout,
+        }
+    }
+
+    pub(crate) fn register(
+        &self,
+        client_kind: ClientKind,
+        client_label: Option<String>,
+        now: Instant,
+    ) -> String {
+        self.prune_expired(now);
+        let client_id = generate_runtime_secret();
+        self.leases.lock().insert(
+            client_id.clone(),
+            ClientLeaseRecord {
+                client_kind,
+                client_label: client_label.clone(),
+                last_heartbeat: now,
+            },
+        );
+        tracing::debug!(
+            client_id,
+            ?client_kind,
+            client_label = client_label.as_deref().unwrap_or(""),
+            "registered client lease"
+        );
+        client_id
+    }
+
+    pub(crate) fn heartbeat(&self, client_id: &str, now: Instant) -> bool {
+        let timeout = self.lease_timeout;
+        let mut leases = self.leases.lock();
+        let Some(lease) = leases.get_mut(client_id) else {
+            return false;
+        };
+        if now.duration_since(lease.last_heartbeat) > timeout {
+            leases.remove(client_id);
+            return false;
+        }
+        lease.last_heartbeat = now;
+        true
+    }
+
+    pub(crate) fn detach(&self, client_id: &str) -> bool {
+        if let Some(record) = self.leases.lock().remove(client_id) {
+            tracing::debug!(
+                client_id,
+                client_kind = ?record.client_kind,
+                client_label = record.client_label.as_deref().unwrap_or(""),
+                "detached client lease"
+            );
+            true
+        } else {
+            false
+        }
+    }
+
+    pub(crate) fn prune_expired(&self, now: Instant) -> usize {
+        let timeout = self.lease_timeout;
+        let mut leases = self.leases.lock();
+        let before = leases.len();
+        leases.retain(|_, lease| now.duration_since(lease.last_heartbeat) <= timeout);
+        before.saturating_sub(leases.len())
+    }
+
+    pub(crate) fn active_count(&self, now: Instant) -> usize {
+        let timeout = self.lease_timeout;
+        let mut leases = self.leases.lock();
+        leases.retain(|_, lease| now.duration_since(lease.last_heartbeat) <= timeout);
+        leases.len()
+    }
+
+    pub(crate) fn timeout(&self) -> Duration {
+        self.lease_timeout
+    }
+
+    #[cfg(test)]
+    pub(crate) fn snapshot(&self) -> Vec<ClientLeaseRecord> {
+        self.leases.lock().values().cloned().collect()
+    }
+}
+
+#[derive(Debug)]
+pub(crate) struct WebIdleShutdownPolicy {
+    empty_since: Option<Instant>,
+    grace: Duration,
+}
+
+impl WebIdleShutdownPolicy {
+    pub(crate) fn new(grace: Duration) -> Self {
+        Self {
+            empty_since: None,
+            grace,
+        }
+    }
+
+    pub(crate) fn should_shutdown_after_prune(
+        &mut self,
+        active_count: usize,
+        expired_to_empty: bool,
+        now: Instant,
+    ) -> bool {
+        if active_count > 0 {
+            self.empty_since = None;
+            return false;
+        }
+
+        if expired_to_empty {
+            return true;
+        }
+
+        match self.empty_since {
+            Some(empty_since) => now.duration_since(empty_since) >= self.grace,
+            None => {
+                self.empty_since = Some(now);
+                false
+            }
+        }
+    }
+}
+
+fn generate_runtime_secret() -> String {
+    format!(
+        "{}{}{}{}",
+        crate::session::generate_session_id(),
+        crate::session::generate_session_id(),
+        crate::session::generate_session_id(),
+        crate::session::generate_session_id()
+    )
+}
+
+async fn socket_has_listener(socket_path: &Path) -> bool {
+    match tokio::time::timeout(Duration::from_millis(500), UnixStream::connect(socket_path)).await {
+        Ok(Ok(_)) => true,
+        Ok(Err(e)) => {
+            tracing::debug!(socket = %socket_path.display(), error = %e, "runtime socket has no listener");
+            false
+        }
+        Err(_) => {
+            tracing::debug!(socket = %socket_path.display(), "runtime socket connect timed out");
+            true
+        }
+    }
+}
 
 pub struct Server {
     socket_path: PathBuf,
@@ -60,6 +312,7 @@ pub struct Server {
     subagent_model_selection: bool,
     token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
     container_config: Option<ContainerConfig>,
+    runtime_options: ServerRuntimeOptions,
 }
 
 impl Server {
@@ -79,6 +332,41 @@ impl Server {
         token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
         container_config: Option<ContainerConfig>,
     ) -> Self {
+        Self::new_with_runtime_options(
+            socket_path,
+            display_file,
+            status_file,
+            usage_file,
+            session_dir,
+            conversation_state_file,
+            llm,
+            model,
+            chat_options,
+            max_subagent_depth,
+            subagent_model_selection,
+            token_manager,
+            container_config,
+            ServerRuntimeOptions::default(),
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_runtime_options(
+        socket_path: PathBuf,
+        display_file: PathBuf,
+        status_file: PathBuf,
+        usage_file: PathBuf,
+        session_dir: PathBuf,
+        conversation_state_file: PathBuf,
+        llm: Box<dyn LLM>,
+        model: String,
+        chat_options: ChatOptions,
+        max_subagent_depth: usize,
+        subagent_model_selection: bool,
+        token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
+        container_config: Option<ContainerConfig>,
+        runtime_options: ServerRuntimeOptions,
+    ) -> Self {
         Self {
             socket_path,
             display_file,
@@ -93,34 +381,52 @@ impl Server {
             subagent_model_selection,
             token_manager,
             container_config,
+            runtime_options,
         }
     }
 
     pub async fn run(
         self,
-        ready_tx: Option<tokio::sync::oneshot::Sender<anyhow::Result<()>>>,
+        mut ready_tx: Option<tokio::sync::oneshot::Sender<anyhow::Result<()>>>,
     ) -> Result<()> {
-        let bind_result: Result<UnixListener> = (|| {
-            // Clean up existing socket file
+        let bind_result: Result<UnixListener> = async {
+            let _socket_start_lock = acquire_socket_start_lock(&self.socket_path).await?;
+
             if self.socket_path.exists() {
+                if socket_has_listener(&self.socket_path).await {
+                    anyhow::bail!(
+                        "session runtime already active at {:?}; refusing to replace live socket",
+                        self.socket_path
+                    );
+                }
+
+                tracing::debug!(socket = %self.socket_path.display(), "removing stale runtime socket");
                 std::fs::remove_file(&self.socket_path).with_context(|| {
-                    format!("Failed to remove existing socket {:?}", self.socket_path)
+                    format!("Failed to remove stale socket {:?}", self.socket_path)
                 })?;
             }
 
-            UnixListener::bind(&self.socket_path)
-                .with_context(|| format!("Failed to bind Unix socket at {:?}", self.socket_path))
-        })();
+            match UnixListener::bind(&self.socket_path) {
+                Ok(listener) => Ok(listener),
+                Err(e) => {
+                    if socket_has_listener(&self.socket_path).await {
+                        anyhow::bail!(
+                            "session runtime already active at {:?}; refusing to replace live socket",
+                            self.socket_path
+                        );
+                    }
+                    Err(e).with_context(|| {
+                        format!("Failed to bind Unix socket at {:?}", self.socket_path)
+                    })
+                }
+            }
+        }
+        .await;
 
         let listener = match bind_result {
-            Ok(l) => {
-                if let Some(tx) = ready_tx {
-                    let _ = tx.send(Ok(())); // receiver dropped = main is gone, not actionable
-                }
-                l
-            }
+            Ok(l) => l,
             Err(e) => {
-                if let Some(tx) = ready_tx {
+                if let Some(tx) = ready_tx.take() {
                     // Send actual error to main; recover error if receiver dropped
                     return match tx.send(Err(e)) {
                         Ok(()) => Ok(()),
@@ -134,6 +440,10 @@ impl Server {
 
         let token_manager = self.token_manager.clone();
         let usage_file = self.usage_file.clone();
+        let owner_kind = self.runtime_options.owner_kind;
+        let owner_shutdown_token = self.runtime_options.owner_shutdown_token.clone();
+        let lease_timeout = self.runtime_options.lease_timeout;
+        let runtime_id = generate_runtime_secret();
 
         // Create conversation manager (creates permission manager internally)
         // Store project-level permissions under ~/.tcode/projects/<sha256(cwd)>/
@@ -393,6 +703,41 @@ impl Server {
         let (shutdown_tx, _) = broadcast::channel::<()>(1);
         let shutdown_tx = Arc::new(shutdown_tx);
         let socket_path = self.socket_path.clone();
+        let lease_tracker = Arc::new(ClientLeaseTracker::new(lease_timeout));
+
+        {
+            let idle_leases = Arc::clone(&lease_tracker);
+            let idle_shutdown_tx = Arc::clone(&shutdown_tx);
+            let mut idle_rx = shutdown_tx.subscribe();
+            tokio::spawn(async move {
+                let mut policy = (owner_kind == RuntimeOwnerKind::Web)
+                    .then(|| WebIdleShutdownPolicy::new(lease_timeout));
+                loop {
+                    tokio::select! {
+                        biased;
+                        _ = idle_rx.recv() => break,
+                        _ = tokio::time::sleep(LEASE_PRUNE_INTERVAL) => {
+                            let now = Instant::now();
+                            let pruned = idle_leases.prune_expired(now);
+                            if pruned > 0 {
+                                tracing::debug!(pruned, "pruned expired client leases");
+                            }
+                            if let Some(policy) = policy.as_mut() {
+                                let active_count = idle_leases.active_count(now);
+                                let expired_to_empty = pruned > 0 && active_count == 0;
+                                if policy.should_shutdown_after_prune(active_count, expired_to_empty, now) {
+                                    tracing::info!("web-owned runtime idle timeout reached; shutting down");
+                                    if idle_shutdown_tx.send(()).is_err() {
+                                        tracing::warn!("shutdown receiver already dropped");
+                                    }
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
 
         // Periodic usage polling (OAuth only, every 5 min)
         if let Some(ref tm) = token_manager {
@@ -414,7 +759,13 @@ impl Server {
             });
         }
 
-        // Accept loop
+        // Accept loop. Signal startup readiness only after all runtime state is
+        // initialized and the socket RPC loop is about to start responding.
+        if let Some(tx) = ready_tx.take()
+            && tx.send(Ok(())).is_err()
+        {
+            tracing::debug!("runtime readiness receiver dropped before success signal");
+        }
         let mut shutdown_rx = shutdown_tx.subscribe();
         loop {
             tokio::select! {
@@ -423,11 +774,17 @@ impl Server {
                 _ = tokio::signal::ctrl_c() => break,
                 result = listener.accept() => {
                     let (stream, _) = result?;
-                    let conv_client = Arc::clone(&conversation_client);
-                    let tc_map = Arc::clone(&tool_clients);
-                    let shutdown_tx = Arc::clone(&shutdown_tx);
-                    let mgr = Arc::clone(&manager);
-                    tokio::spawn(handle_client(stream, conv_client, tc_map, shutdown_tx, mgr));
+                    let context = ClientHandlerContext {
+                        conv_client: Arc::clone(&conversation_client),
+                        tool_clients: Arc::clone(&tool_clients),
+                        shutdown_tx: Arc::clone(&shutdown_tx),
+                        manager: Arc::clone(&manager),
+                        lease_tracker: Arc::clone(&lease_tracker),
+                        owner_kind,
+                        owner_shutdown_token: owner_shutdown_token.clone(),
+                        runtime_id: runtime_id.clone(),
+                    };
+                    tokio::spawn(handle_client(stream, context));
                 }
             }
         }
@@ -444,8 +801,14 @@ impl Server {
             manager.shutdown_all().await;
         }
 
-        std::fs::remove_file(&socket_path)
-            .with_context(|| format!("Failed to remove socket {:?}", socket_path))?;
+        match std::fs::remove_file(&socket_path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("Failed to remove socket {:?}", socket_path));
+            }
+        }
         Ok(())
     }
 }
@@ -1055,36 +1418,61 @@ fn run_event_writer(
     }) // Box::pin
 }
 
-async fn handle_client(
-    stream: UnixStream,
+struct ClientHandlerContext {
     conv_client: Arc<ConversationClient>,
     tool_clients: ToolClientMap,
     shutdown_tx: Arc<broadcast::Sender<()>>,
     manager: Arc<ConversationManager>,
-) {
-    let shutdown_rx = shutdown_tx.subscribe();
-    if let Err(e) = handle_client_inner(
-        stream,
-        conv_client,
-        tool_clients,
-        shutdown_tx,
-        shutdown_rx,
-        manager,
-    )
-    .await
-    {
+    lease_tracker: Arc<ClientLeaseTracker>,
+    owner_kind: RuntimeOwnerKind,
+    owner_shutdown_token: String,
+    runtime_id: String,
+}
+
+fn runtime_info(
+    lease_tracker: &ClientLeaseTracker,
+    owner_kind: RuntimeOwnerKind,
+    runtime_id: &str,
+) -> SessionRuntimeInfo {
+    let timeout = lease_tracker.timeout();
+    SessionRuntimeInfo {
+        active: true,
+        owner_kind,
+        active_lease_count: lease_tracker.active_count(Instant::now()),
+        lease_timeout_seconds: timeout.as_secs(),
+        runtime_id: runtime_id.to_string(),
+    }
+}
+
+pub(crate) fn validate_owner_shutdown_token(provided: &str, expected: &str) -> bool {
+    let provided_digest = sha2::Sha256::digest(provided.as_bytes());
+    let expected_digest = sha2::Sha256::digest(expected.as_bytes());
+    let tokens_match: bool = provided_digest.ct_eq(&expected_digest).into();
+    !provided.is_empty() && !expected.is_empty() && tokens_match
+}
+
+async fn handle_client(stream: UnixStream, context: ClientHandlerContext) {
+    let shutdown_rx = context.shutdown_tx.subscribe();
+    if let Err(e) = handle_client_inner(stream, context, shutdown_rx).await {
         eprintln!("[Server] Client handler error: {}", e);
     }
 }
 
 async fn handle_client_inner(
     stream: UnixStream,
-    conv_client: Arc<ConversationClient>,
-    tool_clients: ToolClientMap,
-    shutdown_tx: Arc<broadcast::Sender<()>>,
+    context: ClientHandlerContext,
     mut shutdown_rx: broadcast::Receiver<()>,
-    manager: Arc<ConversationManager>,
 ) -> Result<()> {
+    let ClientHandlerContext {
+        conv_client,
+        tool_clients,
+        shutdown_tx,
+        manager,
+        lease_tracker,
+        owner_kind,
+        owner_shutdown_token,
+        runtime_id,
+    } = context;
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
     let (mut sink, mut stream) = framed.split();
 
@@ -1237,7 +1625,56 @@ async fn handle_client_inner(
                         let state = manager.permission_manager().snapshot();
                         send_msg(&mut sink, &ServerMessage::PermissionState(state)).await?;
                     }
-                    ClientMessage::Shutdown => {
+                    ClientMessage::RegisterClientLease { client_kind, client_label } => {
+                        let client_id = lease_tracker.register(client_kind, client_label, Instant::now());
+                        let info = ClientLeaseInfo {
+                            client_id,
+                            lease_timeout_seconds: lease_tracker.timeout().as_secs(),
+                            runtime_info: runtime_info(&lease_tracker, owner_kind, &runtime_id),
+                        };
+                        send_msg(&mut sink, &ServerMessage::ClientLeaseRegistered(info)).await?;
+                    }
+                    ClientMessage::HeartbeatClientLease { client_id } => {
+                        if lease_tracker.heartbeat(&client_id, Instant::now()) {
+                            send_msg(
+                                &mut sink,
+                                &ServerMessage::SessionRuntimeInfo(runtime_info(
+                                    &lease_tracker,
+                                    owner_kind,
+                                    &runtime_id,
+                                )),
+                            )
+                            .await?;
+                        } else {
+                            send_msg(&mut sink, &ServerMessage::Error {
+                                message: format!("client lease '{}' not found", client_id),
+                            }).await?;
+                        }
+                    }
+                    ClientMessage::DetachClientLease { client_id } => {
+                        lease_tracker.detach(&client_id);
+                        send_msg(&mut sink, &ServerMessage::Ack).await?;
+                    }
+                    ClientMessage::GetSessionRuntimeInfo => {
+                        send_msg(
+                            &mut sink,
+                            &ServerMessage::SessionRuntimeInfo(runtime_info(
+                                &lease_tracker,
+                                owner_kind,
+                                &runtime_id,
+                            )),
+                        )
+                        .await?;
+                    }
+                    ClientMessage::AuthorizedShutdown { owner_token } => {
+                        if !validate_owner_shutdown_token(&owner_token, &owner_shutdown_token) {
+                            tracing::warn!("rejected shutdown request with invalid owner token");
+                            send_msg(&mut sink, &ServerMessage::Error {
+                                message: "invalid owner shutdown token".to_string(),
+                            }).await?;
+                            continue;
+                        }
+                        send_msg(&mut sink, &ServerMessage::Ack).await?;
                         if shutdown_tx.send(()).is_err() {
                             tracing::warn!("shutdown receiver already dropped");
                         }
@@ -1277,7 +1714,7 @@ async fn append_event(file: &PathBuf, event: &Message) -> Result<()> {
 /// On resume, close any tool calls or subagents that were still "running"
 /// when the previous session exited. Appends synthetic Cancelled end events
 /// to display.jsonl files and updates status files.
-async fn close_stale_running_items(session_dir: &PathBuf) -> Result<()> {
+pub(crate) async fn close_stale_running_items(session_dir: &PathBuf) -> Result<()> {
     close_stale_in_dir(session_dir).await
 }
 
@@ -1381,7 +1818,7 @@ fn close_stale_in_dir(dir: &PathBuf) -> Pin<Box<dyn Future<Output = Result<()>> 
 
             // Update status file
             let tc_status = dir.join(format!("tool-call-{}-status.txt", tool_call_id));
-            tokio::fs::write(&tc_status, "Done")
+            tokio::fs::write(&tc_status, "Cancelled")
                 .await
                 .with_context(|| format!("Failed to write tool call status {:?}", tc_status))?;
         }

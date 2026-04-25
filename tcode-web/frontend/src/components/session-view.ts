@@ -1,9 +1,9 @@
 import { LitElement, html, nothing } from 'lit';
 
-import { ApiError, ReplayAwareBuffer, api, openEventStream } from '../api';
+import { ApiError, api, openEventStream, sessionLeaseManager, type LeaseSnapshot } from '../api';
 import { navigate } from '../router';
 import { buildConversationTimeline, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
-import type { RawStreamEvent, TimelineItem } from '../types';
+import type { RawStreamEvent, SessionRuntimeInfo, TimelineItem } from '../types';
 
 interface ToastNotice {
   id: number;
@@ -32,7 +32,11 @@ class TcodeSessionView extends LitElement {
   private cancelling = false;
   private pollHandle: number | null = null;
   private eventSource: EventSource | null = null;
-  private replayBuffer = new ReplayAwareBuffer();
+  private leaseRelease: (() => void) | null = null;
+  private runtimeInfo: SessionRuntimeInfo | null = null;
+  private sessionDisconnected = false;
+  private reconnecting = false;
+  private lastLeaseError = '';
   private toasts: ToastNotice[] = [];
   private toastCounter = 0;
   private toastTimeouts = new Map<number, number>();
@@ -77,11 +81,14 @@ class TcodeSessionView extends LitElement {
     this.loading = true;
     this.sending = false;
     this.cancelling = false;
+    this.runtimeInfo = null;
+    this.sessionDisconnected = false;
+    this.reconnecting = false;
     this.expandedSubagentIds = new Set<string>();
     this.stickToBottom = true;
     this.lastSnapshotError = '';
+    this.lastLeaseError = '';
     this.clearToasts();
-    this.replayBuffer.reset();
 
     if (!this.sessionId) {
       this.loading = false;
@@ -91,6 +98,7 @@ class TcodeSessionView extends LitElement {
 
     this.requestUpdate();
     void this.refreshSnapshots(true);
+    this.attachLease();
     this.openStream();
     this.pollHandle = window.setInterval(() => {
       void this.refreshSnapshots(false);
@@ -103,6 +111,9 @@ class TcodeSessionView extends LitElement {
       this.pollHandle = null;
     }
 
+    this.leaseRelease?.();
+    this.leaseRelease = null;
+
     this.eventSource?.close();
     this.eventSource = null;
   }
@@ -113,6 +124,64 @@ class TcodeSessionView extends LitElement {
     }
     this.toastTimeouts.clear();
     this.toasts = [];
+  }
+
+  private attachLease(): void {
+    this.leaseRelease?.();
+    this.leaseRelease = null;
+    if (!this.sessionId || this.draftMode) {
+      return;
+    }
+    this.leaseRelease = sessionLeaseManager.attach(this.sessionId, (snapshot) => this.onLeaseSnapshot(snapshot));
+  }
+
+  private onLeaseSnapshot(snapshot: LeaseSnapshot): void {
+    if (snapshot.sessionId !== this.sessionId) {
+      return;
+    }
+    this.runtimeInfo = snapshot.runtimeInfo;
+    this.sessionDisconnected = snapshot.disconnected;
+    this.reconnecting = snapshot.reconnecting;
+    if (snapshot.errorMessage && snapshot.errorMessage !== this.lastLeaseError) {
+      this.lastLeaseError = snapshot.errorMessage;
+      this.showToast(snapshot.errorMessage, 'error');
+    }
+    if (!snapshot.errorMessage) {
+      this.lastLeaseError = '';
+    }
+    this.requestUpdate();
+  }
+
+  private async reconnectSession(): Promise<void> {
+    if (!this.sessionId || this.reconnecting) {
+      return;
+    }
+
+    this.reconnecting = true;
+    this.requestUpdate();
+    try {
+      await sessionLeaseManager.reconnect(this.sessionId);
+      if (!this.sessionDisconnected) {
+        this.showToast('Session reconnected.', 'info', 3000);
+        this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
+        void this.refreshSnapshots(false);
+      }
+    } finally {
+      this.reconnecting = false;
+      this.requestUpdate();
+    }
+  }
+
+  private runtimeRoleSummary(): string {
+    if (this.sessionDisconnected) {
+      return 'Disconnected';
+    }
+    if (!this.runtimeInfo?.active) {
+      return 'Runtime status unknown';
+    }
+    const owner = this.runtimeInfo.owner_kind.toLowerCase();
+    const role = this.runtimeInfo.owner_kind === 'Web' ? 'web-owned' : 'attached';
+    return `${role} (${owner}, ${this.runtimeInfo.active_lease_count} lease${this.runtimeInfo.active_lease_count === 1 ? '' : 's'})`;
   }
 
   private showToast(message: string, tone: 'error' | 'info', durationMs = 5000): void {
@@ -155,6 +224,9 @@ class TcodeSessionView extends LitElement {
   }
 
   private statusSummary(): string {
+    if (this.sessionDisconnected) {
+      return 'Disconnected — manual reconnect available';
+    }
     if (this.statusText.trim()) {
       return this.statusText.trim();
     }
@@ -168,6 +240,9 @@ class TcodeSessionView extends LitElement {
   }
 
   private isGenerating(): boolean {
+    if (this.sessionDisconnected) {
+      return false;
+    }
     const status = this.statusText.trim().toLowerCase();
     return status.includes('stream') || status.includes('thinking');
   }
@@ -258,7 +333,7 @@ class TcodeSessionView extends LitElement {
     } catch (error) {
       const message =
         error instanceof ApiError && error.status === 404
-          ? 'Session snapshots are not available yet. Waiting for runtime output…'
+          ? 'Session snapshot files are missing or not available yet; this may be a historical/incomplete session or runtime output may still be pending.'
           : error instanceof Error
             ? error.message
             : 'Failed to load session data';
@@ -276,19 +351,19 @@ class TcodeSessionView extends LitElement {
   }
 
   private openStream(): void {
-    this.eventSource?.close();
-    this.replayBuffer.beginReplay();
+    if (this.eventSource) {
+      return;
+    }
     const source = openEventStream(api.sessionDisplayPath(this.sessionId));
     this.eventSource = source;
 
     source.onopen = () => {
-      this.replayBuffer.beginReplay();
       this.requestUpdate();
     };
 
     source.onmessage = (message) => {
       const raw = message.data;
-      if (typeof raw !== 'string' || !this.replayBuffer.accept(raw)) {
+      if (typeof raw !== 'string') {
         return;
       }
 
@@ -330,7 +405,6 @@ class TcodeSessionView extends LitElement {
     };
 
     source.onerror = () => {
-      this.replayBuffer.beginReplay();
       this.requestUpdate();
     };
   }
@@ -361,7 +435,7 @@ class TcodeSessionView extends LitElement {
   private async submitMessage(event: Event): Promise<void> {
     event.preventDefault();
     const text = this.composerText.trim();
-    if (!text || this.sending || this.isGenerating()) {
+    if (!text || this.sending || this.isGenerating() || this.sessionDisconnected) {
       return;
     }
 
@@ -397,7 +471,7 @@ class TcodeSessionView extends LitElement {
   }
 
   private async cancelConversation(): Promise<void> {
-    if (this.cancelling || !this.isGenerating()) {
+    if (this.cancelling || !this.isGenerating() || this.sessionDisconnected) {
       return;
     }
 
@@ -479,16 +553,29 @@ class TcodeSessionView extends LitElement {
           <div class="chat-bottom-stack">
             <footer class="chat-status-bar">
               <span class="pill pill-${statusTone}">${this.statusSummary()}</span>
+              ${this.sessionId && !this.draftMode ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${this.runtimeRoleSummary()}</span>` : nothing}
               ${combinedUsage ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${combinedUsage}</span>` : nothing}
             </footer>
+
+            ${this.sessionDisconnected && this.sessionId
+              ? html`
+                  <div class="inline-alert warning">
+                    Session runtime has ended or disconnected. Messages are disabled until you reconnect.
+                    <button class="button secondary" type="button" @click=${this.reconnectSession} ?disabled=${this.reconnecting}>
+                      ${this.reconnecting ? 'Reconnecting…' : 'Reconnect / resume'}
+                    </button>
+                  </div>
+                `
+              : nothing}
 
             <form class="panel chat-composer" @submit=${this.submitMessage}>
               <div class="chat-composer-row">
                 <textarea
                   class="chat-composer-input"
                   rows="1"
-                  placeholder="Message tcode…"
+                  placeholder=${this.sessionDisconnected ? 'Reconnect session to send messages…' : 'Message tcode…'}
                   .value=${this.composerText}
+                  ?disabled=${this.sessionDisconnected}
                   @input=${this.onComposerInput}
                   @keydown=${this.onComposerKeyDown}
                 ></textarea>
@@ -509,7 +596,7 @@ class TcodeSessionView extends LitElement {
                       <button
                         class="button chat-composer-action"
                         type="submit"
-                        ?disabled=${this.sending || !this.composerText.trim()}
+                        ?disabled=${this.sending || this.sessionDisconnected || !this.composerText.trim()}
                         aria-label=${this.sending ? 'Sending message' : 'Send message'}
                         title=${this.sending ? 'Sending…' : 'Send message'}
                       >

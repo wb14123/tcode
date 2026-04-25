@@ -189,12 +189,12 @@ async fn subagent_write_routes_require_same_origin() -> anyhow::Result<()> {
 async fn subagent_write_routes_validate_subagent_existence() -> anyhow::Result<()> {
     let home_dir = temp_dir();
     let _home_guard = HomeGuard::set(&home_dir);
-    create_session_dir("session-a")?;
+    create_session_dir("abc123xy")?;
 
     let app = fresh_app();
     let pair = login_and_take_cookie_pair(&app).await?;
 
-    for (uri, body) in subagent_write_endpoints("session-a", "missing-child") {
+    for (uri, body) in subagent_write_endpoints("abc123xy", "missing-child") {
         let resp = app
             .clone()
             .oneshot(build_post_request(&uri, body, Some(&pair), None)?)
@@ -218,7 +218,7 @@ async fn subagent_write_routes_validate_subagent_existence() -> anyhow::Result<(
 async fn nested_subagent_reads_still_work() -> anyhow::Result<()> {
     let home_dir = temp_dir();
     let _home_guard = HomeGuard::set(&home_dir);
-    let session_dir = create_session_dir("session-nested")?;
+    let session_dir = create_session_dir("def456uv")?;
     let nested_subagent_dir = session_dir.join("subagent-parent").join("subagent-child");
     std::fs::create_dir_all(&nested_subagent_dir)?;
     std::fs::write(nested_subagent_dir.join("status.txt"), "nested ok")?;
@@ -230,7 +230,7 @@ async fn nested_subagent_reads_still_work() -> anyhow::Result<()> {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/api/sessions/session-nested/subagents/child/status.txt")
+                .uri("/api/sessions/def456uv/subagents/child/status.txt")
                 .header("cookie", &pair)
                 .body(Body::empty())?,
         )

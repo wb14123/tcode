@@ -79,8 +79,15 @@ impl DisplayClient {
         // Save terminal settings before neovim takes over
         let saved_termios = nix::sys::termios::tcgetattr(std::io::stdin()).ok();
 
+        let lease = crate::cli_runtime::register_cli_lease(
+            crate::cli_runtime::root_socket_path_for_session(&self.session),
+            "display",
+        )
+        .await
+        .context("Failed to register display runtime lease")?;
+
         // Spawn neovim
-        let mut nvim = spawn_nvim(
+        let mut nvim = match spawn_nvim(
             &self.lua_dir,
             &display_file,
             &status_file,
@@ -90,8 +97,18 @@ impl DisplayClient {
             &exe_path,
             &parser_path,
             &self.runtime_dir,
-        )?;
-        nvim.wait().await?;
+        ) {
+            Ok(nvim) => nvim,
+            Err(e) => {
+                lease.detach().await;
+                return Err(e);
+            }
+        };
+        let wait_result = nvim.wait().await;
+
+        lease.detach().await;
+
+        wait_result?;
 
         // Restore terminal settings as a safety net
         if let Some(ref t) = saved_termios {
