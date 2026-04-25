@@ -528,47 +528,50 @@ class TcodeApp extends LitElement {
     }
 
     return html`
-      <div class="modal-backdrop">
-        <section class="modal-card">
-          <div>
-            <h2 class="page-title">Permission approval required</h2>
-            <p class="page-subtitle">
-              Request ${pending.request_id} for tool <code>${pending.tool}</code>. This PoC only exposes
-              approval metadata here; diff/file previews are intentionally out of scope.
-            </p>
+      <div class="modal-backdrop permission-modal-backdrop">
+        <section class="modal-card permission-modal-card" role="dialog" aria-modal="true" aria-labelledby="permission-modal-title">
+          <header class="permission-modal-header">
+            <div>
+              <h2 id="permission-modal-title" class="page-title">Permission approval required</h2>
+              <p class="page-subtitle">
+                Review request ${pending.request_id} for tool <code>${pending.tool}</code>, then choose how to proceed.
+              </p>
+            </div>
+          </header>
+          <div class="permission-modal-content">
+            ${this.permissionsError ? html`<div class="inline-alert error">${this.permissionsError}</div>` : nothing}
+            <section class="permission-prompt-card" aria-label="Permission prompt">
+              <div class="permission-section-label">Prompt</div>
+              <div class="permission-prompt">${pending.prompt}</div>
+            </section>
+            <dl class="meta-list permission-meta-list">
+              <div>
+                <dt>Key</dt>
+                <dd>${pending.key}</dd>
+              </div>
+              <div>
+                <dt>Value</dt>
+                <dd><code class="permission-code-value">${pending.value}</code></dd>
+              </div>
+              <div>
+                <dt>Queued requests</dt>
+                <dd>${this.permissionState?.pending.length ?? 0}</dd>
+              </div>
+              <div>
+                <dt>Once only</dt>
+                <dd>${pending.once_only ? 'yes' : 'no'}</dd>
+              </div>
+            </dl>
+            <label class="permission-deny-reason">
+              <span class="muted">Optional deny reason</span>
+              <textarea
+                placeholder="Only used when denying this request"
+                .value=${this.denyReason}
+                @input=${this.onDenyReasonInput}
+              ></textarea>
+            </label>
           </div>
-          ${this.permissionsError ? html`<div class="inline-alert error">${this.permissionsError}</div>` : nothing}
-          <dl class="meta-list">
-            <div>
-              <dt>Prompt</dt>
-              <dd>${pending.prompt}</dd>
-            </div>
-            <div>
-              <dt>Key</dt>
-              <dd>${pending.key}</dd>
-            </div>
-            <div>
-              <dt>Value</dt>
-              <dd><code>${pending.value}</code></dd>
-            </div>
-            <div>
-              <dt>Queued requests</dt>
-              <dd>${this.permissionState?.pending.length ?? 0}</dd>
-            </div>
-            <div>
-              <dt>Once only</dt>
-              <dd>${pending.once_only ? 'yes' : 'no'}</dd>
-            </div>
-          </dl>
-          <label>
-            <span class="muted">Optional deny reason</span>
-            <textarea
-              placeholder="Only used when denying this request"
-              .value=${this.denyReason}
-              @input=${this.onDenyReasonInput}
-            ></textarea>
-          </label>
-          <div class="modal-actions">
+          <div class="modal-actions permission-modal-actions">
             <button class="button success" @click=${() => void this.resolvePermission('AllowOnce')} ?disabled=${this.resolvingPermission}>
               Allow once
             </button>
