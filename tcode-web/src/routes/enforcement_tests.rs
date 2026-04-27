@@ -74,7 +74,8 @@ async fn protected_json_without_cookie_returns_401() -> anyhow::Result<()> {
     assert_eq!(
         body,
         SessionStatus {
-            authenticated: false
+            authenticated: false,
+            secure_session_cookie: true,
         }
     );
     Ok(())
@@ -133,7 +134,8 @@ async fn protected_sse_without_cookie_returns_401() -> anyhow::Result<()> {
     assert_eq!(
         body,
         SessionStatus {
-            authenticated: false
+            authenticated: false,
+            secure_session_cookie: true,
         }
     );
     Ok(())
@@ -448,7 +450,8 @@ async fn public_session_endpoint_is_not_gated_by_require_auth() -> anyhow::Resul
     assert_eq!(
         body,
         SessionStatus {
-            authenticated: false
+            authenticated: false,
+            secure_session_cookie: true,
         }
     );
     Ok(())

@@ -1,5 +1,6 @@
 export interface AuthSessionStatus {
   authenticated: boolean;
+  secure_session_cookie: boolean;
 }
 
 export type SessionMode = 'normal' | 'web_only';

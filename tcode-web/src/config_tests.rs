@@ -51,6 +51,14 @@ fn with_bind_addr_allows_non_loopback_address() -> anyhow::Result<()> {
 }
 
 #[test]
+fn with_allow_insecure_http_enables_plain_http_cookie_mode() -> anyhow::Result<()> {
+    let cfg = RemoteConfig::try_new(8765, "valid-password-16chars!".into(), false)?
+        .with_allow_insecure_http(true);
+    assert!(cfg.allow_insecure_http);
+    Ok(())
+}
+
+#[test]
 fn remote_mode_policy_defaults_to_all_and_creates_normal_sessions() {
     let cfg = RemoteConfig::try_new(8765, "a-long-enough-password-123".into(), false)
         .expect("valid remote config");

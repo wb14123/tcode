@@ -30,14 +30,24 @@ pub(crate) struct LoginRequest {
 #[cfg_attr(test, derive(Deserialize))]
 pub(crate) struct SessionStatus {
     pub(crate) authenticated: bool,
+    pub(crate) secure_session_cookie: bool,
+}
+
+impl SessionStatus {
+    pub(crate) fn new(authenticated: bool, state: &AppState) -> Self {
+        Self {
+            authenticated,
+            secure_session_cookie: state.secure_session_cookie(),
+        }
+    }
 }
 
 /// Cookie name used for the server-side session token.
 pub(crate) const SESSION_COOKIE_NAME: &str = "tcode_session";
 
 /// Helper: a cookie that clears `tcode_session`. Its attribute set
-/// (name, Path=/, HttpOnly, Secure, SameSite=Strict) must mirror the
-/// cookie issued by `post_login`. Browsers store cookies keyed by
+/// (name, Path=/, HttpOnly, SameSite=Strict, and optional Secure) must mirror
+/// the cookie issued by `post_login`. Browsers store cookies keyed by
 /// (name, domain, path) per RFC 6265, but the `Secure`, `HttpOnly`,
 /// and `SameSite` attributes gate *which* request a cookie applies
 /// to: a clearing `Set-Cookie` that diverges on those attributes can
@@ -45,21 +55,23 @@ pub(crate) const SESSION_COOKIE_NAME: &str = "tcode_session";
 /// so the clear fails to take effect. Mirroring all attributes keeps
 /// logout reliable.
 ///
-/// The `Secure` attribute is set unconditionally. Chromium, Firefox,
+/// The `Secure` attribute is set by default. Chromium, Firefox,
 /// and Safari treat `http://localhost`, `http://127.0.0.1`, and
 /// `http://[::1]` as potentially-trustworthy / secure contexts per
 /// the W3C Secure Contexts spec, so `Secure` cookies still round-trip
 /// over plain HTTP on the default loopback binding (see
-/// `RemoteConfig::with_loopback_defaults`). Any non-loopback
-/// deployment is expected to terminate TLS at a proxy, at which
-/// point `Secure` becomes load-bearing.
-fn clear_cookie() -> Cookie<'static> {
-    Cookie::build((SESSION_COOKIE_NAME, ""))
+/// `RemoteConfig::with_loopback_defaults`). Non-loopback direct HTTP
+/// requires the explicit `--allow-insecure-http` opt-in, which omits
+/// `Secure` and sends the password and session cookie in cleartext.
+fn clear_cookie(secure: bool) -> Cookie<'static> {
+    let mut cookie = Cookie::build((SESSION_COOKIE_NAME, ""))
         .path("/")
         .http_only(true)
-        .secure(true)
-        .same_site(SameSite::Strict)
-        .build()
+        .same_site(SameSite::Strict);
+    if secure {
+        cookie = cookie.secure(true);
+    }
+    cookie.build()
 }
 
 /// `POST /api/auth/login`
@@ -84,9 +96,7 @@ pub(crate) async fn post_login(
         return (
             StatusCode::UNAUTHORIZED,
             jar,
-            Json(SessionStatus {
-                authenticated: false,
-            }),
+            Json(SessionStatus::new(false, &state)),
         );
     }
     let token = match state.mint_session() {
@@ -98,9 +108,7 @@ pub(crate) async fn post_login(
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 jar,
-                Json(SessionStatus {
-                    authenticated: false,
-                }),
+                Json(SessionStatus::new(false, &state)),
             );
         }
     };
@@ -110,19 +118,19 @@ pub(crate) async fn post_login(
     // a misbehaving client ignores `Max-Age`. The cast is safe because
     // `SESSION_TTL` is a hardcoded const well below `i64::MAX` seconds.
     let max_age = time::Duration::seconds(SESSION_TTL.as_secs() as i64);
-    let cookie = Cookie::build((SESSION_COOKIE_NAME, token))
+    let mut cookie = Cookie::build((SESSION_COOKIE_NAME, token))
         .path("/")
         .http_only(true)
-        .secure(true)
         .same_site(SameSite::Strict)
-        .max_age(max_age)
-        .build();
+        .max_age(max_age);
+    if state.secure_session_cookie() {
+        cookie = cookie.secure(true);
+    }
+    let cookie = cookie.build();
     (
         StatusCode::OK,
         jar.add(cookie),
-        Json(SessionStatus {
-            authenticated: true,
-        }),
+        Json(SessionStatus::new(true, &state)),
     )
 }
 
@@ -143,17 +151,19 @@ pub(crate) async fn post_logout(
     // 200 with no `Set-Cookie`" contract readable.
     if let Some(c) = jar.get(SESSION_COOKIE_NAME) {
         state.revoke_session(c.value());
-        return (StatusCode::OK, jar.remove(clear_cookie()));
+        return (
+            StatusCode::OK,
+            jar.remove(clear_cookie(state.secure_session_cookie())),
+        );
     }
     (StatusCode::OK, jar)
 }
 
 /// `GET /api/auth/session`
 ///
-/// SPA bootstrap probe. Returns `{authenticated: bool}` based on whether
-/// the presented session cookie (if any) names a live session. Status is
-/// always 200 — the real 401 semantics come from the middleware that will
-/// gate every other endpoint.
+/// SPA bootstrap probe. Returns authentication status and cookie security
+/// mode. Status is always 200 — the real 401 semantics come from the
+/// middleware that will gate every other endpoint.
 pub(crate) async fn get_session(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
@@ -162,5 +172,5 @@ pub(crate) async fn get_session(
         .get(SESSION_COOKIE_NAME)
         .map(|c| state.verify_session(c.value()))
         .unwrap_or(false);
-    Json(SessionStatus { authenticated })
+    Json(SessionStatus::new(authenticated, &state))
 }

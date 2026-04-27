@@ -25,6 +25,15 @@ function formatSessionMode(mode: SessionMode): string {
   return mode === 'web_only' ? 'web-only' : 'normal';
 }
 
+function isLocalHttpHost(hostname: string): boolean {
+  const normalized = hostname.toLowerCase().replace(/^\[(.*)\]$/, '$1');
+  return normalized === 'localhost' || normalized === '::1' || /^127(?:\.\d{1,3}){3}$/.test(normalized);
+}
+
+function isPlainHttpRemoteOrigin(): boolean {
+  return window.location.protocol === 'http:' && !isLocalHttpHost(window.location.hostname);
+}
+
 class TcodeApp extends LitElement {
   private authState: 'loading' | 'authenticated' | 'unauthenticated' = 'loading';
   private route: AppRoute = parseRoute();
@@ -32,6 +41,7 @@ class TcodeApp extends LitElement {
   private sessionsError = '';
   private loginSecret = '';
   private loginError = '';
+  private authUsesSecureCookie = true;
   private loginBusy = false;
   private sessionsPollHandle: number | null = null;
   private permissionsPollHandle: number | null = null;
@@ -94,6 +104,7 @@ class TcodeApp extends LitElement {
 
     try {
       const session = await api.getAuthSession();
+      this.authUsesSecureCookie = session.secure_session_cookie;
       if (session.authenticated) {
         this.authState = 'authenticated';
         if (this.route.kind === 'login') {
@@ -264,6 +275,20 @@ class TcodeApp extends LitElement {
     this.requestUpdate();
   }
 
+  private loginCookieWarningMessage(): string {
+    return 'This page is using plain HTTP from a non-local address, but the server is issuing Secure auth cookies. Your browser may accept the password and then discard the login cookie. Use HTTPS or restart tcode remote with --allow-insecure-http if you understand the risk.';
+  }
+
+  private shouldShowLoginCookieWarning(): boolean {
+    return this.authUsesSecureCookie && isPlainHttpRemoteOrigin();
+  }
+
+  private async verifyLoginCookieStored(): Promise<boolean> {
+    const session = await api.getAuthSession();
+    this.authUsesSecureCookie = session.secure_session_cookie;
+    return session.authenticated;
+  }
+
   private handleShellClick = (event: Event): void => {
     const mouseEvent = event as MouseEvent;
     if (mouseEvent.defaultPrevented || mouseEvent.button !== 0 || mouseEvent.metaKey || mouseEvent.ctrlKey || mouseEvent.shiftKey || mouseEvent.altKey) {
@@ -327,8 +352,17 @@ class TcodeApp extends LitElement {
 
     try {
       const status = await api.login(this.loginSecret);
+      this.authUsesSecureCookie = status.secure_session_cookie;
       if (!status.authenticated) {
         this.loginError = 'Login failed.';
+        return;
+      }
+
+      if (!(await this.verifyLoginCookieStored())) {
+        this.authState = 'unauthenticated';
+        this.loginError = this.shouldShowLoginCookieWarning()
+          ? 'Login succeeded, but the browser did not send the session cookie back. See the HTTP cookie warning above.'
+          : 'Login succeeded, but the browser did not send the session cookie back.';
         return;
       }
 
@@ -396,6 +430,9 @@ class TcodeApp extends LitElement {
             centralized so later hosting changes stay localized, though cross-origin/static hosting
             would still need backend support.
           </p>
+          ${this.shouldShowLoginCookieWarning()
+            ? html`<div class="inline-alert warning">${this.loginCookieWarningMessage()}</div>`
+            : nothing}
           ${this.loginError ? html`<div class="inline-alert error">${this.loginError}</div>` : nothing}
           <label>
             <span class="muted">Shared secret</span>

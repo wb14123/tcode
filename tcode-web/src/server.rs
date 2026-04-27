@@ -58,17 +58,24 @@ pub async fn run(config: RemoteConfig) -> anyhow::Result<()> {
     // to the password goes through `AppState::password`. The `Secret`
     // keeps its zeroize-on-drop guarantee across this move.
     let remote_mode_policy = config.remote_mode_policy;
+    let secure_session_cookie = !config.allow_insecure_http;
     let RemoteConfig { password, .. } = config;
     let state = Arc::new(AppState::from_secret_and_runtime(
         password,
         runtime_settings,
         remote_mode_policy,
+        secure_session_cookie,
     ));
 
     tracing::info!("tcode remote listening on http://{local}");
     if !local.ip().is_loopback() {
         tracing::warn!(
             "tcode remote is listening on a non-loopback address over HTTP; use a strong password and prefer HTTPS/tunnel exposure"
+        );
+    }
+    if !secure_session_cookie {
+        tracing::warn!(
+            "--allow-insecure-http is enabled; login passwords and session cookies may be sent over the network in cleartext"
         );
     }
 

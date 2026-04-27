@@ -76,10 +76,12 @@ fn web_only_global_flag_is_accepted_after_remote_subcommand() {
         Some(crate::Commands::Remote {
             port,
             host,
+            allow_insecure_http,
             password,
         }) => {
             assert_eq!(port, 1234);
             assert_eq!(host, IpAddr::V4(Ipv4Addr::LOCALHOST));
+            assert!(!allow_insecure_http);
             assert_eq!(password, "super-secret-password");
         }
         _ => panic!("expected remote command"),
@@ -103,6 +105,30 @@ fn remote_host_flag_accepts_non_loopback_address() {
     match cli.command {
         Some(crate::Commands::Remote { host, .. }) => {
             assert_eq!(host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+        }
+        _ => panic!("expected remote command"),
+    }
+}
+
+#[test]
+fn remote_allow_insecure_http_flag_is_accepted() {
+    let cli = crate::Cli::try_parse_from([
+        "tcode",
+        "remote",
+        "--port",
+        "1234",
+        "--allow-insecure-http",
+        "--password",
+        "super-secret-password",
+    ])
+    .expect("remote --allow-insecure-http should parse");
+
+    match cli.command {
+        Some(crate::Commands::Remote {
+            allow_insecure_http,
+            ..
+        }) => {
+            assert!(allow_insecure_http);
         }
         _ => panic!("expected remote command"),
     }

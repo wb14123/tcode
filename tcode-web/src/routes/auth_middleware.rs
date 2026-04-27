@@ -36,8 +36,9 @@ use crate::state::AppState;
 /// - status `401 Unauthorized`
 /// - `content-type: application/json`
 /// - `cache-control: no-store`
-/// - body `{"authenticated":false}` (mirrors `SessionStatus` shape so
-///   the SPA's bootstrap probe can use a single deserializer)
+/// - body `{"authenticated":false,"secure_session_cookie":...}` (mirrors
+///   `SessionStatus` shape so the SPA's bootstrap probe can use a single
+///   deserializer)
 ///
 /// Logging contract:
 /// - logs `tracing::trace!` with method + path on rejection (silent at
@@ -69,9 +70,7 @@ pub(crate) async fn require_auth(
     (
         StatusCode::UNAUTHORIZED,
         [(header::CACHE_CONTROL, "no-store")],
-        Json(SessionStatus {
-            authenticated: false,
-        }),
+        Json(SessionStatus::new(false, &state)),
     )
         .into_response()
 }

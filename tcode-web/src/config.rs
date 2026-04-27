@@ -47,6 +47,7 @@ pub struct RemoteConfig {
     pub(crate) profile: Option<String>,
     pub(crate) container_config: Option<ContainerConfig>,
     pub(crate) remote_mode_policy: RemoteModePolicy,
+    pub(crate) allow_insecure_http: bool,
 }
 
 impl RemoteConfig {
@@ -120,6 +121,16 @@ impl RemoteConfig {
         self
     }
 
+    /// Allow direct plain-HTTP browser sessions by omitting the `Secure`
+    /// attribute from auth cookies.
+    ///
+    /// This is intentionally opt-in: without TLS, the login password and
+    /// session cookie can be observed by anyone who can read the network path.
+    pub fn with_allow_insecure_http(mut self, allow_insecure_http: bool) -> Self {
+        self.allow_insecure_http = allow_insecure_http;
+        self
+    }
+
     /// Shared builder used by both `try_new` (after validation) and
     /// `for_test` (which skips validation). Keeping the default bind address
     /// in one place guards against the two paths drifting.
@@ -131,6 +142,7 @@ impl RemoteConfig {
             profile: None,
             container_config: None,
             remote_mode_policy: RemoteModePolicy::default(),
+            allow_insecure_http: false,
         }
     }
 

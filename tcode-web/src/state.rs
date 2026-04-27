@@ -122,6 +122,7 @@ pub(crate) struct AppState {
     sessions: parking_lot::RwLock<HashMap<String, Instant>>,
     runtime: Option<RuntimeState>,
     remote_mode_policy: RemoteModePolicy,
+    secure_session_cookie: bool,
 }
 
 impl AppState {
@@ -141,12 +142,20 @@ impl AppState {
     }
 
     #[cfg(test)]
+    pub(crate) fn new_with_insecure_http(password: String) -> Self {
+        let mut state = Self::from_secret(Secret::new(password));
+        state.secure_session_cookie = false;
+        state
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_secret(password: Secret) -> Self {
         Self {
             password,
             sessions: parking_lot::RwLock::new(HashMap::new()),
             runtime: None,
             remote_mode_policy: RemoteModePolicy::default(),
+            secure_session_cookie: true,
         }
     }
 
@@ -154,6 +163,7 @@ impl AppState {
         password: Secret,
         runtime_settings: RuntimeSettings,
         remote_mode_policy: RemoteModePolicy,
+        secure_session_cookie: bool,
     ) -> Self {
         Self {
             password,
@@ -164,6 +174,7 @@ impl AppState {
                 start_lock: tokio::sync::Mutex::new(()),
             }),
             remote_mode_policy,
+            secure_session_cookie,
         }
     }
 
@@ -254,6 +265,10 @@ impl AppState {
 
     pub(crate) fn remote_mode_policy(&self) -> RemoteModePolicy {
         self.remote_mode_policy
+    }
+
+    pub(crate) fn secure_session_cookie(&self) -> bool {
+        self.secure_session_cookie
     }
 
     pub(crate) fn new_session_mode(&self) -> SessionMode {

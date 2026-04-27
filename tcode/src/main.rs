@@ -221,6 +221,12 @@ enum Commands {
         #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
         host: IpAddr,
 
+        /// Allow browser auth over direct plain HTTP by omitting the Secure
+        /// attribute from auth cookies. This exposes the login password and
+        /// session cookie to anyone who can observe the network path.
+        #[arg(long)]
+        allow_insecure_http: bool,
+
         /// Shared secret used for the single-user login flow.
         /// Prefer passing via env (TCODE_REMOTE_PASSWORD).
         // NOTE: if `Cli`/`Commands` ever derives `Debug`/`Display`, wrap `password` in a redacted newtype — Secret in tcode-web does not extend to this CLI-layer struct.
@@ -725,6 +731,7 @@ async fn main() -> Result<()> {
         Some(Commands::Remote {
             port,
             host,
+            allow_insecure_http,
             password,
         }) => {
             // Ordering is load-bearing: init_remote_tracing() MUST run before
@@ -741,6 +748,7 @@ async fn main() -> Result<()> {
             };
             let cfg = tcode_web::RemoteConfig::try_new(port, password, password_on_argv)?
                 .with_bind_addr(host)
+                .with_allow_insecure_http(allow_insecure_http)
                 .with_runtime_options(profile.clone(), container_config)
                 .with_remote_mode_policy(remote_mode_policy);
             tcode_web::run(cfg).await

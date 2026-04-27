@@ -18,6 +18,11 @@ fn fresh_app() -> axum::Router {
     build_router(state)
 }
 
+fn fresh_insecure_http_app() -> axum::Router {
+    let state = Arc::new(AppState::new_with_insecure_http(VALID_PASSWORD.into()));
+    build_router(state)
+}
+
 #[tokio::test]
 async fn get_session_returns_unauthenticated() -> anyhow::Result<()> {
     let app = fresh_app();
@@ -44,7 +49,31 @@ async fn get_session_returns_unauthenticated() -> anyhow::Result<()> {
     assert_eq!(
         parsed,
         SessionStatus {
-            authenticated: false
+            authenticated: false,
+            secure_session_cookie: true,
+        }
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn insecure_http_get_session_reports_insecure_cookie_mode() -> anyhow::Result<()> {
+    let app = fresh_insecure_http_app();
+
+    let request = Request::builder()
+        .uri("/api/auth/session")
+        .body(Body::empty())?;
+
+    let response = app.oneshot(request).await?;
+
+    assert_eq!(response.status(), StatusCode::OK);
+    let parsed = parse_session_body(response).await?;
+    assert_eq!(
+        parsed,
+        SessionStatus {
+            authenticated: false,
+            secure_session_cookie: false,
         }
     );
 
@@ -109,7 +138,42 @@ async fn login_with_correct_password_succeeds() -> anyhow::Result<()> {
     assert_eq!(
         body,
         SessionStatus {
-            authenticated: true
+            authenticated: true,
+            secure_session_cookie: true,
+        }
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn insecure_http_login_cookie_omits_secure_attribute() -> anyhow::Result<()> {
+    let app = fresh_insecure_http_app();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(login_body(VALID_PASSWORD)))?,
+        )
+        .await?;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let cookie = find_session_cookie(&resp)?
+        .ok_or_else(|| anyhow::anyhow!("Set-Cookie tcode_session missing"))?;
+
+    assert_eq!(cookie.http_only(), Some(true));
+    assert_eq!(cookie.same_site(), Some(SameSite::Strict));
+    assert_eq!(cookie.secure(), None);
+
+    let body = parse_session_body(resp).await?;
+    assert_eq!(
+        body,
+        SessionStatus {
+            authenticated: true,
+            secure_session_cookie: false,
         }
     );
 
@@ -140,7 +204,8 @@ async fn login_with_wrong_password_returns_401_and_no_set_cookie() -> anyhow::Re
     assert_eq!(
         body,
         SessionStatus {
-            authenticated: false
+            authenticated: false,
+            secure_session_cookie: true,
         }
     );
 
@@ -435,6 +500,45 @@ async fn logout_clears_cookie_and_revokes_session() -> anyhow::Result<()> {
         !body.authenticated,
         "session must be revoked after logout, got authenticated=true"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn insecure_http_logout_clear_cookie_omits_secure_attribute() -> anyhow::Result<()> {
+    let app = fresh_insecure_http_app();
+
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(login_body(VALID_PASSWORD)))?,
+        )
+        .await?;
+    assert_eq!(login.status(), StatusCode::OK);
+    let issued = find_session_cookie(&login)?
+        .ok_or_else(|| anyhow::anyhow!("Set-Cookie tcode_session missing after login"))?;
+    let pair = format!("{}={}", issued.name(), issued.value());
+
+    let logout = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/logout")
+                .header("cookie", &pair)
+                .body(Body::empty())?,
+        )
+        .await?;
+    assert_eq!(logout.status(), StatusCode::OK);
+
+    let cleared = find_session_cookie(&logout)?
+        .ok_or_else(|| anyhow::anyhow!("logout must emit a clearing Set-Cookie"))?;
+    assert_eq!(cleared.http_only(), Some(true));
+    assert_eq!(cleared.same_site(), Some(SameSite::Strict));
+    assert_eq!(cleared.secure(), None);
 
     Ok(())
 }
