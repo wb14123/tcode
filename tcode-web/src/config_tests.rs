@@ -1,4 +1,5 @@
-use crate::config::RemoteConfig;
+use crate::config::{RemoteConfig, RemoteModePolicy};
+use tcode_runtime::session::SessionMode;
 
 /// Test D — empty string rejects and the error mentions
 /// `TCODE_REMOTE_PASSWORD` so the operator can self-correct.
@@ -33,8 +34,47 @@ fn try_new_accepts_long_password() {
 }
 
 /// Exercise the argv-sourced password branch. The warn! is a side effect
-/// we don't assert on (see §8 of plan.md — intentional coverage gap).
+/// we don't assert on.
 #[test]
 fn try_new_accepts_argv_sourced_password() {
     assert!(RemoteConfig::try_new(8765, "a-long-enough-password-123".into(), true).is_ok());
+}
+
+#[test]
+fn remote_mode_policy_defaults_to_all_and_creates_normal_sessions() {
+    let cfg = RemoteConfig::try_new(8765, "a-long-enough-password-123".into(), false)
+        .expect("valid remote config");
+    assert_eq!(cfg.remote_mode_policy, RemoteModePolicy::All);
+    assert_eq!(
+        cfg.remote_mode_policy.new_session_mode(),
+        SessionMode::Normal
+    );
+    assert!(
+        cfg.remote_mode_policy
+            .allows_session_mode(SessionMode::Normal)
+    );
+    assert!(
+        cfg.remote_mode_policy
+            .allows_session_mode(SessionMode::WebOnly)
+    );
+}
+
+#[test]
+fn remote_mode_policy_web_only_only_creates_and_allows_only_web_only_sessions() {
+    let cfg = RemoteConfig::try_new(8765, "a-long-enough-password-123".into(), false)
+        .expect("valid remote config")
+        .with_remote_mode_policy(RemoteModePolicy::WebOnlyOnly);
+    assert_eq!(cfg.remote_mode_policy, RemoteModePolicy::WebOnlyOnly);
+    assert_eq!(
+        cfg.remote_mode_policy.new_session_mode(),
+        SessionMode::WebOnly
+    );
+    assert!(
+        !cfg.remote_mode_policy
+            .allows_session_mode(SessionMode::Normal)
+    );
+    assert!(
+        cfg.remote_mode_policy
+            .allows_session_mode(SessionMode::WebOnly)
+    );
 }

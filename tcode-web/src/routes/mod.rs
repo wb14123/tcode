@@ -1,8 +1,18 @@
 use std::sync::Arc;
 
 use axum::middleware::{from_fn, from_fn_with_state};
+use axum::{
+    Json,
+    extract::{Request, State},
+    http::StatusCode,
+    middleware::Next,
+    response::{IntoResponse, Response},
+};
+use serde_json::json;
+use tcode_runtime::session::read_session_mode;
+use tcode_runtime::session::{base_path, validate_session_id};
 
-use crate::state::AppState;
+use crate::{config::RemoteModePolicy, state::AppState};
 
 mod api;
 mod auth;
@@ -155,7 +165,65 @@ pub(crate) fn protected_routes(state: Arc<AppState>) -> axum::Router<Arc<AppStat
 
     reads
         .merge(writes)
+        .route_layer(from_fn_with_state(
+            Arc::clone(&state),
+            enforce_remote_mode_policy,
+        ))
         .route_layer(from_fn_with_state(state, require_auth))
+}
+
+async fn enforce_remote_mode_policy(
+    State(state): State<Arc<AppState>>,
+    request: Request,
+    next: Next,
+) -> Response {
+    if let Some(session_id) = session_id_from_api_path(request.uri().path())
+        && let Err(response) = ensure_session_allowed_by_policy(&state, session_id)
+    {
+        return *response;
+    }
+    next.run(request).await
+}
+
+fn session_id_from_api_path(path: &str) -> Option<&str> {
+    let rest = path.strip_prefix("/api/sessions/")?;
+    let session_id = rest
+        .split('/')
+        .next()
+        .filter(|session_id| !session_id.is_empty())?;
+    validate_session_id(session_id).ok()?;
+    Some(session_id)
+}
+
+fn ensure_session_allowed_by_policy(
+    state: &AppState,
+    session_id: &str,
+) -> Result<(), Box<Response>> {
+    validate_session_id(session_id).map_err(|e| api_error_response(StatusCode::BAD_REQUEST, e))?;
+    let session_dir = base_path()
+        .map_err(|e| api_error_response(StatusCode::INTERNAL_SERVER_ERROR, e))?
+        .join(session_id);
+    if !session_dir.is_dir() {
+        return Err(api_error_response(
+            StatusCode::NOT_FOUND,
+            "session not found",
+        ));
+    }
+    if state.remote_mode_policy() == RemoteModePolicy::WebOnlyOnly {
+        let mode = read_session_mode(&session_dir)
+            .map_err(|e| api_error_response(StatusCode::INTERNAL_SERVER_ERROR, e))?;
+        if !mode.is_web_only() {
+            return Err(api_error_response(
+                StatusCode::NOT_FOUND,
+                "session not found",
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn api_error_response(status: StatusCode, message: impl ToString) -> Box<Response> {
+    Box::new((status, Json(json!({ "error": message.to_string() }))).into_response())
 }
 
 pub(crate) fn build_router(state: Arc<AppState>) -> axum::Router {

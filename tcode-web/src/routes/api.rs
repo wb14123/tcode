@@ -14,14 +14,17 @@ use axum::{
 };
 use base64::Engine;
 use llm_rs::{
-    conversation::{ConversationState, Message, SessionMeta},
+    conversation::{ConversationState, Message},
     permission::{PermissionDecision, PermissionKey, PermissionScope, PermissionState},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tcode_runtime::{
     protocol::{ClientMessage, DEFAULT_LEASE_TIMEOUT_SECONDS, ServerMessage, SessionRuntimeInfo},
-    session::{Session, base_path, generate_session_id, list_sessions, validate_session_id},
+    session::{
+        Session, SessionMeta, SessionMode, base_path, ensure_session_mode_initialized,
+        generate_session_id, list_sessions, read_session_mode, validate_session_id,
+    },
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
@@ -83,6 +86,7 @@ struct SessionSummary {
     created_at: Option<u64>,
     last_active_at: Option<u64>,
     status: String,
+    mode: SessionMode,
 }
 
 #[derive(Deserialize)]
@@ -153,12 +157,18 @@ struct ParentContext {
     tool_call_id: Option<String>,
 }
 
-pub(crate) async fn get_sessions() -> ApiResult<Json<SessionsResponse>> {
+pub(crate) async fn get_sessions(
+    State(state): State<std::sync::Arc<AppState>>,
+) -> ApiResult<Json<SessionsResponse>> {
     let mut sessions = Vec::new();
     for session_id in list_sessions().map_err(|e| ApiError::internal(e.to_string()))? {
         let session_dir = session_dir_for(&session_id)?;
         let meta =
             read_json_optional::<SessionMeta>(&session_dir.join("session-meta.json")).await?;
+        let mode = meta.as_ref().map(|m| m.mode).unwrap_or_default();
+        if !state.allows_session_mode(mode) {
+            continue;
+        }
         let status = read_optional_text_file(&session_dir.join("status.txt"))
             .await?
             .unwrap_or_default();
@@ -168,6 +178,7 @@ pub(crate) async fn get_sessions() -> ApiResult<Json<SessionsResponse>> {
             created_at: meta.as_ref().and_then(|m| m.created_at),
             last_active_at: meta.as_ref().and_then(|m| m.last_active_at),
             status,
+            mode,
         });
     }
     sessions.sort_by(|a, b| {
@@ -183,7 +194,10 @@ pub(crate) async fn post_sessions(
     Json(body): Json<CreateSessionRequest>,
 ) -> ApiResult<Json<CreateSessionResponse>> {
     let session_id = create_unique_session_id().map_err(|e| ApiError::internal(e.to_string()))?;
-    Session::new(session_id.clone()).map_err(|e| ApiError::internal(e.to_string()))?;
+    let session =
+        Session::new(session_id.clone()).map_err(|e| ApiError::internal(e.to_string()))?;
+    ensure_session_mode_initialized(session.session_dir(), state.new_session_mode())
+        .map_err(|e| ApiError::internal(e.to_string()))?;
     state
         .ensure_runtime(&session_id)
         .await
@@ -253,12 +267,13 @@ pub(crate) async fn post_session_lease(
         }));
     }
 
+    let runtime_info = inactive_runtime_info_for(&session_dir)?;
     Ok(Json(LeaseResponse {
         active: false,
         client_id: None,
         lease_timeout_seconds: DEFAULT_LEASE_TIMEOUT_SECONDS,
         heartbeat_interval_seconds: heartbeat_interval_seconds(DEFAULT_LEASE_TIMEOUT_SECONDS),
-        runtime_info: SessionRuntimeInfo::inactive(),
+        runtime_info,
     }))
 }
 
@@ -266,11 +281,15 @@ pub(crate) async fn post_session_lease_heartbeat(
     State(state): State<std::sync::Arc<AppState>>,
     AxumPath((session_id, client_id)): AxumPath<(String, String)>,
 ) -> ApiResult<Json<RuntimeInfoResponse>> {
-    existing_session_dir(&session_id)?;
-    let runtime_info = state
+    let session_dir = existing_session_dir(&session_id)?;
+    let mut runtime_info = state
         .heartbeat_client_lease(&session_id, client_id)
         .await
         .map_err(|e| ApiError::conflict(e.to_string()))?;
+    if !runtime_info.active {
+        runtime_info.session_mode =
+            read_session_mode(&session_dir).map_err(|e| ApiError::internal(e.to_string()))?;
+    }
     Ok(Json(RuntimeInfoResponse { runtime_info }))
 }
 
@@ -669,6 +688,13 @@ pub(crate) fn empty_permission_state() -> PermissionState {
         session: Vec::new(),
         project: Vec::new(),
     }
+}
+
+fn inactive_runtime_info_for(session_dir: &Path) -> ApiResult<SessionRuntimeInfo> {
+    let mut info = SessionRuntimeInfo::inactive();
+    info.session_mode =
+        read_session_mode(session_dir).map_err(|e| ApiError::internal(e.to_string()))?;
+    Ok(info)
 }
 
 fn map_runtime_error(message: String) -> ApiError {

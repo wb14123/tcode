@@ -2,12 +2,15 @@ export interface AuthSessionStatus {
   authenticated: boolean;
 }
 
+export type SessionMode = 'normal' | 'web_only';
+
 export interface SessionSummary {
   id: string;
   description?: string | null;
   created_at: number | null;
   last_active_at: number | null;
   status: string;
+  mode: SessionMode;
 }
 
 export interface SessionsResponse {
@@ -23,6 +26,7 @@ export type RuntimeOwnerKind = 'Cli' | 'Web' | 'Serve';
 export interface SessionRuntimeInfo {
   active: boolean;
   owner_kind: RuntimeOwnerKind;
+  session_mode: SessionMode;
   active_lease_count: number;
   lease_timeout_seconds: number;
   runtime_id: string;

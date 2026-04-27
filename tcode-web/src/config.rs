@@ -2,8 +2,32 @@ use std::net::{IpAddr, Ipv4Addr};
 
 use anyhow::bail;
 use llm_rs::tool::ContainerConfig;
+use tcode_runtime::session::SessionMode;
 
 use crate::state::Secret;
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RemoteModePolicy {
+    #[default]
+    All,
+    WebOnlyOnly,
+}
+
+impl RemoteModePolicy {
+    pub fn new_session_mode(self) -> SessionMode {
+        match self {
+            Self::All => SessionMode::Normal,
+            Self::WebOnlyOnly => SessionMode::WebOnly,
+        }
+    }
+
+    pub fn allows_session_mode(self, mode: SessionMode) -> bool {
+        match self {
+            Self::All => true,
+            Self::WebOnlyOnly => mode.is_web_only(),
+        }
+    }
+}
 
 /// Configuration for the `tcode remote` web backend.
 ///
@@ -22,6 +46,7 @@ pub struct RemoteConfig {
     pub(crate) password: Secret,
     pub(crate) profile: Option<String>,
     pub(crate) container_config: Option<ContainerConfig>,
+    pub(crate) remote_mode_policy: RemoteModePolicy,
 }
 
 impl RemoteConfig {
@@ -80,6 +105,11 @@ impl RemoteConfig {
         self
     }
 
+    pub fn with_remote_mode_policy(mut self, remote_mode_policy: RemoteModePolicy) -> Self {
+        self.remote_mode_policy = remote_mode_policy;
+        self
+    }
+
     /// Shared builder used by both `try_new` (after validation) and
     /// `for_test` (which skips validation). Keeping the default bind address
     /// in one place guards against the two paths drifting.
@@ -90,6 +120,7 @@ impl RemoteConfig {
             password: Secret::new(password),
             profile: None,
             container_config: None,
+            remote_mode_policy: RemoteModePolicy::default(),
         }
     }
 

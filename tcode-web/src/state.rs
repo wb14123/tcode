@@ -2,13 +2,14 @@ use std::collections::HashMap;
 use std::fmt;
 use std::time::{Duration, Instant};
 
-use anyhow::{Context, Result, anyhow};
+use crate::config::RemoteModePolicy;
+use anyhow::{Context, Result, anyhow, bail};
 use base64::Engine;
 use subtle::ConstantTimeEq;
 use tcode_runtime::{
     bootstrap::{RuntimeProbeStatus, RuntimeSettings, probe_runtime_status, send_socket_message},
     protocol::{ClientKind, ClientLeaseInfo, ClientMessage, ServerMessage, SessionRuntimeInfo},
-    session::{base_path, validate_session_id},
+    session::{SessionMode, base_path, read_session_mode, validate_session_id},
 };
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -120,6 +121,7 @@ pub(crate) struct AppState {
     /// sweep on `mint_session` or a periodic background task.
     sessions: parking_lot::RwLock<HashMap<String, Instant>>,
     runtime: Option<RuntimeState>,
+    remote_mode_policy: RemoteModePolicy,
 }
 
 impl AppState {
@@ -132,17 +134,26 @@ impl AppState {
     }
 
     #[cfg(test)]
+    pub(crate) fn new_with_policy(password: String, remote_mode_policy: RemoteModePolicy) -> Self {
+        let mut state = Self::from_secret(Secret::new(password));
+        state.remote_mode_policy = remote_mode_policy;
+        state
+    }
+
+    #[cfg(test)]
     pub(crate) fn from_secret(password: Secret) -> Self {
         Self {
             password,
             sessions: parking_lot::RwLock::new(HashMap::new()),
             runtime: None,
+            remote_mode_policy: RemoteModePolicy::default(),
         }
     }
 
     pub(crate) fn from_secret_and_runtime(
         password: Secret,
         runtime_settings: RuntimeSettings,
+        remote_mode_policy: RemoteModePolicy,
     ) -> Self {
         Self {
             password,
@@ -152,6 +163,7 @@ impl AppState {
                 runtimes: parking_lot::Mutex::new(HashMap::new()),
                 start_lock: tokio::sync::Mutex::new(()),
             }),
+            remote_mode_policy,
         }
     }
 
@@ -240,6 +252,18 @@ impl AppState {
         self.sessions.write().remove(candidate);
     }
 
+    pub(crate) fn remote_mode_policy(&self) -> RemoteModePolicy {
+        self.remote_mode_policy
+    }
+
+    pub(crate) fn new_session_mode(&self) -> SessionMode {
+        self.remote_mode_policy.new_session_mode()
+    }
+
+    pub(crate) fn allows_session_mode(&self, mode: SessionMode) -> bool {
+        self.remote_mode_policy.allows_session_mode(mode)
+    }
+
     pub(crate) async fn ensure_runtime(&self, session_id: &str) -> Result<()> {
         let runtime = self
             .runtime
@@ -247,11 +271,13 @@ impl AppState {
             .ok_or_else(|| anyhow!("session runtime support is not configured"))?;
 
         if Self::runtime_is_live(&runtime.runtimes, session_id) {
+            self.runtime_status(session_id).await?;
             return Ok(());
         }
 
         let _guard = runtime.start_lock.lock().await;
         if Self::runtime_is_live(&runtime.runtimes, session_id) {
+            self.runtime_status(session_id).await?;
             return Ok(());
         }
 
@@ -266,7 +292,18 @@ impl AppState {
     pub(crate) async fn runtime_status(&self, session_id: &str) -> Result<SessionRuntimeStatus> {
         let socket_path = Self::socket_path_for_session(session_id)?;
         Ok(match probe_runtime_status(&socket_path).await? {
-            RuntimeProbeStatus::Active(_) => SessionRuntimeStatus::Active,
+            RuntimeProbeStatus::Active(info) => {
+                let session_dir = base_path()?.join(session_id);
+                let expected_mode = read_session_mode(&session_dir)?;
+                if info.session_mode != expected_mode {
+                    bail!(
+                        "session runtime mode mismatch for {session_id}: persisted mode is {}, active runtime mode is {}",
+                        expected_mode.label(),
+                        info.session_mode.label()
+                    );
+                }
+                SessionRuntimeStatus::Active
+            }
             RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {
                 SessionRuntimeStatus::Inactive
             }

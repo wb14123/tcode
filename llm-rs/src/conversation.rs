@@ -17,142 +17,31 @@ use tokio_stream::{Stream, StreamExt};
 use uuid::Uuid;
 
 /// Prefix that subagent prompts are expected to start with.
-/// Used in the system prompt instruction and stripped from display descriptions.
+/// Used in subagent tool guidance and stripped from display descriptions.
 const SUBAGENT_PROMPT_PREFIX: &str = "You are a subagent.";
 
-/// Shared prompt rules appended to both root and subagent system prompts.
-pub const SUBAGENT_RULES: &str = "\
-## Subagent Rules
-
-1. **Continue over create.** Use `continue_subagent` to query existing subagents \
-about their work/sources/reasoning before spawning new ones.
-2. **Ask, don't inspect.** Query subagents via `continue_subagent` rather than \
-re-reading their outputs yourself.
-3. **Chase the delegation chain.** If a subagent delegated to its own subagents, \
-ask it to query them — don't accept \"I don't know\" if an agent in the chain might know.
-4. **Provenance over corroboration.** Trace the ACTUAL source of information — \
-don't find new sources that agree with it.
-5. **Verify, don't approximate.** If precise info exists in the subagent chain, \
-pursue it via `continue_subagent`.
-6. **No block evasion.** If an operation is blocked, a subagent will be blocked too.
-7. **No relay subagents.** Only spawn subagents that summarize/synthesize — never \
-to call a tool and return raw results. If you need verbatim content, call the tool yourself.
-
-## When to Delegate
-
-Delegate to keep your context clean. Subagents retain context and can be continued.
-
-- **Research:** Explore unfamiliar code, return summary
-- **Multi-step changes:** Plan yourself, delegate each independent step
-- **Debugging:** Investigate failures, report conclusions only
-- **Verification:** Run tests/builds, report pass/fail + errors
-- **Fix-verify cycles:** Mechanical edits + verification in one subagent
-- **Parallel work:** Spawn multiple subagents for independent tasks
-
-## Delegation Style
-
-- Be specific: exact file paths, function names, acceptance criteria
-- Include known context so subagent doesn't re-discover it
-- State deliverable: code change, summary, or both
-
-## Tool Usage
-
-Use dedicated tools for file ops, not bash:
-- `read`/`write`/`edit` for files, `grep` for search, `glob` for finding files
-- `LSP` (if available) for code navigation: go-to-definition, find-references, type info, call hierarchy
-- `bash` is for terminal ops: git, cargo, npm, docker, etc.
-
-### Bash output filtering
-
-Project instructions (including `CLAUDE.md`) may tell you to pipe bash \
-commands through `tail`, `head`, `grep`, `sed`, etc. Treat those as \
-**intent** and translate to the bash tool's `filter` / `head` / `tail` \
-parameters — do **not** use the shell pipeline form.
-
-- `cmd 2>&1 | tail -n N` → `bash(command=\"cmd\", tail=N)`
-- `cmd 2>&1 | head -n N` → `bash(command=\"cmd\", head=N)`
-- `cmd 2>&1 | grep PAT` → `bash(command=\"cmd\", filter=\"PAT\")`
-- `cmd | grep -E \"a|b\" | tail -20` → `bash(command=\"cmd\", filter=\"a|b\", tail=20)`
-
-The bash tool merges stderr into stdout automatically (lines are tagged \
-`stdout| ` / `stderr| ` with a trailing space), so you never need `2>&1`. Fall back to a literal \
-shell pipeline only when the processing cannot be expressed with \
-`filter` / `head` / `tail` (rare — e.g. `awk` column extraction, \
-`sort | uniq -c`).
-
-## Efficient Reading
-
-1. `grep` to find relevant lines → `read` with offset/limit for just that section
-2. Full-file reads only for small files (<100 lines) or full rewrites
-3. Delegate large-output tasks to subagents when a summary suffices; \
-call tools directly when you need verbatim content";
-
-fn build_system_prompt(
-    subagent_depth: usize,
-    container_config: Option<&ContainerConfig>,
-) -> String {
-    let role = if subagent_depth == 0 {
-        "You are the main agent coordinating the user's task. \
-         Plan the approach and delegate work to subagents. Delegate based on context \
-         cost, not complexity — offload anything that loads content you won't need \
-         afterward. Reserve your context for planning, coordination, and user communication. \
-         Always ask the user question when there is something not clear and you are not able to \
-         confirm from your own research. "
-    } else {
-        "You are a subagent spawned for a specific task. Complete it and return a \
-         concise result. You may spawn sub-subagents for genuine subtasks, but never \
-         re-delegate your own task — that just wastes tokens."
-    };
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|e| {
-            tracing::warn!("Failed to get current directory: {}", e);
-            "unknown".to_string()
-        });
-    let start_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z");
-    let mut prompt = format!(
-        "{role}\n\n{rules}\n\nCurrent directory: {cwd}\n\
-         This conversation started at: {start_time}. Note that time may have passed since then; \
-         use the `current_time` tool to get the accurate current time if needed.",
-        role = role,
-        rules = SUBAGENT_RULES,
-        cwd = cwd,
-        start_time = start_time,
-    );
-
-    // Append CLAUDE.md content if the file exists in the current directory.
-    let claude_md_path = std::path::Path::new(&cwd).join("CLAUDE.md");
-    if claude_md_path.is_file() {
-        match std::fs::read_to_string(&claude_md_path) {
-            Ok(content) => {
-                prompt.push_str("\n\n");
-                prompt.push_str(&content);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to read CLAUDE.md: {}", e);
-            }
-        }
-    }
-
-    if let Some(config) = container_config {
-        prompt.push_str(&format!(
-            "\n\n## Container Mode\n\n\
-            Your bash commands execute inside container `{}` (via {}). \
-            File tools (read, write, edit, grep, glob) operate on the host filesystem outside the container. \
-            The project directory is mounted at the same absolute path inside the container, \
-            so file paths are consistent between bash and file tools. \
-            Some tools or commands available on the host may not be available inside the container.",
-            config.name, config.runtime
-        ));
-    }
-
-    prompt
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SystemPromptContext {
+    pub subagent_depth: usize,
 }
 
-/// Lightweight metadata written alongside conversation state for quick access
-/// (e.g. session listing) without loading the full state.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct SessionMeta {
+pub type SystemPromptBuilder = Arc<dyn Fn(SystemPromptContext) -> String + Send + Sync + 'static>;
+
+pub fn default_system_prompt_builder() -> SystemPromptBuilder {
+    Arc::new(|context| {
+        if context.subagent_depth == 0 {
+            "You are a helpful assistant.".to_string()
+        } else {
+            "You are a helpful assistant. Complete the delegated task and return a concise result."
+                .to_string()
+        }
+    })
+}
+
+/// Generic lightweight summary of a conversation for outer applications that
+/// keep their own session metadata.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ConversationSummary {
     pub description: Option<String>,
     #[serde(default)]
     pub created_at: Option<u64>,
@@ -184,6 +73,26 @@ pub struct ConversationState {
     pub aggregate_cache_read_tokens: i32,
     pub single_turn: bool,
     pub subagent_depth: usize,
+}
+
+impl ConversationState {
+    pub fn summary(&self) -> ConversationSummary {
+        ConversationSummary {
+            description: first_user_description(&self.llm_msgs),
+            created_at: None,
+            last_active_at: None,
+        }
+    }
+}
+
+fn first_user_description(llm_msgs: &[LLMMessage]) -> Option<String> {
+    llm_msgs.iter().find_map(|msg| {
+        if let LLMMessage::User(text) = msg {
+            Some(truncate_preview(text, 80))
+        } else {
+            None
+        }
+    })
 }
 
 /// Fill in synthetic "cancelled" ToolResults for any tool calls that lack results.
@@ -546,18 +455,25 @@ pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
         .collect();
 
     let description = format!(
-        "Spawn a subagent to handle a task in its own context window. \
-         The subagent has access to all tools and will return its final answer. \
+        "Spawn a subagent to handle a self-contained task in its own context window. \
+         The subagent has access to the available tools and returns its final answer. \
          Subagents can spawn their own subagents and can be continued via \
-         `continue_subagent`.\n\n\
-         **When to use:** research, implementation subtasks, debugging, \
-         verification, fix-and-verify cycles, or any task loading content \
-         you won't need afterward.\n\n\
-         **Rules:**\n\
+         `continue_subagent`.
+
+\
+         **Use this when:** the task can be handled independently, may need its own \
+         context, or would produce details you do not need to keep in the main \
+         conversation.
+
+\
+         **Rules:**
+\
          - Start the prompt with \"{SUBAGENT_PROMPT_PREFIX}\"\n\
-         - Give specific sub-tasks with file paths, function names, and acceptance criteria.\n\
-         - State deliverable: code change, summary, or both.\n\
-         - Spawn in parallel when tasks are independent.\n\n\
+         - Describe the task clearly, including relevant context and acceptance criteria.\n\
+         - State what the subagent should return.\n\
+         - Spawn in parallel when tasks are independent.
+
+\
          Available models:\n{}",
         models_list.join("\n")
     );
@@ -583,6 +499,7 @@ fn prepare_conversation(
     llm: &mut dyn LLM,
     tools: Vec<Arc<Tool>>,
     msg_id_start: i32,
+    summary: ConversationSummary,
 ) -> (
     HashMap<String, Arc<Tool>>,
     mpsc::Receiver<Message>,
@@ -595,6 +512,7 @@ fn prepare_conversation(
     let client = Arc::new(ConversationClient {
         msg_id_counter: AtomicI32::new(msg_id_start),
         msgs: parking_lot::RwLock::new(Vec::new()),
+        summary: parking_lot::RwLock::new(summary),
         input_channel_tx: input_tx,
         new_msg_notify_tx: notify_tx,
         tool_cancel_tokens: parking_lot::Mutex::new(HashMap::new()),
@@ -617,11 +535,24 @@ pub struct ConversationManager {
     permission_manager: Arc<crate::permission::PermissionManager>,
     /// Optional container configuration for Docker/Podman sandbox mode.
     container_config: Option<Arc<ContainerConfig>>,
+    system_prompt_builder: SystemPromptBuilder,
 }
 
 /// Manages conversations so that any new client can attach to an existing conversation.
 impl ConversationManager {
     pub fn new(permissions_path: PathBuf, container_config: Option<ContainerConfig>) -> Arc<Self> {
+        Self::new_with_system_prompt_builder(
+            permissions_path,
+            container_config,
+            default_system_prompt_builder(),
+        )
+    }
+
+    pub fn new_with_system_prompt_builder(
+        permissions_path: PathBuf,
+        container_config: Option<ContainerConfig>,
+        system_prompt_builder: SystemPromptBuilder,
+    ) -> Arc<Self> {
         let permission_manager =
             Arc::new(crate::permission::PermissionManager::new(permissions_path));
         Arc::new(Self {
@@ -629,7 +560,12 @@ impl ConversationManager {
             subagent_parents: parking_lot::Mutex::new(HashMap::new()),
             permission_manager,
             container_config: container_config.map(Arc::new),
+            system_prompt_builder,
         })
+    }
+
+    pub(crate) fn build_system_prompt(&self, subagent_depth: usize) -> String {
+        (self.system_prompt_builder)(SystemPromptContext { subagent_depth })
     }
 
     /// Get the permission manager.
@@ -680,8 +616,18 @@ impl ConversationManager {
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
     ) -> Result<(String, Arc<ConversationClient>)> {
-        let (tools_map, input_rx, client) = prepare_conversation(&mut *llm, tools, 0);
-        let system_prompt = build_system_prompt(subagent_depth, self.container_config.as_deref());
+        let now = now_millis();
+        let (tools_map, input_rx, client) = prepare_conversation(
+            &mut *llm,
+            tools,
+            0,
+            ConversationSummary {
+                description: None,
+                created_at: Some(now),
+                last_active_at: Some(now),
+            },
+        );
+        let system_prompt = self.build_system_prompt(subagent_depth);
         let llm_msgs = vec![LLMMessage::System(system_prompt)];
         let conversation = Conversation {
             id: conversation_id.clone(),
@@ -702,7 +648,7 @@ impl ConversationManager {
             cancelled_tools: HashSet::new(),
             accumulated_tool_content: HashMap::new(),
             description: None,
-            created_at: Some(now_millis()),
+            created_at: Some(now),
             env: ConversationEnv {
                 conversation_id: conversation_id.clone(),
                 client,
@@ -807,30 +753,12 @@ impl ConversationManager {
         state_dir: Option<PathBuf>,
     ) -> Result<(String, Arc<ConversationClient>)> {
         fill_cancelled_tool_results(&mut state.llm_msgs);
-
-        // Load session metadata (description, created_at) from session-meta.json
-        let meta = state_dir
-            .as_ref()
-            .and_then(|dir| std::fs::read_to_string(dir.join("session-meta.json")).ok())
-            .and_then(|json| serde_json::from_str::<SessionMeta>(&json).ok());
-
-        // Back-fill description from first user message for old sessions without metadata
-        let description = meta
-            .as_ref()
-            .and_then(|m| m.description.clone())
-            .or_else(|| {
-                state.llm_msgs.iter().find_map(|msg| {
-                    if let LLMMessage::User(text) = msg {
-                        Some(truncate_preview(text, 80))
-                    } else {
-                        None
-                    }
-                })
-            });
-        let created_at = meta.and_then(|m| m.created_at).or(Some(now_millis()));
+        let summary = state.summary();
+        let description = summary.description.clone();
+        let created_at = summary.created_at;
 
         let (tools_map, input_rx, client) =
-            prepare_conversation(&mut *llm, tools, state.msg_id_counter);
+            prepare_conversation(&mut *llm, tools, state.msg_id_counter, summary);
         let conv_id = state.id.clone();
         let conversation = Conversation {
             id: state.id.clone(),
@@ -1456,7 +1384,17 @@ impl Conversation {
         }
     }
 
-    fn save_state(&self) -> Result<()> {
+    fn summary_snapshot(&self, last_active_at: Option<u64>) -> ConversationSummary {
+        ConversationSummary {
+            description: self.description.clone(),
+            created_at: self.created_at,
+            last_active_at,
+        }
+    }
+
+    fn save_state(&self) -> Result<ConversationSummary> {
+        let summary = self.summary_snapshot(Some(now_millis()));
+        self.env.client.set_conversation_summary(summary.clone());
         if let Some(ref dir) = self.env.state_dir {
             let state = self.snapshot_state();
             let json = serde_json::to_string_pretty(&state)?;
@@ -1464,25 +1402,14 @@ impl Conversation {
             let target = dir.join("conversation-state.json");
             std::fs::write(&tmp, &json)?;
             std::fs::rename(&tmp, &target)?;
-
-            // Write lightweight session-meta.json for quick access (e.g. session listing)
-            let meta = SessionMeta {
-                description: self.description.clone(),
-                created_at: self.created_at,
-                last_active_at: Some(now_millis()),
-            };
-            let meta_json = serde_json::to_string_pretty(&meta)?;
-            let meta_tmp = dir.join("session-meta.json.tmp");
-            let meta_target = dir.join("session-meta.json");
-            std::fs::write(&meta_tmp, &meta_json)?;
-            std::fs::rename(&meta_tmp, &meta_target)?;
         }
-        Ok(())
+        Ok(summary)
     }
 
     fn push_llm_msg(&mut self, msg: LLMMessage) -> Result<()> {
         self.llm_msgs.push(msg);
-        self.save_state()
+        self.save_state()?;
+        Ok(())
     }
 
     /// Broadcast SubAgentTurnEnd for a subagent response (without pushing to llm_msgs).
@@ -1569,15 +1496,15 @@ impl Conversation {
                                 self.env.client.reset_cancel_token();
                             }
                             self.cancelled_tools.clear();
+                            if self.description.is_none() {
+                                self.description = Some(truncate_preview(&content, 80));
+                            }
+                            self.push_llm_msg(LLMMessage::User(content.to_string()))?;
                             self.broadcast_msg(Message::UserMessage {
                                 msg_id: self.next_msg_id(),
                                 created_at: now_millis(),
                                 content: Arc::clone(&content),
                             })?;
-                            if self.description.is_none() {
-                                self.description = Some(truncate_preview(&content, 80));
-                            }
-                            self.push_llm_msg(LLMMessage::User(content.to_string()))?;
                             self.call_llm().await?;
                             self.maybe_finish_turn()?;
                         }
@@ -2538,6 +2465,7 @@ async fn execute_continue_subagent(
 pub struct ConversationClient {
     msg_id_counter: AtomicI32,
     msgs: parking_lot::RwLock<Vec<Arc<Message>>>,
+    summary: parking_lot::RwLock<ConversationSummary>,
     input_channel_tx: mpsc::Sender<Message>,
     new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
     tool_cancel_tokens: parking_lot::Mutex<HashMap<String, CancellationToken>>,
@@ -2558,6 +2486,57 @@ impl ConversationClient {
     pub(crate) fn msg_id_counter_value(&self) -> i32 {
         self.msg_id_counter
             .load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    pub fn conversation_summary(&self) -> ConversationSummary {
+        self.summary.read().clone()
+    }
+
+    pub(crate) fn set_conversation_summary(&self, summary: ConversationSummary) {
+        *self.summary.write() = summary;
+    }
+
+    fn update_summary_for_message(&self, msg: &Message) {
+        let mut summary = self.summary.write();
+        match msg {
+            Message::UserMessage {
+                created_at,
+                content,
+                ..
+            } => {
+                if summary.description.is_none() {
+                    summary.description = Some(truncate_preview(content, 80));
+                }
+                if summary.created_at.is_none() {
+                    summary.created_at = Some(*created_at);
+                }
+                summary.last_active_at = Some(*created_at);
+            }
+            Message::AssistantMessageStart { created_at, .. }
+            | Message::ToolMessageStart { created_at, .. }
+            | Message::SubAgentInputStart { created_at, .. }
+            | Message::AssistantToolCallStart { created_at, .. }
+            | Message::SystemMessage { created_at, .. } => {
+                if summary.created_at.is_none() {
+                    summary.created_at = Some(*created_at);
+                }
+                summary.last_active_at = Some(*created_at);
+            }
+            Message::AssistantMessageEnd { .. }
+            | Message::ToolMessageEnd { .. }
+            | Message::SubAgentEnd { .. }
+            | Message::SubAgentTurnEnd { .. }
+            | Message::AssistantRequestEnd { .. }
+            | Message::UserRequestEnd { .. }
+            | Message::ToolCallResolved { .. } => {
+                let now = now_millis();
+                if summary.created_at.is_none() {
+                    summary.created_at = Some(now);
+                }
+                summary.last_active_at = Some(now);
+            }
+            _ => {}
+        }
     }
 
     /// Cancel the entire conversation: cancels the conversation-level token (which cascades
@@ -2656,6 +2635,7 @@ impl ConversationClient {
 
     /// Used for conversation to notify a new message if available
     pub fn notify_msg(&self, msg: Message) -> Result<()> {
+        self.update_summary_for_message(&msg);
         let msg = Arc::new(msg);
         self.msgs.write().push(Arc::clone(&msg));
         self.new_msg_notify_tx.send(msg).map_err(|e| {
@@ -2745,6 +2725,7 @@ impl ConversationClient {
         ConversationClient {
             msg_id_counter: AtomicI32::new(0),
             msgs: parking_lot::RwLock::new(Vec::new()),
+            summary: parking_lot::RwLock::new(ConversationSummary::default()),
             input_channel_tx: input_tx,
             new_msg_notify_tx: notify_tx,
             tool_cancel_tokens: parking_lot::Mutex::new(HashMap::new()),

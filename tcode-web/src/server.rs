@@ -57,10 +57,12 @@ pub async fn run(config: RemoteConfig) -> anyhow::Result<()> {
     // Move the `Secret` out of `config` exactly once; subsequent access
     // to the password goes through `AppState::password`. The `Secret`
     // keeps its zeroize-on-drop guarantee across this move.
+    let remote_mode_policy = config.remote_mode_policy;
     let RemoteConfig { password, .. } = config;
     let state = Arc::new(AppState::from_secret_and_runtime(
         password,
         runtime_settings,
+        remote_mode_policy,
     ));
 
     tracing::info!("tcode remote listening on http://{local}");

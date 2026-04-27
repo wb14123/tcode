@@ -1,10 +1,165 @@
 use std::fs::{self, Permissions};
 use std::io;
+use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, bail};
+use llm_rs::conversation::ConversationSummary;
 use rand::RngExt;
+use serde::{Deserialize, Serialize};
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum SessionMode {
+    #[default]
+    Normal,
+    WebOnly,
+}
+
+impl SessionMode {
+    pub fn label(self) -> &'static str {
+        match self {
+            SessionMode::Normal => "normal",
+            SessionMode::WebOnly => "web-only",
+        }
+    }
+
+    pub fn is_web_only(self) -> bool {
+        matches!(self, SessionMode::WebOnly)
+    }
+}
+
+/// Lightweight metadata written alongside conversation state for quick access
+/// (e.g. session listing) without loading the full state.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionMeta {
+    pub description: Option<String>,
+    #[serde(default)]
+    pub created_at: Option<u64>,
+    #[serde(default)]
+    pub last_active_at: Option<u64>,
+    #[serde(default)]
+    pub mode: SessionMode,
+}
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system clock before UNIX epoch")
+        .as_millis() as u64
+}
+
+pub fn read_session_meta(session_dir: &Path) -> Result<Option<SessionMeta>> {
+    let path = session_dir.join("session-meta.json");
+    match std::fs::read_to_string(&path) {
+        Ok(json) => serde_json::from_str::<SessionMeta>(&json)
+            .map(Some)
+            .with_context(|| format!("failed to parse {}", path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e).with_context(|| format!("failed to read {}", path.display())),
+    }
+}
+
+pub fn read_session_mode(session_dir: &Path) -> Result<SessionMode> {
+    Ok(read_session_meta(session_dir)?
+        .map(|meta| meta.mode)
+        .unwrap_or_default())
+}
+
+fn write_initial_session_meta(session_dir: &Path, mode: SessionMode) -> Result<()> {
+    if read_session_meta(session_dir)?.is_some() {
+        return Ok(());
+    }
+
+    std::fs::create_dir_all(session_dir)
+        .with_context(|| format!("failed to create {}", session_dir.display()))?;
+
+    let now = now_millis();
+    let meta = SessionMeta {
+        description: None,
+        created_at: Some(now),
+        last_active_at: Some(now),
+        mode,
+    };
+    let meta_json = serde_json::to_string_pretty(&meta)?;
+    let meta_path = session_dir.join("session-meta.json");
+
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&meta_path)
+    {
+        Ok(mut file) => file
+            .write_all(meta_json.as_bytes())
+            .with_context(|| format!("failed to write {}", meta_path.display())),
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            read_session_meta(session_dir)?;
+            Ok(())
+        }
+        Err(e) => Err(e).with_context(|| format!("failed to create {}", meta_path.display())),
+    }
+}
+
+pub fn ensure_session_mode_initialized(session_dir: &Path, mode: SessionMode) -> Result<()> {
+    write_initial_session_meta(session_dir, mode)
+}
+
+pub fn session_meta_from_summary(
+    session_dir: &Path,
+    summary: &ConversationSummary,
+    default_mode: SessionMode,
+) -> Result<SessionMeta> {
+    let existing = read_session_meta(session_dir)?;
+    let now = now_millis();
+    let mode = existing
+        .as_ref()
+        .map(|meta| meta.mode)
+        .unwrap_or(default_mode);
+    Ok(SessionMeta {
+        description: summary
+            .description
+            .clone()
+            .or_else(|| existing.as_ref().and_then(|meta| meta.description.clone())),
+        created_at: summary
+            .created_at
+            .or_else(|| existing.as_ref().and_then(|meta| meta.created_at))
+            .or(Some(now)),
+        last_active_at: summary.last_active_at.or(Some(now)),
+        mode,
+    })
+}
+
+pub fn update_session_meta_from_summary(
+    session_dir: &Path,
+    summary: &ConversationSummary,
+    default_mode: SessionMode,
+) -> Result<SessionMeta> {
+    std::fs::create_dir_all(session_dir)
+        .with_context(|| format!("failed to create {}", session_dir.display()))?;
+    let meta = session_meta_from_summary(session_dir, summary, default_mode)?;
+    let meta_json = serde_json::to_string_pretty(&meta)?;
+    let temp_nonce: u64 = rand::rng().random();
+    let meta_tmp = session_dir.join(format!(
+        "session-meta.json.{}.{}.tmp",
+        std::process::id(),
+        temp_nonce
+    ));
+    let meta_target = session_dir.join("session-meta.json");
+    std::fs::write(&meta_tmp, meta_json)
+        .with_context(|| format!("failed to write {}", meta_tmp.display()))?;
+    if let Err(e) = std::fs::rename(&meta_tmp, &meta_target) {
+        if let Err(cleanup_err) = std::fs::remove_file(&meta_tmp) {
+            tracing::warn!(
+                temp_file = %meta_tmp.display(),
+                error = %cleanup_err,
+                "failed to remove session metadata temp file after rename failure"
+            );
+        }
+        return Err(e).with_context(|| format!("failed to rename {}", meta_target.display()));
+    }
+    Ok(meta)
+}
 
 /// Returns the base path for all sessions: ~/.tcode/sessions/
 pub fn base_path() -> Result<PathBuf> {
@@ -163,6 +318,22 @@ impl Session {
     /// Path for the lightweight session metadata file
     pub fn session_meta_file(&self) -> PathBuf {
         self.session_dir.join("session-meta.json")
+    }
+
+    pub fn read_mode(&self) -> Result<SessionMode> {
+        read_session_mode(&self.session_dir)
+    }
+
+    pub fn ensure_mode_initialized(&self, mode: SessionMode) -> Result<()> {
+        ensure_session_mode_initialized(&self.session_dir, mode)
+    }
+
+    pub fn update_meta_from_summary(
+        &self,
+        summary: &ConversationSummary,
+        default_mode: SessionMode,
+    ) -> Result<SessionMeta> {
+        update_session_meta_from_summary(&self.session_dir, summary, default_mode)
     }
 
     /// Path for stdout log (captures injected stdout from tools like proxychains)

@@ -14,7 +14,7 @@ use tokio_util::codec::{Framed, LengthDelimitedCodec};
 use crate::config::{self, TcodeConfig};
 use crate::protocol::{ClientMessage, RuntimeOwnerKind, ServerMessage, SessionRuntimeInfo};
 use crate::server::{Server, ServerRuntimeOptions};
-use crate::session::Session;
+use crate::session::{Session, SessionMode, read_session_mode};
 
 #[derive(Clone)]
 pub struct RuntimeSettings {
@@ -51,9 +51,11 @@ impl RuntimeSettings {
         let owner_kind = RuntimeOwnerKind::Web;
         let session = Session::new(session_id.to_string())?;
         let socket_path = session.socket_path();
+        let session_mode = read_session_mode(session.session_dir())?;
 
         match probe_runtime_status(&socket_path).await? {
             RuntimeProbeStatus::Active(info) => {
+                validate_active_runtime_mode(session_id, &info, session_mode)?;
                 tracing::info!(
                     session_id,
                     owner_kind = ?info.owner_kind,
@@ -87,6 +89,7 @@ impl RuntimeSettings {
             self.container_config.clone(),
             ServerRuntimeOptions {
                 owner_kind,
+                session_mode,
                 ..ServerRuntimeOptions::default()
             },
         );
@@ -103,26 +106,32 @@ impl RuntimeSettings {
             Ok(Ok(())) => Ok(handle),
             Ok(Err(e)) => {
                 handle.abort();
-                if matches!(
-                    probe_runtime_status(&socket_path).await?,
-                    RuntimeProbeStatus::Active(_)
-                ) {
-                    tracing::info!(session_id, "another runtime won startup race; attaching");
-                    return Ok(monitor_existing_runtime(socket_path));
+                match probe_runtime_status(&socket_path).await? {
+                    RuntimeProbeStatus::Active(info) => {
+                        validate_active_runtime_mode(session_id, &info, session_mode)?;
+                        tracing::info!(session_id, "another runtime won startup race; attaching");
+                        return Ok(monitor_existing_runtime(socket_path));
+                    }
+                    RuntimeProbeStatus::NoSocket
+                    | RuntimeProbeStatus::NoListener
+                    | RuntimeProbeStatus::Unresponsive => {}
                 }
                 Err(e.context("session runtime failed to start"))
             }
             Err(_) => {
                 handle.abort();
-                if matches!(
-                    probe_runtime_status(&socket_path).await?,
-                    RuntimeProbeStatus::Active(_)
-                ) {
-                    tracing::info!(
-                        session_id,
-                        "runtime became active after startup task ended; attaching"
-                    );
-                    return Ok(monitor_existing_runtime(socket_path));
+                match probe_runtime_status(&socket_path).await? {
+                    RuntimeProbeStatus::Active(info) => {
+                        validate_active_runtime_mode(session_id, &info, session_mode)?;
+                        tracing::info!(
+                            session_id,
+                            "runtime became active after startup task ended; attaching"
+                        );
+                        return Ok(monitor_existing_runtime(socket_path));
+                    }
+                    RuntimeProbeStatus::NoSocket
+                    | RuntimeProbeStatus::NoListener
+                    | RuntimeProbeStatus::Unresponsive => {}
                 }
                 Err(anyhow!(
                     "session runtime terminated before signaling readiness"
@@ -149,6 +158,21 @@ pub enum RuntimeProbeStatus {
     NoSocket,
     NoListener,
     Unresponsive,
+}
+
+fn validate_active_runtime_mode(
+    session_id: &str,
+    info: &SessionRuntimeInfo,
+    expected_mode: SessionMode,
+) -> Result<()> {
+    if info.session_mode != expected_mode {
+        bail!(
+            "session runtime mode mismatch for {session_id}: persisted mode is {}, active runtime mode is {}",
+            expected_mode.label(),
+            info.session_mode.label()
+        );
+    }
+    Ok(())
 }
 
 pub fn runtime_monitor_action(

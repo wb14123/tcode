@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use crate::session::SessionMode;
 use anyhow::Result;
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
@@ -46,6 +47,7 @@ fn spawn_dummy_runtime(socket_path: PathBuf) -> Result<tokio::task::JoinHandle<(
                 let response = ServerMessage::SessionRuntimeInfo(SessionRuntimeInfo {
                     active: true,
                     owner_kind: RuntimeOwnerKind::Cli,
+                    session_mode: SessionMode::Normal,
                     active_lease_count: 1,
                     lease_timeout_seconds: DEFAULT_LEASE_TIMEOUT_SECONDS,
                     runtime_id: "dummy-runtime".to_string(),
@@ -69,7 +71,7 @@ async fn probe_runtime_detects_live_runtime() -> Result<()> {
     let status = probe_runtime_status(&socket_path).await?;
 
     assert!(
-        matches!(status, RuntimeProbeStatus::Active(info) if info.active && info.owner_kind == RuntimeOwnerKind::Cli && info.runtime_id == "dummy-runtime")
+        matches!(status, RuntimeProbeStatus::Active(info) if info.active && info.owner_kind == RuntimeOwnerKind::Cli && info.session_mode == SessionMode::Normal && info.runtime_id == "dummy-runtime")
     );
 
     handle.abort();
@@ -115,6 +117,7 @@ fn runtime_monitor_resets_unresponsive_count_after_active_probe() {
     let active = RuntimeProbeStatus::Active(SessionRuntimeInfo {
         active: true,
         owner_kind: RuntimeOwnerKind::Cli,
+        session_mode: SessionMode::Normal,
         active_lease_count: 1,
         lease_timeout_seconds: DEFAULT_LEASE_TIMEOUT_SECONDS,
         runtime_id: "runtime".to_string(),

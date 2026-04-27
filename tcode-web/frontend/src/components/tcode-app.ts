@@ -3,7 +3,7 @@ import { LitElement, html, nothing } from 'lit';
 import { ApiError, api } from '../api';
 import { runtimeConfig } from '../config';
 import { activeSessionId, hrefForRoute, navigate, parseRoute } from '../router';
-import type { AppRoute, PendingPermissionInfo, PermissionDecisionPayload, PermissionState, SessionSummary } from '../types';
+import type { AppRoute, PendingPermissionInfo, PermissionDecisionPayload, PermissionState, SessionMode, SessionSummary } from '../types';
 
 import './session-view';
 import './subagent-view';
@@ -19,6 +19,10 @@ interface SystemNotificationDetail {
   createdAt: number | null;
   level: string | null;
   message: string;
+}
+
+function formatSessionMode(mode: SessionMode): string {
+  return mode === 'web_only' ? 'web-only' : 'normal';
 }
 
 class TcodeApp extends LitElement {
@@ -501,6 +505,7 @@ class TcodeApp extends LitElement {
                     @click=${this.closeSidebar}
                   >
                     <div class="session-link-title">${session.description || 'Untitled conversation'}</div>
+                    <div class="session-link-meta">${formatSessionMode(session.mode)} · ${session.status || 'inactive'}</div>
                   </a>
                 `,
               )

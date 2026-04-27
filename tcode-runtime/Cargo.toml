@@ -8,6 +8,7 @@ auth = { path = "../auth" }
 anyhow = "1"
 bytes = "1"
 browser-server = { path = "../browser-server" }
+chrono = "0.4"
 dirs = "6"
 fs2 = "0.4"
 futures = "0.3"

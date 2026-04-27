@@ -3,12 +3,16 @@ import { LitElement, html, nothing } from 'lit';
 import { ApiError, api, openEventStream, sessionLeaseManager, type LeaseSnapshot } from '../api';
 import { navigate } from '../router';
 import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
-import type { SessionRuntimeInfo, TimelineItem } from '../types';
+import type { SessionMode, SessionRuntimeInfo, TimelineItem } from '../types';
 
 interface ToastNotice {
   id: number;
   tone: 'error' | 'info';
   message: string;
+}
+
+function formatSessionMode(mode: SessionMode): string {
+  return mode === 'web_only' ? 'web-only' : 'normal';
 }
 
 class TcodeSessionView extends LitElement {
@@ -625,6 +629,7 @@ class TcodeSessionView extends LitElement {
 
   render() {
     const combinedUsage = this.combinedUsageText();
+    const activeMode = this.runtimeInfo?.active ? formatSessionMode(this.runtimeInfo.session_mode) : '';
     const statusTone = this.statusTone();
     const showProgress = this.loading || this.sending || this.isGenerating();
 
@@ -666,6 +671,7 @@ class TcodeSessionView extends LitElement {
             <footer class="chat-status-bar">
               <span class="pill pill-${statusTone}">${this.statusSummary()}</span>
               ${this.sessionId && !this.draftMode ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${this.runtimeRoleSummary()}</span>` : nothing}
+              ${activeMode ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${activeMode}</span>` : nothing}
               ${combinedUsage ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${combinedUsage}</span>` : nothing}
             </footer>
 

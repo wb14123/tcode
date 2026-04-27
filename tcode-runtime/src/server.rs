@@ -10,7 +10,7 @@ use bytes::Bytes;
 use fs2::FileExt;
 use futures::{SinkExt, Stream, StreamExt};
 use llm_rs::conversation::{
-    ConversationManager, ConversationState, Message, MessageEndStatus,
+    ConversationClient, ConversationManager, ConversationState, Message, MessageEndStatus,
     create_continue_subagent_tool, create_subagent_tool, format_subagent_result,
 };
 use llm_rs::llm::{ChatOptions, LLM};
@@ -25,12 +25,12 @@ use tokio::task::JoinHandle;
 use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
 use tokio_util::codec::{Framed, LengthDelimitedCodec};
 
-use llm_rs::conversation::ConversationClient;
-
 use crate::protocol::{
     ClientKind, ClientLeaseInfo, ClientMessage, RuntimeOwnerKind, ServerMessage,
     SessionRuntimeInfo, lease_timeout_duration,
 };
+use crate::session::{SessionMode, update_session_meta_from_summary};
+use crate::system_prompt::tcode_system_prompt_builder;
 
 /// Shared map from tool_call_id -> ConversationClient that owns the tool.
 /// Populated by event writers on ToolMessageStart, cleaned up on ToolMessageEnd.
@@ -122,6 +122,7 @@ async fn acquire_socket_start_lock(socket_path: &Path) -> Result<SocketStartLock
 #[derive(Clone, Debug)]
 pub struct ServerRuntimeOptions {
     pub owner_kind: RuntimeOwnerKind,
+    pub session_mode: SessionMode,
     pub owner_shutdown_token: String,
     pub lease_timeout: Duration,
 }
@@ -130,6 +131,7 @@ impl Default for ServerRuntimeOptions {
     fn default() -> Self {
         Self {
             owner_kind: RuntimeOwnerKind::Cli,
+            session_mode: SessionMode::Normal,
             owner_shutdown_token: generate_runtime_secret(),
             lease_timeout: lease_timeout_duration(),
         }
@@ -441,47 +443,44 @@ impl Server {
         let token_manager = self.token_manager.clone();
         let usage_file = self.usage_file.clone();
         let owner_kind = self.runtime_options.owner_kind;
+        let session_mode = self.runtime_options.session_mode;
         let owner_shutdown_token = self.runtime_options.owner_shutdown_token.clone();
         let lease_timeout = self.runtime_options.lease_timeout;
         let runtime_id = generate_runtime_secret();
 
-        // Create conversation manager (creates permission manager internally)
-        // Store project-level permissions under ~/.tcode/projects/<sha256(cwd)>/
-        // so they persist across sessions for the same working directory.
-        let cwd = std::env::current_dir().context("Failed to get current working directory")?;
-        let cwd_str = cwd.to_string_lossy();
-        let mut hasher = sha2::Sha256::new();
-        hasher.update(cwd_str.as_bytes());
-        let digest = hasher.finalize();
-        let mut hash = String::with_capacity(digest.len() * 2);
-        use std::fmt::Write;
-        for byte in digest.iter() {
-            // write! to a String is infallible (fmt::Write for String never errors).
-            write!(&mut hash, "{:02x}", byte).expect("writes to String are infallible");
-        }
-        let base =
-            dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
-        let permissions_path = base
-            .join(".tcode")
-            .join("projects")
-            .join(&hash)
-            .join("permissions.json");
-        let manager = ConversationManager::new(permissions_path, self.container_config.clone());
+        let cwd = if session_mode.is_web_only() {
+            None
+        } else {
+            Some(std::env::current_dir().context("Failed to get current working directory")?)
+        };
+        let permissions_path = if let Some(cwd) = cwd.as_ref() {
+            let cwd_str = cwd.to_string_lossy();
+            let mut hasher = sha2::Sha256::new();
+            hasher.update(cwd_str.as_bytes());
+            let digest = hasher.finalize();
+            let mut hash = String::with_capacity(digest.len() * 2);
+            use std::fmt::Write;
+            for byte in digest.iter() {
+                // write! to a String is infallible (fmt::Write for String never errors).
+                write!(&mut hash, "{:02x}", byte).expect("writes to String are infallible");
+            }
+            let base =
+                dirs::home_dir().ok_or_else(|| anyhow::anyhow!("Failed to get home directory"))?;
+            base.join(".tcode")
+                .join("projects")
+                .join(&hash)
+                .join("permissions.json")
+        } else {
+            self.session_dir.join("permissions.json")
+        };
+        let system_prompt_builder =
+            tcode_system_prompt_builder(session_mode, self.container_config.clone());
+        let manager = ConversationManager::new_with_system_prompt_builder(
+            permissions_path,
+            self.container_config.clone(),
+            system_prompt_builder,
+        );
 
-        // Scan skills
-        let (skills, skill_warnings) = llm_rs::skill::scan_skills();
-        for warning in &skill_warnings {
-            tracing::warn!("{}", warning);
-        }
-        let skills = std::sync::Arc::new(skills);
-
-        // Start LSP config extraction in the background (runs headless nvim, can take seconds).
-        // We await the result later, just before building the tools list, so it doesn't
-        // block session file creation (display.jsonl, status.txt) which the display nvim
-        // needs to watch on startup.
-        let lsp_config_task = tokio::spawn(lsp_client::extract_config_from_nvim());
-
-        // Build tools list including subagent tools
         let model_infos = if self.subagent_model_selection {
             self.llm.available_models()
         } else {
@@ -490,22 +489,48 @@ impl Server {
                 description: "Same model as parent conversation".into(),
             }]
         };
-        let mut tools_list: Vec<Arc<Tool>> = vec![
-            Arc::new(tools::bash_tool()),
-            Arc::new(tools::current_time_tool()),
-            Arc::new(tools::glob_tool()),
-            Arc::new(tools::grep_tool()),
-            Arc::new(tools::read_tool()),
-            Arc::new(tools::write_tool()),
-            Arc::new(tools::edit_tool()),
-            Arc::new(tools::web_fetch_tool()),
-            Arc::new(tools::web_search_tool()),
-        ];
-        tools_list.push(Arc::new(create_subagent_tool(&model_infos)));
-        tools_list.push(Arc::new(create_continue_subagent_tool()));
-        if !skills.is_empty() {
-            tools_list.push(Arc::new(tools::skill_tool(Arc::clone(&skills))));
-        }
+
+        let mut skill_warnings: Vec<String> = Vec::new();
+        let mut tools_list: Vec<Arc<Tool>> = if session_mode.is_web_only() {
+            vec![
+                Arc::new(tools::current_time_tool()),
+                Arc::new(tools::web_fetch_tool()),
+                Arc::new(tools::web_search_tool()),
+                Arc::new(create_subagent_tool(&model_infos)),
+                Arc::new(create_continue_subagent_tool()),
+            ]
+        } else {
+            let (skills, warnings) = llm_rs::skill::scan_skills();
+            skill_warnings = warnings;
+            for warning in &skill_warnings {
+                tracing::warn!("{}", warning);
+            }
+            let skills = std::sync::Arc::new(skills);
+
+            let mut tools = vec![
+                Arc::new(tools::bash_tool()),
+                Arc::new(tools::current_time_tool()),
+                Arc::new(tools::glob_tool()),
+                Arc::new(tools::grep_tool()),
+                Arc::new(tools::read_tool()),
+                Arc::new(tools::write_tool()),
+                Arc::new(tools::edit_tool()),
+                Arc::new(tools::web_fetch_tool()),
+                Arc::new(tools::web_search_tool()),
+                Arc::new(create_subagent_tool(&model_infos)),
+                Arc::new(create_continue_subagent_tool()),
+            ];
+            if !skills.is_empty() {
+                tools.push(Arc::new(tools::skill_tool(Arc::clone(&skills))));
+            }
+            tools
+        };
+
+        let lsp_config_task = if session_mode.is_web_only() {
+            None
+        } else {
+            Some(tokio::spawn(lsp_client::extract_config_from_nvim()))
+        };
 
         // Create session files early so the display nvim (which may already be running)
         // can start watching them before the LSP config await which can take seconds.
@@ -523,37 +548,46 @@ impl Server {
                 })?;
         }
 
-        // Await LSP config extraction result and conditionally add LSP tool
-        let lsp_manager = match lsp_config_task.await {
-            Ok(Ok(lsp_config)) => {
-                if lsp_config.has_servers() {
-                    let manager =
-                        std::sync::Arc::new(lsp_client::LspManager::new(lsp_config, cwd.clone()));
-                    // Pre-warm: detect project languages and start servers in background
-                    let manager_clone = manager.clone();
-                    let project_dir = cwd.clone();
-                    let _pre_warm = tokio::spawn(async move {
-                        manager_clone.pre_warm(&project_dir).await;
-                    });
-                    tools_list.push(Arc::new(tools::lsp_tool(manager.clone())));
-                    Some(manager)
-                } else {
-                    tracing::info!("No LSP servers configured in nvim");
+        let lsp_manager = if let Some(lsp_config_task) = lsp_config_task {
+            match lsp_config_task.await {
+                Ok(Ok(lsp_config)) => {
+                    if lsp_config.has_servers() {
+                        if let Some(cwd) = cwd.as_ref() {
+                            let manager = std::sync::Arc::new(lsp_client::LspManager::new(
+                                lsp_config,
+                                cwd.clone(),
+                            ));
+                            // Pre-warm: detect project languages and start servers in background
+                            let manager_clone = manager.clone();
+                            let project_dir = cwd.clone();
+                            let _pre_warm = tokio::spawn(async move {
+                                manager_clone.pre_warm(&project_dir).await;
+                            });
+                            tools_list.push(Arc::new(tools::lsp_tool(manager.clone())));
+                            Some(manager)
+                        } else {
+                            None
+                        }
+                    } else {
+                        tracing::info!("No LSP servers configured in nvim");
+                        None
+                    }
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("Failed to extract LSP config from nvim: {e}");
+                    None
+                }
+                Err(e) => {
+                    tracing::warn!("LSP config extraction task panicked: {e}");
                     None
                 }
             }
-            Ok(Err(e)) => {
-                tracing::warn!("Failed to extract LSP config from nvim: {e}");
-                None
-            }
-            Err(e) => {
-                tracing::warn!("LSP config extraction task panicked: {e}");
-                None
-            }
+        } else {
+            None
         };
 
         // Write LSP hint file if no servers configured
-        if lsp_manager.is_none() {
+        if !session_mode.is_web_only() && lsp_manager.is_none() {
             let hint_path = self.session_dir.join("lsp-hint.txt");
             if let Err(e) = tokio::fs::write(
                 &hint_path,
@@ -615,6 +649,7 @@ impl Server {
                         sa_status,
                         sa_token_usage,
                         sa_dir_clone,
+                        session_mode,
                         Some(mgr_clone),
                         sa_conv_client,
                         sa_tool_clients,
@@ -653,6 +688,7 @@ impl Server {
                 status_file,
                 token_usage_file,
                 session_dir,
+                session_mode,
                 Some(manager_clone),
                 root_client,
                 tc_map,
@@ -686,6 +722,7 @@ impl Server {
                 status_file,
                 token_usage_file,
                 session_dir,
+                session_mode,
                 Some(manager_clone),
                 root_client,
                 tc_map,
@@ -781,6 +818,7 @@ impl Server {
                         manager: Arc::clone(&manager),
                         lease_tracker: Arc::clone(&lease_tracker),
                         owner_kind,
+                        session_mode,
                         owner_shutdown_token: owner_shutdown_token.clone(),
                         runtime_id: runtime_id.clone(),
                     };
@@ -888,6 +926,20 @@ async fn write_token_usage(
         .context("Failed to write token usage file")
 }
 
+fn should_update_session_meta(event: &Message) -> bool {
+    matches!(
+        event,
+        Message::UserMessage { .. }
+            | Message::AssistantMessageEnd { .. }
+            | Message::ToolMessageEnd { .. }
+            | Message::SubAgentEnd { .. }
+            | Message::SubAgentTurnEnd { .. }
+            | Message::AssistantRequestEnd { .. }
+            | Message::UserRequestEnd { .. }
+            | Message::ToolCallResolved { .. }
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_event_writer(
     mut events: EventStream,
@@ -895,6 +947,7 @@ fn run_event_writer(
     status_file: PathBuf,
     token_usage_file: PathBuf,
     session_dir: PathBuf,
+    session_mode: SessionMode,
     manager: Option<Arc<ConversationManager>>,
     conv_client: Arc<ConversationClient>,
     tool_clients: ToolClientMap,
@@ -1184,6 +1237,7 @@ fn run_event_writer(
                                         sa_status_clone,
                                         sa_token_usage,
                                         sa_dir,
+                                        session_mode,
                                         Some(sa_mgr),
                                         sa_conv_client,
                                         sa_tool_clients,
@@ -1412,6 +1466,17 @@ fn run_event_writer(
                         .context("Failed to append display event")?;
                 }
             }
+
+            if should_update_session_meta(&event) {
+                let summary = conv_client.conversation_summary();
+                update_session_meta_from_summary(&session_dir, &summary, session_mode)
+                    .with_context(|| {
+                        format!(
+                            "Failed to update session metadata for {}",
+                            session_dir.display()
+                        )
+                    })?;
+            }
         }
         tracing::info!("event_writer finished");
         Ok(())
@@ -1425,6 +1490,7 @@ struct ClientHandlerContext {
     manager: Arc<ConversationManager>,
     lease_tracker: Arc<ClientLeaseTracker>,
     owner_kind: RuntimeOwnerKind,
+    session_mode: SessionMode,
     owner_shutdown_token: String,
     runtime_id: String,
 }
@@ -1432,12 +1498,14 @@ struct ClientHandlerContext {
 fn runtime_info(
     lease_tracker: &ClientLeaseTracker,
     owner_kind: RuntimeOwnerKind,
+    session_mode: SessionMode,
     runtime_id: &str,
 ) -> SessionRuntimeInfo {
     let timeout = lease_tracker.timeout();
     SessionRuntimeInfo {
         active: true,
         owner_kind,
+        session_mode,
         active_lease_count: lease_tracker.active_count(Instant::now()),
         lease_timeout_seconds: timeout.as_secs(),
         runtime_id: runtime_id.to_string(),
@@ -1470,6 +1538,7 @@ async fn handle_client_inner(
         manager,
         lease_tracker,
         owner_kind,
+        session_mode,
         owner_shutdown_token,
         runtime_id,
     } = context;
@@ -1630,7 +1699,7 @@ async fn handle_client_inner(
                         let info = ClientLeaseInfo {
                             client_id,
                             lease_timeout_seconds: lease_tracker.timeout().as_secs(),
-                            runtime_info: runtime_info(&lease_tracker, owner_kind, &runtime_id),
+                            runtime_info: runtime_info(&lease_tracker, owner_kind, session_mode, &runtime_id),
                         };
                         send_msg(&mut sink, &ServerMessage::ClientLeaseRegistered(info)).await?;
                     }
@@ -1641,6 +1710,7 @@ async fn handle_client_inner(
                                 &ServerMessage::SessionRuntimeInfo(runtime_info(
                                     &lease_tracker,
                                     owner_kind,
+                                    session_mode,
                                     &runtime_id,
                                 )),
                             )
@@ -1661,6 +1731,7 @@ async fn handle_client_inner(
                             &ServerMessage::SessionRuntimeInfo(runtime_info(
                                 &lease_tracker,
                                 owner_kind,
+                                session_mode,
                                 &runtime_id,
                             )),
                         )

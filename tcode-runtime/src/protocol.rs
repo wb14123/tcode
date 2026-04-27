@@ -1,3 +1,4 @@
+use crate::session::SessionMode;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 
@@ -27,6 +28,8 @@ pub struct ClientLeaseInfo {
 pub struct SessionRuntimeInfo {
     pub active: bool,
     pub owner_kind: RuntimeOwnerKind,
+    #[serde(default)]
+    pub session_mode: SessionMode,
     pub active_lease_count: usize,
     pub lease_timeout_seconds: u64,
     pub runtime_id: String,
@@ -37,6 +40,7 @@ impl SessionRuntimeInfo {
         Self {
             active: false,
             owner_kind: RuntimeOwnerKind::Cli,
+            session_mode: SessionMode::Normal,
             active_lease_count: 0,
             lease_timeout_seconds: DEFAULT_LEASE_TIMEOUT_SECONDS,
             runtime_id: String::new(),

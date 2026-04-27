@@ -78,7 +78,8 @@ use tcode_runtime::bootstrap::{
     RuntimeProbeStatus, browser_server_socket_path, build_chat_options, init_browser_client,
     parse_search_engine, probe_runtime_status,
 };
-use tcode_runtime::protocol::RuntimeOwnerKind;
+use tcode_runtime::protocol::{RuntimeOwnerKind, SessionRuntimeInfo};
+use tcode_runtime::session::{SessionMode, ensure_session_mode_initialized, read_session_mode};
 use tool_call_display::ToolCallDisplayClient;
 
 #[derive(Parser)]
@@ -104,6 +105,10 @@ struct Cli {
     /// Container runtime CLI to use (default: docker)
     #[arg(long = "container-runtime", default_value = "docker", value_parser = ["docker", "podman"], requires = "container")]
     container_runtime: String,
+
+    /// Create new sessions in web-only mode
+    #[arg(long = "web-only", global = true)]
+    web_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -325,6 +330,44 @@ fn run_shell_cmd(cmd: &str, context_msg: &str) -> Result<()> {
     Ok(())
 }
 
+fn requested_session_mode(web_only: bool) -> SessionMode {
+    if web_only {
+        SessionMode::WebOnly
+    } else {
+        SessionMode::Normal
+    }
+}
+
+fn initialize_new_session_mode(
+    session: &Session,
+    requested_mode: SessionMode,
+) -> Result<SessionMode> {
+    ensure_session_mode_initialized(session.session_dir(), requested_mode)?;
+    read_session_mode(session.session_dir())
+}
+
+fn session_mode_for_serve(session: &Session, requested_mode: SessionMode) -> Result<SessionMode> {
+    if !session.session_meta_file().exists() && !session.conversation_state_file().exists() {
+        ensure_session_mode_initialized(session.session_dir(), requested_mode)?;
+    }
+    read_session_mode(session.session_dir())
+}
+
+fn validate_active_runtime_mode(
+    session_id: &str,
+    info: &SessionRuntimeInfo,
+    expected_mode: SessionMode,
+) -> Result<()> {
+    if info.session_mode != expected_mode {
+        bail!(
+            "session runtime mode mismatch for {session_id}: persisted mode is {}, active runtime mode is {}",
+            expected_mode.label(),
+            info.session_mode.label()
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -334,7 +377,9 @@ async fn main() -> Result<()> {
         profile,
         container,
         container_runtime,
+        web_only,
     } = cli;
+    let requested_session_mode = requested_session_mode(web_only);
 
     // Helper to require --session flag for subcommands
     let require_session = |opt: Option<String>| -> Result<String> {
@@ -371,15 +416,23 @@ async fn main() -> Result<()> {
             }
             let config = load_cfg()?;
             let container_config = resolve_container_config(&container, &container_runtime).await?;
-            run_unified(config, profile.as_deref(), container_config).await
+            run_unified(
+                config,
+                profile.as_deref(),
+                container_config,
+                requested_session_mode,
+            )
+            .await
         }
         Some(Commands::Serve) => {
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let sess = Session::new(session_id.clone())?;
             let socket_path = sess.socket_path();
-            match probe_runtime_status(&socket_path).await? {
+            let session_mode = match probe_runtime_status(&socket_path).await? {
                 RuntimeProbeStatus::Active(info) => {
+                    let session_mode = read_session_mode(sess.session_dir())?;
+                    validate_active_runtime_mode(&session_id, &info, session_mode)?;
                     let lease = cli_runtime::register_cli_lease(socket_path.clone(), "serve")
                         .await
                         .context("Failed to register serve runtime lease")?;
@@ -397,8 +450,10 @@ async fn main() -> Result<()> {
                         socket_path
                     );
                 }
-                RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {}
-            }
+                RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {
+                    session_mode_for_serve(&sess, requested_session_mode)?
+                }
+            };
             let config = load_cfg()?;
             init_browser_client(
                 config.browser_server_url.clone(),
@@ -426,6 +481,7 @@ async fn main() -> Result<()> {
                 container_config,
                 server::ServerRuntimeOptions {
                     owner_kind: RuntimeOwnerKind::Serve,
+                    session_mode,
                     ..server::ServerRuntimeOptions::default()
                 },
             );
@@ -489,9 +545,11 @@ async fn main() -> Result<()> {
                     session_id
                 );
             }
+            let session_mode = read_session_mode(sess.session_dir())?;
             let socket_path = sess.socket_path();
             let runtime_deps = match probe_runtime_status(&socket_path).await? {
                 RuntimeProbeStatus::Active(info) => {
+                    validate_active_runtime_mode(&session_id, &info, session_mode)?;
                     tracing::info!(
                         owner_kind = ?info.owner_kind,
                         session_id,
@@ -529,13 +587,13 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Commands::Sessions) => {
-            use llm_rs::conversation::SessionMeta;
             use std::os::unix::net::UnixStream;
+            use tcode_runtime::session::SessionMeta;
             let sessions = session::list_sessions()?;
             if sessions.is_empty() {
                 println!("No sessions in ~/.tcode/sessions/");
             } else {
-                let mut entries: Vec<(String, String, Option<String>, u64)> = sessions
+                let mut entries: Vec<(String, String, SessionMode, Option<String>, u64)> = sessions
                     .into_iter()
                     .map(|id| {
                         let session = Session::new(id.clone())?;
@@ -548,19 +606,20 @@ async fn main() -> Result<()> {
                             .ok()
                             .and_then(|json| serde_json::from_str::<SessionMeta>(&json).ok());
                         let last_active = meta.as_ref().and_then(|m| m.last_active_at).unwrap_or(0);
+                        let mode = meta.as_ref().map(|m| m.mode).unwrap_or_default();
                         let description = meta.and_then(|m| m.description);
-                        Ok((id, status.to_string(), description, last_active))
+                        Ok((id, status.to_string(), mode, description, last_active))
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                entries.sort_by(|a, b| b.3.cmp(&a.3));
+                entries.sort_by(|a, b| b.4.cmp(&a.4));
 
                 println!("Sessions:");
-                for (id, status, description, _) in entries {
+                for (id, status, mode, description, _) in entries {
                     if let Some(desc) = description {
-                        println!("  {} ({}) {}", id, status, desc);
+                        println!("  {} ({}, {}) {}", id, status, mode.label(), desc);
                     } else {
-                        println!("  {} ({})", id, status);
+                        println!("  {} ({}, {})", id, status, mode.label());
                     }
                 }
             }
@@ -665,8 +724,14 @@ async fn main() -> Result<()> {
 
             let container_config = resolve_container_config(&container, &container_runtime).await?;
             let password_on_argv = password_on_argv();
+            let remote_mode_policy = if web_only {
+                tcode_web::RemoteModePolicy::WebOnlyOnly
+            } else {
+                tcode_web::RemoteModePolicy::All
+            };
             let cfg = tcode_web::RemoteConfig::try_new(port, password, password_on_argv)?
-                .with_runtime_options(profile.clone(), container_config);
+                .with_runtime_options(profile.clone(), container_config)
+                .with_remote_mode_policy(remote_mode_policy);
             tcode_web::run(cfg).await
         }
     }
@@ -786,6 +851,7 @@ async fn run_unified(
     config: config::TcodeConfig,
     profile: Option<&str>,
     container_config: Option<llm_rs::tool::ContainerConfig>,
+    requested_mode: SessionMode,
 ) -> Result<()> {
     if !is_in_tmux() {
         anyhow::bail!(
@@ -795,6 +861,7 @@ async fn run_unified(
 
     let session_id = session::generate_session_id();
     let session = Session::new(session_id.clone())?;
+    initialize_new_session_mode(&session, requested_mode)?;
     let (llm, model, token_manager) = create_llm(&config, profile)?;
     let chat_options = build_chat_options();
     let runtime_deps = Some(RuntimeDependencies {
@@ -1100,6 +1167,7 @@ async fn run_unified_with_session(
     tools::set_search_engine(search_engine);
 
     let socket_path = session.socket_path();
+    let session_mode = read_session_mode(session.session_dir())?;
 
     let exe_path =
         std::env::current_exe().context("Failed to determine current executable path")?;
@@ -1114,6 +1182,7 @@ async fn run_unified_with_session(
 
     let runtime_mode = match probe_runtime_status(&socket_path).await? {
         RuntimeProbeStatus::Active(info) => {
+            validate_active_runtime_mode(&session_id, &info, session_mode)?;
             tracing::info!(
                 owner_kind = ?info.owner_kind,
                 session_id,
@@ -1157,6 +1226,7 @@ async fn run_unified_with_session(
                 server::ServerRuntimeOptions {
                     owner_kind: RuntimeOwnerKind::Cli,
                     owner_shutdown_token: owner_token.clone(),
+                    session_mode,
                     ..server::ServerRuntimeOptions::default()
                 },
             );
@@ -1175,24 +1245,30 @@ async fn run_unified_with_session(
                 }),
                 Ok(Err(e)) => {
                     handle.abort();
-                    if matches!(
-                        probe_runtime_status(&socket_path).await?,
-                        RuntimeProbeStatus::Active(_)
-                    ) {
-                        RuntimeMode::Attached
-                    } else {
-                        return Err(e.context("Server failed to start"));
+                    match probe_runtime_status(&socket_path).await? {
+                        RuntimeProbeStatus::Active(info) => {
+                            validate_active_runtime_mode(&session_id, &info, session_mode)?;
+                            RuntimeMode::Attached
+                        }
+                        RuntimeProbeStatus::NoSocket
+                        | RuntimeProbeStatus::NoListener
+                        | RuntimeProbeStatus::Unresponsive => {
+                            return Err(e.context("Server failed to start"));
+                        }
                     }
                 }
                 Err(_) => {
                     handle.abort();
-                    if matches!(
-                        probe_runtime_status(&socket_path).await?,
-                        RuntimeProbeStatus::Active(_)
-                    ) {
-                        RuntimeMode::Attached
-                    } else {
-                        return Err(anyhow::anyhow!("Server task terminated unexpectedly"));
+                    match probe_runtime_status(&socket_path).await? {
+                        RuntimeProbeStatus::Active(info) => {
+                            validate_active_runtime_mode(&session_id, &info, session_mode)?;
+                            RuntimeMode::Attached
+                        }
+                        RuntimeProbeStatus::NoSocket
+                        | RuntimeProbeStatus::NoListener
+                        | RuntimeProbeStatus::Unresponsive => {
+                            return Err(anyhow::anyhow!("Server task terminated unexpectedly"));
+                        }
                     }
                 }
             }

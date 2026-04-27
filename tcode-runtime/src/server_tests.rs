@@ -15,6 +15,7 @@ use crate::server::{
     ClientLeaseTracker, Server, ServerRuntimeOptions, WebIdleShutdownPolicy,
     close_stale_running_items, validate_owner_shutdown_token,
 };
+use crate::session::SessionMode;
 
 fn test_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/r")
@@ -27,10 +28,26 @@ fn temp_dir() -> PathBuf {
 }
 
 #[derive(Clone)]
-struct MockLlm;
+struct MockLlm {
+    registered_tools: Arc<parking_lot::Mutex<Vec<String>>>,
+}
+
+impl MockLlm {
+    fn new() -> Self {
+        Self {
+            registered_tools: Arc::new(parking_lot::Mutex::new(Vec::new())),
+        }
+    }
+
+    fn with_registered_tools(registered_tools: Arc<parking_lot::Mutex<Vec<String>>>) -> Self {
+        Self { registered_tools }
+    }
+}
 
 impl LLM for MockLlm {
-    fn register_tools(&mut self, _tools: Vec<Arc<Tool>>) {}
+    fn register_tools(&mut self, tools: Vec<Arc<Tool>>) {
+        *self.registered_tools.lock() = tools.iter().map(|tool| tool.name.clone()).collect();
+    }
 
     fn chat(
         &self,
@@ -58,7 +75,7 @@ fn test_server(socket_path: PathBuf, session_dir: PathBuf, owner_token: &str) ->
         session_dir.join("usage.txt"),
         session_dir.clone(),
         session_dir.join("conversation.json"),
-        Box::new(MockLlm),
+        Box::new(MockLlm::new()),
         "mock-model".to_string(),
         ChatOptions::default(),
         10,
@@ -67,6 +84,7 @@ fn test_server(socket_path: PathBuf, session_dir: PathBuf, owner_token: &str) ->
         None,
         ServerRuntimeOptions {
             owner_kind: RuntimeOwnerKind::Serve,
+            session_mode: SessionMode::Normal,
             owner_shutdown_token: owner_token.to_string(),
             lease_timeout: Duration::from_secs(60),
         },
@@ -137,6 +155,78 @@ fn shutdown_authorization_requires_owner_token_match() {
     ));
     assert!(!validate_owner_shutdown_token("", "owner-token"));
     assert!(!validate_owner_shutdown_token("owner-token", ""));
+}
+
+#[test]
+fn server_runtime_options_default_to_normal_session_mode() {
+    assert_eq!(
+        ServerRuntimeOptions::default().session_mode,
+        SessionMode::Normal
+    );
+}
+
+#[tokio::test]
+async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow::Result<()> {
+    let dir = temp_dir();
+    let socket_path = dir.join("s");
+    let owner_token = "owner-token";
+    let registered_tools = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let server = Server::new_with_runtime_options(
+        socket_path.clone(),
+        dir.join("display.jsonl"),
+        dir.join("status.txt"),
+        dir.join("usage.txt"),
+        dir.clone(),
+        dir.join("conversation.json"),
+        Box::new(MockLlm::with_registered_tools(Arc::clone(
+            &registered_tools,
+        ))),
+        "mock-model".to_string(),
+        ChatOptions::default(),
+        10,
+        false,
+        None,
+        None,
+        ServerRuntimeOptions {
+            owner_kind: RuntimeOwnerKind::Serve,
+            session_mode: SessionMode::WebOnly,
+            owner_shutdown_token: owner_token.to_string(),
+            lease_timeout: Duration::from_secs(60),
+        },
+    );
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(server.run(Some(ready_tx)));
+
+    ready_rx.await??;
+
+    let response =
+        send_socket_message(socket_path.clone(), &ClientMessage::GetSessionRuntimeInfo).await?;
+    let Some(ServerMessage::SessionRuntimeInfo(info)) = response else {
+        anyhow::bail!("expected runtime info response");
+    };
+    assert_eq!(info.session_mode, SessionMode::WebOnly);
+    assert_eq!(
+        registered_tools.lock().clone(),
+        vec![
+            "current_time".to_string(),
+            "web_fetch".to_string(),
+            "web_search".to_string(),
+            "subagent".to_string(),
+            "continue_subagent".to_string(),
+        ]
+    );
+    assert!(!dir.join("lsp-hint.txt").exists());
+
+    let response = send_socket_message(
+        socket_path,
+        &ClientMessage::AuthorizedShutdown {
+            owner_token: owner_token.to_string(),
+        },
+    )
+    .await?;
+    assert!(matches!(response, Some(ServerMessage::Ack)));
+    handle.await??;
+    Ok(())
 }
 
 #[tokio::test]

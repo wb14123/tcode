@@ -1,14 +1,12 @@
-use std::ffi::OsString;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
-use parking_lot::Mutex;
 use tower::ServiceExt;
 
-use super::test_support::{VALID_PASSWORD, find_session_cookie, login_body};
+use super::test_support::{HomeGuard, VALID_PASSWORD, find_session_cookie, login_body};
 use crate::state::AppState;
 
 fn fresh_app() -> axum::Router {
@@ -41,49 +39,6 @@ fn temp_dir() -> PathBuf {
     let dir = test_root().join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&dir).expect("failed to create test dir");
     dir
-}
-
-fn home_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct HomeGuard {
-    _guard: parking_lot::MutexGuard<'static, ()>,
-    previous_home: Option<OsString>,
-}
-
-impl HomeGuard {
-    fn set(home_dir: &Path) -> Self {
-        let guard = home_env_lock().lock();
-        let previous_home = std::env::var_os("HOME");
-
-        // SAFETY: these tests serialize HOME mutation with a process-wide mutex,
-        // and only call HOME-dependent code while holding that lock.
-        unsafe { std::env::set_var("HOME", home_dir) };
-
-        Self {
-            _guard: guard,
-            previous_home,
-        }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        match &self.previous_home {
-            Some(previous_home) => {
-                // SAFETY: see HomeGuard::set; restoration happens while the same
-                // process-wide mutex is still held.
-                unsafe { std::env::set_var("HOME", previous_home) };
-            }
-            None => {
-                // SAFETY: see HomeGuard::set; restoration happens while the same
-                // process-wide mutex is still held.
-                unsafe { std::env::remove_var("HOME") };
-            }
-        }
-    }
 }
 
 fn create_session_dir(session_id: &str) -> anyhow::Result<PathBuf> {

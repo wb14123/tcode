@@ -10,5 +10,5 @@ mod server_tests;
 #[cfg(test)]
 mod state_tests;
 
-pub use config::RemoteConfig;
+pub use config::{RemoteConfig, RemoteModePolicy};
 pub use server::run;

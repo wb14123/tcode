@@ -1,7 +1,6 @@
 use std::io;
 
 use anyhow::Result;
-use llm_rs::conversation::SessionMeta;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEventKind};
@@ -13,12 +12,14 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use tcode_runtime::session::{SessionMeta, SessionMode};
 
 use crate::session::{self, Session};
 
 struct SessionEntry {
     id: String,
     status: String,
+    mode: SessionMode,
     description: Option<String>,
 }
 
@@ -45,11 +46,13 @@ pub fn pick_session() -> Result<Option<String>> {
                 .ok()
                 .and_then(|json| serde_json::from_str::<SessionMeta>(&json).ok());
             let last_active = meta.as_ref().and_then(|m| m.last_active_at).unwrap_or(0);
+            let mode = meta.as_ref().map(|m| m.mode).unwrap_or_default();
             let description = meta.and_then(|m| m.description);
             Some((
                 SessionEntry {
                     id,
                     status: status.to_string(),
+                    mode,
                     description,
                 },
                 last_active,
@@ -91,7 +94,7 @@ fn run_picker(entries: &[SessionEntry]) -> Result<Option<String>> {
                     let mut spans = vec![
                         Span::raw(&e.id),
                         Span::raw(" "),
-                        Span::styled(format!("({})", e.status), status_style),
+                        Span::styled(format!("({}, {})", e.status, e.mode.label()), status_style),
                     ];
                     if let Some(ref desc) = e.description {
                         spans.push(Span::raw(" "));

@@ -1,13 +1,121 @@
 #[cfg(test)]
 mod tests {
-    use crate::conversation::{ConversationClient, ConversationState, fill_cancelled_tool_results};
-    use crate::llm::{ChatOptions, LLMMessage, ReasoningEffort, ToolCall};
+    use crate::conversation::{
+        ConversationClient, ConversationManager, ConversationState, ConversationSummary,
+        SystemPromptContext, create_subagent_tool, fill_cancelled_tool_results,
+    };
+    use crate::llm::{ChatOptions, LLMMessage, ModelInfo, ReasoningEffort, ToolCall};
+    use std::path::{Path, PathBuf};
 
     fn make_tool_call(id: &str, name: &str) -> ToolCall {
         ToolCall {
             id: id.to_string(),
             name: name.to_string(),
             arguments: "{}".to_string(),
+        }
+    }
+
+    fn test_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/conversation")
+    }
+
+    fn temp_dir() -> anyhow::Result<PathBuf> {
+        let dir = test_root().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&dir)?;
+        Ok(dir)
+    }
+
+    // ======== Session metadata and mode ========
+
+    // ======== Conversation summary ========
+
+    #[test]
+    fn conversation_summary_serde_roundtrip() -> anyhow::Result<()> {
+        let summary = ConversationSummary {
+            description: Some("hello".to_string()),
+            created_at: Some(123),
+            last_active_at: Some(456),
+        };
+
+        let json = serde_json::to_string_pretty(&summary)?;
+        let deserialized: ConversationSummary = serde_json::from_str(&json)?;
+
+        assert_eq!(deserialized, summary);
+        Ok(())
+    }
+
+    #[test]
+    fn conversation_state_summary_uses_first_user_message() {
+        let state = ConversationState {
+            id: "test-conv-1".to_string(),
+            model: "claude-opus-4-6".to_string(),
+            llm_msgs: vec![
+                LLMMessage::System("You are helpful.".to_string()),
+                LLMMessage::User("Hello from an old state".to_string()),
+            ],
+            chat_options: ChatOptions::default(),
+            msg_id_counter: 0,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
+            aggregate_input_tokens: 0,
+            aggregate_output_tokens: 0,
+            aggregate_cache_creation_tokens: 0,
+            aggregate_cache_read_tokens: 0,
+            single_turn: false,
+            subagent_depth: 0,
+        };
+
+        let summary = state.summary();
+
+        assert_eq!(
+            summary.description.as_deref(),
+            Some("Hello from an old state")
+        );
+        assert_eq!(summary.created_at, None);
+        assert_eq!(summary.last_active_at, None);
+    }
+
+    // ======== System prompt builder ========
+
+    #[test]
+    fn conversation_manager_uses_provided_system_prompt_builder() -> anyhow::Result<()> {
+        let dir = temp_dir()?;
+        let manager = ConversationManager::new_with_system_prompt_builder(
+            dir.join("permissions.json"),
+            None,
+            std::sync::Arc::new(|context: SystemPromptContext| {
+                format!("custom prompt depth {}", context.subagent_depth)
+            }),
+        );
+
+        assert_eq!(manager.build_system_prompt(2), "custom prompt depth 2");
+        Ok(())
+    }
+
+    #[test]
+    fn subagent_tool_description_is_mode_neutral() {
+        let tool = create_subagent_tool(&[ModelInfo {
+            id: "model-a".to_string(),
+            description: "general model".to_string(),
+        }]);
+
+        assert!(tool.description.contains("self-contained task"));
+        assert!(tool.description.contains("model-a"));
+        for local_phrase in [
+            "implementation subtasks",
+            "debugging",
+            "verification",
+            "fix-and-verify",
+            "file paths",
+            "function names",
+            "code change",
+        ] {
+            assert!(
+                !tool.description.contains(local_phrase),
+                "subagent description should not include local/code-specific phrase: {local_phrase}"
+            );
         }
     }
 
