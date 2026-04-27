@@ -3,6 +3,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import { renderMarkdownToHtml } from './markdown';
 import { hrefForRoute } from './router';
+import { TimelineStore } from './timeline-store';
 import type {
   AppRoute,
   AssistantTimelineItem,
@@ -91,8 +92,10 @@ export function parseStreamLine(rawText: string): RawStreamEvent | null {
   }
 }
 
-function createAssistant(msgId: number | null): AssistantTimelineItem {
+function createAssistant(id: string, msgId: number | null): AssistantTimelineItem {
   return {
+    id,
+    revision: 0,
     kind: 'assistant',
     msgId,
     createdAt: null,
@@ -108,6 +111,8 @@ function createAssistant(msgId: number | null): AssistantTimelineItem {
 
 function createTool(toolCallId: string): ToolTimelineItem {
   return {
+    id: `tool:${toolCallId}`,
+    revision: 0,
     kind: 'tool',
     msgId: null,
     toolCallId,
@@ -124,6 +129,8 @@ function createTool(toolCallId: string): ToolTimelineItem {
 
 function createSubagent(conversationId: string): SubagentTimelineItem {
   return {
+    id: `subagent:${conversationId}`,
+    revision: 0,
     kind: 'subagent',
     msgId: null,
     toolCallId: null,
@@ -139,66 +146,26 @@ function createSubagent(conversationId: string): SubagentTimelineItem {
   };
 }
 
-function createRawItem(event: RawStreamEvent, label: string): RawTimelineItem {
+function createRawItem(store: TimelineStore, event: RawStreamEvent, label: string): RawTimelineItem {
   return {
+    id: `raw:${store.nextSequence()}`,
+    revision: 0,
     kind: 'raw',
+    createdAt: null,
     label,
     rawText: event.rawText,
     rawJson: event.rawJson,
   };
 }
 
-function createSignal(label: string, details = ''): SignalTimelineItem {
+function createSignal(store: TimelineStore, label: string, details = ''): SignalTimelineItem {
   return {
+    id: `signal:${store.nextSequence()}`,
+    revision: 0,
     kind: 'signal',
     label,
     details,
   };
-}
-
-function ensureActiveAssistant(
-  items: TimelineItem[],
-  activeAssistant: AssistantTimelineItem | null,
-): AssistantTimelineItem {
-  if (activeAssistant) {
-    return activeAssistant;
-  }
-
-  const item = createAssistant(null);
-  items.push(item);
-  return item;
-}
-
-function getOrCreateTool(
-  items: TimelineItem[],
-  map: Map<string, ToolTimelineItem>,
-  toolCallId: string,
-): ToolTimelineItem {
-  const existing = map.get(toolCallId);
-  if (existing) {
-    return existing;
-  }
-
-  const item = createTool(toolCallId);
-  items.push(item);
-  map.set(toolCallId, item);
-  return item;
-}
-
-function getOrCreateSubagent(
-  items: TimelineItem[],
-  map: Map<string, SubagentTimelineItem>,
-  conversationId: string,
-): SubagentTimelineItem {
-  const existing = map.get(conversationId);
-  if (existing) {
-    return existing;
-  }
-
-  const item = createSubagent(conversationId);
-  items.push(item);
-  map.set(conversationId, item);
-  return item;
 }
 
 function shouldRenderTimelineItem(item: TimelineItem): boolean {
@@ -213,375 +180,542 @@ function shouldRenderTimelineItem(item: TimelineItem): boolean {
   return Boolean(item.content.trim() || item.thinking.trim() || item.error);
 }
 
+interface PendingSubagentInput {
+  msgId: number | null;
+  toolCallId: string | null;
+  createdAt: number | null;
+  description: string;
+  input: string;
+}
+
 export class ConversationTimelineBuilder {
-  private items: TimelineItem[] = [];
+  readonly store = new TimelineStore();
+
+  private itemIds: string[] = [];
   private visibleItems: TimelineItem[] = [];
-  private activeAssistant: AssistantTimelineItem | null = null;
-  private tools = new Map<string, ToolTimelineItem>();
+  private tools = new Map<string, string>();
   private toolCallIdByIndex = new Map<number, string>();
-  private subagents = new Map<string, SubagentTimelineItem>();
-  private pendingSubagentsByToolCall = new Map<string, SubagentTimelineItem>();
-  private pendingSubagentToolByIndex = new Map<number, string>();
-  private visibleSet = new Set<TimelineItem>();
+  private subagents = new Map<string, string>();
+  private subagentIdByToolCall = new Map<string, string>();
+  private subagentIdByToolIndex = new Map<number, string>();
+  private pendingSubagentInputByToolCall = new Map<string, PendingSubagentInput>();
+  private pendingSubagentToolCallByIndex = new Map<number, string>();
+  private visibleSet = new Set<string>();
 
   get timeline(): TimelineItem[] {
     return this.visibleItems;
   }
 
   reset(): void {
-    this.items = [];
-    this.visibleItems = [];
-    this.activeAssistant = null;
-    this.tools = new Map<string, ToolTimelineItem>();
+    this.itemIds = [];
+    this.visibleItems.splice(0);
+    this.tools = new Map<string, string>();
     this.toolCallIdByIndex = new Map<number, string>();
-    this.subagents = new Map<string, SubagentTimelineItem>();
-    this.pendingSubagentsByToolCall = new Map<string, SubagentTimelineItem>();
-    this.pendingSubagentToolByIndex = new Map<number, string>();
-    this.visibleSet = new Set<TimelineItem>();
+    this.subagents = new Map<string, string>();
+    this.subagentIdByToolCall = new Map<string, string>();
+    this.subagentIdByToolIndex = new Map<number, string>();
+    this.pendingSubagentInputByToolCall = new Map<string, PendingSubagentInput>();
+    this.pendingSubagentToolCallByIndex = new Map<number, string>();
+    this.visibleSet = new Set<string>();
+    this.store.reset();
   }
 
   appendEvent(event: RawStreamEvent): TimelineItem[] {
-    const items = this.items;
-    let activeAssistant = this.activeAssistant;
-    const tools = this.tools;
-    const toolCallIdByIndex = this.toolCallIdByIndex;
-    const subagents = this.subagents;
-    const pendingSubagentsByToolCall = this.pendingSubagentsByToolCall;
-    const pendingSubagentToolByIndex = this.pendingSubagentToolByIndex;
-    const previousItemCount = items.length;
-    const visibilityCandidates: TimelineItem[] = [];
+    return this.appendEvents([event]);
+  }
 
-    const wire = event.wire;
-    if (!wire) {
-      items.push(createRawItem(event, 'Raw event'));
-      this.syncNewItems(previousItemCount);
-      this.activeAssistant = activeAssistant;
-      return this.visibleItems;
-    }
+  appendEvents(events: RawStreamEvent[]): TimelineItem[] {
+    this.store.batch({ layoutMayChange: true }, () => {
+      for (const event of events) {
+        this.appendEventInBatch(event);
+      }
+    });
 
-    const { variant, payload } = wire;
-
-    switch (variant) {
-      case 'UserMessage': {
-        const item: UserTimelineItem = {
-          kind: 'user',
-          msgId: asNumber(payload.msg_id),
-          createdAt: asNumber(payload.created_at),
-          content: asString(payload.content) ?? '',
-        };
-        items.push(item);
-        break;
-      }
-      case 'AssistantMessageStart': {
-        const item = createAssistant(asNumber(payload.msg_id));
-        item.createdAt = asNumber(payload.created_at);
-        items.push(item);
-        activeAssistant = item;
-        break;
-      }
-      case 'AssistantMessageChunk': {
-        const item = ensureActiveAssistant(items, activeAssistant);
-        item.msgId ??= asNumber(payload.msg_id);
-        item.content += asString(payload.content) ?? '';
-        visibilityCandidates.push(item);
-        activeAssistant = item;
-        break;
-      }
-      case 'AssistantThinkingChunk': {
-        const item = ensureActiveAssistant(items, activeAssistant);
-        item.msgId ??= asNumber(payload.msg_id);
-        item.thinking += asString(payload.content) ?? '';
-        visibilityCandidates.push(item);
-        activeAssistant = item;
-        break;
-      }
-      case 'AssistantMessageEnd': {
-        const item = ensureActiveAssistant(items, activeAssistant);
-        item.msgId ??= asNumber(payload.msg_id);
-        item.endStatus = asString(payload.end_status);
-        item.error = asString(payload.error);
-        item.inputTokens = asNumber(payload.input_tokens);
-        item.outputTokens = asNumber(payload.output_tokens);
-        item.reasoningTokens = asNumber(payload.reasoning_tokens);
-        visibilityCandidates.push(item);
-        activeAssistant = null;
-        break;
-      }
-      case 'AssistantToolCallStart': {
-        const toolCallId = asString(payload.tool_call_id);
-        const toolCallIndex = asNumber(payload.tool_call_index);
-        if (!toolCallId) {
-          items.push(createRawItem(event, variant));
-          break;
-        }
-
-        const item = getOrCreateTool(items, tools, toolCallId);
-        item.msgId = asNumber(payload.msg_id);
-        item.createdAt = asNumber(payload.created_at);
-        item.toolName = asString(payload.tool_name) ?? item.toolName;
-        if (toolCallIndex !== null) {
-          toolCallIdByIndex.set(toolCallIndex, toolCallId);
-        }
-        break;
-      }
-      case 'AssistantToolCallArgChunk': {
-        const index = asNumber(payload.tool_call_index);
-        const toolCallId = index !== null ? toolCallIdByIndex.get(index) : null;
-        if (!toolCallId) {
-          items.push(createRawItem(event, variant));
-          break;
-        }
-
-        const item = getOrCreateTool(items, tools, toolCallId);
-        item.toolName = asString(payload.tool_name) ?? item.toolName;
-        item.toolArgs += asString(payload.content) ?? '';
-        break;
-      }
-      case 'ToolMessageStart': {
-        const toolCallId = asString(payload.tool_call_id);
-        if (!toolCallId) {
-          items.push(createRawItem(event, variant));
-          break;
-        }
-
-        const item = getOrCreateTool(items, tools, toolCallId);
-        item.msgId = asNumber(payload.msg_id);
-        item.createdAt = asNumber(payload.created_at);
-        item.toolName = asString(payload.tool_name) ?? item.toolName;
-        item.toolArgs = asString(payload.tool_args) ?? item.toolArgs;
-        break;
-      }
-      case 'ToolOutputChunk': {
-        const toolCallId = asString(payload.tool_call_id);
-        if (!toolCallId) {
-          items.push(createRawItem(event, variant));
-          break;
-        }
-
-        const item = getOrCreateTool(items, tools, toolCallId);
-        item.toolName = asString(payload.tool_name) ?? item.toolName;
-        item.output += asString(payload.content) ?? '';
-        break;
-      }
-      case 'ToolMessageEnd': {
-        const toolCallId = asString(payload.tool_call_id);
-        if (!toolCallId) {
-          items.push(createRawItem(event, variant));
-          break;
-        }
-
-        const item = getOrCreateTool(items, tools, toolCallId);
-        item.msgId = asNumber(payload.msg_id);
-        item.endStatus = asString(payload.end_status);
-        item.inputTokens = asNumber(payload.input_tokens);
-        item.outputTokens = asNumber(payload.output_tokens);
-        break;
-      }
-      case 'SubAgentInputStart': {
-        const toolCallId = asString(payload.tool_call_id);
-        const toolCallIndex = asNumber(payload.tool_call_index);
-        if (!toolCallId) {
-          items.push(createRawItem(event, variant));
-          break;
-        }
-
-        const item = createSubagent(`pending:${toolCallId}`);
-        item.msgId = asNumber(payload.msg_id);
-        item.toolCallId = toolCallId;
-        item.createdAt = asNumber(payload.created_at);
-        item.description = asString(payload.tool_name) ?? '';
-        items.push(item);
-        pendingSubagentsByToolCall.set(toolCallId, item);
-        if (toolCallIndex !== null) {
-          pendingSubagentToolByIndex.set(toolCallIndex, toolCallId);
-        }
-        break;
-      }
-      case 'SubAgentInputChunk': {
-        const toolCallId = asNumber(payload.tool_call_index) !== null
-          ? pendingSubagentToolByIndex.get(asNumber(payload.tool_call_index) as number)
-          : null;
-        if (!toolCallId) {
-          items.push(createRawItem(event, variant));
-          break;
-        }
-
-        const item = pendingSubagentsByToolCall.get(toolCallId);
-        if (!item) {
-          items.push(createRawItem(event, variant));
-          break;
-        }
-        item.description = asString(payload.tool_name) ?? item.description;
-        item.input += asString(payload.content) ?? '';
-        break;
-      }
-      case 'SubAgentStart':
-      case 'SubAgentContinue': {
-        const conversationId = asString(payload.conversation_id);
-        const toolCallId = asString(payload.tool_call_id);
-        if (!conversationId) {
-          items.push(createRawItem(event, variant));
-          break;
-        }
-
-        const pending = toolCallId ? pendingSubagentsByToolCall.get(toolCallId) : undefined;
-        if (pending && toolCallId) {
-          pending.conversationId = conversationId;
-          subagents.set(conversationId, pending);
-          pendingSubagentsByToolCall.delete(toolCallId);
-        }
-        const item = pending ?? getOrCreateSubagent(items, subagents, conversationId);
-
-        item.msgId = asNumber(payload.msg_id);
-        item.toolCallId = toolCallId ?? item.toolCallId;
-        item.description = asString(payload.description) ?? item.description;
-        break;
-      }
-      case 'SubAgentTurnEnd':
-      case 'SubAgentEnd': {
-        const conversationId = asString(payload.conversation_id);
-        if (!conversationId) {
-          items.push(createRawItem(event, variant));
-          break;
-        }
-
-        const item = getOrCreateSubagent(items, subagents, conversationId);
-        item.msgId = asNumber(payload.msg_id);
-        item.response = asString(payload.response) ?? item.response;
-        item.endStatus = asString(payload.end_status);
-        item.inputTokens = asNumber(payload.input_tokens);
-        item.outputTokens = asNumber(payload.output_tokens);
-        break;
-      }
-      case 'SystemMessage': {
-        const item: SystemTimelineItem = {
-          kind: 'system',
-          msgId: asNumber(payload.msg_id),
-          createdAt: asNumber(payload.created_at),
-          level: asString(payload.level) ?? 'Info',
-          message: asString(payload.message) ?? '',
-        };
-        items.push(item);
-        break;
-      }
-      case 'ToolRequestPermission': {
-        const toolCallId = asString(payload.tool_call_id);
-        if (toolCallId && tools.has(toolCallId)) {
-          tools.get(toolCallId)!.permissionState = 'waiting';
-        } else {
-          items.push(createSignal('Tool waiting for permission', toolCallId ?? ''));
-        }
-        break;
-      }
-      case 'ToolPermissionApproved': {
-        const toolCallId = asString(payload.tool_call_id);
-        if (toolCallId && tools.has(toolCallId)) {
-          tools.get(toolCallId)!.permissionState = 'approved';
-        } else {
-          items.push(createSignal('Tool permission approved', toolCallId ?? ''));
-        }
-        break;
-      }
-      case 'SubAgentWaitingPermission': {
-        const conversationId = asString(payload.conversation_id);
-        if (conversationId) {
-          getOrCreateSubagent(items, subagents, conversationId).permissionState = 'waiting';
-        } else {
-          items.push(createRawItem(event, variant));
-        }
-        break;
-      }
-      case 'SubAgentPermissionApproved': {
-        const conversationId = asString(payload.conversation_id);
-        if (conversationId) {
-          getOrCreateSubagent(items, subagents, conversationId).permissionState = 'approved';
-        } else {
-          items.push(createRawItem(event, variant));
-        }
-        break;
-      }
-      case 'SubAgentPermissionDenied': {
-        const conversationId = asString(payload.conversation_id);
-        if (conversationId) {
-          getOrCreateSubagent(items, subagents, conversationId).permissionState = 'denied';
-        } else {
-          items.push(createRawItem(event, variant));
-        }
-        break;
-      }
-      case 'PermissionUpdated':
-        items.push(createSignal('Permission state updated'));
-        break;
-      case 'AssistantRequestEnd':
-        items.push(createSignal('Assistant requested conversation end'));
-        break;
-      case 'UserRequestEnd':
-        items.push(createSignal('User requested conversation end', asString(payload.conversation_id) ?? ''));
-        break;
-      case 'ToolCallResolved':
-        items.push(createSignal('Tool call resolved', asString(payload.tool_call_id) ?? ''));
-        break;
-      case 'AggregateTokenUpdate':
-        items.push(createSignal('Aggregate tokens updated'));
-        break;
-      case 'SubAgentTokenRollup':
-        items.push(createSignal('Subagent token rollup recorded'));
-        break;
-      default:
-        items.push(createRawItem(event, variant));
-        break;
-    }
-
-    this.syncNewItems(previousItemCount);
-    for (const item of visibilityCandidates) {
-      this.syncItemVisibility(item);
-    }
-    this.activeAssistant = activeAssistant;
+    this.syncVisibleItemsFromStore();
     return this.visibleItems;
   }
 
-  private syncNewItems(previousItemCount: number): void {
-    for (let index = previousItemCount; index < this.items.length; index += 1) {
-      this.syncItemVisibility(this.items[index]);
+  private appendEventInBatch(event: RawStreamEvent): void {
+      const wire = event.wire;
+      if (!wire) {
+        this.addItem(createRawItem(this.store, event, 'Raw event'));
+        return;
+      }
+
+      const { variant, payload } = wire;
+
+      switch (variant) {
+        case 'UserMessage': {
+          const msgId = asNumber(payload.msg_id);
+          const item: UserTimelineItem = {
+            id: msgId !== null ? `user:${msgId}` : this.store.nextSequenceId('user'),
+            revision: 0,
+            kind: 'user',
+            msgId,
+            createdAt: asNumber(payload.created_at),
+            content: asString(payload.content) ?? '',
+          };
+          this.addItem(item);
+          break;
+        }
+        case 'AssistantMessageStart': {
+          const msgId = asNumber(payload.msg_id);
+          const id = msgId !== null ? `assistant:${msgId}` : this.store.nextSequenceId('assistant');
+          const item = createAssistant(id, msgId);
+          item.createdAt = asNumber(payload.created_at);
+          this.addItem(item, false);
+          this.store.setActiveAssistantId(id);
+          break;
+        }
+        case 'AssistantMessageChunk': {
+          const id = this.ensureActiveAssistantId();
+          this.updateAssistant(id, (item) => {
+            item.msgId ??= asNumber(payload.msg_id);
+            item.content += asString(payload.content) ?? '';
+          });
+          this.store.setActiveAssistantId(id);
+          break;
+        }
+        case 'AssistantThinkingChunk': {
+          const id = this.ensureActiveAssistantId();
+          this.updateAssistant(id, (item) => {
+            item.msgId ??= asNumber(payload.msg_id);
+            item.thinking += asString(payload.content) ?? '';
+          });
+          this.store.setActiveAssistantId(id);
+          break;
+        }
+        case 'AssistantMessageEnd': {
+          const id = this.ensureActiveAssistantId();
+          this.updateAssistant(id, (item) => {
+            item.msgId ??= asNumber(payload.msg_id);
+            item.endStatus = asString(payload.end_status);
+            item.error = asString(payload.error);
+            item.inputTokens = asNumber(payload.input_tokens);
+            item.outputTokens = asNumber(payload.output_tokens);
+            item.reasoningTokens = asNumber(payload.reasoning_tokens);
+          });
+          this.store.setActiveAssistantId(null);
+          break;
+        }
+        case 'AssistantToolCallStart': {
+          const toolCallId = asString(payload.tool_call_id);
+          const toolCallIndex = asNumber(payload.tool_call_index);
+          if (!toolCallId) {
+            this.addItem(createRawItem(this.store, event, variant));
+            break;
+          }
+
+          const id = this.getOrCreateToolId(toolCallId);
+          this.updateTool(id, (item) => {
+            item.msgId = asNumber(payload.msg_id);
+            item.createdAt = asNumber(payload.created_at);
+            item.toolName = asString(payload.tool_name) ?? item.toolName;
+          });
+          if (toolCallIndex !== null) {
+            this.toolCallIdByIndex.set(toolCallIndex, toolCallId);
+          }
+          break;
+        }
+        case 'AssistantToolCallArgChunk': {
+          const index = asNumber(payload.tool_call_index);
+          const toolCallId = index !== null ? this.toolCallIdByIndex.get(index) : null;
+          if (!toolCallId) {
+            this.addItem(createRawItem(this.store, event, variant));
+            break;
+          }
+
+          const id = this.getOrCreateToolId(toolCallId);
+          this.updateTool(id, (item) => {
+            item.toolName = asString(payload.tool_name) ?? item.toolName;
+            item.toolArgs += asString(payload.content) ?? '';
+          });
+          break;
+        }
+        case 'ToolMessageStart': {
+          const toolCallId = asString(payload.tool_call_id);
+          if (!toolCallId) {
+            this.addItem(createRawItem(this.store, event, variant));
+            break;
+          }
+
+          const id = this.getOrCreateToolId(toolCallId);
+          this.updateTool(id, (item) => {
+            item.msgId = asNumber(payload.msg_id);
+            item.createdAt = asNumber(payload.created_at);
+            item.toolName = asString(payload.tool_name) ?? item.toolName;
+            item.toolArgs = asString(payload.tool_args) ?? item.toolArgs;
+          });
+          break;
+        }
+        case 'ToolOutputChunk': {
+          const toolCallId = asString(payload.tool_call_id);
+          if (!toolCallId) {
+            this.addItem(createRawItem(this.store, event, variant));
+            break;
+          }
+
+          const id = this.getOrCreateToolId(toolCallId);
+          this.updateTool(id, (item) => {
+            item.toolName = asString(payload.tool_name) ?? item.toolName;
+            item.output += asString(payload.content) ?? '';
+          });
+          break;
+        }
+        case 'ToolMessageEnd': {
+          const toolCallId = asString(payload.tool_call_id);
+          if (!toolCallId) {
+            this.addItem(createRawItem(this.store, event, variant));
+            break;
+          }
+
+          const id = this.getOrCreateToolId(toolCallId);
+          this.updateTool(id, (item) => {
+            item.msgId = asNumber(payload.msg_id);
+            item.endStatus = asString(payload.end_status);
+            item.inputTokens = asNumber(payload.input_tokens);
+            item.outputTokens = asNumber(payload.output_tokens);
+          });
+          break;
+        }
+        case 'SubAgentInputStart': {
+          const conversationId = asString(payload.conversation_id);
+          const toolCallId = asString(payload.tool_call_id);
+          const toolCallIndex = asNumber(payload.tool_call_index);
+          const pendingInput: PendingSubagentInput = {
+            msgId: asNumber(payload.msg_id),
+            toolCallId,
+            createdAt: asNumber(payload.created_at),
+            description: asString(payload.tool_name) ?? '',
+            input: '',
+          };
+
+          if (!conversationId) {
+            if (toolCallId) {
+              this.pendingSubagentInputByToolCall.set(toolCallId, pendingInput);
+            }
+            if (toolCallIndex !== null && toolCallId) {
+              this.pendingSubagentToolCallByIndex.set(toolCallIndex, toolCallId);
+            }
+            this.addItem(createRawItem(this.store, event, variant));
+            break;
+          }
+
+          const id = this.getOrCreateSubagentId(conversationId);
+          this.updateSubagent(id, (item) => {
+            item.msgId = pendingInput.msgId;
+            item.toolCallId = toolCallId ?? item.toolCallId;
+            item.createdAt = pendingInput.createdAt;
+            item.description = pendingInput.description || item.description;
+          });
+          if (toolCallId) {
+            this.subagentIdByToolCall.set(toolCallId, id);
+          }
+          if (toolCallIndex !== null) {
+            this.subagentIdByToolIndex.set(toolCallIndex, id);
+          }
+          break;
+        }
+        case 'SubAgentInputChunk': {
+          const conversationId = asString(payload.conversation_id);
+          const toolCallId = asString(payload.tool_call_id);
+          const toolCallIndex = asNumber(payload.tool_call_index);
+          const pendingToolCallId = toolCallId ?? (toolCallIndex !== null ? this.pendingSubagentToolCallByIndex.get(toolCallIndex) : undefined);
+          const id = conversationId
+            ? this.getOrCreateSubagentId(conversationId)
+            : toolCallId
+              ? this.subagentIdByToolCall.get(toolCallId)
+              : toolCallIndex !== null
+                ? this.subagentIdByToolIndex.get(toolCallIndex)
+                : undefined;
+          if (!id) {
+            if (pendingToolCallId) {
+              const pending = this.pendingSubagentInputByToolCall.get(pendingToolCallId) ?? {
+                msgId: null,
+                toolCallId: pendingToolCallId,
+                createdAt: null,
+                description: '',
+                input: '',
+              };
+              pending.description = asString(payload.tool_name) ?? pending.description;
+              pending.input += asString(payload.content) ?? '';
+              this.pendingSubagentInputByToolCall.set(pendingToolCallId, pending);
+            }
+            this.addItem(createRawItem(this.store, event, variant));
+            break;
+          }
+
+          this.updateSubagent(id, (item) => {
+            item.description = asString(payload.tool_name) ?? item.description;
+            item.input += asString(payload.content) ?? '';
+          });
+          break;
+        }
+        case 'SubAgentStart':
+        case 'SubAgentContinue': {
+          const conversationId = asString(payload.conversation_id);
+          const toolCallId = asString(payload.tool_call_id);
+          const toolCallIndex = asNumber(payload.tool_call_index);
+          if (!conversationId) {
+            this.addItem(createRawItem(this.store, event, variant));
+            break;
+          }
+
+          const id = this.getOrCreateSubagentId(conversationId);
+          const pendingToolCallId = toolCallId ?? (toolCallIndex !== null ? this.pendingSubagentToolCallByIndex.get(toolCallIndex) : undefined);
+          const pending = pendingToolCallId ? this.pendingSubagentInputByToolCall.get(pendingToolCallId) : undefined;
+          this.updateSubagent(id, (item) => {
+            item.msgId = asNumber(payload.msg_id) ?? pending?.msgId ?? item.msgId;
+            item.toolCallId = toolCallId ?? pending?.toolCallId ?? item.toolCallId;
+            item.createdAt = pending?.createdAt ?? item.createdAt;
+            item.description = asString(payload.description) ?? pending?.description ?? item.description;
+            if (pending?.input && !item.input) {
+              item.input = pending.input;
+            }
+          });
+          if (toolCallId) {
+            this.subagentIdByToolCall.set(toolCallId, id);
+          }
+          if (pendingToolCallId) {
+            this.subagentIdByToolCall.set(pendingToolCallId, id);
+            this.pendingSubagentInputByToolCall.delete(pendingToolCallId);
+          }
+          if (toolCallIndex !== null) {
+            this.subagentIdByToolIndex.set(toolCallIndex, id);
+          }
+          break;
+        }
+        case 'SubAgentTurnEnd':
+        case 'SubAgentEnd': {
+          const conversationId = asString(payload.conversation_id);
+          if (!conversationId) {
+            this.addItem(createRawItem(this.store, event, variant));
+            break;
+          }
+
+          const id = this.getOrCreateSubagentId(conversationId);
+          this.updateSubagent(id, (item) => {
+            item.msgId = asNumber(payload.msg_id);
+            item.response = asString(payload.response) ?? item.response;
+            item.endStatus = asString(payload.end_status);
+            item.inputTokens = asNumber(payload.input_tokens);
+            item.outputTokens = asNumber(payload.output_tokens);
+          });
+          break;
+        }
+        case 'SystemMessage': {
+          const item: SystemTimelineItem = {
+            id: this.store.nextSequenceId('system'),
+            revision: 0,
+            kind: 'system',
+            msgId: asNumber(payload.msg_id),
+            createdAt: asNumber(payload.created_at),
+            level: asString(payload.level) ?? 'Info',
+            message: asString(payload.message) ?? '',
+          };
+          this.addItem(item, false);
+          break;
+        }
+        case 'ToolRequestPermission': {
+          const toolCallId = asString(payload.tool_call_id);
+          const id = toolCallId ? this.tools.get(toolCallId) : undefined;
+          if (id) {
+            this.updateTool(id, (item) => {
+              item.permissionState = 'waiting';
+            });
+          } else {
+            this.addItem(createSignal(this.store, 'Tool waiting for permission', toolCallId ?? ''), false);
+          }
+          break;
+        }
+        case 'ToolPermissionApproved': {
+          const toolCallId = asString(payload.tool_call_id);
+          const id = toolCallId ? this.tools.get(toolCallId) : undefined;
+          if (id) {
+            this.updateTool(id, (item) => {
+              item.permissionState = 'approved';
+            });
+          } else {
+            this.addItem(createSignal(this.store, 'Tool permission approved', toolCallId ?? ''), false);
+          }
+          break;
+        }
+        case 'SubAgentWaitingPermission': {
+          const conversationId = asString(payload.conversation_id);
+          if (conversationId) {
+            const id = this.getOrCreateSubagentId(conversationId);
+            this.updateSubagent(id, (item) => {
+              item.permissionState = 'waiting';
+            });
+          } else {
+            this.addItem(createRawItem(this.store, event, variant));
+          }
+          break;
+        }
+        case 'SubAgentPermissionApproved': {
+          const conversationId = asString(payload.conversation_id);
+          if (conversationId) {
+            const id = this.getOrCreateSubagentId(conversationId);
+            this.updateSubagent(id, (item) => {
+              item.permissionState = 'approved';
+            });
+          } else {
+            this.addItem(createRawItem(this.store, event, variant));
+          }
+          break;
+        }
+        case 'SubAgentPermissionDenied': {
+          const conversationId = asString(payload.conversation_id);
+          if (conversationId) {
+            const id = this.getOrCreateSubagentId(conversationId);
+            this.updateSubagent(id, (item) => {
+              item.permissionState = 'denied';
+            });
+          } else {
+            this.addItem(createRawItem(this.store, event, variant));
+          }
+          break;
+        }
+        case 'PermissionUpdated':
+          this.addItem(createSignal(this.store, 'Permission state updated'), false);
+          break;
+        case 'AssistantRequestEnd':
+          this.addItem(createSignal(this.store, 'Assistant requested conversation end'), false);
+          break;
+        case 'UserRequestEnd':
+          this.addItem(createSignal(this.store, 'User requested conversation end', asString(payload.conversation_id) ?? ''), false);
+          break;
+        case 'ToolCallResolved':
+          this.addItem(createSignal(this.store, 'Tool call resolved', asString(payload.tool_call_id) ?? ''), false);
+          break;
+        case 'AggregateTokenUpdate':
+          this.addItem(createSignal(this.store, 'Aggregate tokens updated'), false);
+          break;
+        case 'SubAgentTokenRollup':
+          this.addItem(createSignal(this.store, 'Subagent token rollup recorded'), false);
+          break;
+        default:
+          this.addItem(createRawItem(this.store, event, variant));
+          break;
+      }
+  }
+
+  private addItem(item: TimelineItem, visible = true): void {
+    if (this.store.hasItem(item.id)) {
+      return;
+    }
+
+    this.itemIds.push(item.id);
+    this.store.addItem(item, { visible, layoutMayChange: visible });
+    if (visible && shouldRenderTimelineItem(item)) {
+      this.visibleSet.add(item.id);
     }
   }
 
-  private syncItemVisibility(item: TimelineItem): void {
+  private ensureActiveAssistantId(): string {
+    const activeId = this.store.getActiveAssistantId();
+    if (activeId && this.store.hasItem(activeId)) {
+      return activeId;
+    }
+
+    const id = this.store.nextSequenceId('assistant');
+    const item = createAssistant(id, null);
+    this.addItem(item, false);
+    this.store.setActiveAssistantId(id);
+    return id;
+  }
+
+  private getOrCreateToolId(toolCallId: string): string {
+    const existing = this.tools.get(toolCallId);
+    if (existing) {
+      return existing;
+    }
+
+    const item = createTool(toolCallId);
+    this.tools.set(toolCallId, item.id);
+    this.addItem(item);
+    return item.id;
+  }
+
+  private getOrCreateSubagentId(conversationId: string): string {
+    const existing = this.subagents.get(conversationId);
+    if (existing) {
+      return existing;
+    }
+
+    const item = createSubagent(conversationId);
+    this.subagents.set(conversationId, item.id);
+    this.addItem(item);
+    return item.id;
+  }
+
+  private updateAssistant(id: string, mutator: (item: AssistantTimelineItem) => void): void {
+    const wasVisible = this.visibleSet.has(id);
+    this.store.updateItem(id, { layoutMayChange: true, visibleChange: wasVisible }, (item) => {
+      if (item.kind === 'assistant') {
+        mutator(item);
+      }
+    });
+    this.syncItemVisibility(id);
+  }
+
+  private updateTool(id: string, mutator: (item: ToolTimelineItem) => void): void {
+    this.store.updateItem(id, { layoutMayChange: true }, (item) => {
+      if (item.kind === 'tool') {
+        mutator(item);
+      }
+    });
+  }
+
+  private updateSubagent(id: string, mutator: (item: SubagentTimelineItem) => void): void {
+    this.store.updateItem(id, { layoutMayChange: true }, (item) => {
+      if (item.kind === 'subagent') {
+        mutator(item);
+      }
+    });
+  }
+
+  private syncItemVisibility(id: string): void {
+    const item = this.store.getItem(id);
+    if (!item) {
+      return;
+    }
+
     const shouldRender = shouldRenderTimelineItem(item);
-    const isVisible = this.visibleSet.has(item);
+    const isVisible = this.visibleSet.has(id);
 
     if (shouldRender && !isVisible) {
-      this.insertVisibleItem(item);
+      this.store.showItem(id, { index: this.visibleInsertIndex(id), layoutMayChange: true });
+      this.visibleSet.add(id);
       return;
     }
 
     if (!shouldRender && isVisible) {
-      const visibleIndex = this.visibleItems.indexOf(item);
-      if (visibleIndex !== -1) {
-        this.visibleItems.splice(visibleIndex, 1);
-      }
-      this.visibleSet.delete(item);
+      this.store.hideItem(id, { layoutMayChange: true });
+      this.visibleSet.delete(id);
     }
   }
 
-  private insertVisibleItem(item: TimelineItem): void {
-    const itemIndex = this.items.indexOf(item);
+  private visibleInsertIndex(id: string): number | undefined {
+    const itemIndex = this.itemIds.indexOf(id);
     if (itemIndex === -1) {
-      return;
+      return undefined;
     }
 
+    const visibleIds = this.store.getVisibleIds();
     for (let index = itemIndex - 1; index >= 0; index -= 1) {
-      const previousItem = this.items[index];
-      if (this.visibleSet.has(previousItem)) {
-        const visibleIndex = this.visibleItems.indexOf(previousItem);
-        this.visibleItems.splice(visibleIndex + 1, 0, item);
-        this.visibleSet.add(item);
-        return;
+      const previousId = this.itemIds[index];
+      if (this.visibleSet.has(previousId)) {
+        const visibleIndex = visibleIds.indexOf(previousId);
+        return visibleIndex === -1 ? undefined : visibleIndex + 1;
       }
     }
 
-    this.visibleItems.unshift(item);
-    this.visibleSet.add(item);
+    return 0;
+  }
+
+  private syncVisibleItemsFromStore(): void {
+    this.visibleItems.splice(0, this.visibleItems.length, ...this.store.getVisibleItems());
   }
 }
 
@@ -627,8 +761,10 @@ function statusBadge(status: string | null, flavor?: string): TemplateResult | t
 export interface TimelineRenderContext {
   sessionId: string;
   currentSubagentId?: string;
+  timelineStore?: TimelineStore;
   expandedSubagentIds?: ReadonlySet<string>;
   toggleSubagentExpansion?: (conversationId: string) => void;
+  toggleTimelineItemExpansion?: (itemId: string) => void;
 }
 
 function toolRoute(sessionId: string, toolCallId: string, currentSubagentId?: string): AppRoute {
@@ -731,8 +867,15 @@ function renderTool(item: ToolTimelineItem, context: TimelineRenderContext): Tem
 }
 
 function renderSubagent(item: SubagentTimelineItem, context: TimelineRenderContext): TemplateResult {
-  const expanded = context.expandedSubagentIds?.has(item.conversationId) ?? false;
-  const canToggle = Boolean(context.toggleSubagentExpansion);
+  const expanded = context.timelineStore?.isExpanded(item.id) ?? context.expandedSubagentIds?.has(item.conversationId) ?? false;
+  const canToggle = Boolean(context.toggleTimelineItemExpansion || context.toggleSubagentExpansion);
+  const toggle = () => {
+    if (context.toggleTimelineItemExpansion) {
+      context.toggleTimelineItemExpansion(item.id);
+    } else {
+      context.toggleSubagentExpansion?.(item.conversationId);
+    }
+  };
 
   return html`
     <article class="timeline-card chat-card chat-card-subagent timeline-subagent">
@@ -766,7 +909,7 @@ function renderSubagent(item: SubagentTimelineItem, context: TimelineRenderConte
                     <button
                       class="button ghost subagent-toggle"
                       type="button"
-                      @click=${() => context.toggleSubagentExpansion?.(item.conversationId)}
+                      @click=${toggle}
                     >
                       ${expanded ? 'Show less' : 'Show more'}
                     </button>

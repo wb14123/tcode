@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc && vite build",
+    "test": "node --experimental-strip-types stage7-validation.mjs",
     "preview": "vite preview"
   },
   "dependencies": {

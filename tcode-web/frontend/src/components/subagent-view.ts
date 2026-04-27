@@ -1,8 +1,11 @@
 import { LitElement, html, nothing } from 'lit';
 
 import { ApiError, api, openEventStream, sessionLeaseManager, type LeaseSnapshot } from '../api';
-import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
-import type { TimelineItem } from '../types';
+import { StreamEventBatcher } from '../stream-event-batcher';
+import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant } from '../messages';
+
+import './composer';
+import './timeline';
 
 interface ToastNotice {
   id: number;
@@ -21,8 +24,9 @@ class TcodeSubagentView extends LitElement {
   private statusText = '';
   private tokenUsageText = '';
   private timelineBuilder = new ConversationTimelineBuilder();
-  private timeline: TimelineItem[] = this.timelineBuilder.timeline;
-  private composerText = '';
+  private streamBatcher = new StreamEventBatcher((events) => this.timelineBuilder.appendEvents(events));
+  private composerResetToken = 0;
+  private timelineScrollToken = 0;
   private loading = true;
   private sending = false;
   private cancelling = false;
@@ -33,16 +37,11 @@ class TcodeSubagentView extends LitElement {
   private toasts: ToastNotice[] = [];
   private toastCounter = 0;
   private toastTimeouts = new Map<number, number>();
-  private expandedSubagentIds = new Set<string>();
-  private stickToBottom = true;
   private lastSnapshotError = '';
   private sessionDisconnected = false;
   private reconnecting = false;
   private leaseErrorMessage = '';
   private lastLeaseError = '';
-  private streamUpdateFrame: number | null = null;
-  private streamScrollPending = false;
-  private streamScrollForce = false;
 
   createRenderRoot(): this {
     return this;
@@ -66,8 +65,6 @@ class TcodeSubagentView extends LitElement {
     if (changed.has('sessionId') || changed.has('subagentId')) {
       this.startView();
     }
-
-    this.syncComposerHeight();
   }
 
   private startView(): void {
@@ -79,14 +76,12 @@ class TcodeSubagentView extends LitElement {
     this.statusText = '';
     this.tokenUsageText = '';
     this.timelineBuilder.reset();
-    this.timeline = this.timelineBuilder.timeline;
-    this.composerText = '';
+    this.composerResetToken += 1;
     this.loading = true;
     this.sending = false;
     this.cancelling = false;
     this.finishing = false;
-    this.expandedSubagentIds = new Set<string>();
-    this.stickToBottom = true;
+    this.timelineScrollToken += 1;
     this.lastSnapshotError = '';
     this.sessionDisconnected = false;
     this.reconnecting = false;
@@ -114,12 +109,7 @@ class TcodeSubagentView extends LitElement {
     this.eventSource?.close();
     this.eventSource = null;
 
-    if (this.streamUpdateFrame !== null) {
-      window.cancelAnimationFrame(this.streamUpdateFrame);
-      this.streamUpdateFrame = null;
-    }
-    this.streamScrollPending = false;
-    this.streamScrollForce = false;
+    this.streamBatcher.clear();
   }
 
   private attachLease(): void {
@@ -219,101 +209,9 @@ class TcodeSubagentView extends LitElement {
     return status.includes('stream') || status.includes('thinking');
   }
 
-  private syncComposerHeight(textarea?: HTMLTextAreaElement | null): void {
-    const composerInput = textarea ?? this.querySelector<HTMLTextAreaElement>('.chat-composer-input');
-    if (!composerInput) {
-      return;
-    }
-
-    composerInput.style.height = 'auto';
-    const maxHeight = Number.parseFloat(window.getComputedStyle(composerInput).maxHeight) || 160;
-    const nextHeight = Math.min(composerInput.scrollHeight, maxHeight);
-    composerInput.style.height = `${nextHeight}px`;
-    composerInput.style.overflowY = composerInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
-  }
-
-  private renderSendIcon() {
-    return html`
-      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <path d="M3.4 20.4 19.85 13.35a1.5 1.5 0 0 0 0-2.76L3.4 3.6a1 1 0 0 0-1.37 1.22l2.36 6.49a1 1 0 0 0 .94.66h7.36a1 1 0 1 1 0 2H5.33a1 1 0 0 0-.94.66l-2.36 6.49A1 1 0 0 0 3.4 20.4Z"></path>
-      </svg>
-    `;
-  }
-
-  private renderCancelIcon() {
-    return html`
-      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <path d="M7 7h10v10H7z"></path>
-      </svg>
-    `;
-  }
-
   private mutationDisabled(): boolean {
     return this.sessionDisconnected || this.reconnecting;
   }
-
-  private async scheduleScrollToBottom(force = false): Promise<void> {
-    if (!force && !this.stickToBottom) {
-      return;
-    }
-
-    await this.updateComplete;
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        const scroller = this.querySelector<HTMLElement>('.chat-scroll-area');
-        if (!scroller) {
-          return;
-        }
-        scroller.scrollTop = scroller.scrollHeight;
-      });
-    });
-  }
-
-  private scheduleStreamUpdate(scrollToBottom = false, forceScroll = false): void {
-    if (scrollToBottom && (forceScroll || this.stickToBottom)) {
-      this.streamScrollPending = true;
-      this.streamScrollForce ||= forceScroll;
-    }
-
-    if (this.streamUpdateFrame !== null) {
-      return;
-    }
-
-    this.streamUpdateFrame = window.requestAnimationFrame(() => {
-      this.streamUpdateFrame = null;
-      this.requestUpdate();
-
-      if (!this.streamScrollPending) {
-        return;
-      }
-
-      const force = this.streamScrollForce;
-      this.streamScrollPending = false;
-      this.streamScrollForce = false;
-      this.scheduleScrollToBottom(force);
-    });
-  }
-
-  private onChatScroll = (event: Event): void => {
-    const target = event.currentTarget;
-    if (!(target instanceof HTMLElement)) {
-      return;
-    }
-
-    const remaining = target.scrollHeight - target.scrollTop - target.clientHeight;
-    this.stickToBottom = remaining < 80;
-  };
-
-  private toggleSubagentExpansion = (conversationId: string): void => {
-    const nextExpanded = new Set(this.expandedSubagentIds);
-    if (nextExpanded.has(conversationId)) {
-      nextExpanded.delete(conversationId);
-    } else {
-      nextExpanded.add(conversationId);
-    }
-    this.expandedSubagentIds = nextExpanded;
-    this.requestUpdate();
-  };
 
   private async refreshSnapshots(initial: boolean): Promise<void> {
     try {
@@ -326,7 +224,7 @@ class TcodeSubagentView extends LitElement {
       this.lastSnapshotError = '';
       if (initial) {
         this.loading = false;
-        this.scheduleScrollToBottom(true);
+        this.timelineScrollToken += 1;
       }
       this.requestUpdate();
     } catch (error) {
@@ -368,7 +266,7 @@ class TcodeSubagentView extends LitElement {
         return;
       }
 
-      this.timelineBuilder.appendEvent(parsed);
+      this.streamBatcher.enqueue(parsed);
       const variant = rawVariant(parsed);
       const systemNotification = extractSystemNotification(parsed);
       if (systemNotification?.message) {
@@ -395,7 +293,9 @@ class TcodeSubagentView extends LitElement {
           }),
         );
       }
-      this.scheduleStreamUpdate(true);
+      if (variant === 'AssistantMessageEnd') {
+        this.requestUpdate();
+      }
     };
 
     source.onerror = () => {
@@ -403,32 +303,8 @@ class TcodeSubagentView extends LitElement {
     };
   }
 
-  private onComposerInput(event: Event): void {
-    const target = event.target as HTMLTextAreaElement;
-    this.composerText = target.value;
-    this.syncComposerHeight(target);
-    this.requestUpdate();
-  }
-
-  private onComposerKeyDown = (event: KeyboardEvent): void => {
-    if (
-      event.key !== 'Enter' ||
-      event.shiftKey ||
-      event.altKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.isComposing
-    ) {
-      return;
-    }
-
-    event.preventDefault();
-    void this.submitMessage(event);
-  };
-
-  private async submitMessage(event: Event): Promise<void> {
-    event.preventDefault();
-    const text = this.composerText.trim();
+  private async submitMessage(event: CustomEvent<{ text: string }>): Promise<void> {
+    const text = event.detail.text;
     if (!text || this.sending || this.finishing || this.isGenerating() || this.mutationDisabled()) {
       return;
     }
@@ -438,12 +314,10 @@ class TcodeSubagentView extends LitElement {
 
     try {
       await api.sendSubagentMessage(this.sessionId, this.subagentId, text);
-      this.composerText = '';
+      this.composerResetToken += 1;
       this.requestUpdate();
-      await this.updateComplete;
-      this.syncComposerHeight();
       this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
-      this.scheduleScrollToBottom(true);
+      this.timelineScrollToken += 1;
     } catch (error) {
       this.showToast(error instanceof Error ? error.message : 'Failed to send message', 'error');
     } finally {
@@ -453,8 +327,9 @@ class TcodeSubagentView extends LitElement {
   }
 
   private canFinishConversation(): boolean {
-    for (let index = this.timeline.length - 1; index >= 0; index -= 1) {
-      const item = this.timeline[index];
+    const items = this.timelineBuilder.store.getVisibleItems();
+    for (let index = items.length - 1; index >= 0; index -= 1) {
+      const item = items[index];
       if (item.kind === 'assistant') {
         return Boolean(item.content.trim());
       }
@@ -546,24 +421,15 @@ class TcodeSubagentView extends LitElement {
                 </div>
               `
             : nothing}
-          <section class="chat-scroll-area" @scroll=${this.onChatScroll}>
-            ${this.loading
-              ? html`<div class="chat-empty-state">Loading subagent…</div>`
-              : this.timeline.length
-                ? html`
-                    <div class="timeline chat-timeline">
-                      ${this.timeline.map((item) =>
-                        renderTimelineItem(item, {
-                          sessionId: this.sessionId,
-                          currentSubagentId: this.subagentId,
-                          expandedSubagentIds: this.expandedSubagentIds,
-                          toggleSubagentExpansion: this.toggleSubagentExpansion,
-                        }),
-                      )}
-                    </div>
-                  `
-                : html`<div class="chat-empty-state">Waiting for subagent events… Send a message below to continue.</div>`}
-          </section>
+          <tcode-timeline
+            .store=${this.timelineBuilder.store}
+            .sessionId=${this.sessionId}
+            .currentSubagentId=${this.subagentId}
+            .loading=${this.loading}
+            .loadingMessage=${'Loading subagent…'}
+            .emptyMessage=${'Waiting for subagent events… Send a message below to continue.'}
+            .scrollToBottomToken=${this.timelineScrollToken}
+          ></tcode-timeline>
 
           <div class="chat-bottom-stack">
             <footer class="chat-status-bar">
@@ -573,64 +439,35 @@ class TcodeSubagentView extends LitElement {
 
             ${leaseAlert ? html`<div class="inline-alert error">${leaseAlert}</div>` : nothing}
 
-            <form class="panel chat-composer" @submit=${this.submitMessage}>
-              <div class="chat-composer-row">
-                <textarea
-                  class="chat-composer-input"
-                  rows="1"
-                  placeholder="Message subagent…"
-                  .value=${this.composerText}
-                  @input=${this.onComposerInput}
-                  @keydown=${this.onComposerKeyDown}
-                  ?disabled=${mutationsDisabled}
-                ></textarea>
-                <div class="chat-composer-actions">
-                  ${this.isGenerating()
-                    ? nothing
-                    : html`
-                        <button
-                          class="button secondary chat-composer-done"
-                          type="button"
-                          @click=${this.finishConversation}
-                          ?disabled=${mutationsDisabled || this.finishing || this.sending || !canFinish}
-                          title=${
-                            this.finishing
-                              ? 'Marking done…'
-                              : canFinish
-                                ? 'Done with this subagent for now'
-                                : 'Wait for a completed subagent reply before sending it back'
-                          }
-                        >
-                          ${this.finishing ? 'Done…' : 'Done'}
-                        </button>
-                      `}
-                  ${this.isGenerating()
-                    ? html`
-                        <button
-                          class="button danger chat-composer-action"
-                          type="button"
-                          @click=${this.cancelConversation}
-                          ?disabled=${mutationsDisabled || this.cancelling}
-                          aria-label=${this.cancelling ? 'Cancelling subagent' : 'Cancel subagent'}
-                          title=${this.cancelling ? 'Cancelling…' : 'Cancel subagent'}
-                        >
-                          ${this.renderCancelIcon()}
-                        </button>
-                      `
-                    : html`
-                        <button
-                          class="button chat-composer-action"
-                          type="submit"
-                          ?disabled=${mutationsDisabled || this.sending || this.finishing || !this.composerText.trim()}
-                          aria-label=${this.sending ? 'Sending message' : 'Send message'}
-                          title=${this.sending ? 'Sending…' : 'Send message'}
-                        >
-                          ${this.renderSendIcon()}
-                        </button>
-                      `}
-                </div>
-              </div>
-            </form>
+            <tcode-composer
+              .disabled=${mutationsDisabled || this.finishing}
+              .sending=${this.sending}
+              .generating=${this.isGenerating()}
+              .cancelling=${this.cancelling}
+              .placeholder=${'Message subagent…'}
+              .resetToken=${this.composerResetToken}
+              .secondaryAction=${this.isGenerating()
+                ? nothing
+                : html`
+                    <button
+                      class="button secondary chat-composer-done"
+                      type="button"
+                      @click=${this.finishConversation}
+                      ?disabled=${mutationsDisabled || this.finishing || this.sending || !canFinish}
+                      title=${
+                        this.finishing
+                          ? 'Marking done…'
+                          : canFinish
+                            ? 'Done with this subagent for now'
+                            : 'Wait for a completed subagent reply before sending it back'
+                      }
+                    >
+                      ${this.finishing ? 'Done…' : 'Done'}
+                    </button>
+                  `}
+              @message-submit=${this.submitMessage}
+              @cancel-requested=${this.cancelConversation}
+            ></tcode-composer>
           </div>
         </div>
 

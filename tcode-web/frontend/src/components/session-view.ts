@@ -2,8 +2,12 @@ import { LitElement, html, nothing } from 'lit';
 
 import { ApiError, api, openEventStream, sessionLeaseManager, type LeaseSnapshot } from '../api';
 import { navigate } from '../router';
-import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant, renderTimelineItem } from '../messages';
-import type { SessionMode, SessionRuntimeInfo, TimelineItem } from '../types';
+import { StreamEventBatcher } from '../stream-event-batcher';
+import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant } from '../messages';
+import type { SessionMode, SessionRuntimeInfo } from '../types';
+
+import './composer';
+import './timeline';
 
 interface ToastNotice {
   id: number;
@@ -29,8 +33,9 @@ class TcodeSessionView extends LitElement {
   private usageText = '';
   private tokenUsageText = '';
   private timelineBuilder = new ConversationTimelineBuilder();
-  private timeline: TimelineItem[] = this.timelineBuilder.timeline;
-  private composerText = '';
+  private streamBatcher = new StreamEventBatcher((events) => this.timelineBuilder.appendEvents(events));
+  private composerResetToken = 0;
+  private timelineScrollToken = 0;
   private loading = true;
   private sending = false;
   private cancelling = false;
@@ -44,15 +49,10 @@ class TcodeSessionView extends LitElement {
   private toasts: ToastNotice[] = [];
   private toastCounter = 0;
   private toastTimeouts = new Map<number, number>();
-  private expandedSubagentIds = new Set<string>();
-  private stickToBottom = true;
   private lastSnapshotError = '';
-  private streamUpdateFrame: number | null = null;
   private streamReconnectHandle: number | null = null;
   private streamRetryDelayMs = 1000;
   private streamEventsReceived = 0;
-  private streamScrollPending = false;
-  private streamScrollForce = false;
 
   createRenderRoot(): this {
     return this;
@@ -76,8 +76,6 @@ class TcodeSessionView extends LitElement {
     if (changed.has('sessionId') || changed.has('draftMode') || changed.has('draftVersion')) {
       this.startView();
     }
-
-    this.syncComposerHeight();
   }
 
   private startView(): void {
@@ -86,16 +84,14 @@ class TcodeSessionView extends LitElement {
     this.usageText = '';
     this.tokenUsageText = '';
     this.timelineBuilder.reset();
-    this.timeline = this.timelineBuilder.timeline;
-    this.composerText = '';
+    this.composerResetToken += 1;
     this.loading = true;
     this.sending = false;
     this.cancelling = false;
     this.runtimeInfo = null;
     this.sessionDisconnected = false;
     this.reconnecting = false;
-    this.expandedSubagentIds = new Set<string>();
-    this.stickToBottom = true;
+    this.timelineScrollToken += 1;
     this.lastSnapshotError = '';
     this.lastLeaseError = '';
     this.streamRetryDelayMs = 1000;
@@ -134,12 +130,7 @@ class TcodeSessionView extends LitElement {
       this.streamReconnectHandle = null;
     }
 
-    if (this.streamUpdateFrame !== null) {
-      window.cancelAnimationFrame(this.streamUpdateFrame);
-      this.streamUpdateFrame = null;
-    }
-    this.streamScrollPending = false;
-    this.streamScrollForce = false;
+    this.streamBatcher.clear();
   }
 
   private clearToasts(): void {
@@ -271,98 +262,6 @@ class TcodeSessionView extends LitElement {
     return status.includes('stream') || status.includes('thinking');
   }
 
-  private syncComposerHeight(textarea?: HTMLTextAreaElement | null): void {
-    const composerInput = textarea ?? this.querySelector<HTMLTextAreaElement>('.chat-composer-input');
-    if (!composerInput) {
-      return;
-    }
-
-    composerInput.style.height = 'auto';
-    const maxHeight = Number.parseFloat(window.getComputedStyle(composerInput).maxHeight) || 160;
-    const nextHeight = Math.min(composerInput.scrollHeight, maxHeight);
-    composerInput.style.height = `${nextHeight}px`;
-    composerInput.style.overflowY = composerInput.scrollHeight > maxHeight ? 'auto' : 'hidden';
-  }
-
-  private renderSendIcon() {
-    return html`
-      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <path d="M3.4 20.4 19.85 13.35a1.5 1.5 0 0 0 0-2.76L3.4 3.6a1 1 0 0 0-1.37 1.22l2.36 6.49a1 1 0 0 0 .94.66h7.36a1 1 0 1 1 0 2H5.33a1 1 0 0 0-.94.66l-2.36 6.49A1 1 0 0 0 3.4 20.4Z"></path>
-      </svg>
-    `;
-  }
-
-  private renderCancelIcon() {
-    return html`
-      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
-        <path d="M7 7h10v10H7z"></path>
-      </svg>
-    `;
-  }
-
-  private async scheduleScrollToBottom(force = false): Promise<void> {
-    if (!force && !this.stickToBottom) {
-      return;
-    }
-
-    await this.updateComplete;
-    window.requestAnimationFrame(() => {
-      window.requestAnimationFrame(() => {
-        const scroller = this.querySelector<HTMLElement>('.chat-scroll-area');
-        if (!scroller) {
-          return;
-        }
-        scroller.scrollTop = scroller.scrollHeight;
-      });
-    });
-  }
-
-  private scheduleStreamUpdate(scrollToBottom = false, forceScroll = false): void {
-    if (scrollToBottom && (forceScroll || this.stickToBottom)) {
-      this.streamScrollPending = true;
-      this.streamScrollForce ||= forceScroll;
-    }
-
-    if (this.streamUpdateFrame !== null) {
-      return;
-    }
-
-    this.streamUpdateFrame = window.requestAnimationFrame(() => {
-      this.streamUpdateFrame = null;
-      this.requestUpdate();
-
-      if (!this.streamScrollPending) {
-        return;
-      }
-
-      const force = this.streamScrollForce;
-      this.streamScrollPending = false;
-      this.streamScrollForce = false;
-      this.scheduleScrollToBottom(force);
-    });
-  }
-
-  private onChatScroll = (event: Event): void => {
-    const target = event.currentTarget;
-    if (!(target instanceof HTMLElement)) {
-      return;
-    }
-
-    const remaining = target.scrollHeight - target.scrollTop - target.clientHeight;
-    this.stickToBottom = remaining < 80;
-  };
-
-  private toggleSubagentExpansion = (conversationId: string): void => {
-    const nextExpanded = new Set(this.expandedSubagentIds);
-    if (nextExpanded.has(conversationId)) {
-      nextExpanded.delete(conversationId);
-    } else {
-      nextExpanded.add(conversationId);
-    }
-    this.expandedSubagentIds = nextExpanded;
-    this.requestUpdate();
-  };
-
   private async refreshSnapshots(initial: boolean): Promise<void> {
     try {
       const [statusText, usageText, tokenUsageText] = await Promise.all([
@@ -376,7 +275,7 @@ class TcodeSessionView extends LitElement {
       this.lastSnapshotError = '';
       if (initial) {
         this.loading = false;
-        this.scheduleScrollToBottom(true);
+        this.timelineScrollToken += 1;
       }
       this.requestUpdate();
     } catch (error) {
@@ -401,7 +300,6 @@ class TcodeSessionView extends LitElement {
 
   private resetTimelineFromReplay(): void {
     this.timelineBuilder.reset();
-    this.timeline = this.timelineBuilder.timeline;
   }
 
   private closeStream(): void {
@@ -482,7 +380,7 @@ class TcodeSessionView extends LitElement {
       }
 
       this.streamEventsReceived += 1;
-      this.timelineBuilder.appendEvent(parsed);
+      this.streamBatcher.enqueue(parsed);
       const variant = rawVariant(parsed);
       const systemNotification = extractSystemNotification(parsed);
       if (systemNotification?.message) {
@@ -509,7 +407,7 @@ class TcodeSessionView extends LitElement {
           }),
         );
       }
-      this.scheduleStreamUpdate(true);
+
     };
 
     source.onerror = () => {
@@ -523,32 +421,8 @@ class TcodeSessionView extends LitElement {
     };
   }
 
-  private onComposerInput(event: Event): void {
-    const target = event.target as HTMLTextAreaElement;
-    this.composerText = target.value;
-    this.syncComposerHeight(target);
-    this.requestUpdate();
-  }
-
-  private onComposerKeyDown = (event: KeyboardEvent): void => {
-    if (
-      event.key !== 'Enter' ||
-      event.shiftKey ||
-      event.altKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.isComposing
-    ) {
-      return;
-    }
-
-    event.preventDefault();
-    void this.submitMessage(event);
-  };
-
-  private async submitMessage(event: Event): Promise<void> {
-    event.preventDefault();
-    const text = this.composerText.trim();
+  private async submitMessage(event: CustomEvent<{ text: string }>): Promise<void> {
+    const text = event.detail.text;
     if (!text || this.sending || this.isGenerating() || this.sessionDisconnected) {
       return;
     }
@@ -559,10 +433,8 @@ class TcodeSessionView extends LitElement {
     try {
       if (this.draftMode && !this.sessionId) {
         const created = await api.createSession(text);
-        this.composerText = '';
+        this.composerResetToken += 1;
         this.requestUpdate();
-        await this.updateComplete;
-        this.syncComposerHeight();
         this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
         navigate({ kind: 'session', sessionId: created.id }, false);
         return;
@@ -571,12 +443,10 @@ class TcodeSessionView extends LitElement {
       const eventsBeforeSend = this.streamEventsReceived;
       await api.sendSessionMessage(this.sessionId, text);
       this.scheduleSendCatchUp(this.sessionId, eventsBeforeSend);
-      this.composerText = '';
+      this.composerResetToken += 1;
       this.requestUpdate();
-      await this.updateComplete;
-      this.syncComposerHeight();
       this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
-      this.scheduleScrollToBottom(true);
+      this.timelineScrollToken += 1;
     } catch (error) {
       this.showToast(error instanceof Error ? error.message : 'Failed to send message', 'error');
     } finally {
@@ -642,29 +512,16 @@ class TcodeSessionView extends LitElement {
                 </div>
               `
             : nothing}
-          <section class="chat-scroll-area" @scroll=${this.onChatScroll}>
-            ${this.loading
-              ? html`<div class="chat-empty-state">Loading session…</div>`
-              : this.timeline.length
-                ? html`
-                    <div class="timeline chat-timeline">
-                      ${this.timeline.map((item) =>
-                        renderTimelineItem(item, {
-                          sessionId: this.sessionId,
-                          expandedSubagentIds: this.expandedSubagentIds,
-                          toggleSubagentExpansion: this.toggleSubagentExpansion,
-                        }),
-                      )}
-                    </div>
-                  `
-                : html`
-                    <div class="chat-empty-state">
-                      ${this.draftMode && !this.sessionId
-                        ? 'Send a message below to start a new conversation.'
-                        : 'Waiting for streamed events… Send a message below to get started.'}
-                    </div>
-                  `}
-          </section>
+          <tcode-timeline
+            .store=${this.timelineBuilder.store}
+            .sessionId=${this.sessionId}
+            .loading=${this.loading}
+            .loadingMessage=${'Loading session…'}
+            .emptyMessage=${this.draftMode && !this.sessionId
+              ? 'Send a message below to start a new conversation.'
+              : 'Waiting for streamed events… Send a message below to get started.'}
+            .scrollToBottomToken=${this.timelineScrollToken}
+          ></tcode-timeline>
 
           <div class="chat-bottom-stack">
             <footer class="chat-status-bar">
@@ -685,43 +542,16 @@ class TcodeSessionView extends LitElement {
                 `
               : nothing}
 
-            <form class="panel chat-composer" @submit=${this.submitMessage}>
-              <div class="chat-composer-row">
-                <textarea
-                  class="chat-composer-input"
-                  rows="1"
-                  placeholder=${this.sessionDisconnected ? 'Reconnect session to send messages…' : 'Message tcode…'}
-                  .value=${this.composerText}
-                  ?disabled=${this.sessionDisconnected}
-                  @input=${this.onComposerInput}
-                  @keydown=${this.onComposerKeyDown}
-                ></textarea>
-                ${this.isGenerating()
-                  ? html`
-                      <button
-                        class="button danger chat-composer-action"
-                        type="button"
-                        @click=${this.cancelConversation}
-                        ?disabled=${this.cancelling}
-                        aria-label=${this.cancelling ? 'Cancelling conversation' : 'Cancel conversation'}
-                        title=${this.cancelling ? 'Cancelling…' : 'Cancel conversation'}
-                      >
-                        ${this.renderCancelIcon()}
-                      </button>
-                    `
-                  : html`
-                      <button
-                        class="button chat-composer-action"
-                        type="submit"
-                        ?disabled=${this.sending || this.sessionDisconnected || !this.composerText.trim()}
-                        aria-label=${this.sending ? 'Sending message' : 'Send message'}
-                        title=${this.sending ? 'Sending…' : 'Send message'}
-                      >
-                        ${this.renderSendIcon()}
-                      </button>
-                    `}
-              </div>
-            </form>
+            <tcode-composer
+              .disconnected=${this.sessionDisconnected}
+              .sending=${this.sending}
+              .generating=${this.isGenerating()}
+              .cancelling=${this.cancelling}
+              .placeholder=${this.sessionDisconnected ? 'Reconnect session to send messages…' : 'Message tcode…'}
+              .resetToken=${this.composerResetToken}
+              @message-submit=${this.submitMessage}
+              @cancel-requested=${this.cancelConversation}
+            ></tcode-composer>
           </div>
         </div>
 

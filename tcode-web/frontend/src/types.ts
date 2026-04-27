@@ -104,7 +104,12 @@ export interface RawStreamEvent {
   wire: WireMessageEnvelope | null;
 }
 
-export interface AssistantTimelineItem {
+export interface TimelineItemBase {
+  id: string;
+  revision: number;
+}
+
+export interface AssistantTimelineItem extends TimelineItemBase {
   kind: 'assistant';
   msgId: number | null;
   createdAt: number | null;
@@ -117,14 +122,14 @@ export interface AssistantTimelineItem {
   reasoningTokens: number | null;
 }
 
-export interface UserTimelineItem {
+export interface UserTimelineItem extends TimelineItemBase {
   kind: 'user';
   msgId: number | null;
   createdAt: number | null;
   content: string;
 }
 
-export interface ToolTimelineItem {
+export interface ToolTimelineItem extends TimelineItemBase {
   kind: 'tool';
   msgId: number | null;
   toolCallId: string;
@@ -138,7 +143,7 @@ export interface ToolTimelineItem {
   permissionState: 'waiting' | 'approved' | null;
 }
 
-export interface SubagentTimelineItem {
+export interface SubagentTimelineItem extends TimelineItemBase {
   kind: 'subagent';
   msgId: number | null;
   toolCallId: string | null;
@@ -153,7 +158,7 @@ export interface SubagentTimelineItem {
   permissionState: 'waiting' | 'approved' | 'denied' | null;
 }
 
-export interface SystemTimelineItem {
+export interface SystemTimelineItem extends TimelineItemBase {
   kind: 'system';
   msgId: number | null;
   createdAt: number | null;
@@ -161,14 +166,15 @@ export interface SystemTimelineItem {
   message: string;
 }
 
-export interface SignalTimelineItem {
+export interface SignalTimelineItem extends TimelineItemBase {
   kind: 'signal';
   label: string;
   details: string;
 }
 
-export interface RawTimelineItem {
+export interface RawTimelineItem extends TimelineItemBase {
   kind: 'raw';
+  createdAt: number | null;
   label: string;
   rawText: string;
   rawJson: unknown;
