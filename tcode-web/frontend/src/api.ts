@@ -99,7 +99,8 @@ class SessionLeaseManager {
   private subscribers = new Set<LeaseSubscriber>();
   private releaseTimer: number | null = null;
   private heartbeatTimer: number | null = null;
-  private heartbeatInFlight: { sessionId: string; clientId: string } | null = null;
+  private heartbeatRecoveryTimer: number | null = null;
+  private heartbeatInFlight: { sessionId: string; clientId: string; startedAt: number } | null = null;
   private startInFlight = false;
   private heartbeatIntervalSeconds = 15;
   private requestToken = 0;
@@ -137,6 +138,27 @@ class SessionLeaseManager {
     };
   }
 
+  ensureActive(sessionId: string): void {
+    if (this.releaseTimer !== null) {
+      window.clearTimeout(this.releaseTimer);
+      this.releaseTimer = null;
+    }
+    if (this.sessionId && this.sessionId !== sessionId) {
+      this.detachNow();
+    }
+    this.sessionId = sessionId;
+    if (this.maybeRecoverStaleHeartbeat(sessionId)) {
+      return;
+    }
+    if (!this.clientId) {
+      if (!this.startInFlight) {
+        void this.startLease(false);
+      }
+      return;
+    }
+    void this.sendHeartbeat();
+  }
+
   async reconnect(sessionId: string): Promise<void> {
     if (this.sessionId && this.sessionId !== sessionId) {
       this.detachNow();
@@ -163,6 +185,7 @@ class SessionLeaseManager {
     this.startInFlight = true;
     this.reconnecting = resume;
     this.stopHeartbeat();
+    this.stopHeartbeatRecovery();
     this.clientId = null;
     this.notify();
     if (previousClientId && previousSessionId) {
@@ -228,6 +251,7 @@ class SessionLeaseManager {
 
   private scheduleHeartbeat(): void {
     this.stopHeartbeat();
+    this.stopHeartbeatRecovery();
     this.heartbeatTimer = window.setTimeout(() => {
       this.heartbeatTimer = null;
       void this.sendHeartbeat();
@@ -239,6 +263,46 @@ class SessionLeaseManager {
       window.clearTimeout(this.heartbeatTimer);
       this.heartbeatTimer = null;
     }
+  }
+
+  private stopHeartbeatRecovery(): void {
+    if (this.heartbeatRecoveryTimer !== null) {
+      window.clearTimeout(this.heartbeatRecoveryTimer);
+      this.heartbeatRecoveryTimer = null;
+    }
+  }
+
+  private scheduleStaleHeartbeatRecheck(sessionId: string, delayMs: number): void {
+    this.stopHeartbeatRecovery();
+    this.heartbeatRecoveryTimer = window.setTimeout(() => {
+      this.heartbeatRecoveryTimer = null;
+      if (this.sessionId === sessionId) {
+        this.ensureActive(sessionId);
+      }
+    }, Math.max(0, delayMs));
+  }
+
+  private staleHeartbeatThresholdMs(): number {
+    return Math.max(this.heartbeatIntervalSeconds * 2000, 30_000);
+  }
+
+  private maybeRecoverStaleHeartbeat(sessionId: string): boolean {
+    const inFlight = this.heartbeatInFlight;
+    const clientId = this.clientId;
+    if (!inFlight || !clientId || inFlight.sessionId !== sessionId || inFlight.clientId !== clientId) {
+      return false;
+    }
+
+    const ageMs = Date.now() - inFlight.startedAt;
+    const thresholdMs = this.staleHeartbeatThresholdMs();
+    if (ageMs < thresholdMs) {
+      this.scheduleStaleHeartbeatRecheck(sessionId, thresholdMs - ageMs + 100);
+      return false;
+    }
+
+    this.heartbeatInFlight = null;
+    this.markDisconnected('Session heartbeat timed out.', sessionId, clientId);
+    return true;
   }
 
   private async sendHeartbeat(): Promise<void> {
@@ -253,7 +317,8 @@ class SessionLeaseManager {
       return;
     }
 
-    const heartbeatLease = { sessionId, clientId };
+    const heartbeatLease = { sessionId, clientId, startedAt: Date.now() };
+    this.stopHeartbeatRecovery();
     this.heartbeatInFlight = heartbeatLease;
     try {
       const response = await api.heartbeatSessionLease(sessionId, clientId);
@@ -282,20 +347,33 @@ class SessionLeaseManager {
 
   private markDisconnected(message: string, sessionId: string, clientId: string): void {
     this.stopHeartbeat();
+    this.stopHeartbeatRecovery();
     this.clientId = null;
+    void api.detachSessionLease(sessionId, clientId).catch(() => undefined);
+
+    if (this.sessionId === sessionId && this.subscribers.size > 0 && !this.startInFlight) {
+      this.disconnected = false;
+      this.reconnecting = true;
+      this.errorMessage = '';
+      this.notify();
+      void this.startLease(true);
+      return;
+    }
+
     this.disconnected = true;
     this.errorMessage = message;
-    void api.detachSessionLease(sessionId, clientId).catch(() => undefined);
     this.notify();
   }
 
   private detachNow(): void {
     this.requestToken += 1;
     this.stopHeartbeat();
+    this.stopHeartbeatRecovery();
     const sessionId = this.sessionId;
     const clientId = this.clientId;
     this.sessionId = null;
     this.clientId = null;
+    this.heartbeatInFlight = null;
     this.runtimeInfo = null;
     this.disconnected = false;
     this.reconnecting = false;

@@ -188,6 +188,9 @@ class TcodeSessionView extends LitElement {
   }
 
   private runtimeRoleSummary(): string {
+    if (this.reconnecting) {
+      return 'Reconnecting';
+    }
     if (this.sessionDisconnected) {
       return 'Disconnected';
     }
@@ -229,7 +232,7 @@ class TcodeSessionView extends LitElement {
   }
 
   private statusTone(): 'generating' | 'idle' | 'connecting' {
-    if (this.loading && !this.statusText.trim()) {
+    if (this.reconnecting || (this.loading && !this.statusText.trim())) {
       return 'connecting';
     }
     if (this.isGenerating()) {
@@ -239,6 +242,9 @@ class TcodeSessionView extends LitElement {
   }
 
   private statusSummary(): string {
+    if (this.reconnecting) {
+      return 'Reconnecting…';
+    }
     if (this.sessionDisconnected) {
       return 'Disconnected — manual reconnect available';
     }
@@ -255,11 +261,15 @@ class TcodeSessionView extends LitElement {
   }
 
   private isGenerating(): boolean {
-    if (this.sessionDisconnected) {
+    if (this.mutationDisabled()) {
       return false;
     }
     const status = this.statusText.trim().toLowerCase();
     return status.includes('stream') || status.includes('thinking');
+  }
+
+  private mutationDisabled(): boolean {
+    return this.sessionDisconnected || this.reconnecting;
   }
 
   private async refreshSnapshots(initial: boolean): Promise<void> {
@@ -423,7 +433,7 @@ class TcodeSessionView extends LitElement {
 
   private async submitMessage(event: CustomEvent<{ text: string }>): Promise<void> {
     const text = event.detail.text;
-    if (!text || this.sending || this.isGenerating() || this.sessionDisconnected) {
+    if (!text || this.sending || this.isGenerating() || this.mutationDisabled()) {
       return;
     }
 
@@ -456,7 +466,7 @@ class TcodeSessionView extends LitElement {
   }
 
   private async cancelConversation(): Promise<void> {
-    if (this.cancelling || !this.isGenerating() || this.sessionDisconnected) {
+    if (this.cancelling || !this.isGenerating() || this.mutationDisabled()) {
       return;
     }
 
@@ -543,11 +553,11 @@ class TcodeSessionView extends LitElement {
               : nothing}
 
             <tcode-composer
-              .disconnected=${this.sessionDisconnected}
+              .disconnected=${this.mutationDisabled()}
               .sending=${this.sending}
               .generating=${this.isGenerating()}
               .cancelling=${this.cancelling}
-              .placeholder=${this.sessionDisconnected ? 'Reconnect session to send messages…' : 'Message tcode…'}
+              .placeholder=${this.sessionDisconnected ? 'Reconnect session to send messages…' : this.reconnecting ? 'Waiting for session reconnect…' : 'Message tcode…'}
               .resetToken=${this.composerResetToken}
               @message-submit=${this.submitMessage}
               @cancel-requested=${this.cancelConversation}

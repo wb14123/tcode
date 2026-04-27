@@ -1,6 +1,6 @@
 import { LitElement, html, nothing } from 'lit';
 
-import { ApiError, api } from '../api';
+import { ApiError, api, sessionLeaseManager } from '../api';
 import { runtimeConfig } from '../config';
 import { activeSessionId, hrefForRoute, navigate, parseRoute } from '../router';
 import type { AppRoute, PendingPermissionInfo, PermissionDecisionPayload, PermissionState, SessionMode, SessionSummary } from '../types';
@@ -52,6 +52,8 @@ class TcodeApp extends LitElement {
   private denyReason = '';
   private resolvingPermission = false;
   private sidebarOpen = false;
+  private activeSessionLeaseId: string | null = null;
+  private activeSessionLeaseRelease: (() => void) | null = null;
   private toasts: ToastNotice[] = [];
   private toastCounter = 0;
   private toastTimeouts = new Map<number, number>();
@@ -64,6 +66,10 @@ class TcodeApp extends LitElement {
     super.connectedCallback();
     window.addEventListener('popstate', this.handleRouteChange);
     window.addEventListener('tcode-auth-required', this.handleAuthRequired as EventListener);
+    window.addEventListener('pageshow', this.handlePageActive);
+    window.addEventListener('focus', this.handlePageActive);
+    window.addEventListener('online', this.handlePageActive);
+    document.addEventListener('visibilitychange', this.handlePageActive);
     this.bootstrap();
   }
 
@@ -71,6 +77,11 @@ class TcodeApp extends LitElement {
     super.disconnectedCallback();
     window.removeEventListener('popstate', this.handleRouteChange);
     window.removeEventListener('tcode-auth-required', this.handleAuthRequired as EventListener);
+    window.removeEventListener('pageshow', this.handlePageActive);
+    window.removeEventListener('focus', this.handlePageActive);
+    window.removeEventListener('online', this.handlePageActive);
+    document.removeEventListener('visibilitychange', this.handlePageActive);
+    this.releaseActiveSessionLease();
     this.stopSessionsPolling();
     this.stopPermissionsPolling();
     this.clearToasts();
@@ -79,9 +90,42 @@ class TcodeApp extends LitElement {
   private handleRouteChange = (): void => {
     this.route = parseRoute();
     this.sidebarOpen = false;
+    this.syncActiveSessionLease();
     this.resetPermissionPolling();
     this.requestUpdate();
   };
+
+  private handlePageActive = (): void => {
+    if (document.visibilityState === 'hidden') {
+      return;
+    }
+    this.syncActiveSessionLease();
+    const sessionId = activeSessionId(this.route);
+    if (this.authState === 'authenticated' && sessionId) {
+      sessionLeaseManager.ensureActive(sessionId);
+    }
+  };
+
+  private releaseActiveSessionLease(): void {
+    this.activeSessionLeaseRelease?.();
+    this.activeSessionLeaseRelease = null;
+    this.activeSessionLeaseId = null;
+  }
+
+  private syncActiveSessionLease(): void {
+    const sessionId = this.authState === 'authenticated' ? activeSessionId(this.route) : null;
+    if (sessionId === this.activeSessionLeaseId) {
+      return;
+    }
+
+    this.releaseActiveSessionLease();
+    if (!sessionId) {
+      return;
+    }
+
+    this.activeSessionLeaseId = sessionId;
+    this.activeSessionLeaseRelease = sessionLeaseManager.attach(sessionId, () => undefined);
+  }
 
   private handleAuthRequired = (): void => {
     this.authState = 'unauthenticated';
@@ -91,6 +135,7 @@ class TcodeApp extends LitElement {
     this.lastPermissionsErrorToast = '';
     this.stopSessionsPolling();
     this.stopPermissionsPolling();
+    this.releaseActiveSessionLease();
     if (this.route.kind !== 'login') {
       navigate({ kind: 'login' }, true);
       this.route = { kind: 'login' };
@@ -113,9 +158,11 @@ class TcodeApp extends LitElement {
         }
         await this.refreshSessions();
         this.startSessionsPolling();
+        this.syncActiveSessionLease();
         this.resetPermissionPolling();
       } else {
         this.authState = 'unauthenticated';
+        this.releaseActiveSessionLease();
         if (this.route.kind !== 'login') {
           navigate({ kind: 'login' }, true);
           this.route = { kind: 'login' };
@@ -123,6 +170,7 @@ class TcodeApp extends LitElement {
       }
     } catch (error) {
       this.authState = 'unauthenticated';
+      this.releaseActiveSessionLease();
       this.loginError = error instanceof Error ? error.message : 'Failed to probe auth session';
       if (this.route.kind !== 'login') {
         navigate({ kind: 'login' }, true);
