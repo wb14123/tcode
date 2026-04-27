@@ -169,6 +169,8 @@ class SessionLeaseManager {
       void api.detachSessionLease(previousSessionId, previousClientId).catch(() => undefined);
     }
 
+    let autoResumeAfterInactiveAttach = false;
+
     try {
       const response = await api.registerSessionLease(sessionId, {
         client_label: 'web-ui',
@@ -183,8 +185,14 @@ class SessionLeaseManager {
 
       this.runtimeInfo = response.runtime_info;
       if (!response.active || !response.client_id) {
+        autoResumeAfterInactiveAttach =
+          !resume &&
+          !response.active &&
+          !response.client_id &&
+          response.runtime_info.active_lease_count === 0;
         this.clientId = null;
         this.disconnected = true;
+        this.reconnecting = autoResumeAfterInactiveAttach;
         this.errorMessage = resume ? 'Session runtime is not active.' : '';
         this.notify();
         return;
@@ -208,6 +216,10 @@ class SessionLeaseManager {
     } finally {
       if (requestToken === this.requestToken) {
         this.startInFlight = false;
+        if (autoResumeAfterInactiveAttach && sessionId === this.sessionId && this.subscribers.size > 0) {
+          void this.startLease(true);
+          return;
+        }
         this.reconnecting = false;
         this.notify();
       }
