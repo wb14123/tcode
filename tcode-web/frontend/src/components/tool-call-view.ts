@@ -30,6 +30,7 @@ class TcodeToolCallView extends LitElement {
   private reconnecting = false;
   private leaseErrorMessage = '';
   private streamUpdateFrame: number | null = null;
+  private stickToBottom = true;
 
   createRenderRoot(): this {
     return this;
@@ -67,6 +68,7 @@ class TcodeToolCallView extends LitElement {
     this.sessionDisconnected = false;
     this.reconnecting = false;
     this.leaseErrorMessage = '';
+    this.stickToBottom = true;
     this.requestUpdate();
     void this.refreshStatus(true);
     this.attachLease();
@@ -142,6 +144,35 @@ class TcodeToolCallView extends LitElement {
       : api.sessionToolCallDisplayPath(this.sessionId, this.toolCallId);
   }
 
+  private async scheduleScrollToBottom(): Promise<void> {
+    if (!this.stickToBottom) {
+      return;
+    }
+
+    await this.updateComplete;
+    window.requestAnimationFrame(() => {
+      if (!this.stickToBottom) {
+        return;
+      }
+
+      const scroller = this.querySelector<HTMLElement>('.tool-call-page');
+      if (!scroller) {
+        return;
+      }
+      scroller.scrollTop = scroller.scrollHeight;
+    });
+  }
+
+  private onPageScroll = (event: Event): void => {
+    const target = event.currentTarget;
+    if (!(target instanceof HTMLElement)) {
+      return;
+    }
+
+    const remaining = target.scrollHeight - target.scrollTop - target.clientHeight;
+    this.stickToBottom = remaining < 120;
+  };
+
   private scheduleStreamUpdate(): void {
     if (this.streamUpdateFrame !== null) {
       return;
@@ -150,6 +181,7 @@ class TcodeToolCallView extends LitElement {
     this.streamUpdateFrame = window.requestAnimationFrame(() => {
       this.streamUpdateFrame = null;
       this.requestUpdate();
+      void this.scheduleScrollToBottom();
     });
   }
 
@@ -256,7 +288,7 @@ class TcodeToolCallView extends LitElement {
       : '';
 
     return html`
-      <section class="page">
+      <section class="page tool-call-page" @scroll=${this.onPageScroll}>
         <header class="page-header">
           <div>
             <h1 class="page-title">Tool call ${this.toolCallId}</h1>
