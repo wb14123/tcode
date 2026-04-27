@@ -2003,7 +2003,6 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
           file:write(filtered_content)
           file:close()
           vim.api.nvim_buf_set_lines(buf, 0, -1, false, {})
-          vim.notify('Message sent!', vim.log.levels.INFO)
         else
           vim.notify('Failed to send message', vim.log.levels.ERROR)
         end

@@ -442,7 +442,6 @@ class TcodeSubagentView extends LitElement {
       this.requestUpdate();
       await this.updateComplete;
       this.syncComposerHeight();
-      this.showToast('Message sent.', 'info', 3000);
       this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
       this.scheduleScrollToBottom(true);
     } catch (error) {
