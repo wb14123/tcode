@@ -161,6 +161,50 @@ The same profile must be used later at runtime; `tcode -p <profile> ...` loads t
 
 ---
 
+### `tcode remote`
+
+Starts the web backend for browser access. The server binds to `127.0.0.1` by default and serves both `/api/...` routes and the single-page web UI from the same origin.
+
+```sh
+TCODE_REMOTE_PASSWORD=change-me tcode remote --port 8080
+```
+
+Open:
+
+```text
+http://127.0.0.1:8080/
+```
+
+Use `127.0.0.1`, not `localhost`, so browser origin checks match the bind address. Log in with the shared secret passed at startup.
+
+To select a config profile, pass `-p` at the top level:
+
+```sh
+TCODE_REMOTE_PASSWORD=change-me tcode -p <profile> remote --port 8080
+```
+
+You can pass the password on argv, but the environment variable is preferred because argv can leak through shell history or process listings:
+
+```sh
+tcode remote --port 8080 --password change-me
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--port <port>` | TCP port to bind. Required. `0` is rejected; choose a concrete port. |
+| `--host <ip>` | IP address to bind. Defaults to `127.0.0.1`. Use `0.0.0.0` or `::` only when intentionally exposing the server beyond localhost. |
+| `--password <secret>` | Shared secret for browser login. Prefer `TCODE_REMOTE_PASSWORD=<secret>` instead. |
+| `--allow-insecure-http` | Omit the `Secure` cookie attribute for direct plain-HTTP access. Use only for trusted local/private setups; prefer HTTPS or a trusted tunnel/proxy when exposed beyond localhost. |
+
+**Frontend serving:**
+
+- Installed release binaries and `install-from-source.sh` builds embed the frontend in the `tcode` binary.
+- Development builds without `--features tcode/bundled-frontend` serve `tcode-web/frontend/dist` from the source checkout. If that directory is missing, `/api/...` can still work, but frontend browser routes return `404` until you run `npm run build` in `tcode-web/frontend`.
+
+---
+
 ## Internal / Plumbing Commands
 
 These commands are invoked internally by tcode -- from display keybindings, tmux popups, or the server process. They are not intended for direct use but are documented here for completeness.

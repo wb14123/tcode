@@ -9,13 +9,18 @@ For the current PoC:
 
 ## Build
 
-### 1. Build the frontend
+There are two frontend-serving modes:
+
+- **Development/default builds** read static files from `tcode-web/frontend/dist` at runtime. This keeps normal `cargo check`, `cargo build`, and `cargo run` fast and does not require Node.js unless you want to open the web UI.
+- **Bundled builds** compile `tcode-web/frontend/dist` into the `tcode` binary with the `bundled-frontend` Cargo feature. Release and source-install builds use this mode so installed binaries do not depend on the source checkout path.
+
+### Build the frontend
 
 From the repo root:
 
 ```bash
 cd tcode-web/frontend
-npm install
+npm ci
 npm run build
 ```
 
@@ -25,21 +30,36 @@ This writes the production bundle to:
 tcode-web/frontend/dist
 ```
 
-The Rust server will serve those files if that directory exists.
-
-### 2. Build/check the Rust crate
+### Development Rust build/check
 
 From the repo root:
 
 ```bash
 cargo check -p tcode-web
-```
-
-Optional full CLI build:
-
-```bash
 cargo build -p tcode
 ```
+
+If you run the web backend from a development/default build, the Rust server serves the filesystem `dist` directory above. If `tcode-web/frontend/dist` is missing, the backend still runs but frontend browser routes return `404`.
+
+### Self-contained bundled build
+
+For a release-like binary that can be moved to another machine without `frontend/dist`, build the frontend first, then enable the feature through the top-level `tcode` crate:
+
+```bash
+cd tcode-web/frontend
+npm ci
+npm run build
+cd ../..
+cargo build -p tcode --features tcode/bundled-frontend
+```
+
+Use the same feature with release builds:
+
+```bash
+cargo build --release --features tcode/bundled-frontend
+```
+
+The GitHub release workflow and `install-from-source.sh` both follow this pattern.
 
 ## Run
 
@@ -77,8 +97,8 @@ Then log in with the shared secret you passed at startup.
 
 ## Development notes
 
-- If `tcode-web/frontend/dist` is missing, the Rust server will still run, but frontend routes will return `404`.
-- After frontend changes, rebuild with `npm run build` before restarting or refreshing the Rust-served app.
+- Development/default builds serve `tcode-web/frontend/dist` from the filesystem. Rebuild with `npm run build` after frontend changes before restarting or refreshing the Rust-served app.
+- Bundled builds serve embedded files from the binary and do not need `frontend/dist` at runtime.
 - API routes stay under `/api/...`; non-API browser routes use SPA fallback.
 
 ## Color theme structure

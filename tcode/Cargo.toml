@@ -3,6 +3,9 @@ name = "tcode"
 version.workspace = true
 edition = "2024"
 
+[features]
+bundled-frontend = ["tcode-web/bundled-frontend"]
+
 [dependencies]
 browser-server = { path = "../browser-server" }
 tcode-web = { path = "../tcode-web" }

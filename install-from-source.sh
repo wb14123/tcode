@@ -71,8 +71,15 @@ run() {
   fi
 }
 
+echo "Building frontend..."
+(
+  cd tcode-web/frontend
+  npm ci
+  npm run build
+)
+
 echo "Building release binaries..."
-cargo build --release
+cargo build --release --features tcode/bundled-frontend
 
 killall browser-server 2>/dev/null || true
 

@@ -69,6 +69,8 @@ Each crate has its own README with architecture and developer documentation.
 
 ## Building
 
+Common Rust development commands:
+
 ```bash
 cargo check           # Quick type checking
 cargo build           # Debug build
@@ -79,6 +81,22 @@ cargo clippy          # Lint code
 
 Run `cargo fmt` and `cargo clippy` after each change to ensure consistent formatting and catch common issues.
 
+The web UI frontend is built separately with Node/Vite:
+
+```bash
+cd tcode-web/frontend
+npm ci
+npm run build
+```
+
+Default development builds serve `tcode-web/frontend/dist` from the checkout at runtime. For a self-contained binary that embeds the web UI, build the frontend first, then enable the bundled feature:
+
+```bash
+cargo build --features tcode/bundled-frontend
+# or for a release-like local build:
+cargo build --release --features tcode/bundled-frontend
+```
+
 ## Releasing
 
 Requires [`cargo-release`](https://github.com/crate-ci/cargo-release): `cargo install cargo-release`.
@@ -88,7 +106,7 @@ Requires [`cargo-release`](https://github.com/crate-ci/cargo-release): `cargo in
 cargo release 0.2.0 --execute
 ```
 
-This creates a `v0.2.0` tag and pushes it. GitHub Actions then builds binaries for all 4 platforms and publishes a GitHub Release (~10 minutes).
+This creates a `v0.2.0` tag and pushes it. GitHub Actions then builds the web frontend, embeds it into the `tcode` binary with `--features tcode/bundled-frontend`, builds binaries for all 4 platforms, and publishes a GitHub Release (~10 minutes).
 
 ## Uninstall
 

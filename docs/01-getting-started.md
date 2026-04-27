@@ -26,6 +26,8 @@ This downloads the latest release and installs:
 - `tcode` and `browser-server` to `/usr/local/bin`
 - `libtree-sitter-tcode.so` (or `.dylib` on macOS) to `/usr/local/lib`
 
+Release builds embed the web UI frontend into the `tcode` binary, so no separate frontend files are installed.
+
 To install a specific version:
 
 ```sh
@@ -53,7 +55,7 @@ curl -sSL https://raw.githubusercontent.com/wb14123/tcode/refs/heads/master/inst
 Building from source requires:
 - **Rust toolchain** — install via [rustup](https://rustup.rs/)
 - **A C compiler** — needed to build the tree-sitter grammar (`gcc` or `clang`)
-- **Node.js** — required by `tree-sitter generate`
+- **Node.js/npm** — needed to build the web frontend and install the tree-sitter CLI
 - **tree-sitter CLI** — install via `npm install -g tree-sitter-cli`
 
 ```sh
@@ -63,7 +65,7 @@ git clone https://github.com/wb14123/tcode.git && cd tcode
 ./install-from-source.sh --user   # installs to ~/.local
 ```
 
-`install-from-source.sh` runs `cargo build --release` and then installs `tcode`, `browser-server`, and the tree-sitter shared library into `<prefix>/bin` and `<prefix>/lib`.
+`install-from-source.sh` runs `npm ci` and `npm run build` in `tcode-web/frontend`, then runs `cargo build --release --features tcode/bundled-frontend`. It installs `tcode`, `browser-server`, and the tree-sitter shared library into `<prefix>/bin` and `<prefix>/lib`. The web UI is embedded in the installed `tcode` binary.
 
 ### Verify the installation
 

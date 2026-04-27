@@ -39,8 +39,14 @@ jobs:
       - name: Install tree-sitter CLI
         run: npm install -g tree-sitter-cli
 
+      - name: Build frontend
+        working-directory: tcode-web/frontend
+        run: |
+          npm ci
+          npm run build
+
       - name: Build
-        run: cargo build --release --target ${{ matrix.target }}
+        run: cargo build --release --target ${{ matrix.target }} --features tcode/bundled-frontend
 
       - name: Package
         run: |

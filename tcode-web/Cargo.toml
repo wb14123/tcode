@@ -3,12 +3,16 @@ name = "tcode-web"
 version.workspace = true
 edition = "2024"
 
+[features]
+bundled-frontend = ["dep:include_dir"]
+
 [dependencies]
 anyhow = "1"
 axum = "0.8"
 axum-extra = { version = "0.10", features = ["cookie"] }
 base64 = "0.22"
 getrandom = "0.3"
+include_dir = { version = "0.7", optional = true }
 llm-rs = { path = "../llm-rs" }
 parking_lot = "0.12"
 serde = { version = "1", features = ["derive"] }

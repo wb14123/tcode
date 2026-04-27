@@ -5,9 +5,14 @@ use axum::{
     http::{Method, StatusCode, Uri, header},
     response::{IntoResponse, Response},
 };
+#[cfg(feature = "bundled-frontend")]
+use include_dir::{Dir, include_dir};
 
 const FRONTEND_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 const FRONTEND_REFERRER_POLICY: &str = "no-referrer";
+
+#[cfg(feature = "bundled-frontend")]
+static FRONTEND_DIST: Dir<'static> = include_dir!("$CARGO_MANIFEST_DIR/frontend/dist");
 
 pub(crate) async fn serve_frontend(method: Method, uri: Uri) -> Response {
     let request_path = uri.path();
@@ -15,6 +20,38 @@ pub(crate) async fn serve_frontend(method: Method, uri: Uri) -> Response {
         return StatusCode::NOT_FOUND.into_response();
     }
 
+    #[cfg(feature = "bundled-frontend")]
+    {
+        serve_bundled_frontend(method, request_path)
+    }
+
+    #[cfg(not(feature = "bundled-frontend"))]
+    {
+        serve_filesystem_frontend(method, request_path).await
+    }
+}
+
+#[cfg(feature = "bundled-frontend")]
+fn serve_bundled_frontend(method: Method, request_path: &str) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return StatusCode::METHOD_NOT_ALLOWED.into_response();
+    }
+
+    let relative_path = match normalize_relative_path(request_path) {
+        Some(path) => path,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    let response_file = match resolve_bundled_file(&relative_path) {
+        Some(file) => file,
+        None => return StatusCode::NOT_FOUND.into_response(),
+    };
+
+    bundled_file_response(response_file, method == Method::HEAD)
+}
+
+#[cfg(not(feature = "bundled-frontend"))]
+async fn serve_filesystem_frontend(method: Method, request_path: &str) -> Response {
     let dist_dir = frontend_dist_dir();
     let dist_available = match path_is_dir(&dist_dir).await {
         Ok(is_dir) => is_dir,
@@ -54,6 +91,7 @@ pub(crate) async fn serve_frontend(method: Method, uri: Uri) -> Response {
     }
 }
 
+#[cfg(not(feature = "bundled-frontend"))]
 fn frontend_dist_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("frontend/dist")
 }
@@ -86,6 +124,7 @@ fn normalize_relative_path(request_path: &str) -> Option<PathBuf> {
     Some(relative)
 }
 
+#[cfg(not(feature = "bundled-frontend"))]
 async fn resolve_response_path(
     dist_dir: &Path,
     relative_path: &Path,
@@ -105,6 +144,19 @@ async fn resolve_response_path(
     Ok(None)
 }
 
+#[cfg(feature = "bundled-frontend")]
+fn resolve_bundled_file(relative_path: &Path) -> Option<&'static include_dir::File<'static>> {
+    if let Some(file) = FRONTEND_DIST.get_file(relative_path) {
+        return Some(file);
+    }
+
+    if should_fallback_to_index(relative_path) {
+        return FRONTEND_DIST.get_file("index.html");
+    }
+
+    None
+}
+
 fn should_fallback_to_index(relative_path: &Path) -> bool {
     if relative_path
         .components()
@@ -121,6 +173,7 @@ fn should_fallback_to_index(relative_path: &Path) -> bool {
         .is_none_or(|name| !name.contains('.'))
 }
 
+#[cfg(not(feature = "bundled-frontend"))]
 async fn path_is_dir(path: &Path) -> std::io::Result<bool> {
     match tokio::fs::metadata(path).await {
         Ok(metadata) => Ok(metadata.is_dir()),
@@ -129,6 +182,7 @@ async fn path_is_dir(path: &Path) -> std::io::Result<bool> {
     }
 }
 
+#[cfg(not(feature = "bundled-frontend"))]
 async fn path_is_file(path: &Path) -> std::io::Result<bool> {
     match tokio::fs::metadata(path).await {
         Ok(metadata) => Ok(metadata.is_file()),
@@ -137,6 +191,7 @@ async fn path_is_file(path: &Path) -> std::io::Result<bool> {
     }
 }
 
+#[cfg(not(feature = "bundled-frontend"))]
 async fn file_response(
     path: &Path,
     head_only: bool,
@@ -144,14 +199,32 @@ async fn file_response(
     let bytes = tokio::fs::read(path)
         .await
         .map_err(|error| map_io_error(path, error))?;
-    let content_type = content_type_for_path(path);
-    let content_length = bytes.len().to_string();
-
+    let content_length = bytes.len();
     let body = if head_only {
         Body::empty()
     } else {
         Body::from(bytes)
     };
+
+    Ok(build_file_response(path, content_length, body))
+}
+
+#[cfg(feature = "bundled-frontend")]
+fn bundled_file_response(file: &'static include_dir::File<'static>, head_only: bool) -> Response {
+    let contents = file.contents();
+    let body = if head_only {
+        Body::empty()
+    } else {
+        Body::from(contents.to_vec())
+    };
+
+    build_file_response(file.path(), contents.len(), body)
+}
+
+fn build_file_response(path: &Path, content_length: usize, body: Body) -> Response {
+    let content_type = content_type_for_path(path);
+    let content_length = content_length.to_string();
+
     let mut response = Response::new(body);
     response.headers_mut().insert(
         header::CONTENT_TYPE,
@@ -176,9 +249,10 @@ async fn file_response(
             header::HeaderValue::from_static(FRONTEND_REFERRER_POLICY),
         );
     }
-    Ok(response)
+    response
 }
 
+#[cfg(not(feature = "bundled-frontend"))]
 fn map_io_error(path: &Path, error: std::io::Error) -> (StatusCode, std::io::Error) {
     let status = if error.kind() == std::io::ErrorKind::NotFound {
         StatusCode::NOT_FOUND
