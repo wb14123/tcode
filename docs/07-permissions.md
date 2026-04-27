@@ -2,6 +2,8 @@
 
 tcode has a permission system that gives you control over what the agent can do — which files it reads and writes, which commands it runs, and which websites it fetches. This page explains how that system works.
 
+Most file and shell permission categories apply to normal sessions. In web-only sessions, local filesystem tools, shell commands, LSP, and skills are not registered, so file/bash permissions and default current-directory read access do not apply.
+
 > **Best-effort guardrail, not a security boundary.** The permission system is designed to keep the agent in check during normal use — it helps you stay aware of what the agent is doing and catch mistakes before they happen. It is not a sandbox. If you need real security isolation (e.g., running untrusted code, protecting sensitive files outside the project), use proper OS-level tools like Docker containers, VMs, or dedicated user accounts.
 
 ## Concepts
@@ -18,6 +20,8 @@ The **tool** (also called "scope" in some parts of the UI) identifies which cate
 | `file_write` | Writing, creating, or modifying files |
 | `bash` | Running shell commands |
 | `web_fetch` | Fetching web pages |
+
+Web-only sessions mainly use `web_search` and `web_fetch`; only `web_fetch` uses hostname permissions. `web_search` does not require a permission grant.
 
 ### Key
 
@@ -64,7 +68,7 @@ Permissions are **hierarchical**:
 
 - **Commands:** A permission for `cargo` also covers `cargo build`, `cargo test --release`, etc. The system matches by prefix — if the command starts with the permitted value, it's allowed.
 
-- **Default read access to the current directory:** The agent can read any file inside the directory you launched tcode from — no permission prompt, no approval needed. This is granted automatically so the agent can explore the project without you having to approve every file read. Writing still requires explicit permission.
+- **Default read access to the current directory (normal sessions only):** The agent can read any file inside the directory you launched tcode from — no permission prompt, no approval needed. This is granted automatically so the agent can explore the project without you having to approve every file read. Writing still requires explicit permission. Web-only sessions do not register local file tools, so this default read grant does not apply.
 
   > **Be mindful of where you launch tcode.** If you run `tcode` from `/home/user`, the agent can read everything under your home directory. Always launch tcode from the specific project directory you want to work in.
 
@@ -149,7 +153,7 @@ Press **f** in the permission pane to toggle between showing all permissions and
 
 ### Container mode annotations
 
-When running with `-c` (container mode), the permission pane annotates each tool to show where it executes. The `bash` tool is labeled `bash (in container X)` while all other tools (file_read, file_write, web_fetch) are labeled with `(outside container)`. This makes it clear which operations run inside the container sandbox and which operate directly on the host.
+When running with `-c` (container mode), the permission pane annotates each tool to show where it executes. The `bash` tool is labeled `bash (in container X)` while all other tools (file_read, file_write, web_fetch) are labeled with `(outside container)`. This makes it clear which operations run inside the container sandbox and which operate directly on the host. Container mode applies to normal sessions; web-only sessions do not register the bash or file tools.
 
 ## Tips
 

@@ -22,6 +22,7 @@ See [03-commands.md](03-commands.md#tcode-config) for the full `tcode config` co
 
 ```
 tcode                          # start with default config
+tcode --web-only               # start a web-only session
 tcode -p work                  # start with ~/.tcode/config-work.toml
 tcode --session <id> attach    # attach to existing session
 tcode -c my-container          # run bash commands inside a Docker container
@@ -32,11 +33,28 @@ tcode -c my-container --container-runtime podman  # same, using Podman
 |------|-------------|
 | `-p <profile>` | Load a specific config profile |
 | `--session <id>` | Target a specific session |
+| `--web-only` | Create new sessions in web-only mode. This is a CLI/session mode, not a config-file setting. |
 | `-V`, `--version` | Print version and git commit |
 | `-c <name>`, `--container <name>` | Run bash commands inside a running container (see [Container Mode](#container-mode)) |
 | `--container-runtime <runtime>` | Container runtime CLI: `docker` (default) or `podman`. Requires `-c`. |
 
 All other settings live in the config file.
+
+## Session Modes
+
+Normal sessions are the default. They load project context, register the local filesystem and shell tools, and honor project instructions such as `CLAUDE.md`.
+
+Use `tcode --web-only` to create a web-only session for research that should not expose local project context. Web-only sessions register only these tools:
+
+- `current_time`
+- `web_search`
+- `web_fetch`
+- `subagent`
+- `continue_subagent`
+
+They do not register shell commands, local file tools (`read`, `write`, `edit`, `grep`, `glob`), LSP, or skills, and they do not load project-local `CLAUDE.md` instructions.
+
+The mode is stored as session metadata. Existing sessions keep their original mode when attached or resumed; passing `--web-only` affects new session creation, not existing sessions.
 
 ## Full Config Reference
 
@@ -198,13 +216,13 @@ tcode -c my-dev-container --container-runtime podman
 
 ## CLAUDE.md
 
-Place a `CLAUDE.md` file in your project root to inject custom instructions into every conversation. Its content is appended to the system prompt automatically.
+Place a `CLAUDE.md` file in your project root to inject custom instructions into every normal-mode conversation. Its content is appended to the system prompt automatically. Web-only sessions do not load `CLAUDE.md`.
 
 **Location:** `<project-root>/CLAUDE.md`
 
 **Behavior:**
 
-- Loaded every time the system prompt is built (both root agent and subagents).
+- Loaded every time the system prompt is built in normal sessions (both root agent and subagents).
 - The entire file content is appended to the end of the system prompt.
 - If the file doesn't exist, it is silently skipped.
 - No size limit is enforced — keep it concise for best results.
@@ -221,7 +239,7 @@ Example `CLAUDE.md`:
 
 ## Skills
 
-Skills are reusable instruction sets the agent can load on demand via a tool call. Unlike CLAUDE.md (which is always present in the system prompt), skills are only loaded when the agent decides they are relevant.
+Skills are reusable instruction sets the agent can load on demand via a tool call in normal sessions. Unlike CLAUDE.md (which is always present in the normal-mode system prompt), skills are only loaded when the agent decides they are relevant. Web-only sessions do not scan skills or register the skill tool.
 
 **Directory structure:**
 

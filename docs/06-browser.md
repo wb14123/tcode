@@ -2,7 +2,7 @@
 
 ## Why a Browser?
 
-tcode uses headless Chrome for its `web_search` and `web_fetch` tools. Unlike API-based search services, this means the browser uses **your own accounts and logins** — you get your Kagi results, access to sites behind your logins, and the same browsing context you would have in a normal browser.
+tcode uses headless Chrome for its `web_search` and `web_fetch` tools. Unlike API-based search services, this means the browser uses **your own accounts and logins** — you get your Kagi results, access to sites behind your logins, and the same browsing context you would have in a normal browser. Web-only sessions rely on this same browser setup.
 
 A shared `browser-server` process manages the Chrome instance, tab pooling, and lifecycle. Multiple tcode sessions share the same browser-server.
 
@@ -34,7 +34,7 @@ Run `tcode browser` to launch Chrome with a persistent profile at `~/.tcode/chro
 - Log in to **GitHub**, **Google**, or any other service you want the agent to access
 - Google search technically works without authentication, but a fresh profile will usually hit Google's CAPTCHA / "unusual traffic" page on the first queries and searches will fail. Before using `web_search` against Google, either log in to your Google account in this window, or run a few manual Google searches here to warm the profile up. Cookies persist and are reused by the headless browser-server.
 
-Cookies, sessions, and all browser storage are saved in the persistent profile and reused by the headless browser-server. You only need to log in once — your sessions carry over across tcode restarts.
+Cookies, sessions, and all browser storage are saved in the persistent profile and reused by the headless browser-server. You only need to log in once — your sessions carry over across tcode restarts. Run this setup before using web-only sessions if you need logged-in search or page access.
 
 This is a standalone command — it opens a visible Chrome window and does not interact with the browser-server process. When finished, press Ctrl+C in the terminal to exit (closing the Chrome window first is optional).
 

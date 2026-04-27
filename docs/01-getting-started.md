@@ -10,7 +10,7 @@ This guide walks you through installing tcode and running it for the first time.
 
 - **Neovim** (>= 0.9) -- tcode uses neovim for its display and edit windows. The [LazyVim](https://www.lazyvim.org/) distribution is recommended. See [05-neovim.md](05-neovim.md) for plugin setup.
 
-- **Chrome or Chromium** -- required by `web_search` and `web_fetch` tools. Run `tcode browser` to configure. See [06-browser.md](06-browser.md) for details.
+- **Chrome or Chromium** -- required by `web_search` and `web_fetch` tools, including web-only sessions. Run `tcode browser` to configure. See [06-browser.md](06-browser.md) for details.
 
   > **Heads up — Google CAPTCHA on first use.** `web_search` drives the public Google search page (`https://www.google.com/search`) through a headless Chrome profile — it does not use a search API. A brand-new profile with no history or cookies will very often hit Google's CAPTCHA / "unusual traffic" page on the first few queries, and searches will silently fail. Before relying on `web_search`, run `tcode browser` and either **log in to your Google account** in that window, or at least run a handful of manual Google searches to warm the profile up. Cookies and sessions from `tcode browser` are reused by the headless browser-server, so you only need to do this once. If you prefer a different engine, log in to Kagi in `tcode browser` and switch the `search_engine` setting — see [06-browser.md](06-browser.md) and [02-configuration.md](02-configuration.md).
 
@@ -103,7 +103,7 @@ Without this, the display pane will have no syntax highlighting for markdown con
 
 ### Configure a provider
 
-> **The agent can read all files under the current directory by default.** tcode automatically grants the agent read access to everything inside the directory you launch it from — no approval prompt. Always `cd` into the specific project you want to work on before running `tcode`. Don't launch it from broad directories like `~` or `/`. See [07-permissions.md](07-permissions.md) for details.
+> **Normal sessions can read all files under the current directory by default.** tcode automatically grants read access to everything inside the directory you launch it from in normal mode — no approval prompt. Always `cd` into the specific project you want to work on before running `tcode`. Don't launch it from broad directories like `~` or `/`. Web-only sessions do not register local filesystem or shell tools. See [07-permissions.md](07-permissions.md) for details.
 
 Inside a tmux window, `cd` into your project and run:
 
@@ -150,6 +150,16 @@ If you created a profile-specific config, use the matching profile for auth and 
 If you created a profile-specific config, use the matching profile for auth and runtime too: `tcode -p work openai-auth`, then `tcode -p work`.
 
 All other options (model, layout, shortcuts, subagent limits, browser server, search engine) live as commented-out lines in the generated file. Open `~/.tcode/config.toml` in your editor to uncomment and tune them. See [02-configuration.md](02-configuration.md) for the full reference.
+
+### Web-only sessions
+
+For web research without local project access, start:
+
+```sh
+tcode --web-only
+```
+
+A web-only session uses the same tmux/neovim UI, but only current time, web search/fetch, and delegation tools are available. It does not expose local file tools, shell commands, LSP, skills, or project instructions. Browser setup still matters because `web_search` and `web_fetch` use the shared browser-server profile.
 
 ### The four-pane layout
 
@@ -236,7 +246,7 @@ Detail views open as separate tmux windows. Use tmux window navigation to switch
 
 ### A typical workflow
 
-1. Start tcode in your project directory: `tcode`
+1. Start tcode in your project directory: `tcode` (or use `tcode --web-only` for standalone web research without local project access)
 2. Type `/plan` + Tab, then describe what you want to build. Send it.
 3. The agent designs a plan. Approve any tool permissions it needs (file reads, etc.) via **Ctrl-p**.
 4. Review the plan, ask questions or suggest changes.

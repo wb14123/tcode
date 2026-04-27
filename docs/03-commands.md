@@ -4,12 +4,15 @@
 
 ### `tcode`
 
-Starts a new session. Launches the server and opens display, edit, tree, and permission panes in the current tmux session. A unique 8-character session ID is generated automatically. Session files persist in `~/.tcode/sessions/{id}/`.
+Starts a new normal session. Launches the server and opens display, edit, tree, and permission panes in the current tmux session. A unique 8-character session ID is generated automatically. Session files persist in `~/.tcode/sessions/{id}/`.
+
+Use `--web-only` to create a new web-only session. Web-only sessions keep the same UI, but only web research, current time, and delegation tools are available; local filesystem tools, shell commands, LSP, skills, and project instructions are not loaded. The mode is stored with the session and is shown by `tcode sessions` and the interactive session picker.
 
 If no config file exists at `~/.tcode/config.toml`, `tcode` automatically launches the `tcode config` wizard in interactive terminals, writes the file, and exits — run `tcode` again afterward to start a session. In non-interactive contexts (CI, piped stdin), tcode instead exits with a "config not found" error that tells you to run `tcode config`.
 
 ```
 tcode
+tcode --web-only
 tcode -p <profile>
 tcode -c <container-name>
 tcode -c <container-name> --container-runtime podman
@@ -20,6 +23,7 @@ tcode -c <container-name> --container-runtime podman
 | Flag | Description |
 |------|-------------|
 | `-p <profile>` | Load a specific config profile |
+| `--web-only` | Create the new session in web-only mode. Existing sessions keep their stored mode. |
 | `-V`, `--version` | Print version and git commit |
 | `-c <name>`, `--container <name>` | Run bash commands inside a running Docker/Podman container. File tools remain on the host. See [02-configuration.md](02-configuration.md#container-mode). |
 | `--container-runtime <runtime>` | Container runtime CLI: `docker` (default) or `podman`. Requires `-c`. |
@@ -54,7 +58,7 @@ See [02-configuration.md](02-configuration.md#config-file-location) for the wiza
 
 ### `tcode attach`
 
-Attaches to an existing session and resumes the conversation in the current tmux session. Must be run inside tmux. If `--session` is omitted, an interactive picker is shown.
+Attaches to an existing session and resumes the conversation in the current tmux session. Must be run inside tmux. If `--session` is omitted, an interactive picker is shown. Existing sessions always use their stored mode; passing `--web-only` does not convert a normal session to web-only or a web-only session to normal.
 
 ```
 tcode attach
@@ -71,7 +75,15 @@ tcode --session <id> attach
 
 ### `tcode sessions`
 
-Lists all sessions with their status (active or inactive). Active sessions have a running server process.
+Lists all sessions with their status (`active` or `inactive`), mode (`normal` or `web-only`), and description when available. Active sessions have a running server process.
+
+Example output:
+
+```text
+Sessions:
+  abc123xy (active, web-only) Research notes
+  def456uv (inactive, normal) Project refactor
+```
 
 ```
 tcode sessions
@@ -157,10 +169,11 @@ These commands are invoked internally by tcode -- from display keybindings, tmux
 
 ### `tcode serve`
 
-Starts just the server process without any tmux integration.
+Starts just the server process without any tmux integration. For a new empty session, `--web-only` initializes the session in web-only mode. If the session already has metadata or conversation state, the stored mode wins.
 
 ```
 tcode --session <id> serve
+tcode --session <id> --web-only serve
 ```
 
 **Flags:**
@@ -168,6 +181,7 @@ tcode --session <id> serve
 | Flag | Description |
 |------|-------------|
 | `--session <id>` | **(required)** Session ID |
+| `--web-only` | Initialize a new empty session in web-only mode. Existing session metadata wins. |
 
 ---
 
