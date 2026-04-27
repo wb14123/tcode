@@ -49,7 +49,7 @@ pub(crate) const SESSION_COOKIE_NAME: &str = "tcode_session";
 /// and Safari treat `http://localhost`, `http://127.0.0.1`, and
 /// `http://[::1]` as potentially-trustworthy / secure contexts per
 /// the W3C Secure Contexts spec, so `Secure` cookies still round-trip
-/// over plain HTTP on the loopback-only PoC binding (see
+/// over plain HTTP on the default loopback binding (see
 /// `RemoteConfig::with_loopback_defaults`). Any non-loopback
 /// deployment is expected to terminate TLS at a proxy, at which
 /// point `Secure` becomes load-bearing.

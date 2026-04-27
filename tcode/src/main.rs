@@ -30,6 +30,7 @@ mod oauth_profile_tests;
 
 use std::collections::HashMap;
 use std::fs;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -196,10 +197,10 @@ enum Commands {
         #[arg(long)]
         once_only: bool,
     },
-    /// Start the web backend for browser access (PoC, localhost only).
+    /// Start the web backend for browser access.
     ///
-    /// Binds to 127.0.0.1 only — connect via http://127.0.0.1:<port>,
-    /// not http://localhost:<port> (IPv6 dual-stack may misroute the latter).
+    /// Binds to 127.0.0.1 by default. Pass `--host 0.0.0.0` (or another
+    /// interface address) to listen for connections from other machines.
     ///
     /// `-p <profile>` is accepted at the top level but not used yet;
     /// reserved for a future login/session ticket.
@@ -209,11 +210,16 @@ enum Commands {
     /// as-received (no trimming), so leading/trailing whitespace in the
     /// secret is significant at login time.
     Remote {
-        /// TCP port to bind on 127.0.0.1. Required — no default, so the
-        /// operator always chooses a port and avoids silent collisions.
-        /// `--port 0` is rejected at parse time; pick a concrete port.
+        /// TCP port to bind. Required — no default, so the operator always
+        /// chooses a port and avoids silent collisions. `--port 0` is rejected
+        /// at parse time; pick a concrete port.
         #[arg(long, value_parser = clap::value_parser!(u16).range(1..))]
         port: u16,
+
+        /// IP address to bind. Defaults to 127.0.0.1 for safe local-only access.
+        /// Use 0.0.0.0 or :: to listen on all IPv4 or IPv6 interfaces.
+        #[arg(long, default_value_t = IpAddr::V4(Ipv4Addr::LOCALHOST))]
+        host: IpAddr,
 
         /// Shared secret used for the single-user login flow.
         /// Prefer passing via env (TCODE_REMOTE_PASSWORD).
@@ -716,7 +722,11 @@ async fn main() -> Result<()> {
         Some(Commands::ClaudeAuth) => claude_auth::run(profile.as_deref()).await,
         Some(Commands::OpenaiAuth) => openai_auth::run(profile.as_deref()).await,
         Some(Commands::Config) => config_wizard::run(profile.as_deref(), false),
-        Some(Commands::Remote { port, password }) => {
+        Some(Commands::Remote {
+            port,
+            host,
+            password,
+        }) => {
             // Ordering is load-bearing: init_remote_tracing() MUST run before
             // try_new() so the warnings/advisories emitted inside try_new()
             // are actually delivered.
@@ -730,6 +740,7 @@ async fn main() -> Result<()> {
                 tcode_web::RemoteModePolicy::All
             };
             let cfg = tcode_web::RemoteConfig::try_new(port, password, password_on_argv)?
+                .with_bind_addr(host)
                 .with_runtime_options(profile.clone(), container_config)
                 .with_remote_mode_policy(remote_mode_policy);
             tcode_web::run(cfg).await

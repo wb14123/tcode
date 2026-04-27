@@ -40,7 +40,7 @@ pub(crate) async fn serve(
 /// 1. Bind a TCP listener via [`bind_listener`].
 /// 2. Capture the local address before moving the listener.
 /// 3. Move the plaintext password into an `AppState`.
-/// 4. Log the startup URL and the localhost-only warning.
+/// 4. Log the startup URL and any exposure warning.
 /// 5. Call [`serve`] with a Ctrl-C-driven shutdown future.
 pub async fn run(config: RemoteConfig) -> anyhow::Result<()> {
     let runtime_settings = tcode_runtime::bootstrap::RuntimeSettings::load(
@@ -66,7 +66,11 @@ pub async fn run(config: RemoteConfig) -> anyhow::Result<()> {
     ));
 
     tracing::info!("tcode remote listening on http://{local}");
-    tracing::warn!("localhost-only HTTP PoC; use HTTPS/tunnel for remote access");
+    if !local.ip().is_loopback() {
+        tracing::warn!(
+            "tcode remote is listening on a non-loopback address over HTTP; use a strong password and prefer HTTPS/tunnel exposure"
+        );
+    }
 
     let shutdown = async {
         match tokio::signal::ctrl_c().await {

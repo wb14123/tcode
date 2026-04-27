@@ -110,6 +110,16 @@ impl RemoteConfig {
         self
     }
 
+    /// Override the IP address used by `bind_listener`.
+    ///
+    /// `RemoteConfig` defaults to loopback for safety; the CLI exposes this
+    /// through `tcode remote --host <ip>` for operators who intentionally want
+    /// to listen on a wider interface.
+    pub fn with_bind_addr(mut self, bind_addr: IpAddr) -> Self {
+        self.bind_addr = bind_addr;
+        self
+    }
+
     /// Shared builder used by both `try_new` (after validation) and
     /// `for_test` (which skips validation). Keeping the default bind address
     /// in one place guards against the two paths drifting.

@@ -1,4 +1,5 @@
 use std::ffi::OsString;
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -72,9 +73,36 @@ fn web_only_global_flag_is_accepted_after_remote_subcommand() {
 
     assert!(cli.web_only);
     match cli.command {
-        Some(crate::Commands::Remote { port, password }) => {
+        Some(crate::Commands::Remote {
+            port,
+            host,
+            password,
+        }) => {
             assert_eq!(port, 1234);
+            assert_eq!(host, IpAddr::V4(Ipv4Addr::LOCALHOST));
             assert_eq!(password, "super-secret-password");
+        }
+        _ => panic!("expected remote command"),
+    }
+}
+
+#[test]
+fn remote_host_flag_accepts_non_loopback_address() {
+    let cli = crate::Cli::try_parse_from([
+        "tcode",
+        "remote",
+        "--port",
+        "1234",
+        "--host",
+        "0.0.0.0",
+        "--password",
+        "super-secret-password",
+    ])
+    .expect("remote --host should parse as an IP address");
+
+    match cli.command {
+        Some(crate::Commands::Remote { host, .. }) => {
+            assert_eq!(host, IpAddr::V4(Ipv4Addr::UNSPECIFIED));
         }
         _ => panic!("expected remote command"),
     }

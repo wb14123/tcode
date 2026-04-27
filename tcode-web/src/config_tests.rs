@@ -1,3 +1,5 @@
+use std::net::{IpAddr, Ipv4Addr};
+
 use crate::config::{RemoteConfig, RemoteModePolicy};
 use tcode_runtime::session::SessionMode;
 
@@ -38,6 +40,14 @@ fn try_new_accepts_long_password() {
 #[test]
 fn try_new_accepts_argv_sourced_password() {
     assert!(RemoteConfig::try_new(8765, "a-long-enough-password-123".into(), true).is_ok());
+}
+
+#[test]
+fn with_bind_addr_allows_non_loopback_address() -> anyhow::Result<()> {
+    let cfg = RemoteConfig::try_new(8765, "valid-password-16chars!".into(), false)?
+        .with_bind_addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    assert_eq!(cfg.bind_addr(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    Ok(())
 }
 
 #[test]
