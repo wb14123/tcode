@@ -487,9 +487,11 @@ pub fn create_continue_subagent_tool() -> Tool {
     let schema = schemars::schema_for!(ContinueSubAgentParams);
     Tool::new_sentinel(
         "continue_subagent",
-        "Send a follow-up message to an existing idle subagent. \
-         Use this to continue a conversation with a subagent that has already responded. \
-         The conversation_id is found in the [subagent_id: ...] prefix of previous subagent results.",
+        "Send a follow-up message to an existing idle subagent for the same \
+         delegated task, such as clarification, provenance, correction, or \
+         completion. Prefer spawning a new subagent for a distinct phase, \
+         deliverable, or independent task. The conversation_id is found in the \
+         [subagent_id: ...] prefix of previous subagent results.",
         schema,
     )
 }

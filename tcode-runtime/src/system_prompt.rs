@@ -9,10 +9,12 @@ use crate::session::SessionMode;
 const COMMON_SUBAGENT_RULES: &str = "\
 ## Subagent Rules
 
-1. **Continue over create.** Use `continue_subagent` to query existing subagents \
-about their work, sources, or reasoning before spawning new ones.
-2. **Ask, don't inspect.** Query subagents via `continue_subagent` rather than \
-re-reading their outputs yourself.
+1. **Continue for same-task follow-up.** Use `continue_subagent` when an existing \
+subagent's result needs clarification, provenance, correction, or completion within its \
+original task. Prefer a fresh subagent for a new phase, distinct deliverable, or independent task.
+2. **Ask for missing context.** If a subagent's result is incomplete, ambiguous, or \
+needs provenance, query it via `continue_subagent` rather than re-investigating. If \
+its answer already contains what you need, use it.
 3. **Chase the delegation chain.** If a subagent delegated to its own subagents, \
 ask it to query them before accepting incomplete answers.
 4. **Provenance over corroboration.** Trace the ACTUAL source of information — \
