@@ -23,16 +23,25 @@ pub(crate) async fn bind_listener(config: &RemoteConfig) -> anyhow::Result<TcpLi
 /// Run the axum router on an already-bound listener until the shutdown
 /// future resolves. Tests pass a `oneshot::Receiver`-backed future so they
 /// can stop the server deterministically.
+///
+/// Shutdown intentionally drops the server future instead of using axum's
+/// graceful shutdown path. tcode-web has long-lived SSE clients; waiting for
+/// those clients to disconnect would let a browser tab block process shutdown.
 pub(crate) async fn serve(
     listener: TcpListener,
     state: Arc<AppState>,
     shutdown: impl std::future::Future<Output = ()> + Send + 'static,
 ) -> anyhow::Result<()> {
     let router = build_router(state);
-    axum::serve(listener, router)
-        .with_graceful_shutdown(shutdown)
-        .await
-        .context("axum server error")
+    let server = axum::serve(listener, router);
+
+    tokio::select! {
+        result = server => result.context("axum server error"),
+        () = shutdown => {
+            tracing::info!("shutdown requested; stopping server without waiting for clients");
+            Ok(())
+        }
+    }
 }
 
 /// Public entry point used by `tcode remote`.
@@ -81,9 +90,9 @@ pub async fn run(config: RemoteConfig) -> anyhow::Result<()> {
 
     let shutdown = async {
         match tokio::signal::ctrl_c().await {
-            Ok(()) => tracing::info!("received Ctrl-C; initiating graceful shutdown"),
+            Ok(()) => tracing::info!("received Ctrl-C; stopping server"),
             Err(e) => {
-                tracing::error!(error = ?e, "ctrl_c handler failed; initiating graceful shutdown")
+                tracing::error!(error = ?e, "ctrl_c handler failed; stopping server")
             }
         }
     };
