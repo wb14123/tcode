@@ -156,6 +156,7 @@ export interface SubagentTimelineItem extends TimelineItemBase {
   inputTokens: number | null;
   outputTokens: number | null;
   permissionState: 'waiting' | 'approved' | 'denied' | null;
+  pending?: boolean;
 }
 
 export interface SystemTimelineItem extends TimelineItemBase {

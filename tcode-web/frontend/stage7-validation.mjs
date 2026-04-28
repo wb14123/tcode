@@ -1,5 +1,6 @@
 import { TimelineStore } from './src/timeline-store.ts';
 import { StreamEventBatcher } from './src/stream-event-batcher.ts';
+import { ConversationTimelineBuilder } from './src/messages.ts';
 
 function assert(condition, message) {
   if (!condition) {
@@ -18,15 +19,17 @@ function userItem(id = 'user:1') {
   };
 }
 
-function rawEvent(variant) {
+function rawEvent(variant, payload = {}) {
+  const raw = { [variant]: payload };
+  const rawText = JSON.stringify(raw);
   return {
-    rawText: variant,
-    rawJson: { [variant]: {} },
+    rawText,
+    rawJson: raw,
     wire: {
       variant,
-      payload: {},
-      raw: { [variant]: {} },
-      rawText: variant,
+      payload,
+      raw,
+      rawText,
     },
   };
 }
@@ -74,6 +77,101 @@ function validateTimelineStore() {
   assert(!store.isExpanded('user:1'), 'reset clears expansion state');
 }
 
+function validateSubagentInputAggregation() {
+  const builder = new ConversationTimelineBuilder();
+  builder.appendEvents([
+    rawEvent('SubAgentInputStart', {
+      msg_id: 7,
+      tool_call_id: 'tool-1',
+      tool_call_index: 0,
+      created_at: 1_700_000_000_000,
+      tool_name: 'worker',
+    }),
+    rawEvent('SubAgentInputChunk', {
+      tool_call_index: 0,
+      content: 'hello ',
+    }),
+    rawEvent('SubAgentInputChunk', {
+      tool_call_index: 0,
+      content: 'world',
+    }),
+  ]);
+
+  assert(builder.timeline.length === 1, 'pending subagent input renders as one timeline item');
+  const pendingItem = builder.timeline[0];
+  assert(pendingItem.kind === 'subagent', 'pending subagent input creates a subagent timeline item');
+  assert(pendingItem.pending === true, 'subagent input without conversation stays pending');
+  assert(pendingItem.input === 'hello world', 'SubAgentInputChunk aggregates into pending subagent input');
+  assert(pendingItem.toolCallId === 'tool-1', 'pending subagent preserves tool call id');
+
+  builder.appendEvent(
+    rawEvent('SubAgentStart', {
+      msg_id: 8,
+      conversation_id: 'subagent-1',
+      tool_call_id: 'tool-1',
+      description: 'worker',
+    }),
+  );
+
+  assert(builder.timeline.length === 1, 'SubAgentStart reuses the pending subagent timeline item');
+  const startedItem = builder.timeline[0];
+  assert(startedItem.kind === 'subagent', 'started item remains a subagent timeline item');
+  assert(startedItem.pending !== true, 'SubAgentStart clears pending state');
+  assert(startedItem.conversationId === 'subagent-1', 'SubAgentStart attaches the real conversation id');
+  assert(startedItem.input === 'hello world', 'pending input survives SubAgentStart without duplication');
+
+  builder.appendEvent(
+    rawEvent('SubAgentInputChunk', {
+      conversation_id: 'subagent-1',
+      content: '!',
+    }),
+  );
+
+  const updatedItem = builder.timeline[0];
+  assert(updatedItem.kind === 'subagent', 'updated item remains a subagent timeline item');
+  assert(updatedItem.input === 'hello world!', 'SubAgentInputChunk aggregates after conversation id is known');
+
+  builder.appendEvent(
+    rawEvent('SubAgentInputChunk', {
+      tool_call_index: 0,
+      content: '?',
+    }),
+  );
+
+  assert(builder.timeline.length === 1, 'late index-only SubAgentInputChunk does not create another pending row');
+  const lateUpdatedItem = builder.timeline[0];
+  assert(lateUpdatedItem.kind === 'subagent', 'late updated item remains a subagent timeline item');
+  assert(lateUpdatedItem.input === 'hello world!?', 'late index-only SubAgentInputChunk uses the known subagent row');
+
+  builder.appendEvents([
+    rawEvent('SubAgentInputStart', {
+      msg_id: 9,
+      tool_call_id: 'tool-2',
+      tool_call_index: 1,
+      created_at: 1_700_000_001_000,
+      tool_name: 'worker',
+    }),
+    rawEvent('SubAgentInputChunk', {
+      tool_call_index: 1,
+      content: 'world',
+    }),
+    rawEvent('SubAgentContinue', {
+      msg_id: 10,
+      conversation_id: 'subagent-1',
+      tool_call_id: 'tool-2',
+      description: 'worker follow-up',
+    }),
+  ]);
+
+  assert(builder.timeline.length === 1, 'SubAgentContinue merges pending follow-up into existing subagent row');
+  const continuedItem = builder.timeline[0];
+  assert(continuedItem.kind === 'subagent', 'continued item remains a subagent timeline item');
+  assert(
+    continuedItem.input === 'hello world!?\n\nworld',
+    'SubAgentContinue preserves follow-up input even when it is a substring of earlier input',
+  );
+}
+
 async function validateStreamEventBatcher() {
   let nextFrame = 1;
   const callbacks = new Map();
@@ -107,5 +205,6 @@ async function validateStreamEventBatcher() {
 }
 
 validateTimelineStore();
+validateSubagentInputAggregation();
 await validateStreamEventBatcher();
 console.log('stage7 validation passed');

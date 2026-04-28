@@ -7,13 +7,13 @@ function normalizeApiBase(value: string | undefined): string {
 }
 
 function normalizeRouterBase(value: string | undefined): string {
-  const fallback = import.meta.env.BASE_URL || '/';
+  const fallback = import.meta.env?.BASE_URL || '/';
   const raw = value || fallback || '/';
   const withLeadingSlash = raw.startsWith('/') ? raw : `/${raw}`;
   return withLeadingSlash.endsWith('/') ? withLeadingSlash : `${withLeadingSlash}/`;
 }
 
-const runtime = window.__TCODE_WEB_CONFIG__ ?? {};
+const runtime = globalThis.window?.__TCODE_WEB_CONFIG__ ?? {};
 
 export const runtimeConfig = {
   apiBase: normalizeApiBase(runtime.apiBase),

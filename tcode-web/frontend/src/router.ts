@@ -1,5 +1,5 @@
-import { runtimeConfig } from './config';
-import type { AppRoute } from './types';
+import { runtimeConfig } from './config.ts';
+import type { AppRoute } from './types.ts';
 
 function stripRouterBase(pathname: string): string {
   const base = runtimeConfig.routerBase;

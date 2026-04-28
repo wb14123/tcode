@@ -1,9 +1,9 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
-import { renderMarkdownToHtml } from './markdown';
-import { hrefForRoute } from './router';
-import { TimelineStore } from './timeline-store';
+import { renderMarkdownToHtml } from './markdown.ts';
+import { hrefForRoute } from './router.ts';
+import { TimelineStore } from './timeline-store.ts';
 import type {
   AppRoute,
   AssistantTimelineItem,
@@ -16,7 +16,7 @@ import type {
   ToolTimelineItem,
   UserTimelineItem,
   WireMessageEnvelope,
-} from './types';
+} from './types.ts';
 
 export interface SystemNotification {
   createdAt: number | null;
@@ -146,6 +146,14 @@ function createSubagent(conversationId: string): SubagentTimelineItem {
   };
 }
 
+function createPendingSubagent(pendingKey: string): SubagentTimelineItem {
+  return {
+    ...createSubagent(`pending:${pendingKey}`),
+    id: `subagent:pending:${pendingKey}`,
+    pending: true,
+  };
+}
+
 function createRawItem(store: TimelineStore, event: RawStreamEvent, label: string): RawTimelineItem {
   return {
     id: `raw:${store.nextSequence()}`,
@@ -183,6 +191,7 @@ function shouldRenderTimelineItem(item: TimelineItem): boolean {
 interface PendingSubagentInput {
   msgId: number | null;
   toolCallId: string | null;
+  toolCallIndex: number | null;
   createdAt: number | null;
   description: string;
   input: string;
@@ -198,8 +207,10 @@ export class ConversationTimelineBuilder {
   private subagents = new Map<string, string>();
   private subagentIdByToolCall = new Map<string, string>();
   private subagentIdByToolIndex = new Map<number, string>();
-  private pendingSubagentInputByToolCall = new Map<string, PendingSubagentInput>();
-  private pendingSubagentToolCallByIndex = new Map<number, string>();
+  private pendingSubagentInputByKey = new Map<string, PendingSubagentInput>();
+  private pendingSubagentIdByKey = new Map<string, string>();
+  private pendingSubagentKeyByToolIndex = new Map<number, string>();
+  private orphanPendingSubagentKey: string | null = null;
   private visibleSet = new Set<string>();
 
   get timeline(): TimelineItem[] {
@@ -214,8 +225,10 @@ export class ConversationTimelineBuilder {
     this.subagents = new Map<string, string>();
     this.subagentIdByToolCall = new Map<string, string>();
     this.subagentIdByToolIndex = new Map<number, string>();
-    this.pendingSubagentInputByToolCall = new Map<string, PendingSubagentInput>();
-    this.pendingSubagentToolCallByIndex = new Map<number, string>();
+    this.pendingSubagentInputByKey = new Map<string, PendingSubagentInput>();
+    this.pendingSubagentIdByKey = new Map<string, string>();
+    this.pendingSubagentKeyByToolIndex = new Map<number, string>();
+    this.orphanPendingSubagentKey = null;
     this.visibleSet = new Set<string>();
     this.store.reset();
   }
@@ -385,70 +398,95 @@ export class ConversationTimelineBuilder {
           const pendingInput: PendingSubagentInput = {
             msgId: asNumber(payload.msg_id),
             toolCallId,
+            toolCallIndex,
             createdAt: asNumber(payload.created_at),
             description: asString(payload.tool_name) ?? '',
             input: '',
           };
 
-          if (!conversationId) {
-            if (toolCallId) {
-              this.pendingSubagentInputByToolCall.set(toolCallId, pendingInput);
-            }
-            if (toolCallIndex !== null && toolCallId) {
-              this.pendingSubagentToolCallByIndex.set(toolCallIndex, toolCallId);
-            }
-            this.addItem(createRawItem(this.store, event, variant));
+          if (conversationId) {
+            const id = this.getOrCreateSubagentId(conversationId);
+            this.updateSubagent(id, (item) => {
+              item.msgId = pendingInput.msgId;
+              item.toolCallId = toolCallId ?? item.toolCallId;
+              item.createdAt = pendingInput.createdAt;
+              item.description = pendingInput.description || item.description;
+              item.pending = false;
+            });
+            this.recordSubagentLookup(id, toolCallId, toolCallIndex);
             break;
           }
 
-          const id = this.getOrCreateSubagentId(conversationId);
+          const pendingKey = this.pendingSubagentKey(toolCallId, toolCallIndex);
+          const id = this.getOrCreatePendingSubagentId(pendingKey);
+          this.pendingSubagentInputByKey.set(pendingKey, pendingInput);
           this.updateSubagent(id, (item) => {
             item.msgId = pendingInput.msgId;
             item.toolCallId = toolCallId ?? item.toolCallId;
             item.createdAt = pendingInput.createdAt;
             item.description = pendingInput.description || item.description;
+            item.pending = true;
           });
-          if (toolCallId) {
-            this.subagentIdByToolCall.set(toolCallId, id);
-          }
-          if (toolCallIndex !== null) {
-            this.subagentIdByToolIndex.set(toolCallIndex, id);
-          }
+          this.recordPendingSubagentLookup(pendingKey, id, toolCallId, toolCallIndex);
           break;
         }
         case 'SubAgentInputChunk': {
           const conversationId = asString(payload.conversation_id);
           const toolCallId = asString(payload.tool_call_id);
           const toolCallIndex = asNumber(payload.tool_call_index);
-          const pendingToolCallId = toolCallId ?? (toolCallIndex !== null ? this.pendingSubagentToolCallByIndex.get(toolCallIndex) : undefined);
-          const id = conversationId
-            ? this.getOrCreateSubagentId(conversationId)
-            : toolCallId
-              ? this.subagentIdByToolCall.get(toolCallId)
-              : toolCallIndex !== null
-                ? this.subagentIdByToolIndex.get(toolCallIndex)
-                : undefined;
-          if (!id) {
-            if (pendingToolCallId) {
-              const pending = this.pendingSubagentInputByToolCall.get(pendingToolCallId) ?? {
-                msgId: null,
-                toolCallId: pendingToolCallId,
-                createdAt: null,
-                description: '',
-                input: '',
-              };
-              pending.description = asString(payload.tool_name) ?? pending.description;
-              pending.input += asString(payload.content) ?? '';
-              this.pendingSubagentInputByToolCall.set(pendingToolCallId, pending);
-            }
-            this.addItem(createRawItem(this.store, event, variant));
+          const content = asString(payload.content) ?? '';
+
+          if (conversationId) {
+            const id = this.getOrCreateSubagentId(conversationId);
+            this.updateSubagent(id, (item) => {
+              item.msgId ??= asNumber(payload.msg_id);
+              item.toolCallId = toolCallId ?? item.toolCallId;
+              item.description = asString(payload.tool_name) ?? item.description;
+              item.input += content;
+              item.pending = false;
+            });
+            this.recordSubagentLookup(id, toolCallId, toolCallIndex);
             break;
           }
 
+          const existingSubagentId = this.findSubagentId(toolCallId, toolCallIndex);
+          if (existingSubagentId && !this.isPendingSubagentId(existingSubagentId)) {
+            this.updateSubagent(existingSubagentId, (item) => {
+              item.msgId ??= asNumber(payload.msg_id);
+              item.toolCallId = toolCallId ?? item.toolCallId;
+              item.description = asString(payload.tool_name) ?? item.description;
+              item.input += content;
+              item.pending = false;
+            });
+            this.recordSubagentLookup(existingSubagentId, toolCallId, toolCallIndex);
+            break;
+          }
+
+          const pendingKey = this.pendingSubagentKey(toolCallId, toolCallIndex);
+          const id = this.getOrCreatePendingSubagentId(pendingKey);
+          const pending = this.pendingSubagentInputByKey.get(pendingKey) ?? {
+            msgId: null,
+            toolCallId,
+            toolCallIndex,
+            createdAt: null,
+            description: '',
+            input: '',
+          };
+          pending.msgId ??= asNumber(payload.msg_id);
+          pending.toolCallId = toolCallId ?? pending.toolCallId;
+          pending.toolCallIndex = toolCallIndex ?? pending.toolCallIndex;
+          pending.description = asString(payload.tool_name) ?? pending.description;
+          pending.input += content;
+          this.pendingSubagentInputByKey.set(pendingKey, pending);
           this.updateSubagent(id, (item) => {
-            item.description = asString(payload.tool_name) ?? item.description;
-            item.input += asString(payload.content) ?? '';
+            item.msgId ??= pending.msgId;
+            item.toolCallId = pending.toolCallId ?? item.toolCallId;
+            item.createdAt = pending.createdAt ?? item.createdAt;
+            item.description = pending.description || item.description;
+            item.input += content;
+            item.pending = true;
           });
+          this.recordPendingSubagentLookup(pendingKey, id, pending.toolCallId, pending.toolCallIndex);
           break;
         }
         case 'SubAgentStart':
@@ -461,27 +499,28 @@ export class ConversationTimelineBuilder {
             break;
           }
 
-          const id = this.getOrCreateSubagentId(conversationId);
-          const pendingToolCallId = toolCallId ?? (toolCallIndex !== null ? this.pendingSubagentToolCallByIndex.get(toolCallIndex) : undefined);
-          const pending = pendingToolCallId ? this.pendingSubagentInputByToolCall.get(pendingToolCallId) : undefined;
+          const pendingId = this.findPendingSubagentId(toolCallId, toolCallIndex);
+          const existingId = this.subagents.get(conversationId);
+          const id = existingId ?? pendingId ?? this.getOrCreateSubagentId(conversationId);
+          const pendingSnapshot = pendingId ? this.subagentSnapshot(pendingId) : null;
+          if (existingId && pendingId && existingId !== pendingId) {
+            this.hideSubagentItem(pendingId);
+          } else if (pendingId && !existingId) {
+            this.subagents.set(conversationId, pendingId);
+          }
+
           this.updateSubagent(id, (item) => {
-            item.msgId = asNumber(payload.msg_id) ?? pending?.msgId ?? item.msgId;
-            item.toolCallId = toolCallId ?? pending?.toolCallId ?? item.toolCallId;
-            item.createdAt = pending?.createdAt ?? item.createdAt;
-            item.description = asString(payload.description) ?? pending?.description ?? item.description;
-            if (pending?.input && !item.input) {
-              item.input = pending.input;
-            }
+            item.msgId = asNumber(payload.msg_id) ?? pendingSnapshot?.msgId ?? item.msgId;
+            item.toolCallId = toolCallId ?? pendingSnapshot?.toolCallId ?? item.toolCallId;
+            item.conversationId = conversationId;
+            item.createdAt = pendingSnapshot?.createdAt ?? item.createdAt;
+            item.description = asString(payload.description) ?? pendingSnapshot?.description ?? item.description;
+            item.input = this.mergeSubagentInput(item.input, pendingSnapshot?.input ?? '');
+            item.pending = false;
           });
-          if (toolCallId) {
-            this.subagentIdByToolCall.set(toolCallId, id);
-          }
-          if (pendingToolCallId) {
-            this.subagentIdByToolCall.set(pendingToolCallId, id);
-            this.pendingSubagentInputByToolCall.delete(pendingToolCallId);
-          }
-          if (toolCallIndex !== null) {
-            this.subagentIdByToolIndex.set(toolCallIndex, id);
+          this.recordSubagentLookup(id, toolCallId ?? pendingSnapshot?.toolCallId ?? null, toolCallIndex ?? pendingSnapshot?.toolCallIndex ?? null);
+          if (pendingId) {
+            this.clearPendingSubagent(pendingId);
           }
           break;
         }
@@ -649,6 +688,145 @@ export class ConversationTimelineBuilder {
     return item.id;
   }
 
+  private getOrCreatePendingSubagentId(pendingKey: string): string {
+    const existing = this.pendingSubagentIdByKey.get(pendingKey);
+    if (existing) {
+      return existing;
+    }
+
+    const item = createPendingSubagent(pendingKey);
+    this.pendingSubagentIdByKey.set(pendingKey, item.id);
+    this.addItem(item);
+    return item.id;
+  }
+
+  private pendingSubagentKey(toolCallId: string | null, toolCallIndex: number | null): string {
+    if (toolCallIndex !== null) {
+      const existing = this.pendingSubagentKeyByToolIndex.get(toolCallIndex);
+      if (existing) {
+        return existing;
+      }
+    }
+
+    if (toolCallId) {
+      return `tool:${toolCallId}`;
+    }
+
+    if (toolCallIndex !== null) {
+      const key = `index:${toolCallIndex}`;
+      this.pendingSubagentKeyByToolIndex.set(toolCallIndex, key);
+      return key;
+    }
+
+    this.orphanPendingSubagentKey ??= `orphan:${this.store.nextSequence()}`;
+    return this.orphanPendingSubagentKey;
+  }
+
+  private recordPendingSubagentLookup(
+    pendingKey: string,
+    id: string,
+    toolCallId: string | null,
+    toolCallIndex: number | null,
+  ): void {
+    this.pendingSubagentIdByKey.set(pendingKey, id);
+    if (toolCallId) {
+      this.subagentIdByToolCall.set(toolCallId, id);
+    }
+    if (toolCallIndex !== null) {
+      this.pendingSubagentKeyByToolIndex.set(toolCallIndex, pendingKey);
+      this.subagentIdByToolIndex.set(toolCallIndex, id);
+    }
+  }
+
+  private recordSubagentLookup(id: string, toolCallId: string | null, toolCallIndex: number | null): void {
+    if (toolCallId) {
+      this.subagentIdByToolCall.set(toolCallId, id);
+    }
+    if (toolCallIndex !== null) {
+      this.subagentIdByToolIndex.set(toolCallIndex, id);
+    }
+  }
+
+  private findSubagentId(toolCallId: string | null, toolCallIndex: number | null): string | undefined {
+    const candidates = [
+      toolCallId ? this.subagentIdByToolCall.get(toolCallId) : undefined,
+      toolCallIndex !== null ? this.subagentIdByToolIndex.get(toolCallIndex) : undefined,
+    ];
+    return candidates.find((id): id is string => Boolean(id));
+  }
+
+  private findPendingSubagentId(toolCallId: string | null, toolCallIndex: number | null): string | undefined {
+    const id = this.findSubagentId(toolCallId, toolCallIndex);
+    return id && this.isPendingSubagentId(id) ? id : undefined;
+  }
+
+  private isPendingSubagentId(id: string): boolean {
+    const item = this.store.getItem(id);
+    return item?.kind === 'subagent' && item.pending === true;
+  }
+
+  private subagentSnapshot(id: string): PendingSubagentInput | null {
+    const item = this.store.getItem(id);
+    if (item?.kind !== 'subagent') {
+      return null;
+    }
+
+    const pending = this.pendingSubagentInputForId(id);
+    return {
+      msgId: item.msgId ?? pending?.msgId ?? null,
+      toolCallId: item.toolCallId ?? pending?.toolCallId ?? null,
+      toolCallIndex: pending?.toolCallIndex ?? null,
+      createdAt: item.createdAt ?? pending?.createdAt ?? null,
+      description: item.description || pending?.description || '',
+      input: item.input || pending?.input || '',
+    };
+  }
+
+  private pendingSubagentInputForId(id: string): PendingSubagentInput | undefined {
+    for (const [key, pendingId] of this.pendingSubagentIdByKey) {
+      if (pendingId === id) {
+        return this.pendingSubagentInputByKey.get(key);
+      }
+    }
+    return undefined;
+  }
+
+  private mergeSubagentInput(existingInput: string, pendingInput: string): string {
+    if (!pendingInput || existingInput === pendingInput) {
+      return existingInput;
+    }
+    if (!existingInput) {
+      return pendingInput;
+    }
+    return `${existingInput}\n\n${pendingInput}`;
+  }
+
+  private hideSubagentItem(id: string): void {
+    this.store.hideItem(id, { layoutMayChange: true });
+    this.visibleSet.delete(id);
+  }
+
+  private clearPendingSubagent(id: string): void {
+    const keysToDelete: string[] = [];
+    for (const [key, pendingId] of this.pendingSubagentIdByKey) {
+      if (pendingId === id) {
+        keysToDelete.push(key);
+      }
+    }
+    for (const key of keysToDelete) {
+      this.pendingSubagentIdByKey.delete(key);
+      this.pendingSubagentInputByKey.delete(key);
+      for (const [toolCallIndex, indexKey] of this.pendingSubagentKeyByToolIndex) {
+        if (indexKey === key) {
+          this.pendingSubagentKeyByToolIndex.delete(toolCallIndex);
+        }
+      }
+      if (this.orphanPendingSubagentKey === key) {
+        this.orphanPendingSubagentKey = null;
+      }
+    }
+  }
+
   private updateAssistant(id: string, mutator: (item: AssistantTimelineItem) => void): void {
     const wasVisible = this.visibleSet.has(id);
     this.store.updateItem(id, { layoutMayChange: true, visibleChange: wasVisible }, (item) => {
@@ -784,6 +962,34 @@ function toolRoute(sessionId: string, toolCallId: string, currentSubagentId?: st
   };
 }
 
+function firstLinePreview(value: string, limit = 160): string {
+  const firstLine = value.trim().split(/\r?\n/, 1)[0] ?? '';
+  if (firstLine.length <= limit) {
+    return firstLine;
+  }
+  return `${firstLine.slice(0, limit)}…`;
+}
+
+function countText(label: string, value: string): string | null {
+  if (!value) {
+    return null;
+  }
+  return `${label}: ${value.length.toLocaleString()} chars`;
+}
+
+function compactText(...values: Array<string | null | undefined>): string {
+  return values.filter((value): value is string => Boolean(value)).join(' · ');
+}
+
+function toggleExpandedOnKeydown(event: KeyboardEvent, toggle: () => void): void {
+  if (event.key !== 'Enter' && event.key !== ' ') {
+    return;
+  }
+
+  event.preventDefault();
+  toggle();
+}
+
 function renderUser(item: UserTimelineItem): TemplateResult {
   return html`
     <article class="chat-bubble chat-bubble-user timeline-user">
@@ -824,9 +1030,50 @@ function renderAssistant(item: AssistantTimelineItem): TemplateResult {
 }
 
 function renderTool(item: ToolTimelineItem, context: TimelineRenderContext): TemplateResult {
+  const canToggle = Boolean(context.timelineStore || context.toggleTimelineItemExpansion);
+  const expanded = canToggle ? (context.timelineStore?.isExpanded(item.id) ?? false) : true;
+  const toggle = () => {
+    if (context.toggleTimelineItemExpansion) {
+      context.toggleTimelineItemExpansion(item.id);
+    } else {
+      context.timelineStore?.toggleExpanded(item.id);
+    }
+  };
+
+  if (canToggle && !expanded) {
+    const preview = firstLinePreview(item.output || item.toolArgs) || 'Waiting for tool output…';
+    const meta = compactText(countText('args', item.toolArgs), countText('output', item.output));
+    return html`
+      <article
+        class="timeline-card chat-card chat-card-tool timeline-tool expandable-row is-collapsed"
+        role="button"
+        tabindex="0"
+        aria-expanded="false"
+        aria-label=${`Expand tool ${item.toolName || item.toolCallId}`}
+        @click=${toggle}
+        @keydown=${(event: KeyboardEvent) => toggleExpandedOnKeydown(event, toggle)}
+      >
+        <span class="compact-row-title">Tool · ${item.toolName || item.toolCallId}</span>
+        ${statusBadge(item.endStatus)} ${item.permissionState ? statusBadge(item.permissionState, item.permissionState) : nothing}
+        <span class="compact-row-meta">${formatTimestamp(item.createdAt)}</span>
+        ${meta ? html`<span class="compact-row-meta">${meta}</span>` : nothing}
+        <span class="compact-row-preview">${preview}</span>
+        <span class="compact-row-toggle">Expand</span>
+      </article>
+    `;
+  }
+
   return html`
-    <article class="timeline-card chat-card chat-card-tool timeline-tool">
-      <header class="chat-card-header">
+    <article class="timeline-card chat-card chat-card-tool timeline-tool ${canToggle ? 'expandable-row is-expanded' : ''}">
+      <header
+        class="chat-card-header ${canToggle ? 'expandable-row-header' : ''}"
+        role=${canToggle ? 'button' : nothing}
+        tabindex=${canToggle ? '0' : nothing}
+        aria-expanded=${canToggle ? 'true' : nothing}
+        aria-label=${canToggle ? `Collapse tool ${item.toolName || item.toolCallId}` : nothing}
+        @click=${canToggle ? toggle : nothing}
+        @keydown=${canToggle ? (event: KeyboardEvent) => toggleExpandedOnKeydown(event, toggle) : nothing}
+      >
         <div>
           <div class="chat-card-title">Tool · ${item.toolName || item.toolCallId}</div>
           <div class="chat-card-subtitle">${formatTimestamp(item.createdAt)}</div>
@@ -834,52 +1081,97 @@ function renderTool(item: ToolTimelineItem, context: TimelineRenderContext): Tem
         <div class="chat-card-actions">
           ${statusBadge(item.endStatus)}
           ${item.permissionState ? statusBadge(item.permissionState, item.permissionState) : nothing}
+          ${canToggle ? html`<span class="row-toggle-label">Collapse</span>` : nothing}
         </div>
       </header>
-      ${item.toolArgs
-        ? html`
-            <details>
-              <summary>Arguments</summary>
-              <pre class="timeline-pre">${item.toolArgs}</pre>
-            </details>
-          `
-        : nothing}
-      ${item.output
-        ? html`
-            <details open>
-              <summary>Output</summary>
-              <pre class="timeline-pre">${item.output}</pre>
-            </details>
-          `
-        : html`<div class="timeline-empty">Waiting for tool output…</div>`}
-      <footer class="chat-card-footer">
-        <span>tool call id: ${item.toolCallId}</span>
-        <a
-          href="${hrefForRoute(toolRoute(context.sessionId, item.toolCallId, context.currentSubagentId))}"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Open detail
-        </a>
-      </footer>
+      <div class="expandable-row-body">
+        ${renderExpandedToolBody(item)}
+        <footer class="chat-card-footer">
+          <span>tool call id: ${item.toolCallId}</span>
+          <a
+            href="${hrefForRoute(toolRoute(context.sessionId, item.toolCallId, context.currentSubagentId))}"
+            target="_blank"
+            rel="noopener noreferrer"
+          >
+            Open detail
+          </a>
+        </footer>
+      </div>
     </article>
   `;
 }
 
+function renderExpandedToolBody(item: ToolTimelineItem): TemplateResult {
+  return html`
+    ${item.toolArgs
+      ? html`
+          <details>
+            <summary>Arguments</summary>
+            <pre class="timeline-pre">${item.toolArgs}</pre>
+          </details>
+        `
+      : nothing}
+    ${item.output
+      ? html`
+          <details open>
+            <summary>Output</summary>
+            <pre class="timeline-pre">${item.output}</pre>
+          </details>
+        `
+      : html`<div class="timeline-empty">Waiting for tool output…</div>`}
+  `;
+}
+
 function renderSubagent(item: SubagentTimelineItem, context: TimelineRenderContext): TemplateResult {
-  const expanded = context.timelineStore?.isExpanded(item.id) ?? context.expandedSubagentIds?.has(item.conversationId) ?? false;
-  const canToggle = Boolean(context.toggleTimelineItemExpansion || context.toggleSubagentExpansion);
+  const canToggle = Boolean(
+    context.timelineStore || context.toggleTimelineItemExpansion || context.expandedSubagentIds || context.toggleSubagentExpansion,
+  );
+  const expanded = context.timelineStore?.isExpanded(item.id) ?? context.expandedSubagentIds?.has(item.conversationId) ?? !canToggle;
   const toggle = () => {
     if (context.toggleTimelineItemExpansion) {
       context.toggleTimelineItemExpansion(item.id);
+    } else if (context.timelineStore) {
+      context.timelineStore.toggleExpanded(item.id);
     } else {
       context.toggleSubagentExpansion?.(item.conversationId);
     }
   };
 
+  if (canToggle && !expanded) {
+    const title = item.description || 'Subagent task';
+    const preview = firstLinePreview(item.response || item.input) || 'Waiting for subagent response…';
+    const meta = compactText(countText('input', item.input), countText('response', item.response));
+    return html`
+      <article
+        class="timeline-card chat-card chat-card-subagent timeline-subagent expandable-row is-collapsed"
+        role="button"
+        tabindex="0"
+        aria-expanded="false"
+        aria-label=${`Expand subagent ${title}`}
+        @click=${toggle}
+        @keydown=${(event: KeyboardEvent) => toggleExpandedOnKeydown(event, toggle)}
+      >
+        <span class="compact-row-title">Subagent · ${title}</span>
+        ${statusBadge(item.endStatus)} ${item.permissionState ? statusBadge(item.permissionState, item.permissionState) : nothing}
+        <span class="compact-row-meta">${formatTimestamp(item.createdAt)}</span>
+        ${meta ? html`<span class="compact-row-meta">${meta}</span>` : nothing}
+        <span class="compact-row-preview">${preview}</span>
+        <span class="compact-row-toggle">Expand</span>
+      </article>
+    `;
+  }
+
   return html`
-    <article class="timeline-card chat-card chat-card-subagent timeline-subagent">
-      <header class="chat-card-header">
+    <article class="timeline-card chat-card chat-card-subagent timeline-subagent ${canToggle ? 'expandable-row is-expanded' : ''}">
+      <header
+        class="chat-card-header ${canToggle ? 'expandable-row-header' : ''}"
+        role=${canToggle ? 'button' : nothing}
+        tabindex=${canToggle ? '0' : nothing}
+        aria-expanded=${canToggle ? 'true' : nothing}
+        aria-label=${canToggle ? `Collapse subagent ${item.description || 'Subagent task'}` : nothing}
+        @click=${canToggle ? toggle : nothing}
+        @keydown=${canToggle ? (event: KeyboardEvent) => toggleExpandedOnKeydown(event, toggle) : nothing}
+      >
         <div>
           <div class="chat-card-title">Subagent</div>
           <div class="chat-card-subtitle">${item.description || 'Subagent task'} · ${formatTimestamp(item.createdAt)}</div>
@@ -887,52 +1179,50 @@ function renderSubagent(item: SubagentTimelineItem, context: TimelineRenderConte
         <div class="chat-card-actions">
           ${statusBadge(item.endStatus)}
           ${item.permissionState ? statusBadge(item.permissionState, item.permissionState) : nothing}
+          ${canToggle ? html`<span class="row-toggle-label">Collapse</span>` : nothing}
         </div>
       </header>
-      ${item.input
-        ? html`
-            <details>
-              <summary>Task input</summary>
-              <pre class="timeline-pre">${item.input}</pre>
-            </details>
-          `
-        : nothing}
-      ${item.response
-        ? html`
-            <section>
-              <div class="chat-card-subtitle">Latest response</div>
-              <div class="subagent-response ${expanded ? 'subagent-response-expanded' : 'subagent-response-collapsed'}">
-                <pre class="timeline-pre">${item.response}</pre>
-              </div>
-              ${canToggle
-                ? html`
-                    <button
-                      class="button ghost subagent-toggle"
-                      type="button"
-                      @click=${toggle}
-                    >
-                      ${expanded ? 'Show less' : 'Show more'}
-                    </button>
-                  `
-                : nothing}
-            </section>
-          `
-        : html`<div class="timeline-empty">Waiting for subagent response…</div>`}
-      <footer class="chat-card-footer">
-        <span>${item.toolCallId ? `spawned by ${item.toolCallId}` : 'subagent session'}</span>
-        <a
-          href="${hrefForRoute({
-            kind: 'subagent',
-            sessionId: context.sessionId,
-            subagentId: item.conversationId,
-          })}"
-          target="_blank"
-          rel="noopener noreferrer"
-        >
-          Open conversation
-        </a>
-      </footer>
+      <div class="expandable-row-body">
+        ${renderExpandedSubagentBody(item)}
+        <footer class="chat-card-footer">
+          <span>${item.toolCallId ? `spawned by ${item.toolCallId}` : item.pending ? 'pending subagent input' : 'subagent session'}</span>
+          ${item.pending
+            ? html`<span>Waiting for subagent conversation…</span>`
+            : html`<a
+                href="${hrefForRoute({
+                  kind: 'subagent',
+                  sessionId: context.sessionId,
+                  subagentId: item.conversationId,
+                })}"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                Open conversation
+              </a>`}
+        </footer>
+      </div>
     </article>
+  `;
+}
+
+function renderExpandedSubagentBody(item: SubagentTimelineItem): TemplateResult {
+  return html`
+    ${item.input
+      ? html`
+          <details>
+            <summary>Task input</summary>
+            <pre class="timeline-pre">${item.input}</pre>
+          </details>
+        `
+      : nothing}
+    ${item.response
+      ? html`
+          <details open>
+            <summary>Latest response</summary>
+            <pre class="timeline-pre">${item.response}</pre>
+          </details>
+        `
+      : html`<div class="timeline-empty">Waiting for subagent response…</div>`}
   `;
 }
 

@@ -86,11 +86,15 @@ function firstLinePreview(value: string, limit = 160): string {
   return `${firstLine.slice(0, limit)}…`;
 }
 
-function countLabel(label: string, value: string): TemplateResult | typeof nothing {
+function countText(label: string, value: string): string | null {
   if (!value) {
-    return nothing;
+    return null;
   }
-  return html`<span>${label}: ${value.length.toLocaleString()} chars</span>`;
+  return `${label}: ${value.length.toLocaleString()} chars`;
+}
+
+function compactText(...values: Array<string | null | undefined>): string {
+  return values.filter((value): value is string => Boolean(value)).join(' · ');
 }
 
 class TcodeTimeline extends LitElement {
@@ -392,6 +396,19 @@ abstract class TimelineRowElement extends LitElement {
     return this.renderItem(item);
   }
 
+  protected toggleExpanded(itemId = this.itemId): void {
+    this.store?.toggleExpanded(itemId);
+  }
+
+  protected toggleExpandedOnKeydown(event: KeyboardEvent, itemId = this.itemId): void {
+    if (event.key !== 'Enter' && event.key !== ' ') {
+      return;
+    }
+
+    event.preventDefault();
+    this.toggleExpanded(itemId);
+  }
+
   protected abstract renderItem(item: TimelineItem): TemplateResult | typeof nothing;
 
   private syncItemSubscription(): void {
@@ -557,9 +574,44 @@ class TcodeToolRow extends TimelineRowElement {
 
   private renderTool(item: ToolTimelineItem): TemplateResult {
     const expanded = this.store?.isExpanded(item.id) ?? false;
+    return expanded ? this.renderExpandedTool(item) : this.renderCollapsedTool(item);
+  }
+
+  private renderCollapsedTool(item: ToolTimelineItem): TemplateResult {
+    const preview = firstLinePreview(item.output || item.toolArgs) || 'Waiting for tool output…';
+    const meta = compactText(countText('args', item.toolArgs), countText('output', item.output));
     return html`
-      <article class="timeline-card chat-card chat-card-tool timeline-tool">
-        <header class="chat-card-header">
+      <article
+        class="timeline-card chat-card chat-card-tool timeline-tool expandable-row is-collapsed"
+        role="button"
+        tabindex="0"
+        aria-expanded="false"
+        aria-label=${`Expand tool ${item.toolName || item.toolCallId}`}
+        @click=${() => this.toggleExpanded(item.id)}
+        @keydown=${(event: KeyboardEvent) => this.toggleExpandedOnKeydown(event, item.id)}
+      >
+        <span class="compact-row-title">Tool · ${item.toolName || item.toolCallId}</span>
+        ${statusBadge(item.endStatus)} ${item.permissionState ? statusBadge(item.permissionState, item.permissionState) : nothing}
+        <span class="compact-row-meta">${formatTimestamp(item.createdAt)}</span>
+        ${meta ? html`<span class="compact-row-meta">${meta}</span>` : nothing}
+        <span class="compact-row-preview">${preview}</span>
+        <span class="compact-row-toggle">Expand</span>
+      </article>
+    `;
+  }
+
+  private renderExpandedTool(item: ToolTimelineItem): TemplateResult {
+    return html`
+      <article class="timeline-card chat-card chat-card-tool timeline-tool expandable-row is-expanded">
+        <header
+          class="chat-card-header expandable-row-header"
+          role="button"
+          tabindex="0"
+          aria-expanded="true"
+          aria-label=${`Collapse tool ${item.toolName || item.toolCallId}`}
+          @click=${() => this.toggleExpanded(item.id)}
+          @keydown=${(event: KeyboardEvent) => this.toggleExpandedOnKeydown(event, item.id)}
+        >
           <div>
             <div class="chat-card-title">Tool · ${item.toolName || item.toolCallId}</div>
             <div class="chat-card-subtitle">${formatTimestamp(item.createdAt)}</div>
@@ -567,35 +619,23 @@ class TcodeToolRow extends TimelineRowElement {
           <div class="chat-card-actions">
             ${statusBadge(item.endStatus)}
             ${item.permissionState ? statusBadge(item.permissionState, item.permissionState) : nothing}
-            <button class="button ghost subagent-toggle" type="button" @click=${() => this.store?.toggleExpanded(item.id)}>
-              ${expanded ? 'Collapse' : 'Expand'}
-            </button>
+            <span class="row-toggle-label">Collapse</span>
           </div>
         </header>
-        ${expanded ? this.renderExpandedToolBody(item) : this.renderCollapsedToolBody(item)}
-        <footer class="chat-card-footer">
-          <span>tool call id: ${item.toolCallId}</span>
-          <a
-            href="${hrefForRoute(toolRoute(this.sessionId, item.toolCallId, this.currentSubagentId || undefined))}"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Open detail
-          </a>
-        </footer>
-      </article>
-    `;
-  }
-
-  private renderCollapsedToolBody(item: ToolTimelineItem): TemplateResult {
-    const preview = firstLinePreview(item.output || item.toolArgs);
-    return html`
-      <div class="timeline-text">
-        <div class="chat-card-subtitle">
-          ${countLabel('args', item.toolArgs)} ${countLabel('output', item.output)}
+        <div class="expandable-row-body">
+          ${this.renderExpandedToolBody(item)}
+          <footer class="chat-card-footer">
+            <span>tool call id: ${item.toolCallId}</span>
+            <a
+              href="${hrefForRoute(toolRoute(this.sessionId, item.toolCallId, this.currentSubagentId || undefined))}"
+              target="_blank"
+              rel="noopener noreferrer"
+            >
+              Open detail
+            </a>
+          </footer>
         </div>
-        ${preview ? html`<div>${preview}</div>` : html`<div class="timeline-empty">Waiting for tool output…</div>`}
-      </div>
+      </article>
     `;
   }
 
@@ -635,9 +675,45 @@ class TcodeSubagentRow extends TimelineRowElement {
 
   private renderSubagent(item: SubagentTimelineItem): TemplateResult {
     const expanded = this.store?.isExpanded(item.id) ?? false;
+    return expanded ? this.renderExpandedSubagent(item) : this.renderCollapsedSubagent(item);
+  }
+
+  private renderCollapsedSubagent(item: SubagentTimelineItem): TemplateResult {
+    const title = item.description || 'Subagent task';
+    const preview = firstLinePreview(item.response || item.input) || 'Waiting for subagent response…';
+    const meta = compactText(countText('input', item.input), countText('response', item.response));
     return html`
-      <article class="timeline-card chat-card chat-card-subagent timeline-subagent">
-        <header class="chat-card-header">
+      <article
+        class="timeline-card chat-card chat-card-subagent timeline-subagent expandable-row is-collapsed"
+        role="button"
+        tabindex="0"
+        aria-expanded="false"
+        aria-label=${`Expand subagent ${title}`}
+        @click=${() => this.toggleExpanded(item.id)}
+        @keydown=${(event: KeyboardEvent) => this.toggleExpandedOnKeydown(event, item.id)}
+      >
+        <span class="compact-row-title">Subagent · ${title}</span>
+        ${statusBadge(item.endStatus)} ${item.permissionState ? statusBadge(item.permissionState, item.permissionState) : nothing}
+        <span class="compact-row-meta">${formatTimestamp(item.createdAt)}</span>
+        ${meta ? html`<span class="compact-row-meta">${meta}</span>` : nothing}
+        <span class="compact-row-preview">${preview}</span>
+        <span class="compact-row-toggle">Expand</span>
+      </article>
+    `;
+  }
+
+  private renderExpandedSubagent(item: SubagentTimelineItem): TemplateResult {
+    return html`
+      <article class="timeline-card chat-card chat-card-subagent timeline-subagent expandable-row is-expanded">
+        <header
+          class="chat-card-header expandable-row-header"
+          role="button"
+          tabindex="0"
+          aria-expanded="true"
+          aria-label=${`Collapse subagent ${item.description || 'Subagent task'}`}
+          @click=${() => this.toggleExpanded(item.id)}
+          @keydown=${(event: KeyboardEvent) => this.toggleExpandedOnKeydown(event, item.id)}
+        >
           <div>
             <div class="chat-card-title">Subagent</div>
             <div class="chat-card-subtitle">${item.description || 'Subagent task'} · ${formatTimestamp(item.createdAt)}</div>
@@ -645,39 +721,29 @@ class TcodeSubagentRow extends TimelineRowElement {
           <div class="chat-card-actions">
             ${statusBadge(item.endStatus)}
             ${item.permissionState ? statusBadge(item.permissionState, item.permissionState) : nothing}
-            <button class="button ghost subagent-toggle" type="button" @click=${() => this.store?.toggleExpanded(item.id)}>
-              ${expanded ? 'Collapse' : 'Expand'}
-            </button>
+            <span class="row-toggle-label">Collapse</span>
           </div>
         </header>
-        ${expanded ? this.renderExpandedSubagentBody(item) : this.renderCollapsedSubagentBody(item)}
-        <footer class="chat-card-footer">
-          <span>${item.toolCallId ? `spawned by ${item.toolCallId}` : 'subagent session'}</span>
-          <a
-            href="${hrefForRoute({
-              kind: 'subagent',
-              sessionId: this.sessionId,
-              subagentId: item.conversationId,
-            })}"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Open conversation
-          </a>
-        </footer>
-      </article>
-    `;
-  }
-
-  private renderCollapsedSubagentBody(item: SubagentTimelineItem): TemplateResult {
-    const preview = firstLinePreview(item.response || item.input);
-    return html`
-      <div class="timeline-text">
-        <div class="chat-card-subtitle">
-          ${countLabel('input', item.input)} ${countLabel('response', item.response)}
+        <div class="expandable-row-body">
+          ${this.renderExpandedSubagentBody(item)}
+          <footer class="chat-card-footer">
+            <span>${item.toolCallId ? `spawned by ${item.toolCallId}` : item.pending ? 'pending subagent input' : 'subagent session'}</span>
+            ${item.pending
+              ? html`<span>Waiting for subagent conversation…</span>`
+              : html`<a
+                  href="${hrefForRoute({
+                    kind: 'subagent',
+                    sessionId: this.sessionId,
+                    subagentId: item.conversationId,
+                  })}"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >
+                  Open conversation
+                </a>`}
+          </footer>
         </div>
-        ${preview ? html`<div>${preview}</div>` : html`<div class="timeline-empty">Waiting for subagent response…</div>`}
-      </div>
+      </article>
     `;
   }
 
@@ -693,12 +759,10 @@ class TcodeSubagentRow extends TimelineRowElement {
         : nothing}
       ${item.response
         ? html`
-            <section>
-              <div class="chat-card-subtitle">Latest response</div>
-              <div class="subagent-response subagent-response-expanded">
-                <pre class="timeline-pre">${item.response}</pre>
-              </div>
-            </section>
+            <details open>
+              <summary>Latest response</summary>
+              <pre class="timeline-pre">${item.response}</pre>
+            </details>
           `
         : html`<div class="timeline-empty">Waiting for subagent response…</div>`}
     `;

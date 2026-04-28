@@ -1203,25 +1203,95 @@ tcode-timeline {
   background: var(--panel-soft);
 }
 
-.subagent-response {
-  position: relative;
+.expandable-row {
+  min-width: 0;
+}
+
+.expandable-row.is-collapsed {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 0.55rem;
+  padding: 0.55rem 0.75rem;
+  min-height: 2.35rem;
   overflow: hidden;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+
+.expandable-row.is-collapsed:hover,
+.expandable-row-header:hover {
+  border-color: var(--border-strong);
+}
+
+.expandable-row.is-collapsed:focus-visible,
+.expandable-row-header:focus-visible {
+  outline: 2px solid var(--focus-ring);
+  outline-offset: 2px;
+}
+
+.expandable-row.is-collapsed > * {
+  flex: 0 0 auto;
+  min-width: 0;
+}
+
+.compact-row-title {
+  flex: 0 1 auto;
+  max-width: min(24rem, 38%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  font-weight: 700;
+}
+
+.compact-row-meta,
+.compact-row-preview,
+.compact-row-toggle,
+.row-toggle-label {
+  color: var(--text-muted);
+  font-size: 0.82rem;
+}
+
+.compact-row-meta {
+  flex: 0 2 auto;
+  max-width: min(26rem, 34%);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compact-row-preview {
+  flex: 1 1 auto;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.compact-row-toggle,
+.row-toggle-label {
+  margin-left: auto;
+  white-space: nowrap;
+}
+
+.expandable-row-header {
+  margin: -0.25rem -0.25rem 0;
+  padding: 0.25rem;
+  border: 1px solid transparent;
   border-radius: 10px;
+  cursor: pointer;
 }
 
-.subagent-response-collapsed {
-  max-height: 10.5rem;
+.expandable-row-body {
+  display: flex;
+  flex-direction: column;
+  gap: 0.7rem;
+  min-width: 0;
 }
 
-.subagent-response-collapsed::after {
-  content: '';
-  position: absolute;
-  left: 0;
-  right: 0;
-  bottom: 0;
-  height: 3.75rem;
-  background: linear-gradient(180deg, rgba(242, 241, 248, 0) 0%, rgba(242, 241, 248, 0.96) 80%);
-  pointer-events: none;
+.expandable-row-body details {
+  min-width: 0;
+}
+
+.expandable-row-body details > .timeline-pre {
+  margin-top: 0.55rem;
 }
 
 .subagent-toggle {
