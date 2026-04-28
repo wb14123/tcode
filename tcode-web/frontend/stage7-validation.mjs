@@ -1,6 +1,8 @@
 import { TimelineStore } from './src/timeline-store.ts';
 import { StreamEventBatcher } from './src/stream-event-batcher.ts';
 import { ConversationTimelineBuilder } from './src/messages.ts';
+import { specialToolArgsPresentation } from './src/tool-args.ts';
+import { subagentRowTitle } from './src/timeline-render-helpers.ts';
 
 function assert(condition, message) {
   if (!condition) {
@@ -172,6 +174,71 @@ function validateSubagentInputAggregation() {
   );
 }
 
+function validateSpecialToolArgsPresentation() {
+  const search = specialToolArgsPresentation('web_search', JSON.stringify({ query: 'rust async', region: 'us' }));
+  assert(search?.collapsedSummary === 'rust async', 'web_search args render a friendly collapsed summary');
+  assert(search.expandedText.includes('Query: rust async'), 'web_search expanded args render query field');
+  assert(search.expandedText.includes('Extra: {"region":"us"}'), 'web_search expanded args preserve compact extras');
+
+  const fetch = specialToolArgsPresentation(
+    'web_fetch',
+    JSON.stringify({ url: 'https://example.com', max_length: 5000, skip_chars: 0, empty: '' }),
+  );
+  assert(fetch?.collapsedSummary === 'https://example.com', 'web_fetch args render a friendly collapsed summary');
+  assert(fetch.expandedText.includes('URL: https://example.com'), 'web_fetch expanded args render url field');
+  assert(fetch.expandedText.includes('max_length: 5000'), 'web_fetch expanded args render present max_length');
+  assert(fetch.expandedText.includes('skip_chars: 0'), 'web_fetch expanded args render present zero skip_chars');
+  assert(!fetch.expandedText.includes('empty'), 'web_fetch expanded args omit empty extras');
+
+  assert(specialToolArgsPresentation('web_search', '{') === null, 'invalid JSON falls back to raw args');
+  assert(specialToolArgsPresentation('web_search', JSON.stringify({ q: 'rust' })) === null, 'unknown web_search shape falls back to raw args');
+  assert(specialToolArgsPresentation('bash', JSON.stringify({ query: 'rust' })) === null, 'unrecognized tools fall back to raw args');
+}
+
+function validateSubagentPromptPreview() {
+  const taskTitle = subagentRowTitle({
+    input: JSON.stringify({ task: 'You are a subagent. Review the mobile UI', model: 'gpt-5.5' }),
+    response: '',
+    description: 'worker',
+  });
+  assert(taskTitle === 'Review the mobile UI', 'subagent collapsed title extracts task and strips boilerplate');
+
+  const partialTitle = subagentRowTitle({
+    input: '{"model":"gpt-5.5","task":"You are a subagent. Investigate scrolling',
+    response: '',
+    description: 'worker',
+  });
+  assert(partialTitle === 'Investigate scrolling', 'subagent collapsed title extracts task from partial streaming JSON');
+
+  const continuedTitle = subagentRowTitle({
+    input: JSON.stringify({ conversation_id: 'subagent-1', message: 'Follow up on findings' }),
+    response: '',
+    description: 'worker',
+  });
+  assert(continuedTitle === 'Follow up on findings', 'continue_subagent collapsed title extracts message');
+
+  const responseTitle = subagentRowTitle({
+    input: JSON.stringify({ conversation_id: 'conversation_abc123456' }),
+    response: 'Summarized findings',
+    description: 'worker fallback',
+  });
+  assert(responseTitle === 'Summarized findings', 'subagent collapsed title falls back to response before description');
+
+  const descriptionTitle = subagentRowTitle({
+    input: JSON.stringify({ conversation_id: 'conversation_abc123456' }),
+    response: '',
+    description: 'Analyze backend logs',
+  });
+  assert(descriptionTitle === 'Analyze backend logs', 'subagent collapsed title falls back to description after prompt and response');
+
+  const internalIdTitle = subagentRowTitle({
+    input: '',
+    response: '',
+    description: 'conversation_abc123456',
+  });
+  assert(internalIdTitle === 'Waiting for subagent…', 'subagent collapsed title does not show internal conversation ids');
+}
+
 async function validateStreamEventBatcher() {
   let nextFrame = 1;
   const callbacks = new Map();
@@ -206,5 +273,7 @@ async function validateStreamEventBatcher() {
 
 validateTimelineStore();
 validateSubagentInputAggregation();
+validateSpecialToolArgsPresentation();
+validateSubagentPromptPreview();
 await validateStreamEventBatcher();
 console.log('stage7 validation passed');

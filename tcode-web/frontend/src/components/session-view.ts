@@ -4,7 +4,6 @@ import { ApiError, api, openEventStream, sessionLeaseManager, type LeaseSnapshot
 import { navigate } from '../router';
 import { StreamEventBatcher } from '../stream-event-batcher';
 import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant } from '../messages';
-import type { SessionMode, SessionRuntimeInfo } from '../types';
 
 import './composer';
 import './timeline';
@@ -13,10 +12,6 @@ interface ToastNotice {
   id: number;
   tone: 'error' | 'info';
   message: string;
-}
-
-function formatSessionMode(mode: SessionMode): string {
-  return mode === 'web_only' ? 'web-only' : 'normal';
 }
 
 class TcodeSessionView extends LitElement {
@@ -42,7 +37,6 @@ class TcodeSessionView extends LitElement {
   private pollHandle: number | null = null;
   private eventSource: EventSource | null = null;
   private leaseRelease: (() => void) | null = null;
-  private runtimeInfo: SessionRuntimeInfo | null = null;
   private sessionDisconnected = false;
   private reconnecting = false;
   private lastLeaseError = '';
@@ -88,7 +82,6 @@ class TcodeSessionView extends LitElement {
     this.loading = true;
     this.sending = false;
     this.cancelling = false;
-    this.runtimeInfo = null;
     this.sessionDisconnected = false;
     this.reconnecting = false;
     this.timelineScrollToken += 1;
@@ -154,7 +147,6 @@ class TcodeSessionView extends LitElement {
     if (snapshot.sessionId !== this.sessionId) {
       return;
     }
-    this.runtimeInfo = snapshot.runtimeInfo;
     this.sessionDisconnected = snapshot.disconnected;
     this.reconnecting = snapshot.reconnecting;
     if (snapshot.errorMessage && snapshot.errorMessage !== this.lastLeaseError) {
@@ -187,21 +179,6 @@ class TcodeSessionView extends LitElement {
     }
   }
 
-  private runtimeRoleSummary(): string {
-    if (this.reconnecting) {
-      return 'Reconnecting';
-    }
-    if (this.sessionDisconnected) {
-      return 'Disconnected';
-    }
-    if (!this.runtimeInfo?.active) {
-      return 'Runtime status unknown';
-    }
-    const owner = this.runtimeInfo.owner_kind.toLowerCase();
-    const role = this.runtimeInfo.owner_kind === 'Web' ? 'web-owned' : 'attached';
-    return `${role} (${owner}, ${this.runtimeInfo.active_lease_count} lease${this.runtimeInfo.active_lease_count === 1 ? '' : 's'})`;
-  }
-
   private showToast(message: string, tone: 'error' | 'info', durationMs = 5000): void {
     const id = ++this.toastCounter;
     const timeout = window.setTimeout(() => {
@@ -229,35 +206,6 @@ class TcodeSessionView extends LitElement {
 
   private combinedUsageText(): string {
     return [this.tokenUsageText, this.usageText].filter((value) => value.trim()).join(' │ ');
-  }
-
-  private statusTone(): 'generating' | 'idle' | 'connecting' {
-    if (this.reconnecting || (this.loading && !this.statusText.trim())) {
-      return 'connecting';
-    }
-    if (this.isGenerating()) {
-      return 'generating';
-    }
-    return 'idle';
-  }
-
-  private statusSummary(): string {
-    if (this.reconnecting) {
-      return 'Reconnecting…';
-    }
-    if (this.sessionDisconnected) {
-      return 'Disconnected — manual reconnect available';
-    }
-    if (this.statusText.trim()) {
-      return this.statusText.trim();
-    }
-    if (this.loading) {
-      return 'Connecting…';
-    }
-    if (this.draftMode && !this.sessionId) {
-      return 'Ready to start';
-    }
-    return 'Ready';
   }
 
   private isGenerating(): boolean {
@@ -508,8 +456,6 @@ class TcodeSessionView extends LitElement {
 
   render() {
     const combinedUsage = this.combinedUsageText();
-    const activeMode = this.runtimeInfo?.active ? formatSessionMode(this.runtimeInfo.session_mode) : '';
-    const statusTone = this.statusTone();
     const showProgress = this.loading || this.sending || this.isGenerating();
 
     return html`
@@ -534,12 +480,15 @@ class TcodeSessionView extends LitElement {
           ></tcode-timeline>
 
           <div class="chat-bottom-stack">
-            <footer class="chat-status-bar">
-              <span class="pill pill-${statusTone}">${this.statusSummary()}</span>
-              ${this.sessionId && !this.draftMode ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${this.runtimeRoleSummary()}</span>` : nothing}
-              ${activeMode ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${activeMode}</span>` : nothing}
-              ${combinedUsage ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${combinedUsage}</span>` : nothing}
-            </footer>
+            ${combinedUsage
+              ? html`
+                  <footer class="chat-status-bar">
+                    <span class="chat-status-meta">
+                      <span class="chat-usage-text">${combinedUsage}</span>
+                    </span>
+                  </footer>
+                `
+              : nothing}
 
             ${this.sessionDisconnected && this.sessionId
               ? html`

@@ -622,9 +622,9 @@ class TcodeApp extends LitElement {
         <section class="modal-card permission-modal-card" role="dialog" aria-modal="true" aria-labelledby="permission-modal-title">
           <header class="permission-modal-header">
             <div>
-              <h2 id="permission-modal-title" class="page-title">Permission approval required</h2>
+              <h2 id="permission-modal-title" class="page-title">Permission required</h2>
               <p class="page-subtitle">
-                Review request ${pending.request_id} for tool <code>${pending.tool}</code>, then choose how to proceed.
+                Request <code>${pending.request_id}</code> · Tool <code>${pending.tool}</code>
               </p>
             </div>
           </header>
@@ -655,6 +655,7 @@ class TcodeApp extends LitElement {
             <label class="permission-deny-reason">
               <span class="muted">Optional deny reason</span>
               <textarea
+                rows="2"
                 placeholder="Only used when denying this request"
                 .value=${this.denyReason}
                 @input=${this.onDenyReasonInput}
@@ -662,29 +663,34 @@ class TcodeApp extends LitElement {
             </label>
           </div>
           <div class="modal-actions permission-modal-actions">
-            <button class="button success" @click=${() => void this.resolvePermission('AllowOnce')} ?disabled=${this.resolvingPermission}>
-              Allow once
-            </button>
-            ${pending.once_only
-              ? nothing
-              : html`
-                  <button class="button" @click=${() => void this.resolvePermission('AllowSession')} ?disabled=${this.resolvingPermission}>
-                    Allow for session
-                  </button>
-                  <button class="button secondary" @click=${() => void this.resolvePermission('AllowProject')} ?disabled=${this.resolvingPermission}>
-                    Allow for project
-                  </button>
-                `}
-            <button
-              class="button danger"
-              @click=${() =>
-                void this.resolvePermission({
-                  Deny: { reason: this.denyReason.trim() || null },
-                })}
-              ?disabled=${this.resolvingPermission}
-            >
-              Deny
-            </button>
+            <div class="permission-allow-actions">
+              <button type="button" class="button success" @click=${() => void this.resolvePermission('AllowOnce')} ?disabled=${this.resolvingPermission}>
+                Allow once
+              </button>
+              ${pending.once_only
+                ? nothing
+                : html`
+                    <button type="button" class="button" @click=${() => void this.resolvePermission('AllowSession')} ?disabled=${this.resolvingPermission}>
+                      Allow for session
+                    </button>
+                    <button type="button" class="button secondary" @click=${() => void this.resolvePermission('AllowProject')} ?disabled=${this.resolvingPermission}>
+                      Allow for project
+                    </button>
+                  `}
+            </div>
+            <div class="permission-deny-actions">
+              <button
+                type="button"
+                class="button danger"
+                @click=${() =>
+                  void this.resolvePermission({
+                    Deny: { reason: this.denyReason.trim() || null },
+                  })}
+                ?disabled=${this.resolvingPermission}
+              >
+                Deny
+              </button>
+            </div>
           </div>
         </section>
       </div>

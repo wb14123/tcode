@@ -175,32 +175,6 @@ class TcodeSubagentView extends LitElement {
     return this.tokenUsageText.trim();
   }
 
-  private statusTone(): 'generating' | 'idle' | 'connecting' {
-    if (this.loading && !this.statusText.trim()) {
-      return 'connecting';
-    }
-    if (this.isGenerating()) {
-      return 'generating';
-    }
-    return 'idle';
-  }
-
-  private statusSummary(): string {
-    if (this.sessionDisconnected) {
-      return 'Disconnected';
-    }
-    if (this.reconnecting) {
-      return 'Reconnecting…';
-    }
-    if (this.statusText.trim()) {
-      return this.statusText.trim();
-    }
-    if (this.loading) {
-      return 'Connecting…';
-    }
-    return 'Ready';
-  }
-
   private isGenerating(): boolean {
     if (this.sessionDisconnected) {
       return false;
@@ -403,7 +377,6 @@ class TcodeSubagentView extends LitElement {
 
   render() {
     const combinedUsage = this.combinedUsageText();
-    const statusTone = this.statusTone();
     const canFinish = this.canFinishConversation();
     const mutationsDisabled = this.mutationDisabled();
     const leaseAlert = this.sessionDisconnected
@@ -432,10 +405,15 @@ class TcodeSubagentView extends LitElement {
           ></tcode-timeline>
 
           <div class="chat-bottom-stack">
-            <footer class="chat-status-bar">
-              <span class="pill pill-${statusTone}">${this.statusSummary()}</span>
-              ${combinedUsage ? html`<span class="chat-status-divider">│</span><span class="chat-usage-text">${combinedUsage}</span>` : nothing}
-            </footer>
+            ${combinedUsage
+              ? html`
+                  <footer class="chat-status-bar">
+                    <span class="chat-status-meta">
+                      <span class="chat-usage-text">${combinedUsage}</span>
+                    </span>
+                  </footer>
+                `
+              : nothing}
 
             ${leaseAlert ? html`<div class="inline-alert error">${leaseAlert}</div>` : nothing}
 
