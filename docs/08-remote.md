@@ -221,7 +221,7 @@ The repository includes a Dockerfile for running the remote server in web-only m
 
 - `tcode`
 - `browser-server`
-- Chromium
+- Chromium and Chromium sandbox support
 - bundled web frontend
 - a non-root `tcode` runtime user
 
@@ -256,10 +256,13 @@ For HTTPS/reverse-proxy use:
 
 ```sh
 docker run --rm \
+  --security-opt seccomp=unconfined \
   -p 8080:8080 \
   -e TCODE_REMOTE_PASSWORD='choose-a-strong-password' \
   "$IMAGE_TAG"
 ```
+
+The `--security-opt seccomp=unconfined` option lets Chromium create the sandbox namespaces it needs inside Docker. Without it, Chromium may fail to launch and browser tools can hang until their timeout.
 
 This starts the server, but model calls still need provider configuration. Mount a data directory containing `config.toml` and any OAuth tokens, or pass provider API-key environment variables such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY`.
 
@@ -267,6 +270,7 @@ For non-loopback direct plain-HTTP testing, add `--allow-insecure-http` by passi
 
 ```sh
 docker run --rm \
+  --security-opt seccomp=unconfined \
   -p 8080:8080 \
   -e TCODE_REMOTE_PASSWORD='choose-a-strong-password' \
   "$IMAGE_TAG" \
@@ -287,6 +291,7 @@ For persistent state, mount a dedicated data directory:
 mkdir -p "$HOME/tcode-docker-data"
 
 docker run --rm \
+  --security-opt seccomp=unconfined \
   -p 8080:8080 \
   -e TCODE_REMOTE_PASSWORD='choose-a-strong-password' \
   -v "$HOME/tcode-docker-data:/home/tcode/.tcode:rw" \
@@ -307,6 +312,7 @@ Mounting your real `~/.tcode` is possible, but it exposes all local tcode config
 
 ```sh
 docker run --rm \
+  --security-opt seccomp=unconfined \
   -p 8080:8080 \
   -e TCODE_REMOTE_PASSWORD='choose-a-strong-password' \
   -v "$HOME/.tcode:/home/tcode/.tcode:rw" \
