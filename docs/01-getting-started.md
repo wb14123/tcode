@@ -163,6 +163,10 @@ tcode --web-only
 
 A web-only session uses the same tmux/neovim UI, but only current time, web search/fetch, and delegation tools are available. It does not expose local file tools, shell commands, LSP, skills, or project instructions. Browser setup still matters because `web_search` and `web_fetch` use the shared browser-server profile.
 
+### Remote web UI
+
+To use tcode from a browser, or to deploy a web-only research server, see [Remote Web UI](08-remote.md).
+
 ### The four-pane layout
 
 tcode opens a four-pane layout inside your tmux window:

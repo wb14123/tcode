@@ -140,7 +140,7 @@ This file turns `poc.md` and `api.md` into an implementation checklist.
 - [ ] Add backend and frontend smoke tests covering login, session creation, message flow, SSE updates, and permission resolution.
   - Verify: run the smoke/integration test suite and confirm the full authenticated happy path passes.
 
-- [ ] Add a short runbook for local use and remote exposure guidance, including the requirement to use HTTPS or a trusted tunnel/proxy when exposed beyond localhost.
+- [x] Add a short runbook for local use and remote exposure guidance, including the requirement to use HTTPS or a trusted tunnel/proxy when exposed beyond localhost. See `docs/08-remote.md`.
   - Verify: follow the runbook on a clean setup and confirm a user can log in, create a session, send a message, and view live updates.
 
 - [ ] Do a final manual PoC pass on desktop and mobile-sized viewports.

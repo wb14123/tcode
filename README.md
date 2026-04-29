@@ -53,6 +53,7 @@ More user docs:
 - [Neovim Setup](docs/05-neovim.md) — render-markdown, tree-sitter, plugin compatibility
 - [Browser Setup](docs/06-browser.md) — Chrome setup for web tools
 - [Permissions](docs/07-permissions.md) — permission system, scopes, and config
+- [Remote Web UI](docs/08-remote.md) — run `tcode remote` locally, expose it safely, or deploy the web-only Docker image
 
 ## Crate Map
 

@@ -1,0 +1,16 @@
+.git/
+.idea/
+.vscode/
+
+# Build outputs and dependency caches
+target/
+target-docker/
+**/node_modules/
+tcode-web/frontend/dist/
+tree-sitter-tcode/src/generated/
+
+# Local environment, logs, and app data
+.env
+.env.*
+*.log
+.tcode/

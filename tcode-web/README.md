@@ -65,6 +65,8 @@ The GitHub release workflow and `install-from-source.sh` both follow this patter
 
 Start the remote web server from the repo root.
 
+For user-facing setup, exposure guidance, and Docker deployment, see [Remote Web UI](../docs/08-remote.md).
+
 Preferred form, using an env var for the shared secret:
 
 ```bash

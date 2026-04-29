@@ -203,6 +203,8 @@ tcode remote --port 8080 --password change-me
 - Installed release binaries and `install-from-source.sh` builds embed the frontend in the `tcode` binary.
 - Development builds without `--features tcode/bundled-frontend` serve `tcode-web/frontend/dist` from the source checkout. If that directory is missing, `/api/...` can still work, but frontend browser routes return `404` until you run `npm run build` in `tcode-web/frontend`.
 
+For setup walkthroughs, exposure guidance, and Docker deployment, see [Remote Web UI](08-remote.md).
+
 ---
 
 ## Internal / Plumbing Commands
