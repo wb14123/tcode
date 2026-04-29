@@ -46,7 +46,7 @@
   --radius-md: 8px;
   --radius-lg: 10px;
   --card-padding: 1rem;
-  --tcode-viewport-height: 100vh;
+  --tcode-keyboard-inset: 0px;
 }
 
 * {
@@ -67,7 +67,8 @@ body {
 body {
   min-height: 100vh;
   min-height: 100svh;
-  min-height: var(--tcode-viewport-height, 100dvh);
+  min-height: 100dvh;
+  min-height: calc(100dvh - var(--tcode-keyboard-inset, 0px));
   touch-action: manipulation;
 }
 
@@ -147,7 +148,8 @@ code {
   grid-template-columns: 320px minmax(0, 1fr);
   height: 100vh;
   height: 100svh;
-  height: var(--tcode-viewport-height, 100dvh);
+  height: 100dvh;
+  height: calc(100dvh - var(--tcode-keyboard-inset, 0px));
   min-height: 0;
   overflow: hidden;
 }
@@ -589,7 +591,8 @@ details > summary {
 .login-shell {
   min-height: 100vh;
   min-height: 100svh;
-  min-height: var(--tcode-viewport-height, 100dvh);
+  min-height: 100dvh;
+  min-height: calc(100dvh - var(--tcode-keyboard-inset, 0px));
   display: grid;
   place-items: center;
   overflow: auto;
@@ -634,8 +637,14 @@ details > summary {
 
 .permission-modal-card {
   width: min(820px, 100%);
-  max-height: calc(var(--tcode-viewport-height, 100dvh) - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-  min-height: min(32rem, calc(var(--tcode-viewport-height, 100dvh) - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+  max-height: calc(100vh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  max-height: calc(100svh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  max-height: calc(100dvh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  max-height: calc(100dvh - var(--tcode-keyboard-inset, 0px) - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  min-height: min(32rem, calc(100vh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+  min-height: min(32rem, calc(100svh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+  min-height: min(32rem, calc(100dvh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+  min-height: min(32rem, calc(100dvh - var(--tcode-keyboard-inset, 0px) - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
   min-width: 0;
   gap: 0;
   overflow: hidden;
@@ -679,6 +688,8 @@ details > summary {
 .permission-prompt-card {
   display: flex;
   flex: 1 1 auto;
+  min-height: clamp(10rem, 34vh, 23rem);
+  min-height: clamp(10rem, 34svh, 23rem);
   min-height: clamp(10rem, 34dvh, 23rem);
   flex-direction: column;
   border: 1px solid var(--border);
@@ -882,7 +893,10 @@ details > summary {
 
   .permission-modal-card {
     width: 100%;
-    height: var(--tcode-viewport-height, 100dvh);
+    height: 100vh;
+    height: 100svh;
+    height: 100dvh;
+    height: calc(100dvh - var(--tcode-keyboard-inset, 0px));
     max-height: none;
     min-height: 0;
     border-right: 0;
@@ -1057,8 +1071,7 @@ tcode-timeline {
 }
 
 .chat-bottom-stack {
-  position: sticky;
-  bottom: 0;
+  flex: 0 0 auto;
   z-index: 5;
   padding: 0;
   background: linear-gradient(180deg, rgba(238, 247, 242, 0) 0%, rgba(238, 247, 242, 0.9) 28%, rgba(238, 247, 242, 0.98) 100%);
@@ -1620,7 +1633,9 @@ tcode-timeline {
 }
 
 .expanded-detail-pre {
-  max-height: min(28rem, calc(var(--tcode-viewport-height, 100dvh) * 0.5));
+  max-height: min(28rem, 50vh);
+  max-height: min(28rem, 50svh);
+  max-height: min(28rem, 50dvh);
   border-color: rgba(190, 207, 197, 0.65);
   border-radius: var(--radius-sm);
   padding: 0.55rem 0.65rem;
