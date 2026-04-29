@@ -15,6 +15,7 @@ A terminal-based coding agent powered by neovim and tmux.
 - **Permission dashboard** — see every permission the agent currently has at a glance, approve or revoke individually, with session and project-level persistence
 - Headless Chrome for web search and web fetch — log in with your own accounts (Kagi, Google, etc.)
 - **Web-only mode** — start with `tcode --web-only` for browser-backed research without local filesystem or shell tools
+- **Remote Web UI** — run `tcode remote` to use tcode from a browser, including conversations, subagents, tool-call views, cancellation, and permission approvals
 - **Container mode** — opt-in Docker/Podman sandbox for bash commands (`tcode -c <container>`), file tools stay on the host
 - Token usage tracking per conversation and subagent
 - **Powered by llm-rs**, a standalone LLM library built from scratch for this project:

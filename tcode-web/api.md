@@ -84,12 +84,12 @@ This keeps routes simple while still preserving the true nesting structure.
 
 ## Authentication and security
 
-All API endpoints and all SSE endpoints require authentication.
+Most API endpoints and all protected SSE endpoints require authentication. The public exceptions are `POST /api/auth/login`, `POST /api/auth/logout`, and `GET /api/auth/session`.
 
-For the PoC, use a single-user login flow:
+The remote server uses a single-user shared-secret login flow:
 
-1. the server starts with a configured password or token
-2. the client logs in using that secret
+1. the server starts with a configured shared secret (`TCODE_REMOTE_PASSWORD` or `--password`)
+2. the client logs in by sending that secret
 3. the server returns an authenticated session cookie
 4. the browser uses that cookie for normal API requests and SSE connections
 
@@ -97,7 +97,7 @@ Security requirements:
 
 - cookie-based authentication
 - cookie must be `HttpOnly`
-- cookie must be `Secure`
+- cookie must be `Secure` by default; `tcode remote --allow-insecure-http` explicitly omits `Secure` for trusted direct-HTTP testing
 - cookie must be `SameSite=Strict`
 - do not put auth tokens in query parameters
 - validate request origin for browser requests
@@ -120,7 +120,7 @@ The API has four groups:
 
 ### `POST /api/auth/login`
 
-Authenticate using the configured password or token.
+Authenticate using the configured shared secret.
 
 Request body:
 
@@ -147,7 +147,8 @@ Example response:
 
 ```json
 {
-  "authenticated": true
+  "authenticated": true,
+  "secure_session_cookie": true
 }
 ```
 
@@ -159,12 +160,14 @@ Example response:
 
 List existing sessions for the sidebar.
 
-This should return lightweight summary data derived from session files such as:
+This returns lightweight summary data derived from session files such as:
 
 - session id
+- description/title when available
 - creation time
 - last active time
 - current status
+- session mode (`normal` or `web-only`)
 
 Example response:
 
@@ -173,9 +176,11 @@ Example response:
   "sessions": [
     {
       "id": "53hthyc8",
+      "description": "Review this project",
       "created_at": "2026-04-15T23:00:00Z",
       "last_active_at": "2026-04-16T00:00:00Z",
-      "status": "Ready"
+      "status": "Ready",
+      "mode": "normal"
     }
   ]
 }
@@ -210,6 +215,26 @@ Notes:
 - `title` is not required for the PoC
 - working directory override is not supported
 - server/profile defaults are controlled by the backend startup environment
+- session mode is selected by the remote server policy: normal by default, web-only when `tcode remote` was started with `--web-only`
+
+### `POST /api/sessions/:sessionId/leases`
+
+Register a browser client lease for a session runtime. The frontend uses leases to keep an active runtime attached while a browser tab is open, and to reconnect or resume an inactive historical session when possible.
+
+Request body fields:
+
+- `client_label` — optional human-readable client label
+- `resume` — optional boolean; when true, the server attempts to resume an inactive session from `conversation-state.json`
+
+The response includes whether a runtime is active, an optional `client_id`, lease/heartbeat timing, and runtime info.
+
+### `POST /api/sessions/:sessionId/leases/:clientId/heartbeat`
+
+Refresh a previously registered browser client lease and return current runtime info.
+
+### `DELETE /api/sessions/:sessionId/leases/:clientId`
+
+Release a browser client lease. The response is `204 No Content` on success.
 
 ---
 
@@ -348,7 +373,7 @@ These endpoints proxy or trigger runtime actions rather than exposing files dire
 
 ### `POST /api/sessions/:sessionId/messages`
 
-Send a new user message to the session.
+Send a new user message to the root session.
 
 Example request:
 
@@ -358,13 +383,27 @@ Example request:
 }
 ```
 
+### `POST /api/sessions/:sessionId/subagents/:subagentId/messages`
+
+Send a new user message to a subagent conversation.
+
+Request body shape is the same as the root message endpoint.
+
 ### `POST /api/sessions/:sessionId/finish`
 
-Finish the current user request.
+Finish the current user request for the root session.
+
+### `POST /api/sessions/:sessionId/subagents/:subagentId/finish`
+
+Finish the current user request for a subagent conversation. The browser UI exposes this as the subagent "Done" action when the subagent has completed its reply.
 
 ### `POST /api/sessions/:sessionId/cancel`
 
-Cancel the current conversation or active run.
+Cancel the current root conversation or active run.
+
+### `POST /api/sessions/:sessionId/subagents/:subagentId/cancel`
+
+Cancel the current subagent conversation or active run.
 
 ## 4.2 Tool control
 
@@ -372,13 +411,15 @@ Cancel the current conversation or active run.
 
 Cancel a top-level tool call.
 
-If subagent tool-call cancellation is needed through the web UI, it should also be supported with a parallel subagent-scoped route:
+Subagent tool-call cancellation uses the parallel subagent-scoped route:
 
 ### `POST /api/sessions/:sessionId/subagents/:subagentId/tool-calls/:toolCallId/cancel`
 
 Cancel a tool call owned by a subagent.
 
 ## 4.3 Permission APIs
+
+The browser UI uses these endpoints to display pending permission requests and resolve them. The add/revoke endpoints are also available for clients or future UI controls that manage permission grants proactively.
 
 ### `GET /api/sessions/:sessionId/permissions`
 
@@ -497,6 +538,9 @@ Do not include the following for now:
 
 - `GET /api/sessions`
 - `POST /api/sessions`
+- `POST /api/sessions/:sessionId/leases`
+- `POST /api/sessions/:sessionId/leases/:clientId/heartbeat`
+- `DELETE /api/sessions/:sessionId/leases/:clientId`
 
 ### Session file endpoints
 
@@ -530,8 +574,11 @@ Do not include the following for now:
 ### Session action endpoints
 
 - `POST /api/sessions/:sessionId/messages`
+- `POST /api/sessions/:sessionId/subagents/:subagentId/messages`
 - `POST /api/sessions/:sessionId/finish`
+- `POST /api/sessions/:sessionId/subagents/:subagentId/finish`
 - `POST /api/sessions/:sessionId/cancel`
+- `POST /api/sessions/:sessionId/subagents/:subagentId/cancel`
 - `GET /api/sessions/:sessionId/permissions`
 - `POST /api/sessions/:sessionId/permissions/resolve`
 - `POST /api/sessions/:sessionId/permissions`

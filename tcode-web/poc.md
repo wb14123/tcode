@@ -89,16 +89,16 @@ Do not need to implement the current tcode tree UI.
 The server should always be protected by authentication. Do not need to have user management for now.
 
 For the PoC, use a single-user login flow:
-1. The server starts with a configured password or token.
+1. The server starts with a configured shared secret.
 2. The client logs in with that secret using a login API.
 3. The server returns an authenticated session cookie.
 4. The browser uses that cookie for normal API calls and SSE connections.
 
-The authentication cookie should be HttpOnly, Secure, and SameSite=Strict.
+The authentication cookie should be HttpOnly, Secure by default, and SameSite=Strict.
 
 Do not put authentication tokens in URL query parameters.
 
-All API and SSE endpoints should require authentication.
+Except for login/logout/session-status endpoints, API and SSE endpoints should require authentication.
 
 For browser requests, validate request origin, with strict enforcement on all state-changing APIs.
 

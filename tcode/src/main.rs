@@ -202,8 +202,8 @@ enum Commands {
     /// Binds to 127.0.0.1 by default. Pass `--host 0.0.0.0` (or another
     /// interface address) to listen for connections from other machines.
     ///
-    /// `-p <profile>` is accepted at the top level but not used yet;
-    /// reserved for a future login/session ticket.
+    /// `-p <profile>` is accepted at the top level and loads the matching
+    /// config/auth data for sessions created through the web UI.
     ///
     /// Prefer `TCODE_REMOTE_PASSWORD=<secret>` over `--password` to avoid
     /// leaking the secret into `ps` / shell history. The password is stored

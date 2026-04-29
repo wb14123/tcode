@@ -93,7 +93,7 @@ Open:
 http://127.0.0.1:8080/
 ```
 
-Use `127.0.0.1`, not `localhost`.
+Use the same hostname consistently in the browser. The examples use `127.0.0.1`; if you open `localhost` instead, keep using `localhost` for that browser session because cookies and same-origin checks are origin-specific.
 
 Then log in with the shared secret you passed at startup.
 

@@ -20,7 +20,7 @@ http://127.0.0.1:8080/
 
 Log in with the value of `TCODE_REMOTE_PASSWORD`.
 
-The default bind address is `127.0.0.1`, so this command is intended for same-machine browser access or use through a trusted tunnel.
+The default bind address is `127.0.0.1`, so this command is intended for same-machine browser access or use through a trusted tunnel. The examples use `127.0.0.1`; if you choose another loopback hostname such as `localhost`, use that hostname consistently in the browser because cookies and same-origin checks are origin-specific.
 
 ## Command reference
 
@@ -58,8 +58,11 @@ Relevant global flags:
 | Flag | Description |
 |------|-------------|
 | `-p <profile>` | Load `~/.tcode/config-<profile>.toml` instead of the default config. |
-| `--web-only` | Create and expose only web-only sessions from this remote server. |
+| `--web-only` | Create and expose only web-only sessions from this remote server. This is a global flag; it is accepted before or after `remote`, but examples in this guide put it before the subcommand except where showing the Docker image's default command. |
 | `-c <container>` / `--container <container>` | In normal remote sessions, run bash commands inside an existing Docker/Podman container. File tools still operate on the host. See [Configuration: Container Mode](02-configuration.md#container-mode). |
+| `--container-runtime <runtime>` | Container runtime CLI for `-c/--container`: `docker` (default) or `podman`. Requires `-c/--container`. |
+
+`--session <id>` is a global flag for terminal/tmux session commands. It is not used by `tcode remote`: the web server lists and creates sessions through the browser UI instead of attaching to one startup session.
 
 ## Password and login sessions
 
@@ -82,6 +85,7 @@ Notes:
 - Empty or all-whitespace passwords are rejected.
 - Passwords shorter than 16 characters produce a warning.
 - Leading/trailing whitespace is significant at login.
+- If both `TCODE_REMOTE_PASSWORD` and `--password` are supplied, the explicit `--password` command-line value is used.
 - Login creates an HTTP-only `tcode_session` cookie with a 7-day max age.
 - Server-side login sessions are in memory. Restarting `tcode remote` invalidates existing browser logins.
 
@@ -117,6 +121,23 @@ TCODE_REMOTE_PASSWORD='...' \
 ```
 
 This sends the password and session cookie over cleartext HTTP. Do not use it on untrusted networks.
+
+## Web UI capabilities
+
+After login, the browser UI can:
+
+- list existing sessions and show each session's status and mode (`normal` or `web-only`)
+- create a new conversation, optionally with an initial prompt
+- stream the live conversation timeline and token/usage/status updates
+- send follow-up messages to root conversations and subagents
+- open subagent views and tool-call detail views
+- cancel active conversations, subagents, and tool calls
+- mark a subagent as done when it has completed its reply
+- review pending permission requests and allow or deny them from the permission modal
+
+Normal remote sessions have the same local/container capabilities as terminal tcode sessions, so permission prompts and grants have the same security meaning. The current browser UI focuses on resolving pending permission requests; the backend API also exposes permission add/revoke endpoints for clients and integrations.
+
+The backend API is documented in [`tcode-web/api.md`](../tcode-web/api.md). It includes auth endpoints, session lifecycle endpoints, file-shaped read/stream endpoints, subagent and tool-call endpoints, conversation/tool cancellation, and permission APIs.
 
 ## Web-only remote mode
 
@@ -266,7 +287,7 @@ The `--security-opt seccomp=unconfined` option lets Chromium create the sandbox 
 
 This starts the server, but model calls still need provider configuration. Mount a data directory containing `config.toml` and any OAuth tokens, or pass provider API-key environment variables such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY`.
 
-For non-loopback direct plain-HTTP testing, add `--allow-insecure-http` by passing the full remote args after the image name. You should not need this for `http://127.0.0.1:8080/`, `http://localhost:8080/`, or when accessing through HTTPS:
+For non-loopback direct plain-HTTP testing, add `--allow-insecure-http` by passing the full remote args after the image name. You should not need this for loopback access such as `http://127.0.0.1:8080/` when you use the same hostname consistently, or when accessing through HTTPS:
 
 ```sh
 docker run --rm \

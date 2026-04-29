@@ -175,7 +175,7 @@ Open:
 http://127.0.0.1:8080/
 ```
 
-Use `127.0.0.1`, not `localhost`, so browser origin checks match the bind address. Log in with the shared secret passed at startup.
+Use the same hostname consistently in the browser. The examples use `127.0.0.1`; if you open `localhost` instead, keep using `localhost` for that browser session because cookies and same-origin checks are origin-specific. Log in with the shared secret passed at startup.
 
 To select a config profile, pass `-p` at the top level:
 
@@ -195,8 +195,19 @@ tcode remote --port 8080 --password change-me
 |------|-------------|
 | `--port <port>` | TCP port to bind. Required. `0` is rejected; choose a concrete port. |
 | `--host <ip>` | IP address to bind. Defaults to `127.0.0.1`. Use `0.0.0.0` or `::` only when intentionally exposing the server beyond localhost. |
-| `--password <secret>` | Shared secret for browser login. Prefer `TCODE_REMOTE_PASSWORD=<secret>` instead. |
+| `--password <secret>` | Shared secret for browser login. Prefer `TCODE_REMOTE_PASSWORD=<secret>` instead. If both are supplied, the explicit `--password` value is used. |
 | `--allow-insecure-http` | Omit the `Secure` cookie attribute for direct plain-HTTP access. Use only for trusted local/private setups; prefer HTTPS or a trusted tunnel/proxy when exposed beyond localhost. |
+
+**Relevant global flags:**
+
+| Flag | Description |
+|------|-------------|
+| `-p <profile>` | Load `~/.tcode/config-<profile>.toml` instead of the default config. |
+| `--web-only` | Create and expose only web-only sessions from this remote server. Accepted before or after `remote`; examples generally put it before the subcommand. |
+| `-c <container>` / `--container <container>` | In normal remote sessions, run bash commands inside an existing Docker/Podman container. File tools still operate on the host. |
+| `--container-runtime <runtime>` | Container runtime CLI for `-c/--container`: `docker` (default) or `podman`. Requires `-c/--container`. |
+
+`--session <id>` is not used by `tcode remote`; the web server lists and creates sessions through the browser UI.
 
 **Frontend serving:**
 
