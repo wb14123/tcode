@@ -28,7 +28,10 @@ class TcodeSessionView extends LitElement {
   private usageText = '';
   private tokenUsageText = '';
   private timelineBuilder = new ConversationTimelineBuilder();
-  private streamBatcher = new StreamEventBatcher((events) => this.timelineBuilder.appendEvents(events));
+  private streamBatcher = new StreamEventBatcher((events) => {
+    this.timelineBuilder.appendEvents(events);
+    this.requestUpdate();
+  });
   private composerResetToken = 0;
   private timelineScrollToken = 0;
   private loading = true;
@@ -213,7 +216,7 @@ class TcodeSessionView extends LitElement {
       return false;
     }
     const status = this.statusText.trim().toLowerCase();
-    return status.includes('stream') || status.includes('thinking');
+    return status.includes('stream') || status.includes('thinking') || this.timelineBuilder.hasActiveWork();
   }
 
   private mutationDisabled(): boolean {

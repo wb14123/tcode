@@ -12,8 +12,9 @@ use tokio_stream::Stream;
 use crate::bootstrap::send_socket_message;
 use crate::protocol::{ClientKind, ClientMessage, RuntimeOwnerKind, ServerMessage};
 use crate::server::{
-    ClientLeaseTracker, Server, ServerRuntimeOptions, WebIdleShutdownPolicy,
-    close_stale_running_items, validate_owner_shutdown_token,
+    ClientLeaseTracker, EventWriterActivityGuard, Server, ServerRuntimeOptions,
+    WebIdleShutdownPolicy, WorkActivityTracker, assistant_activity_key, close_stale_running_items,
+    tool_activity_key, validate_owner_shutdown_token,
 };
 use crate::session::SessionMode;
 
@@ -126,24 +127,201 @@ fn client_lease_register_heartbeat_detach_and_prune() {
 }
 
 #[test]
-fn web_idle_shutdown_policy_requires_empty_grace_and_resets_on_activity() {
-    let mut policy = WebIdleShutdownPolicy::new(Duration::from_secs(60));
-    let now = Instant::now();
+fn work_activity_tracker_tracks_assistant_lifecycle() {
+    let tracker = WorkActivityTracker::new();
+    assert!(!tracker.has_active_work());
 
-    assert!(!policy.should_shutdown_after_prune(0, false, now));
-    assert!(!policy.should_shutdown_after_prune(0, false, now + Duration::from_secs(59)));
-    assert!(!policy.should_shutdown_after_prune(1, false, now + Duration::from_secs(60)));
-    assert!(!policy.should_shutdown_after_prune(0, false, now + Duration::from_secs(61)));
-    assert!(policy.should_shutdown_after_prune(0, false, now + Duration::from_secs(121)));
+    tracker.assistant_started("conversation-1");
+    assert!(tracker.has_active_work());
+
+    tracker.assistant_finished("conversation-1");
+    assert!(!tracker.has_active_work());
 }
 
 #[test]
-fn web_idle_shutdown_policy_shutdowns_when_last_lease_expires() {
+fn work_activity_tracker_tracks_tool_lifecycle_and_duplicate_start() {
+    let tracker = WorkActivityTracker::new();
+
+    tracker.tool_started("tool-1");
+    assert!(tracker.has_active_work());
+
+    tracker.tool_started("tool-1");
+    tracker.tool_finished("tool-1");
+    assert!(!tracker.has_active_work());
+}
+
+#[test]
+fn work_activity_tracker_tracks_subagent_turns_and_continuation() {
+    let tracker = WorkActivityTracker::new();
+
+    tracker.subagent_started("subagent-1");
+    assert!(tracker.has_active_work());
+
+    tracker.subagent_finished_or_idle("subagent-1");
+    assert!(!tracker.has_active_work());
+
+    tracker.subagent_started("subagent-1");
+    assert!(tracker.has_active_work());
+
+    tracker.subagent_finished_or_idle("subagent-1");
+    assert!(!tracker.has_active_work());
+}
+
+#[test]
+fn work_activity_tracker_requires_all_simultaneous_work_to_finish() {
+    let tracker = WorkActivityTracker::new();
+
+    tracker.assistant_started("conversation-1");
+    tracker.tool_started("tool-1");
+    tracker.subagent_started("subagent-1");
+    assert!(tracker.has_active_work());
+
+    tracker.assistant_finished("conversation-1");
+    assert!(tracker.has_active_work());
+
+    tracker.tool_finished("tool-1");
+    assert!(tracker.has_active_work());
+
+    tracker.subagent_finished_or_idle("subagent-1");
+    assert!(!tracker.has_active_work());
+}
+
+#[test]
+fn event_writer_activity_guard_cleans_unfinished_work_on_drop() {
+    let tracker = Arc::new(WorkActivityTracker::new());
+
+    {
+        let mut guard = EventWriterActivityGuard::new(Arc::clone(&tracker));
+        guard.assistant_started("conversation-1");
+        guard.tool_started("tool-1");
+        guard.subagent_started("subagent-1");
+        assert!(tracker.has_active_work());
+    }
+
+    assert!(!tracker.has_active_work());
+}
+
+#[test]
+fn event_writer_activity_guard_keeps_work_finished_before_drop_inactive() {
+    let tracker = Arc::new(WorkActivityTracker::new());
+
+    {
+        let mut guard = EventWriterActivityGuard::new(Arc::clone(&tracker));
+        guard.assistant_started("conversation-1");
+        guard.tool_started("tool-1");
+        guard.subagent_started("subagent-1");
+        guard.assistant_finished("conversation-1");
+        guard.tool_finished("tool-1");
+        guard.subagent_finished_or_idle("subagent-1");
+        assert!(!tracker.has_active_work());
+    }
+
+    assert!(!tracker.has_active_work());
+}
+
+#[test]
+fn event_writer_assistant_activity_key_is_stable_across_message_events() {
+    let tracker = Arc::new(WorkActivityTracker::new());
+    let dir = temp_dir();
+
+    let mut guard = EventWriterActivityGuard::new(Arc::clone(&tracker));
+    guard.assistant_started(assistant_activity_key(&dir));
+    assert!(tracker.has_active_work());
+
+    guard.assistant_finished(&assistant_activity_key(&dir));
+    assert!(!tracker.has_active_work());
+}
+
+#[test]
+fn event_writer_tool_activity_keys_are_namespaced_by_session_dir() {
+    let tracker = Arc::new(WorkActivityTracker::new());
+    let root_dir = temp_dir();
+    let nested_dir = root_dir.join("subagent-child");
+
+    let mut root_guard = EventWriterActivityGuard::new(Arc::clone(&tracker));
+    let mut nested_guard = EventWriterActivityGuard::new(Arc::clone(&tracker));
+
+    root_guard.tool_started(tool_activity_key(&root_dir, "tool-1"));
+    nested_guard.tool_started(tool_activity_key(&nested_dir, "tool-1"));
+    assert!(tracker.has_active_work());
+
+    root_guard.tool_finished(&tool_activity_key(&root_dir, "tool-1"));
+    assert!(tracker.has_active_work());
+
+    nested_guard.tool_finished(&tool_activity_key(&nested_dir, "tool-1"));
+    assert!(!tracker.has_active_work());
+}
+#[test]
+fn web_idle_shutdown_policy_active_lease_never_shuts_down() {
     let mut policy = WebIdleShutdownPolicy::new(Duration::from_secs(60));
     let now = Instant::now();
 
-    assert!(!policy.should_shutdown_after_prune(1, false, now));
-    assert!(policy.should_shutdown_after_prune(0, true, now + Duration::from_secs(60)));
+    assert!(!policy.should_shutdown_after_prune(1, false, false, now));
+    assert!(!policy.should_shutdown_after_prune(1, true, false, now + Duration::from_secs(120)));
+}
+
+#[test]
+fn web_idle_shutdown_policy_zero_leases_no_work_uses_grace() {
+    let mut policy = WebIdleShutdownPolicy::new(Duration::from_secs(60));
+    let now = Instant::now();
+
+    assert!(!policy.should_shutdown_after_prune(0, false, false, now));
+    assert!(!policy.should_shutdown_after_prune(0, false, false, now + Duration::from_secs(59)));
+    assert!(policy.should_shutdown_after_prune(0, false, false, now + Duration::from_secs(60)));
+}
+
+#[test]
+fn web_idle_shutdown_policy_resets_grace_when_lease_becomes_active() {
+    let mut policy = WebIdleShutdownPolicy::new(Duration::from_secs(60));
+    let now = Instant::now();
+
+    assert!(!policy.should_shutdown_after_prune(0, false, false, now));
+    assert!(!policy.should_shutdown_after_prune(1, false, false, now + Duration::from_secs(30)));
+    assert!(!policy.should_shutdown_after_prune(0, false, false, now + Duration::from_secs(61)));
+    assert!(policy.should_shutdown_after_prune(0, false, false, now + Duration::from_secs(121)));
+}
+
+#[test]
+fn web_idle_shutdown_policy_last_lease_expiry_no_work_shuts_down_immediately() {
+    let mut policy = WebIdleShutdownPolicy::new(Duration::from_secs(60));
+    let now = Instant::now();
+
+    assert!(!policy.should_shutdown_after_prune(1, false, false, now));
+    assert!(policy.should_shutdown_after_prune(0, true, false, now + Duration::from_secs(60)));
+}
+
+#[test]
+fn web_idle_shutdown_policy_last_lease_expiry_with_work_waits_until_inactive() {
+    let mut policy = WebIdleShutdownPolicy::new(Duration::from_secs(60));
+    let now = Instant::now();
+
+    assert!(!policy.should_shutdown_after_prune(1, false, false, now));
+    assert!(!policy.should_shutdown_after_prune(0, true, true, now + Duration::from_secs(60)));
+    assert!(!policy.should_shutdown_after_prune(0, false, true, now + Duration::from_secs(120)));
+    assert!(policy.should_shutdown_after_prune(0, false, false, now + Duration::from_secs(121)));
+}
+
+#[test]
+fn web_idle_shutdown_policy_explicit_empty_with_work_does_not_advance_grace() {
+    let mut policy = WebIdleShutdownPolicy::new(Duration::from_secs(60));
+    let now = Instant::now();
+
+    assert!(!policy.should_shutdown_after_prune(0, false, true, now));
+    assert!(!policy.should_shutdown_after_prune(0, false, true, now + Duration::from_secs(120)));
+    assert!(!policy.should_shutdown_after_prune(0, false, false, now + Duration::from_secs(121)));
+    assert!(!policy.should_shutdown_after_prune(0, false, false, now + Duration::from_secs(180)));
+    assert!(policy.should_shutdown_after_prune(0, false, false, now + Duration::from_secs(181)));
+}
+
+#[test]
+fn web_idle_shutdown_policy_work_resets_existing_explicit_empty_grace() {
+    let mut policy = WebIdleShutdownPolicy::new(Duration::from_secs(60));
+    let now = Instant::now();
+
+    assert!(!policy.should_shutdown_after_prune(0, false, false, now));
+    assert!(!policy.should_shutdown_after_prune(0, false, true, now + Duration::from_secs(30)));
+    assert!(!policy.should_shutdown_after_prune(0, false, false, now + Duration::from_secs(120)));
+    assert!(policy.should_shutdown_after_prune(0, false, false, now + Duration::from_secs(180)));
 }
 
 #[test]

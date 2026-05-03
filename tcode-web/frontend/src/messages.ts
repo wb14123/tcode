@@ -210,6 +210,23 @@ interface PendingSubagentInput {
   input: string;
 }
 
+function hasFinishedStatus(value: string | null | undefined): boolean {
+  return Boolean(value?.trim());
+}
+
+function timelineItemHasActiveWork(item: TimelineItem): boolean {
+  switch (item.kind) {
+    case 'assistant':
+      return !hasFinishedStatus(item.endStatus);
+    case 'tool':
+      return !hasFinishedStatus(item.endStatus) || item.permissionState === 'waiting';
+    case 'subagent':
+      return item.pending === true || !hasFinishedStatus(item.endStatus) || item.permissionState === 'waiting';
+    default:
+      return false;
+  }
+}
+
 export class ConversationTimelineBuilder {
   readonly store = new TimelineStore();
 
@@ -228,6 +245,16 @@ export class ConversationTimelineBuilder {
 
   get timeline(): TimelineItem[] {
     return this.visibleItems;
+  }
+
+  hasActiveWork(): boolean {
+    const activeAssistantId = this.store.getActiveAssistantId();
+    const activeAssistant = activeAssistantId ? this.store.getItem(activeAssistantId) : undefined;
+    if (activeAssistant && timelineItemHasActiveWork(activeAssistant)) {
+      return true;
+    }
+
+    return this.store.getVisibleItems().some((item) => timelineItemHasActiveWork(item));
   }
 
   reset(): void {
@@ -399,6 +426,9 @@ export class ConversationTimelineBuilder {
           this.updateTool(id, (item) => {
             item.msgId = asNumber(payload.msg_id);
             item.endStatus = asString(payload.end_status);
+            if (item.permissionState === 'waiting') {
+              item.permissionState = null;
+            }
             item.inputTokens = asNumber(payload.input_tokens);
             item.outputTokens = asNumber(payload.output_tokens);
           });
@@ -424,6 +454,8 @@ export class ConversationTimelineBuilder {
               item.toolCallId = toolCallId ?? item.toolCallId;
               item.createdAt = pendingInput.createdAt;
               item.description = pendingInput.description || item.description;
+              item.endStatus = null;
+              item.permissionState = null;
               item.pending = false;
             });
             this.recordSubagentLookup(id, toolCallId, toolCallIndex);
@@ -456,6 +488,8 @@ export class ConversationTimelineBuilder {
               item.toolCallId = toolCallId ?? item.toolCallId;
               item.description = asString(payload.tool_name) ?? item.description;
               item.input += content;
+              item.endStatus = null;
+              item.permissionState = null;
               item.pending = false;
             });
             this.recordSubagentLookup(id, toolCallId, toolCallIndex);
@@ -469,6 +503,8 @@ export class ConversationTimelineBuilder {
               item.toolCallId = toolCallId ?? item.toolCallId;
               item.description = asString(payload.tool_name) ?? item.description;
               item.input += content;
+              item.endStatus = null;
+              item.permissionState = null;
               item.pending = false;
             });
             this.recordSubagentLookup(existingSubagentId, toolCallId, toolCallIndex);
@@ -529,6 +565,8 @@ export class ConversationTimelineBuilder {
             item.createdAt = pendingSnapshot?.createdAt ?? item.createdAt;
             item.description = asString(payload.description) ?? pendingSnapshot?.description ?? item.description;
             item.input = this.mergeSubagentInput(item.input, pendingSnapshot?.input ?? '');
+            item.endStatus = null;
+            item.permissionState = null;
             item.pending = false;
           });
           this.recordSubagentLookup(id, toolCallId ?? pendingSnapshot?.toolCallId ?? null, toolCallIndex ?? pendingSnapshot?.toolCallIndex ?? null);
@@ -550,6 +588,10 @@ export class ConversationTimelineBuilder {
             item.msgId = asNumber(payload.msg_id);
             item.response = asString(payload.response) ?? item.response;
             item.endStatus = asString(payload.end_status);
+            if (item.permissionState === 'waiting') {
+              item.permissionState = null;
+            }
+            item.pending = false;
             item.inputTokens = asNumber(payload.input_tokens);
             item.outputTokens = asNumber(payload.output_tokens);
           });
@@ -570,7 +612,7 @@ export class ConversationTimelineBuilder {
         }
         case 'ToolRequestPermission': {
           const toolCallId = asString(payload.tool_call_id);
-          const id = toolCallId ? this.tools.get(toolCallId) : undefined;
+          const id = toolCallId ? this.getOrCreateToolId(toolCallId) : undefined;
           if (id) {
             this.updateTool(id, (item) => {
               item.permissionState = 'waiting';
@@ -597,7 +639,9 @@ export class ConversationTimelineBuilder {
           if (conversationId) {
             const id = this.getOrCreateSubagentId(conversationId);
             this.updateSubagent(id, (item) => {
+              item.endStatus = null;
               item.permissionState = 'waiting';
+              item.pending = false;
             });
           } else {
             this.addItem(createRawItem(this.store, event, variant));
@@ -621,7 +665,9 @@ export class ConversationTimelineBuilder {
           if (conversationId) {
             const id = this.getOrCreateSubagentId(conversationId);
             this.updateSubagent(id, (item) => {
-              item.permissionState = 'denied';
+              item.permissionState = null;
+              item.endStatus = null;
+              item.pending = false;
             });
           } else {
             this.addItem(createRawItem(this.store, event, variant));

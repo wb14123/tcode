@@ -174,6 +174,62 @@ function validateSubagentInputAggregation() {
   );
 }
 
+function validateActiveWorkState() {
+  const toolBuilder = new ConversationTimelineBuilder();
+  toolBuilder.appendEvent(rawEvent('ToolRequestPermission', { tool_call_id: 'tool-busy' }));
+  assert(toolBuilder.hasActiveWork(), 'tool permission wait marks the conversation active');
+  toolBuilder.appendEvent(rawEvent('ToolMessageEnd', { tool_call_id: 'tool-busy', end_status: 'success' }));
+  assert(!toolBuilder.hasActiveWork(), 'tool end clears permission wait activity');
+
+  const subagentBuilder = new ConversationTimelineBuilder();
+  subagentBuilder.appendEvent(
+    rawEvent('SubAgentStart', {
+      msg_id: 1,
+      conversation_id: 'subagent-active',
+      tool_call_id: 'tool-1',
+      description: 'worker',
+    }),
+  );
+  assert(subagentBuilder.hasActiveWork(), 'SubAgentStart marks the subagent active');
+  subagentBuilder.appendEvent(
+    rawEvent('SubAgentTurnEnd', {
+      msg_id: 2,
+      conversation_id: 'subagent-active',
+      end_status: 'success',
+      response: 'done',
+    }),
+  );
+  assert(!subagentBuilder.hasActiveWork(), 'SubAgentTurnEnd marks the subagent idle');
+  let item = subagentBuilder.timeline[0];
+  assert(item.kind === 'subagent' && item.endStatus === 'success', 'SubAgentTurnEnd stores the final status');
+
+  subagentBuilder.appendEvent(
+    rawEvent('SubAgentContinue', {
+      msg_id: 3,
+      conversation_id: 'subagent-active',
+      tool_call_id: 'tool-2',
+      description: 'worker follow-up',
+    }),
+  );
+  assert(subagentBuilder.hasActiveWork(), 'SubAgentContinue marks an idle subagent active again');
+  item = subagentBuilder.timeline[0];
+  assert(item.kind === 'subagent' && item.endStatus === null, 'SubAgentContinue clears the old final status');
+
+  subagentBuilder.appendEvent(rawEvent('SubAgentWaitingPermission', { conversation_id: 'subagent-active' }));
+  assert(subagentBuilder.hasActiveWork(), 'subagent permission wait remains active');
+  subagentBuilder.appendEvent(rawEvent('SubAgentPermissionDenied', { conversation_id: 'subagent-active' }));
+  assert(subagentBuilder.hasActiveWork(), 'subagent permission denial returns to active running state');
+  subagentBuilder.appendEvent(
+    rawEvent('SubAgentTurnEnd', {
+      msg_id: 4,
+      conversation_id: 'subagent-active',
+      end_status: 'success',
+      response: 'done after denial',
+    }),
+  );
+  assert(!subagentBuilder.hasActiveWork(), 'subagent turn end after denial clears activity');
+}
+
 function validateSpecialToolArgsPresentation() {
   const search = specialToolArgsPresentation('web_search', JSON.stringify({ query: 'rust async', region: 'us' }));
   assert(search?.collapsedSummary === 'rust async', 'web_search args render a friendly collapsed summary');
@@ -273,6 +329,7 @@ async function validateStreamEventBatcher() {
 
 validateTimelineStore();
 validateSubagentInputAggregation();
+validateActiveWorkState();
 validateSpecialToolArgsPresentation();
 validateSubagentPromptPreview();
 await validateStreamEventBatcher();

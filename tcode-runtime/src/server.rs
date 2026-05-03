@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
@@ -237,9 +237,142 @@ impl ClientLeaseTracker {
     }
 }
 
+#[derive(Debug, Default)]
+struct WorkActivityState {
+    active_assistants: HashSet<String>,
+    active_tools: HashSet<String>,
+    active_subagents: HashSet<String>,
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct WorkActivityTracker {
+    state: parking_lot::Mutex<WorkActivityState>,
+}
+
+impl WorkActivityTracker {
+    pub(crate) fn new() -> Self {
+        Self::default()
+    }
+
+    pub(crate) fn assistant_started(&self, conversation_key: impl Into<String>) {
+        self.state
+            .lock()
+            .active_assistants
+            .insert(conversation_key.into());
+    }
+
+    pub(crate) fn assistant_finished(&self, conversation_key: &str) {
+        self.state.lock().active_assistants.remove(conversation_key);
+    }
+
+    pub(crate) fn tool_started(&self, tool_call_id: impl Into<String>) {
+        self.state.lock().active_tools.insert(tool_call_id.into());
+    }
+
+    pub(crate) fn tool_finished(&self, tool_call_id: &str) {
+        self.state.lock().active_tools.remove(tool_call_id);
+    }
+
+    pub(crate) fn subagent_started(&self, subagent_id: impl Into<String>) {
+        self.state
+            .lock()
+            .active_subagents
+            .insert(subagent_id.into());
+    }
+
+    pub(crate) fn subagent_finished_or_idle(&self, subagent_id: &str) {
+        self.state.lock().active_subagents.remove(subagent_id);
+    }
+
+    pub(crate) fn has_active_work(&self) -> bool {
+        let state = self.state.lock();
+        !state.active_assistants.is_empty()
+            || !state.active_tools.is_empty()
+            || !state.active_subagents.is_empty()
+    }
+}
+
+pub(crate) struct EventWriterActivityGuard {
+    tracker: Arc<WorkActivityTracker>,
+    active_assistants: HashSet<String>,
+    active_tools: HashSet<String>,
+    active_subagents: HashSet<String>,
+}
+
+impl EventWriterActivityGuard {
+    pub(crate) fn new(tracker: Arc<WorkActivityTracker>) -> Self {
+        Self {
+            tracker,
+            active_assistants: HashSet::new(),
+            active_tools: HashSet::new(),
+            active_subagents: HashSet::new(),
+        }
+    }
+
+    pub(crate) fn assistant_started(&mut self, conversation_key: impl Into<String>) {
+        let conversation_key = conversation_key.into();
+        self.tracker.assistant_started(conversation_key.clone());
+        self.active_assistants.insert(conversation_key);
+    }
+
+    pub(crate) fn assistant_finished(&mut self, conversation_key: &str) {
+        self.tracker.assistant_finished(conversation_key);
+        self.active_assistants.remove(conversation_key);
+    }
+
+    pub(crate) fn tool_started(&mut self, tool_call_id: impl Into<String>) {
+        let tool_call_id = tool_call_id.into();
+        self.tracker.tool_started(tool_call_id.clone());
+        self.active_tools.insert(tool_call_id);
+    }
+
+    pub(crate) fn tool_finished(&mut self, tool_call_id: &str) {
+        self.tracker.tool_finished(tool_call_id);
+        self.active_tools.remove(tool_call_id);
+    }
+
+    pub(crate) fn subagent_started(&mut self, subagent_id: impl Into<String>) {
+        let subagent_id = subagent_id.into();
+        self.tracker.subagent_started(subagent_id.clone());
+        self.active_subagents.insert(subagent_id);
+    }
+
+    pub(crate) fn subagent_finished_or_idle(&mut self, subagent_id: &str) {
+        self.tracker.subagent_finished_or_idle(subagent_id);
+        self.active_subagents.remove(subagent_id);
+    }
+}
+
+impl Drop for EventWriterActivityGuard {
+    fn drop(&mut self) {
+        for conversation_key in self.active_assistants.drain() {
+            self.tracker.assistant_finished(&conversation_key);
+        }
+        for tool_call_id in self.active_tools.drain() {
+            self.tracker.tool_finished(&tool_call_id);
+        }
+        for subagent_id in self.active_subagents.drain() {
+            self.tracker.subagent_finished_or_idle(&subagent_id);
+        }
+    }
+}
+
+pub(crate) fn pending_subagent_activity_key(session_dir: &Path, tool_call_id: &str) -> String {
+    format!("pending-subagent:{}:{tool_call_id}", session_dir.display())
+}
+
+pub(crate) fn assistant_activity_key(session_dir: &Path) -> String {
+    format!("assistant:{}", session_dir.display())
+}
+
+pub(crate) fn tool_activity_key(session_dir: &Path, tool_call_id: &str) -> String {
+    format!("tool:{}:{tool_call_id}", session_dir.display())
+}
+
 #[derive(Debug)]
 pub(crate) struct WebIdleShutdownPolicy {
     empty_since: Option<Instant>,
+    expired_to_empty_pending: bool,
     grace: Duration,
 }
 
@@ -247,6 +380,7 @@ impl WebIdleShutdownPolicy {
     pub(crate) fn new(grace: Duration) -> Self {
         Self {
             empty_since: None,
+            expired_to_empty_pending: false,
             grace,
         }
     }
@@ -255,14 +389,25 @@ impl WebIdleShutdownPolicy {
         &mut self,
         active_count: usize,
         expired_to_empty: bool,
+        work_in_progress: bool,
         now: Instant,
     ) -> bool {
         if active_count > 0 {
             self.empty_since = None;
+            self.expired_to_empty_pending = false;
             return false;
         }
 
         if expired_to_empty {
+            self.expired_to_empty_pending = true;
+        }
+
+        if work_in_progress {
+            self.empty_since = None;
+            return false;
+        }
+
+        if self.expired_to_empty_pending {
             return true;
         }
 
@@ -601,6 +746,7 @@ impl Server {
         }
 
         let tool_clients: ToolClientMap = Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let work_activity = Arc::new(WorkActivityTracker::new());
 
         let conversation_client = if resuming {
             tracing::info!(
@@ -642,6 +788,7 @@ impl Server {
                 let sa_dir_clone = sa.state_dir.clone();
                 let sa_conv_client = Arc::clone(&sa.client);
                 let sa_tool_clients = Arc::clone(&tool_clients);
+                let sa_work_activity = Arc::clone(&work_activity);
                 tokio::spawn(async move {
                     if let Err(e) = run_event_writer(
                         sa_events,
@@ -653,6 +800,7 @@ impl Server {
                         Some(mgr_clone),
                         sa_conv_client,
                         sa_tool_clients,
+                        sa_work_activity,
                     )
                     .await
                     {
@@ -682,6 +830,7 @@ impl Server {
             let session_dir = self.session_dir.clone();
             let root_client = Arc::clone(&client);
             let tc_map = Arc::clone(&tool_clients);
+            let root_work_activity = Arc::clone(&work_activity);
             tokio::spawn(run_event_writer(
                 events,
                 display_file,
@@ -692,6 +841,7 @@ impl Server {
                 Some(manager_clone),
                 root_client,
                 tc_map,
+                root_work_activity,
             ));
 
             client
@@ -716,6 +866,7 @@ impl Server {
             let session_dir = self.session_dir.clone();
             let root_client = Arc::clone(&client);
             let tc_map = Arc::clone(&tool_clients);
+            let root_work_activity = Arc::clone(&work_activity);
             tokio::spawn(run_event_writer(
                 events,
                 display_file,
@@ -726,6 +877,7 @@ impl Server {
                 Some(manager_clone),
                 root_client,
                 tc_map,
+                root_work_activity,
             ));
 
             client
@@ -745,6 +897,8 @@ impl Server {
         {
             let idle_leases = Arc::clone(&lease_tracker);
             let idle_shutdown_tx = Arc::clone(&shutdown_tx);
+            let idle_manager = Arc::clone(&manager);
+            let idle_work_activity = Arc::clone(&work_activity);
             let mut idle_rx = shutdown_tx.subscribe();
             tokio::spawn(async move {
                 let mut policy = (owner_kind == RuntimeOwnerKind::Web)
@@ -762,7 +916,9 @@ impl Server {
                             if let Some(policy) = policy.as_mut() {
                                 let active_count = idle_leases.active_count(now);
                                 let expired_to_empty = pruned > 0 && active_count == 0;
-                                if policy.should_shutdown_after_prune(active_count, expired_to_empty, now) {
+                                let work_in_progress = idle_work_activity.has_active_work()
+                                    || !idle_manager.permission_manager().snapshot().pending.is_empty();
+                                if policy.should_shutdown_after_prune(active_count, expired_to_empty, work_in_progress, now) {
                                     tracing::info!("web-owned runtime idle timeout reached; shutting down");
                                     if idle_shutdown_tx.send(()).is_err() {
                                         tracing::warn!("shutdown receiver already dropped");
@@ -951,6 +1107,7 @@ fn run_event_writer(
     manager: Option<Arc<ConversationManager>>,
     conv_client: Arc<ConversationClient>,
     tool_clients: ToolClientMap,
+    work_activity: Arc<WorkActivityTracker>,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> {
     Box::pin(async move {
         let mut tool_calls: HashMap<String, ToolCallState> = HashMap::new();
@@ -958,6 +1115,7 @@ fn run_event_writer(
         // Maps tool_call_index -> tool_call_id for AssistantToolCallArgChunk routing
         let mut tool_call_index_map: HashMap<usize, String> = HashMap::new();
         let mut is_thinking = false;
+        let mut activity_guard = EventWriterActivityGuard::new(Arc::clone(&work_activity));
 
         tracing::info!("event_writer started");
 
@@ -971,7 +1129,8 @@ fn run_event_writer(
             };
 
             // Status file updates for assistant messages
-            if matches!(&*event, Message::AssistantMessageStart { .. }) {
+            if let Message::AssistantMessageStart { .. } = &*event {
+                activity_guard.assistant_started(assistant_activity_key(&session_dir));
                 is_thinking = false;
                 tokio::fs::write(&status_file, "Streaming...")
                     .await
@@ -996,6 +1155,7 @@ fn run_event_writer(
                     tool_name,
                     ..
                 } => {
+                    activity_guard.tool_started(tool_activity_key(&session_dir, tool_call_id));
                     tracing::info!(
                         tool_call_id,
                         tool_call_index,
@@ -1058,6 +1218,7 @@ fn run_event_writer(
                     tool_args,
                     ..
                 } => {
+                    activity_guard.tool_started(tool_activity_key(&session_dir, tool_call_id));
                     tracing::info!(
                         tool_call_id,
                         tool_name,
@@ -1144,6 +1305,11 @@ fn run_event_writer(
                     end_status,
                     ..
                 } => {
+                    activity_guard.tool_finished(&tool_activity_key(&session_dir, tool_call_id));
+                    activity_guard.subagent_finished_or_idle(&pending_subagent_activity_key(
+                        &session_dir,
+                        tool_call_id,
+                    ));
                     tracing::info!(tool_call_id, ?end_status, "ToolMessageEnd received");
                     tool_clients.lock().remove(tool_call_id.as_str());
                     if let Some(state) = tool_calls.remove(tool_call_id) {
@@ -1197,10 +1363,16 @@ fn run_event_writer(
                 }
 
                 Message::SubAgentStart {
+                    tool_call_id,
                     conversation_id,
                     description,
                     ..
                 } => {
+                    activity_guard.subagent_finished_or_idle(&pending_subagent_activity_key(
+                        &session_dir,
+                        tool_call_id,
+                    ));
+                    activity_guard.subagent_started(conversation_id.clone());
                     tracing::info!(conversation_id, description, "SubAgentStart received");
                     append_event(&display_file, &event)
                         .await
@@ -1230,6 +1402,7 @@ fn run_event_writer(
                                 let sa_mgr = Arc::clone(mgr);
                                 let sa_tool_clients = Arc::clone(&tool_clients);
                                 let sa_conv_client = Arc::clone(&sa_client);
+                                let sa_work_activity = Arc::clone(&work_activity);
                                 let handle = tokio::spawn(async move {
                                     if let Err(e) = run_event_writer(
                                         sa_events,
@@ -1241,6 +1414,7 @@ fn run_event_writer(
                                         Some(sa_mgr),
                                         sa_conv_client,
                                         sa_tool_clients,
+                                        sa_work_activity,
                                     )
                                     .await
                                     {
@@ -1276,6 +1450,7 @@ fn run_event_writer(
                     response,
                     ..
                 } => {
+                    activity_guard.subagent_finished_or_idle(conversation_id);
                     tracing::info!(
                         conversation_id,
                         ?end_status,
@@ -1306,6 +1481,7 @@ fn run_event_writer(
                     response,
                     ..
                 } => {
+                    activity_guard.subagent_finished_or_idle(conversation_id);
                     tracing::info!(
                         conversation_id,
                         ?end_status,
@@ -1332,10 +1508,16 @@ fn run_event_writer(
                 }
 
                 Message::SubAgentContinue {
+                    tool_call_id,
                     conversation_id,
                     description,
                     ..
                 } => {
+                    activity_guard.subagent_finished_or_idle(&pending_subagent_activity_key(
+                        &session_dir,
+                        tool_call_id,
+                    ));
+                    activity_guard.subagent_started(conversation_id.clone());
                     tracing::info!(conversation_id, description, "SubAgentContinue received");
 
                     // Write "Running" status — subagent dir and event writer already exist
@@ -1375,6 +1557,7 @@ fn run_event_writer(
                 Message::SubAgentWaitingPermission {
                     conversation_id, ..
                 } => {
+                    activity_guard.subagent_started(conversation_id.clone());
                     if let Some(state) = subagents.get(conversation_id) {
                         tokio::fs::write(&state.status_file_path, "Permission")
                             .await
@@ -1405,7 +1588,11 @@ fn run_event_writer(
                         .context("Failed to append subagent permission resolution to display")?;
                 }
 
-                Message::SubAgentInputStart { .. } => {
+                Message::SubAgentInputStart { tool_call_id, .. } => {
+                    activity_guard.subagent_started(pending_subagent_activity_key(
+                        &session_dir,
+                        tool_call_id,
+                    ));
                     append_event(&display_file, &event)
                         .await
                         .context("Failed to append subagent input start to display")?;
@@ -1425,6 +1612,7 @@ fn run_event_writer(
                     aggregate_cache_read_tokens,
                     ..
                 } => {
+                    activity_guard.assistant_finished(&assistant_activity_key(&session_dir));
                     append_event(&display_file, &event)
                         .await
                         .context("Failed to append display event")?;
