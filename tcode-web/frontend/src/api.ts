@@ -576,6 +576,13 @@ export const api = {
     });
   },
 
+  addPermission(sessionId: string, key: PermissionKey): Promise<void> {
+    return request(`api/sessions/${encodeURIComponent(sessionId)}/permissions`, {
+      method: 'POST',
+      body: jsonBody({ key, scope: 'Session' }),
+    }).then(() => undefined);
+  },
+
   resolvePermission(
     sessionId: string,
     pending: PendingPermissionInfo,

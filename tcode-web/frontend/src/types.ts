@@ -189,3 +189,12 @@ export type TimelineItem =
   | SystemTimelineItem
   | SignalTimelineItem
   | RawTimelineItem;
+
+// Must match llm_rs::permission::ALL_SCOPES in permission.rs
+// When adding a new scope/key to the Rust side, update this constant too.
+export const ALL_SCOPES: Record<string, string[]> = {
+  bash: ['command'],
+  file_read: ['path'],
+  file_write: ['path'],
+  web_fetch: ['hostname'],
+};
