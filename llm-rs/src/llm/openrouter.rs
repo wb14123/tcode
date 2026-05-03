@@ -146,19 +146,57 @@ struct FunctionDelta {
 }
 
 #[derive(Deserialize, Debug, Default)]
-struct Usage {
+pub(super) struct Usage {
     #[serde(default)]
     prompt_tokens: i32,
     #[serde(default)]
     completion_tokens: i32,
     #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
     output_tokens_details: Option<OutputTokensDetails>,
+}
+
+#[derive(Deserialize, Debug, Default)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: i32,
+    #[serde(default)]
+    cache_write_tokens: i32,
 }
 
 #[derive(Deserialize, Debug, Default)]
 struct OutputTokensDetails {
     #[serde(default)]
     reasoning_tokens: i32,
+}
+
+/// Extract provider usage into the additive token accounting convention used by
+/// `LLMEvent::MessageEnd`.
+///
+/// OpenRouter's `prompt_tokens` includes uncached prompt tokens, cache reads,
+/// and cache writes. The conversation/status layers treat those as separate
+/// additive buckets, so subtract cache read/write tokens from `input_tokens`.
+pub(super) fn extract_usage(usage: &Usage) -> (i32, i32, i32, i32, i32) {
+    let reasoning_tokens = usage
+        .output_tokens_details
+        .as_ref()
+        .map(|d| d.reasoning_tokens)
+        .unwrap_or(0);
+    let (cache_read_tokens, cache_creation_tokens) = usage
+        .prompt_tokens_details
+        .as_ref()
+        .map(|d| (d.cached_tokens, d.cache_write_tokens))
+        .unwrap_or((0, 0));
+    let input_tokens = (usage.prompt_tokens - cache_read_tokens - cache_creation_tokens).max(0);
+
+    (
+        input_tokens,
+        usage.completion_tokens,
+        reasoning_tokens,
+        cache_creation_tokens,
+        cache_read_tokens,
+    )
 }
 
 // ============================================================================
@@ -330,6 +368,8 @@ impl LLM for OpenRouter {
             let mut input_tokens = 0i32;
             let mut output_tokens = 0i32;
             let mut reasoning_tokens = 0i32;
+            let mut cache_creation_input_tokens = 0i32;
+            let mut cache_read_input_tokens = 0i32;
             let mut emitted_start = false;
             let mut stop_reason: Option<StopReason> = None;
             let mut accumulated_text = String::new();
@@ -383,8 +423,8 @@ impl LLM for OpenRouter {
                             input_tokens,
                             output_tokens,
                             reasoning_tokens,
-                            cache_creation_input_tokens: 0,
-                            cache_read_input_tokens: 0,
+                            cache_creation_input_tokens,
+                            cache_read_input_tokens,
                             raw: Some(raw_msg),
                         };
                         return;
@@ -399,12 +439,18 @@ impl LLM for OpenRouter {
                     };
 
                     if let Some(usage) = chunk.usage {
-                        input_tokens = usage.prompt_tokens;
-                        output_tokens = usage.completion_tokens;
-                        reasoning_tokens = usage
-                            .output_tokens_details
-                            .map(|d| d.reasoning_tokens)
-                            .unwrap_or(0);
+                        let (
+                            parsed_input_tokens,
+                            parsed_output_tokens,
+                            parsed_reasoning_tokens,
+                            parsed_cache_creation_input_tokens,
+                            parsed_cache_read_input_tokens,
+                        ) = extract_usage(&usage);
+                        input_tokens = parsed_input_tokens;
+                        output_tokens = parsed_output_tokens;
+                        reasoning_tokens = parsed_reasoning_tokens;
+                        cache_creation_input_tokens = parsed_cache_creation_input_tokens;
+                        cache_read_input_tokens = parsed_cache_read_input_tokens;
                     }
 
                     for choice in chunk.choices {
@@ -548,8 +594,8 @@ impl LLM for OpenRouter {
                 input_tokens,
                 output_tokens,
                 reasoning_tokens,
-                cache_creation_input_tokens: 0,
-                cache_read_input_tokens: 0,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
                 raw: Some(raw_msg),
             };
         })

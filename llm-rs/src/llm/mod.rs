@@ -12,6 +12,9 @@ mod sse;
 #[cfg(test)]
 mod openai_tests;
 
+#[cfg(test)]
+mod openrouter_tests;
+
 pub use claude::Claude;
 pub use openai::OpenAI;
 pub use openrouter::OpenRouter;
