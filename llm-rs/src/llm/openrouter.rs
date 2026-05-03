@@ -72,7 +72,14 @@ struct StreamOptions {
 }
 
 #[derive(Serialize)]
-struct ChatMessage {
+#[serde(untagged)]
+pub(super) enum ChatMessage {
+    Structured(StructuredChatMessage),
+    Raw(serde_json::Value),
+}
+
+#[derive(Serialize)]
+pub(super) struct StructuredChatMessage {
     role: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
@@ -199,9 +206,118 @@ pub(super) fn extract_usage(usage: &Usage) -> (i32, i32, i32, i32, i32) {
     )
 }
 
-// ============================================================================
-// Implementation
-// ============================================================================
+pub(super) fn convert_messages(msgs: &[LLMMessage]) -> Vec<ChatMessage> {
+    msgs.iter()
+        .map(|msg| match msg {
+            LLMMessage::System(content) => ChatMessage::Structured(StructuredChatMessage {
+                role: "system",
+                content: Some(content.clone()),
+                tool_call_id: None,
+                tool_calls: None,
+                reasoning_details: None,
+            }),
+            LLMMessage::User(content) => ChatMessage::Structured(StructuredChatMessage {
+                role: "user",
+                content: Some(content.clone()),
+                tool_call_id: None,
+                tool_calls: None,
+                reasoning_details: None,
+            }),
+            LLMMessage::Assistant {
+                content,
+                tool_calls,
+                raw,
+            } => {
+                if let Some(raw_value) = raw
+                    && raw_value.is_object()
+                {
+                    // OpenRouter requires provider-specific fields such as
+                    // `reasoning_content` to be passed back exactly in thinking
+                    // mode, so preserve raw assistant fields while ensuring the
+                    // outer enum role cannot be overridden by persisted raw JSON.
+                    let mut raw_msg = raw_value.clone();
+                    raw_msg["role"] = "assistant".into();
+                    ChatMessage::Raw(raw_msg)
+                } else {
+                    // Fallback: reconstruct from portable fields.
+                    let tc = if tool_calls.is_empty() {
+                        None
+                    } else {
+                        Some(
+                            tool_calls
+                                .iter()
+                                .map(|tc| ChatMessageToolCall {
+                                    id: tc.id.clone(),
+                                    call_type: "function".to_string(),
+                                    function: ChatMessageToolCallFunction {
+                                        name: tc.name.clone(),
+                                        arguments: tc.arguments.clone(),
+                                    },
+                                })
+                                .collect(),
+                        )
+                    };
+                    ChatMessage::Structured(StructuredChatMessage {
+                        role: "assistant",
+                        content: if content.is_empty() {
+                            None
+                        } else {
+                            Some(content.clone())
+                        },
+                        tool_call_id: None,
+                        tool_calls: tc,
+                        reasoning_details: None,
+                    })
+                }
+            }
+            LLMMessage::ToolResult {
+                tool_call_id,
+                content,
+            } => ChatMessage::Structured(StructuredChatMessage {
+                role: "tool",
+                content: Some(content.clone()),
+                tool_call_id: Some(tool_call_id.clone()),
+                tool_calls: None,
+                reasoning_details: None,
+            }),
+        })
+        .collect()
+}
+
+pub(super) fn build_raw_assistant_message(
+    accumulated_text: &str,
+    tool_calls: &HashMap<usize, (String, String, String)>,
+    accumulated_reasoning_details: &[serde_json::Value],
+    accumulated_reasoning_text: &str,
+) -> serde_json::Value {
+    let mut raw_msg = serde_json::json!({ "role": "assistant" });
+    if !accumulated_text.is_empty() {
+        raw_msg["content"] = accumulated_text.into();
+    }
+    if !tool_calls.is_empty() {
+        raw_msg["tool_calls"] = serde_json::json!(
+            tool_calls
+                .values()
+                .map(|(id, name, args)| {
+                    serde_json::json!({
+                        "id": id,
+                        "type": "function",
+                        "function": { "name": name, "arguments": args }
+                    })
+                })
+                .collect::<Vec<_>>()
+        );
+    }
+    if !accumulated_reasoning_details.is_empty() {
+        raw_msg["reasoning_details"] =
+            serde_json::Value::Array(accumulated_reasoning_details.to_vec());
+    }
+    if !accumulated_reasoning_text.is_empty() {
+        raw_msg["reasoning_content"] = accumulated_reasoning_text.into();
+    }
+
+    raw_msg
+}
 
 impl LLM for OpenRouter {
     fn register_tools(&mut self, tools: Vec<Arc<Tool>>) {
@@ -248,91 +364,7 @@ impl LLM for OpenRouter {
         let reasoning_request = openai_common::build_reasoning_request(options);
 
         // Convert messages
-        let messages: Vec<ChatMessage> = msgs
-            .iter()
-            .map(|msg| match msg {
-                LLMMessage::System(content) => ChatMessage {
-                    role: "system",
-                    content: Some(content.clone()),
-                    tool_call_id: None,
-                    tool_calls: None,
-                    reasoning_details: None,
-                },
-                LLMMessage::User(content) => ChatMessage {
-                    role: "user",
-                    content: Some(content.clone()),
-                    tool_call_id: None,
-                    tool_calls: None,
-                    reasoning_details: None,
-                },
-                LLMMessage::Assistant {
-                    content,
-                    tool_calls,
-                    raw,
-                } => {
-                    if let Some(raw_value) = raw {
-                        // Use raw message directly if available
-                        let content = raw_value
-                            .get("content")
-                            .and_then(|v| v.as_str())
-                            .map(String::from);
-                        let tc = raw_value.get("tool_calls").and_then(|v| {
-                            serde_json::from_value::<Vec<ChatMessageToolCall>>(v.clone()).ok()
-                        });
-                        let rd = raw_value
-                            .get("reasoning_details")
-                            .and_then(|v| v.as_array().cloned());
-                        ChatMessage {
-                            role: "assistant",
-                            content,
-                            tool_call_id: None,
-                            tool_calls: tc,
-                            reasoning_details: rd,
-                        }
-                    } else {
-                        // Fallback: reconstruct from fields
-                        let tc = if tool_calls.is_empty() {
-                            None
-                        } else {
-                            Some(
-                                tool_calls
-                                    .iter()
-                                    .map(|tc| ChatMessageToolCall {
-                                        id: tc.id.clone(),
-                                        call_type: "function".to_string(),
-                                        function: ChatMessageToolCallFunction {
-                                            name: tc.name.clone(),
-                                            arguments: tc.arguments.clone(),
-                                        },
-                                    })
-                                    .collect(),
-                            )
-                        };
-                        ChatMessage {
-                            role: "assistant",
-                            content: if content.is_empty() {
-                                None
-                            } else {
-                                Some(content.clone())
-                            },
-                            tool_call_id: None,
-                            tool_calls: tc,
-                            reasoning_details: None,
-                        }
-                    }
-                }
-                LLMMessage::ToolResult {
-                    tool_call_id,
-                    content,
-                } => ChatMessage {
-                    role: "tool",
-                    content: Some(content.clone()),
-                    tool_call_id: Some(tool_call_id.clone()),
-                    tool_calls: None,
-                    reasoning_details: None,
-                },
-            })
-            .collect();
+        let messages = convert_messages(msgs);
 
         let tool_defs = self.cached_tool_defs.clone();
 
@@ -390,33 +422,12 @@ impl LLM for OpenRouter {
                 let data = &event.data;
 
                     if data == "[DONE]" {
-                        // Build raw message for round-tripping
-                        let mut raw_msg = serde_json::json!({ "role": "assistant" });
-                        if !accumulated_text.is_empty() {
-                            raw_msg["content"] = accumulated_text.clone().into();
-                        }
-                        if !tool_calls.is_empty() {
-                            raw_msg["tool_calls"] = serde_json::json!(
-                                tool_calls.values().map(|(id, name, args)| {
-                                    serde_json::json!({
-                                        "id": id,
-                                        "type": "function",
-                                        "function": { "name": name, "arguments": args }
-                                    })
-                                }).collect::<Vec<_>>()
-                            );
-                        }
-                        // Combine reasoning_details and reasoning_content into reasoning_details
-                        if !accumulated_reasoning_details.is_empty() || !accumulated_reasoning_text.is_empty() {
-                            let mut all_details = accumulated_reasoning_details.clone();
-                            if !accumulated_reasoning_text.is_empty() {
-                                all_details.push(serde_json::json!({
-                                    "type": "reasoning.text",
-                                    "text": accumulated_reasoning_text
-                                }));
-                            }
-                            raw_msg["reasoning_details"] = serde_json::Value::Array(all_details);
-                        }
+                        let raw_msg = build_raw_assistant_message(
+                            &accumulated_text,
+                            &tool_calls,
+                            &accumulated_reasoning_details,
+                            &accumulated_reasoning_text,
+                        );
 
                         yield LLMEvent::MessageEnd {
                             stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),
@@ -562,32 +573,12 @@ impl LLM for OpenRouter {
                 }
             }
 
-            // Build raw message for round-tripping
-            let mut raw_msg = serde_json::json!({ "role": "assistant" });
-            if !accumulated_text.is_empty() {
-                raw_msg["content"] = accumulated_text.into();
-            }
-            if !tool_calls.is_empty() {
-                raw_msg["tool_calls"] = serde_json::json!(
-                    tool_calls.values().map(|(id, name, args)| {
-                        serde_json::json!({
-                            "id": id,
-                            "type": "function",
-                            "function": { "name": name, "arguments": args }
-                        })
-                    }).collect::<Vec<_>>()
-                );
-            }
-            if !accumulated_reasoning_details.is_empty() || !accumulated_reasoning_text.is_empty() {
-                let mut all_details = accumulated_reasoning_details;
-                if !accumulated_reasoning_text.is_empty() {
-                    all_details.push(serde_json::json!({
-                        "type": "reasoning.text",
-                        "text": accumulated_reasoning_text
-                    }));
-                }
-                raw_msg["reasoning_details"] = serde_json::Value::Array(all_details);
-            }
+            let raw_msg = build_raw_assistant_message(
+                &accumulated_text,
+                &tool_calls,
+                &accumulated_reasoning_details,
+                &accumulated_reasoning_text,
+            );
 
             yield LLMEvent::MessageEnd {
                 stop_reason: stop_reason.unwrap_or(StopReason::EndTurn),

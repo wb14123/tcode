@@ -1,4 +1,80 @@
-use super::openrouter::{Usage, extract_usage};
+use std::collections::HashMap;
+
+use super::LLMMessage;
+use super::openrouter::{Usage, build_raw_assistant_message, convert_messages, extract_usage};
+
+#[test]
+fn build_raw_assistant_message_preserves_reasoning_content_field() -> anyhow::Result<()> {
+    let tool_calls = HashMap::new();
+
+    let raw = build_raw_assistant_message("answer", &tool_calls, &[], "thinking text");
+
+    assert_eq!(raw["role"], "assistant");
+    assert_eq!(raw["content"], "answer");
+    assert_eq!(raw["reasoning_content"], "thinking text");
+    assert!(raw.get("reasoning_details").is_none());
+
+    Ok(())
+}
+
+#[test]
+fn build_raw_assistant_message_keeps_reasoning_details_separate() -> anyhow::Result<()> {
+    let tool_calls = HashMap::new();
+    let details = vec![serde_json::json!({
+        "type": "reasoning.encrypted",
+        "data": "opaque"
+    })];
+
+    let raw = build_raw_assistant_message("answer", &tool_calls, &details, "thinking text");
+
+    assert_eq!(raw["reasoning_details"], serde_json::json!(details));
+    assert_eq!(raw["reasoning_content"], "thinking text");
+
+    Ok(())
+}
+
+#[test]
+fn convert_messages_replays_assistant_raw_without_dropping_reasoning_content() -> anyhow::Result<()>
+{
+    let raw = serde_json::json!({
+        "role": "assistant",
+        "content": "answer",
+        "reasoning_content": "thinking text",
+        "provider_extra": { "kept": true }
+    });
+    let msgs = vec![LLMMessage::Assistant {
+        content: "fallback content".to_string(),
+        tool_calls: Vec::new(),
+        raw: Some(raw.clone()),
+    }];
+
+    let serialized = serde_json::to_value(convert_messages(&msgs))?;
+
+    assert_eq!(serialized, serde_json::json!([raw]));
+
+    Ok(())
+}
+
+#[test]
+fn convert_messages_forces_assistant_role_for_raw_message() -> anyhow::Result<()> {
+    let raw = serde_json::json!({
+        "role": "system",
+        "content": "answer",
+        "reasoning_content": "thinking text"
+    });
+    let msgs = vec![LLMMessage::Assistant {
+        content: "fallback content".to_string(),
+        tool_calls: Vec::new(),
+        raw: Some(raw),
+    }];
+
+    let serialized = serde_json::to_value(convert_messages(&msgs))?;
+
+    assert_eq!(serialized[0]["role"], "assistant");
+    assert_eq!(serialized[0]["reasoning_content"], "thinking text");
+
+    Ok(())
+}
 
 #[test]
 fn extract_usage_splits_openrouter_prompt_cache_tokens() -> anyhow::Result<()> {
