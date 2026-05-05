@@ -3671,6 +3671,7 @@ dependencies = [
  "parking_lot",
  "rand 0.10.0",
  "ratatui",
+ "regex",
  "reqwest",
  "rustyline",
  "serde",

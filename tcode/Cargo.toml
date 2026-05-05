@@ -37,5 +37,6 @@ rand = "0.10"
 urlencoding = "2.1"
 ratatui = "0.30"
 rustyline = { version = "18", default-features = false }
+regex = "1.12"
 uuid = { version = "1", features = ["v4"] }
 webbrowser = "1"

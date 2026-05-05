@@ -120,7 +120,7 @@ mod tests {
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Failed to read image file"),
+            err.contains("Failed to resolve image path"),
             "expected file-not-found error, got: {err}"
         );
     }

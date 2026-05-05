@@ -73,7 +73,6 @@ impl ImageData {
             ));
         }
 
-        let path = image_dir.join(&self.relative_path);
         // Canonicalize and verify the resolved path stays within image_dir
         let path = resolve_image_path(image_dir, &self.relative_path)?;
         let bytes = std::fs::read(&path)
@@ -154,10 +153,7 @@ pub fn resolve_image_path(image_dir: &Path, filename: &str) -> Result<PathBuf> {
     let canonical_dir = std::fs::canonicalize(image_dir)
         .with_context(|| format!("Failed to resolve image dir: {}", image_dir.display()))?;
     if !canonical.starts_with(&canonical_dir) {
-        anyhow::bail!(
-            "Image path escapes its directory: {}",
-            joined.display()
-        );
+        anyhow::bail!("Image path escapes its directory: {}", joined.display());
     }
     Ok(canonical)
 }

@@ -544,8 +544,7 @@ pub(crate) async fn upload_images(
 }
 
 fn validate_basename(name: &str) -> ApiResult<()> {
-    llm_rs::image::validate_image_filename(name)
-        .map_err(|e| ApiError::bad_request(e.to_string()))
+    llm_rs::image::validate_image_filename(name).map_err(|e| ApiError::bad_request(e.to_string()))
 }
 
 pub(crate) async fn serve_image(
@@ -554,11 +553,8 @@ pub(crate) async fn serve_image(
     validate_basename(&filename)?;
     let session_dir = existing_session_dir(&session_id)?;
     let session = Session::with_dir(session_dir);
-    let path = llm_rs::image::resolve_image_path(
-        &session.images_dir(),
-        &filename,
-    )
-    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let path = llm_rs::image::resolve_image_path(&session.images_dir(), &filename)
+        .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {

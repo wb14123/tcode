@@ -60,8 +60,9 @@ pub enum ClientMessage {
         conversation_id: Option<String>,
         content: String,
         /// Pre-saved image filenames from the session's `images/` directory
-        /// (e.g. `["uuid1.png", "uuid2.jpg"]`). When provided, the runtime
-        /// skips `@image()` path parsing and uses these filenames directly.
+        /// (e.g. `["uuid1.png", "uuid2.jpg"]`). `@image()` path parsing is
+        /// handled by the client before sending — the runtime accepts these
+        /// filenames as-is.
         #[serde(default)]
         image_filenames: Option<Vec<String>>,
     },

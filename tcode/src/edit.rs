@@ -1,10 +1,11 @@
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
+use std::sync::{LazyLock, mpsc};
 
 use anyhow::{Context, Result};
 use bytes::Bytes;
 use futures::{SinkExt, StreamExt};
 use notify::{Event, EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use regex::Regex;
 use tokio::fs;
 use tokio::io::AsyncReadExt;
 use tokio::net::UnixStream;
@@ -15,6 +16,75 @@ use crate::lua_escape;
 use crate::protocol::ClientMessage;
 use crate::session::Session;
 use crate::tty_stdio;
+
+static RE_IMAGE_PATH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"@image\("([^"]+)"\)|@image\(([^\s)"]+)\)"#).expect("valid regex")
+});
+static RE_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expect("valid regex"));
+
+/// Parse `@image(path)` patterns from message content, save images to the
+/// session's `images/` directory, and return cleaned content + filenames.
+///
+/// Returns `(cleaned_content, image_filenames_or_none)`.
+async fn parse_image_refs(content: &str, session: &Session) -> Result<(String, Option<Vec<String>>)> {
+    // Collect all image paths from the content
+    let mut raw_paths: Vec<String> = Vec::new();
+    for cap in RE_IMAGE_PATH.captures_iter(content) {
+        if let Some(m) = cap.get(1) {
+            raw_paths.push(m.as_str().to_string());
+        } else if let Some(m) = cap.get(2) {
+            raw_paths.push(m.as_str().to_string());
+        }
+    }
+
+    if raw_paths.is_empty() {
+        return Ok((content.to_string(), None));
+    }
+
+    session
+        .create_images_dir()
+        .context("Failed to create images directory")?;
+
+    let mut image_filenames: Vec<String> = Vec::new();
+    let cwd = std::env::current_dir().context("Failed to get current working directory")?;
+
+    for raw_path in &raw_paths {
+        let path = Path::new(raw_path);
+        let abs_path = if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            cwd.join(path)
+        };
+
+        // Validate file exists
+        let canonical = tokio::fs::canonicalize(&abs_path).await.with_context(|| {
+            format!(
+                "Image path does not exist or cannot be accessed: {}",
+                abs_path.display()
+            )
+        })?;
+
+        // Save image (validates format, processes, copies to images/)
+        let (filename, _media_type) = session
+            .save_image(&canonical)
+            .with_context(|| format!("Failed to save image file: {}", canonical.display()))?;
+
+        image_filenames.push(filename);
+    }
+
+    // Strip all @image(...) tokens from the text
+    let cleaned = RE_IMAGE_PATH.replace_all(content, "").to_string();
+    // Collapse multiple whitespace chars into single spaces
+    let cleaned = RE_WHITESPACE.replace_all(&cleaned, " ").trim().to_string();
+
+    let filenames = if image_filenames.is_empty() {
+        None
+    } else {
+        Some(image_filenames)
+    };
+
+    Ok((cleaned, filenames))
+}
 
 pub struct EditClient {
     session: Session,
@@ -159,7 +229,15 @@ impl EditClient {
                 }
                 Some(event) = file_events.recv() => {
                     if is_msg_file_event(&event, &msg_file) && let Some(content) = read_message_file(&msg_file).await {
-                        let msg = self.build_client_message(&content);
+                        // Parse @image() references in the CLI before sending
+                        let (content, image_filenames) = match parse_image_refs(&content, &self.session).await {
+                            Ok(result) => result,
+                            Err(e) => {
+                                tracing::error!(error = %e, "Failed to parse image references in message");
+                                continue;
+                            }
+                        };
+                        let msg = self.build_client_message(&content, image_filenames);
                         match serde_json::to_vec(&msg) {
                             Ok(json) => {
                                 if let Err(e) = sink.send(Bytes::from(json)).await {
@@ -190,7 +268,11 @@ impl EditClient {
     }
 
     /// Build the appropriate `ClientMessage` based on conversation_id and content.
-    fn build_client_message(&self, content: &str) -> ClientMessage {
+    fn build_client_message(
+        &self,
+        content: &str,
+        image_filenames: Option<Vec<String>>,
+    ) -> ClientMessage {
         match &self.conversation_id {
             Some(conv_id) if content.trim() == "/done" => ClientMessage::UserRequestEnd {
                 conversation_id: conv_id.clone(),
@@ -198,12 +280,12 @@ impl EditClient {
             Some(conv_id) => ClientMessage::SendMessage {
                 conversation_id: Some(conv_id.clone()),
                 content: content.to_string(),
-                image_filenames: None,
+                image_filenames,
             },
             None => ClientMessage::SendMessage {
                 conversation_id: None,
                 content: content.to_string(),
-                image_filenames: None,
+                image_filenames,
             },
         }
     }

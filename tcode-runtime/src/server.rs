@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
-use std::sync::{Arc, LazyLock};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
@@ -14,9 +14,7 @@ use llm_rs::conversation::{
     create_continue_subagent_tool, create_subagent_tool, format_subagent_result,
 };
 use llm_rs::llm::{ChatOptions, LLM};
-use llm_rs::permission::ScopedPermissionManager;
 use llm_rs::tool::{ContainerConfig, Tool};
-use regex::Regex;
 use sha2::Digest;
 use subtle::ConstantTimeEq;
 use tokio::fs::OpenOptions;
@@ -31,9 +29,8 @@ use crate::protocol::{
     ClientKind, ClientLeaseInfo, ClientMessage, RuntimeOwnerKind, ServerMessage,
     SessionRuntimeInfo, lease_timeout_duration,
 };
-use crate::session::{Session, SessionMode, update_session_meta_from_summary};
+use crate::session::{SessionMode, update_session_meta_from_summary};
 use crate::system_prompt::tcode_system_prompt_builder;
-use tools::file_permission::check_file_read_permission;
 
 /// Shared map from tool_call_id -> ConversationClient that owns the tool.
 /// Populated by event writers on ToolMessageStart, cleaned up on ToolMessageEnd.
@@ -56,11 +53,6 @@ struct SubAgentState {
 const PREVIEW_MAX_CHARS: usize = 200;
 const LEASE_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 const SOCKET_START_LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
-
-static RE_IMAGE_PATH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"@image\("([^"]+)"\)|@image\(([^\s)"]+)\)"#).expect("valid regex")
-});
-static RE_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expect("valid regex"));
 
 #[derive(Debug)]
 struct SocketStartLock {
@@ -1728,137 +1720,30 @@ async fn handle_client(stream: UnixStream, context: ClientHandlerContext) {
     }
 }
 
-/// Parse `@image(path)` patterns from message content, validate permissions,
-/// save images into the session, and dispatch the cleaned message to the
-/// appropriate conversation client.
+/// Dispatch the message to the appropriate conversation client, optionally
+/// with pre-saved image filenames (from the session's `images/` directory).
+/// `@image()` path parsing is handled by the client (CLI or web) before
+/// sending — the runtime accepts text and image filenames as-is.
 async fn handle_send_message(
     content: &str,
     conversation_id: Option<&str>,
     conv_client: &Arc<ConversationClient>,
     manager: &Arc<ConversationManager>,
-    session_dir: &Path,
     image_filenames: Option<Vec<String>>,
 ) -> Result<()> {
-    // Fast path: images already saved in session dir (e.g. web upload flow).
-    // Skip @image() parsing and permission checks — use directly.
-    if let Some(filenames) = image_filenames {
-        // Validate each filename to prevent path traversal
-        for f in &filenames {
-            llm_rs::image::validate_image_filename(f)
-                .context("Invalid image filename")?;
-        }
-        let client = resolve_client(conversation_id, conv_client, manager)?;
-        if filenames.is_empty() {
-            client.send_chat(content).await?;
-        } else {
+    let client = resolve_client(conversation_id, conv_client, manager)?;
+    match image_filenames {
+        Some(filenames) if !filenames.is_empty() => {
+            // Validate each filename to prevent path traversal
+            for f in &filenames {
+                llm_rs::image::validate_image_filename(f).context("Invalid image filename")?;
+            }
             client.send_chat_with_images(content, filenames).await?;
         }
-        return Ok(());
-    }
-
-    // Collect all image paths from the content
-    let mut raw_paths: Vec<String> = Vec::new();
-    for cap in RE_IMAGE_PATH.captures_iter(content) {
-        // Group 1 = quoted, Group 2 = unquoted; only one will match
-        if let Some(m) = cap.get(1) {
-            raw_paths.push(m.as_str().to_string());
-        } else if let Some(m) = cap.get(2) {
-            raw_paths.push(m.as_str().to_string());
+        _ => {
+            client.send_chat(content).await?;
         }
     }
-
-    if raw_paths.is_empty() {
-        // No images — use existing fast path
-        let client = resolve_client(conversation_id, conv_client, manager)?;
-        client.send_chat(content).await?;
-        return Ok(());
-    }
-
-    // Set up image processing
-    let session = Session::with_dir(session_dir.to_path_buf());
-    session
-        .create_images_dir()
-        .context("Failed to create images directory")?;
-
-    let permission_manager = Arc::clone(manager.permission_manager());
-    let conv_clone = Arc::clone(conv_client);
-    let conv_clone2 = Arc::clone(conv_client);
-    let session_dir_owned = session_dir.to_path_buf();
-    let scoped_pm = ScopedPermissionManager::new(
-        "image_input",
-        permission_manager,
-        Arc::new(move || {
-            if let Err(e) = conv_clone.notify_msg(Message::PermissionUpdated {
-                msg_id: conv_clone.next_msg_id(),
-            }) {
-                tracing::error!(error = %e, "failed to send PermissionUpdated for image_input");
-            }
-        }),
-        Arc::new(move || {
-            if let Err(e) = conv_clone2.notify_msg(Message::PermissionUpdated {
-                msg_id: conv_clone2.next_msg_id(),
-            }) {
-                tracing::error!(
-                    error = %e,
-                    "failed to send PermissionUpdated on image_input approval"
-                );
-            }
-        }),
-        Some(session_dir_owned),
-    );
-
-    // Process each image path
-    let mut image_filenames: Vec<String> = Vec::new();
-    let cwd = std::env::current_dir().context("Failed to get current working directory")?;
-
-    for raw_path in &raw_paths {
-        let path = Path::new(raw_path);
-        let abs_path = if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            cwd.join(path)
-        };
-
-        // Canonicalize before permission check
-        let canonical = match tokio::fs::canonicalize(&abs_path).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::error!(
-                    path = %abs_path.display(),
-                    error = %e,
-                    "Image path does not exist or cannot be accessed"
-                );
-                anyhow::bail!("Invalid image path");
-            }
-        };
-
-        // Check file_read permission (reuses existing permission system)
-        if let Err(e) = check_file_read_permission(&scoped_pm, &canonical, false).await {
-            tracing::error!(
-                path = %canonical.display(),
-                error = %e,
-                "Permission denied for image file"
-            );
-            anyhow::bail!("Permission denied for image file");
-        }
-
-        // Save image (validates format, processes, copies to images/)
-        let (filename, _media_type) = session
-            .save_image(&canonical)
-            .with_context(|| "Failed to save image file")?;
-
-        image_filenames.push(filename);
-    }
-
-    // Strip all @image(...) tokens from the text
-    let cleaned = RE_IMAGE_PATH.replace_all(content, "").to_string();
-    // Collapse multiple whitespace chars (spaces, tabs, newlines) into single spaces
-    let cleaned = RE_WHITESPACE.replace_all(&cleaned, " ").trim().to_string();
-
-    let client = resolve_client(conversation_id, conv_client, manager)?;
-    client
-        .send_chat_with_images(&cleaned, image_filenames)
-        .await?;
     Ok(())
 }
 
@@ -1895,6 +1780,7 @@ async fn handle_client_inner(
         runtime_id,
         session_dir,
     } = context;
+    let _ = &session_dir; // no longer passed to handle_send_message; image parsing moved to client
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
     let (mut sink, mut stream) = framed.split();
 
@@ -1913,7 +1799,6 @@ async fn handle_client_inner(
                             conversation_id.as_deref(),
                             &conv_client,
                             &manager,
-                            &session_dir,
                             image_filenames,
                         )
                         .await;
