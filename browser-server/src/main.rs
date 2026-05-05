@@ -187,16 +187,13 @@ impl axum::serve::Listener for TokioUnixListener {
     type Io = tokio::net::UnixStream;
     type Addr = std::sync::Arc<tokio::net::unix::SocketAddr>;
 
-    #[allow(clippy::manual_async_fn)]
-    fn accept(&mut self) -> impl std::future::Future<Output = (Self::Io, Self::Addr)> + Send {
-        async {
-            loop {
-                match self.0.accept().await {
-                    Ok((stream, addr)) => return (stream, std::sync::Arc::new(addr)),
-                    Err(e) => {
-                        tracing::error!("Accept error: {e}");
-                        tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
-                    }
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        loop {
+            match self.0.accept().await {
+                Ok((stream, addr)) => return (stream, std::sync::Arc::new(addr)),
+                Err(e) => {
+                    tracing::error!("Accept error: {e}");
+                    tokio::time::sleep(tokio::time::Duration::from_millis(100)).await;
                 }
             }
         }

@@ -6,6 +6,7 @@ use lsp_types::{
     DidOpenTextDocumentParams, GeneralClientCapabilities, GotoCapability, InitializeParams,
     InitializeResult, InitializedParams, TextDocumentClientCapabilities, TextDocumentIdentifier,
     TextDocumentItem, Uri, WindowClientCapabilities, WorkspaceClientCapabilities,
+    WorkspaceFolder,
     notification::Notification, request::Request,
 };
 use serde::Serialize;
@@ -59,10 +60,12 @@ impl LspServer {
         // Build initialization options
         let init_options = build_init_options(config);
 
-        #[allow(deprecated)]
         let params = InitializeParams {
             process_id: Some(std::process::id()),
-            root_uri: Some(root_uri.clone()),
+            workspace_folders: Some(vec![WorkspaceFolder {
+                uri: root_uri.clone(),
+                name: "root".to_string(),
+            }]),
             capabilities: build_client_capabilities(),
             initialization_options: init_options,
             ..Default::default()

@@ -11,6 +11,11 @@ Never `cargo build --release` for dev — too slow. Use `cargo check` (fastest),
 ### After Every Change
 Run `cargo fmt` then `cargo clippy 2>&1 | tail -n 30`. Fix all warnings before done.
 
+### Lint Resolution
+- **Never add `#[allow(...)]`** to suppress warnings — fix the underlying issue instead.
+- Remove unused code, update deprecated APIs, follow naming conventions, etc.
+- If a lint genuinely cannot be fixed, discuss with the user before suppressing it.
+
 ## Test Organization
 
 - Tests in separate `*_tests.rs` files, one per module (e.g. `conversation_tests.rs`)

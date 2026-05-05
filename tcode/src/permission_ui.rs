@@ -68,7 +68,6 @@ impl PermStatus {
 
 /// Flat node in the permission tree (tool, key, or value leaf).
 #[derive(Debug, Clone)]
-#[allow(dead_code)]
 enum NodeKind {
     Tool {
         name: String,

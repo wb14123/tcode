@@ -221,10 +221,6 @@ struct MessageStartData {
 
 #[derive(Deserialize, Debug)]
 struct MessageInfo {
-    #[allow(dead_code)]
-    id: String,
-    #[allow(dead_code)]
-    model: String,
     usage: Option<UsageInfo>,
 }
 

@@ -258,12 +258,10 @@ fn document_symbols_nested_with_children() {
 
 #[test]
 fn document_symbols_flat() {
-    #[allow(deprecated)]
     let sym = SymbolInformation {
         name: "main".to_string(),
         kind: SymbolKind::FUNCTION,
         tags: None,
-        deprecated: None,
         location: test_location("/test/src/main.rs", 0, 0),
         container_name: None,
     };
@@ -334,13 +332,11 @@ fn document_symbols_various_kinds() {
 
 #[test]
 fn workspace_symbols_flat_grouped_by_file() {
-    #[allow(deprecated)]
     let symbols = vec![
         SymbolInformation {
             name: "foo".to_string(),
             kind: SymbolKind::FUNCTION,
             tags: None,
-            deprecated: None,
             location: test_location("/test/src/main.rs", 0, 0),
             container_name: None,
         },
@@ -348,7 +344,6 @@ fn workspace_symbols_flat_grouped_by_file() {
             name: "Bar".to_string(),
             kind: SymbolKind::STRUCT,
             tags: None,
-            deprecated: None,
             location: test_location("/test/src/lib.rs", 4, 0),
             container_name: None,
         },
@@ -356,7 +351,6 @@ fn workspace_symbols_flat_grouped_by_file() {
             name: "baz".to_string(),
             kind: SymbolKind::FUNCTION,
             tags: None,
-            deprecated: None,
             location: test_location("/test/src/main.rs", 9, 0),
             container_name: None,
         },

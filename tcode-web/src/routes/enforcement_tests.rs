@@ -487,8 +487,7 @@ async fn additional_protected_probe_route_is_gated() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-#[allow(non_snake_case)]
-async fn route_added_after_route_layer_is_NOT_gated() -> anyhow::Result<()> {
+async fn route_added_after_route_layer_is_not_gated() -> anyhow::Result<()> {
     // Documented-footgun test, NOT a security claim. Pins axum 0.8's
     // semantics that routes added AFTER `route_layer` do not inherit the
     // layer. If a future axum version changes this, this test fails and
