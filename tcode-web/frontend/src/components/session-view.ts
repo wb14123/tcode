@@ -4,6 +4,7 @@ import { ApiError, api, openEventStream, sessionLeaseManager, type LeaseSnapshot
 import { navigate } from '../router';
 import { StreamEventBatcher } from '../stream-event-batcher';
 import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant } from '../messages';
+import type { MessageSubmitDetail } from './composer';
 
 import './composer';
 import './timeline';
@@ -382,9 +383,12 @@ class TcodeSessionView extends LitElement {
     };
   }
 
-  private async submitMessage(event: CustomEvent<{ text: string }>): Promise<void> {
-    const text = event.detail.text;
-    if (!text || this.sending || this.isGenerating() || this.mutationDisabled()) {
+  private async submitMessage(event: CustomEvent<MessageSubmitDetail>): Promise<void> {
+    const { text, imageFiles } = event.detail;
+    if (!text && (!imageFiles || imageFiles.length === 0)) {
+      return;
+    }
+    if (this.sending || this.isGenerating() || this.mutationDisabled()) {
       return;
     }
 
@@ -393,7 +397,16 @@ class TcodeSessionView extends LitElement {
 
     try {
       if (this.draftMode && !this.sessionId) {
-        const created = await api.createSession(text);
+        // Create session first so we have a session_id for image upload,
+        // but don't send the initial prompt yet — we'll send it with images below.
+        const created = await api.createSession('');
+        if (imageFiles && imageFiles.length > 0) {
+          const result = await api.uploadSessionImages(created.id, imageFiles);
+          const filenames = result.files.map((f) => f.filename);
+          await api.sendSessionMessageWithImages(created.id, text, filenames);
+        } else {
+          await api.sendSessionMessage(created.id, text);
+        }
         this.composerResetToken += 1;
         this.requestUpdate();
         this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
@@ -402,7 +415,15 @@ class TcodeSessionView extends LitElement {
       }
 
       const eventsBeforeSend = this.streamEventsReceived;
-      await api.sendSessionMessage(this.sessionId, text);
+
+      if (imageFiles && imageFiles.length > 0) {
+        const result = await api.uploadSessionImages(this.sessionId, imageFiles);
+        const filenames = result.files.map((f) => f.filename);
+        await api.sendSessionMessageWithImages(this.sessionId, text || '', filenames);
+      } else {
+        await api.sendSessionMessage(this.sessionId, text);
+      }
+
       this.scheduleSendCatchUp(this.sessionId, eventsBeforeSend);
       this.composerResetToken += 1;
       this.requestUpdate();

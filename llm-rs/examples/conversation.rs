@@ -287,5 +287,8 @@ fn print_message(msg: &Message) {
                 aggregate_input_tokens, aggregate_output_tokens
             );
         }
+        Message::AssistantImageOutput { image, .. } => {
+            println!("    [Image generated: {}]", image.relative_path());
+        }
     }
 }

@@ -1,5 +1,6 @@
 #[cfg(test)]
 mod tests {
+    use crate::image::ContentPart;
     use crate::llm::{ChatOptions, LLMMessage, ReasoningEffort, ToolCall};
 
     fn make_tool_call(id: &str, name: &str) -> ToolCall {
@@ -26,11 +27,17 @@ mod tests {
 
     #[test]
     fn llm_message_user_serde() -> anyhow::Result<()> {
-        let msg = LLMMessage::User("hello".to_string());
+        let msg = LLMMessage::User(vec![ContentPart::Text("hello".to_string())]);
         let json = serde_json::to_string(&msg)?;
         let deserialized: LLMMessage = serde_json::from_str(&json)?;
         match deserialized {
-            LLMMessage::User(s) => assert_eq!(s, "hello"),
+            LLMMessage::User(parts) => {
+                assert_eq!(parts.len(), 1);
+                match &parts[0] {
+                    ContentPart::Text(s) => assert_eq!(s, "hello"),
+                    _ => panic!("Expected Text content part"),
+                }
+            }
             _ => panic!("Expected User variant"),
         }
         Ok(())

@@ -63,6 +63,8 @@ impl LLM for MockLlm {
         Box::new(self.clone())
     }
 
+    fn set_images_dir(&mut self, _dir: Option<PathBuf>) {}
+
     fn available_models(&self) -> Vec<ModelInfo> {
         Vec::new()
     }

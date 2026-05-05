@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use axum::{
     Json,
-    extract::{Path as AxumPath, State},
+    body::Body,
+    extract::{Multipart, Path as AxumPath, State},
     http::{StatusCode, header},
     response::{
         IntoResponse, Response, Sse,
@@ -104,6 +105,20 @@ pub(crate) struct CreateSessionResponse {
 #[serde(deny_unknown_fields)]
 pub(crate) struct MessageRequest {
     text: String,
+    /// Pre-uploaded image filenames relative to the session's `images/` directory.
+    #[serde(default)]
+    image_filenames: Vec<String>,
+}
+
+#[derive(Serialize)]
+pub(crate) struct UploadedFile {
+    filename: String,
+    media_type: String,
+}
+
+#[derive(Serialize)]
+pub(crate) struct UploadImagesResponse {
+    files: Vec<UploadedFile>,
 }
 
 #[derive(Deserialize)]
@@ -202,15 +217,21 @@ pub(crate) async fn post_sessions(
         .ensure_runtime(&session_id)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    send_runtime_message(
-        &state,
-        &session_id,
-        ClientMessage::SendMessage {
-            conversation_id: None,
-            content: body.initial_prompt,
-        },
-    )
-    .await?;
+    // Only send the initial prompt if it's non-empty; empty prompts are used
+    // when the caller wants to create a session first (e.g. to upload images)
+    // and send the real message later.
+    if !body.initial_prompt.is_empty() {
+        send_runtime_message(
+            &state,
+            &session_id,
+            ClientMessage::SendMessage {
+                conversation_id: None,
+                content: body.initial_prompt,
+                image_filenames: None,
+            },
+        )
+        .await?;
+    }
 
     Ok(Json(CreateSessionResponse { id: session_id }))
 }
@@ -423,12 +444,21 @@ pub(crate) async fn post_session_message(
     Json(body): Json<MessageRequest>,
 ) -> ApiResult<StatusCode> {
     existing_session_dir(&session_id)?;
+    // Validate image filenames to prevent path traversal
+    for f in &body.image_filenames {
+        validate_basename(f)?;
+    }
     send_runtime_message(
         &state,
         &session_id,
         ClientMessage::SendMessage {
             conversation_id: None,
             content: body.text,
+            image_filenames: if body.image_filenames.is_empty() {
+                None
+            } else {
+                Some(body.image_filenames)
+            },
         },
     )
     .await?;
@@ -442,16 +472,109 @@ pub(crate) async fn post_subagent_message(
 ) -> ApiResult<StatusCode> {
     let session_dir = existing_session_dir(&session_id)?;
     find_subagent_dir(&session_dir, &subagent_id)?;
+    // Validate image filenames to prevent path traversal
+    for f in &body.image_filenames {
+        validate_basename(f)?;
+    }
     send_runtime_message(
         &state,
         &session_id,
         ClientMessage::SendMessage {
             conversation_id: Some(subagent_id),
             content: body.text,
+            image_filenames: if body.image_filenames.is_empty() {
+                None
+            } else {
+                Some(body.image_filenames)
+            },
         },
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+pub(crate) async fn upload_images(
+    AxumPath(session_id): AxumPath<String>,
+    mut multipart: Multipart,
+) -> ApiResult<Json<UploadImagesResponse>> {
+    let session_dir = existing_session_dir(&session_id)?;
+    let session = Session::with_dir(session_dir);
+    session
+        .create_images_dir()
+        .map_err(|e| ApiError::internal(e.to_string()))?;
+
+    let mut files = Vec::new();
+
+    while let Ok(Some(field)) = multipart.next_field().await {
+        let content_type = field.content_type().unwrap_or("image/png").to_string();
+        let data = field
+            .bytes()
+            .await
+            .map_err(|e| ApiError::bad_request(format!("failed to read upload field: {e}")))?;
+
+        if data.is_empty() {
+            continue;
+        }
+
+        // Validate content type is a supported image format
+        match content_type.as_str() {
+            "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp" => {}
+            other => {
+                return Err(ApiError::bad_request(format!(
+                    "unsupported image type: {other}"
+                )));
+            }
+        }
+
+        let (filename, media_type) = session
+            .save_image_data(&data)
+            .map_err(|e| ApiError::bad_request(format!("failed to process image: {e}")))?;
+
+        files.push(UploadedFile {
+            filename,
+            media_type,
+        });
+    }
+
+    if files.is_empty() {
+        return Err(ApiError::bad_request("no valid image files in upload"));
+    }
+
+    Ok(Json(UploadImagesResponse { files }))
+}
+
+fn validate_basename(name: &str) -> ApiResult<()> {
+    llm_rs::image::validate_image_filename(name)
+        .map_err(|e| ApiError::bad_request(e.to_string()))
+}
+
+pub(crate) async fn serve_image(
+    AxumPath((session_id, filename)): AxumPath<(String, String)>,
+) -> ApiResult<Response<Body>> {
+    validate_basename(&filename)?;
+    let session_dir = existing_session_dir(&session_id)?;
+    let session = Session::with_dir(session_dir);
+    let path = llm_rs::image::resolve_image_path(
+        &session.images_dir(),
+        &filename,
+    )
+    .map_err(|e| ApiError::bad_request(e.to_string()))?;
+
+    let bytes = tokio::fs::read(&path).await.map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            ApiError::not_found("image not found")
+        } else {
+            ApiError::internal(format!("failed to read image: {e}"))
+        }
+    })?;
+
+    let media_type = llm_rs::image::media_type_from_extension(&filename);
+
+    Response::builder()
+        .header(header::CONTENT_TYPE, media_type)
+        .header(header::CACHE_CONTROL, "private, max-age=3600")
+        .body(Body::from(bytes))
+        .map_err(|e| ApiError::internal(format!("failed to build image response: {e}")))
 }
 
 pub(crate) async fn post_session_finish(

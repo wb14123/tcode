@@ -8,13 +8,19 @@
 //! persisted across turns in stateless mode. For full reasoning persistence,
 //! use server-managed mode with `previous_response_id`.
 
+use std::io::Write;
+use std::os::unix::fs::PermissionsExt;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use anyhow::Context;
 use async_stream::stream;
+use base64::Engine;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
+use uuid::Uuid;
 
 use super::openai_common::effort_to_str;
 use super::sse;
@@ -42,7 +48,7 @@ struct ResponsesRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<FunctionToolDef>>,
+    tools: Option<Vec<ToolItem>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningConfig>,
     /// Request encrypted reasoning content so it can be round-tripped in
@@ -79,6 +85,20 @@ struct FunctionToolDef {
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parameters: Option<serde_json::Value>,
+}
+
+/// A tool item in the Responses API `tools` array.  Can be a function tool or
+/// the `image_generation` capability marker.
+#[derive(Serialize)]
+#[serde(untagged)]
+enum ToolItem {
+    Function(FunctionToolDef),
+    ImageGeneration(ImageGenerationToolDef),
+}
+
+#[derive(Serialize)]
+struct ImageGenerationToolDef {
+    r#type: &'static str,
 }
 
 #[derive(Serialize)]
@@ -189,6 +209,9 @@ pub struct OpenAI {
     /// gets a fresh UUID so the server can cache prompt prefixes per conversation.
     cache_key: String,
     cached_tools: Option<Vec<FunctionToolDef>>,
+    /// Directory for session image files. Set when a conversation is created
+    /// or resumed; used for loading images from ContentPart::Image.
+    pub images_dir: Option<PathBuf>,
 }
 
 impl OpenAI {
@@ -210,6 +233,7 @@ impl OpenAI {
             account_id: None,
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
+            images_dir: None,
         }
     }
 
@@ -223,6 +247,7 @@ impl OpenAI {
             account_id: None,
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
+            images_dir: None,
         }
     }
 
@@ -293,7 +318,10 @@ fn build_raw_output(
 /// Returns `(instructions, input_items)` — the system message is extracted
 /// as the top-level `instructions` field (required by the ChatGPT backend proxy),
 /// and remaining messages become input items.
-fn convert_messages(msgs: &[LLMMessage]) -> (Option<String>, Vec<InputItem>) {
+fn convert_messages(
+    msgs: &[LLMMessage],
+    images_dir: &Option<PathBuf>,
+) -> anyhow::Result<(Option<String>, Vec<InputItem>)> {
     let mut items = Vec::new();
     let mut instructions: Option<String> = None;
 
@@ -304,12 +332,55 @@ fn convert_messages(msgs: &[LLMMessage]) -> (Option<String>, Vec<InputItem>) {
                 // Also include as a developer input item for the standard API.
                 instructions = Some(content.clone());
             }
-            LLMMessage::User(content) => {
-                items.push(InputItem::EasyMessage(EasyInputMessage {
-                    role: "user",
-                    content: content.clone(),
-                    phase: None,
-                }));
+            LLMMessage::User(parts) => {
+                let has_image = parts
+                    .iter()
+                    .any(|p| matches!(p, crate::image::ContentPart::Image(_)));
+                if has_image {
+                    let images_dir = images_dir
+                        .as_ref()
+                        .context("Image present in user message but no images_dir configured")?;
+                    let mut content: Vec<serde_json::Value> = Vec::new();
+                    for part in parts {
+                        match part {
+                            crate::image::ContentPart::Text(t) => {
+                                content.push(serde_json::json!({
+                                    "type": "input_text",
+                                    "text": t,
+                                }));
+                            }
+                            crate::image::ContentPart::Image(img) => {
+                                let data = img.get_data(images_dir)?;
+                                let encoded =
+                                    base64::engine::general_purpose::STANDARD.encode(data);
+                                let data_uri =
+                                    format!("data:{};base64,{}", img.media_type(), encoded);
+                                content.push(serde_json::json!({
+                                    "type": "input_image",
+                                    "image_url": data_uri,
+                                }));
+                            }
+                        }
+                    }
+                    items.push(InputItem::Item(serde_json::json!({
+                        "role": "user",
+                        "content": content,
+                    })));
+                } else {
+                    let content: String = parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            crate::image::ContentPart::Text(t) => Some(t.clone()),
+                            crate::image::ContentPart::Image(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    items.push(InputItem::EasyMessage(EasyInputMessage {
+                        role: "user",
+                        content,
+                        phase: None,
+                    }));
+                }
             }
             LLMMessage::Assistant {
                 content,
@@ -363,7 +434,7 @@ fn convert_messages(msgs: &[LLMMessage]) -> (Option<String>, Vec<InputItem>) {
         }
     }
 
-    (instructions, items)
+    Ok((instructions, items))
 }
 
 // ============================================================================
@@ -397,7 +468,12 @@ impl LLM for OpenAI {
             account_id: self.account_id.clone(),
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
+            images_dir: self.images_dir.clone(),
         })
+    }
+
+    fn set_images_dir(&mut self, dir: Option<PathBuf>) {
+        self.images_dir = dir;
     }
 
     fn available_models(&self) -> Vec<ModelInfo> {
@@ -432,8 +508,34 @@ impl LLM for OpenAI {
         let base_url = self.base_url.clone();
         let account_id = self.account_id.clone();
         let model = model.to_string();
-        let (instructions, input_items) = convert_messages(msgs);
-        let tools = self.cached_tools.clone();
+        let images_dir = self.images_dir.clone();
+        let (instructions, input_items) = match convert_messages(msgs, &images_dir) {
+            Ok(v) => v,
+            Err(e) => {
+                return Box::pin(stream! {
+                    yield LLMEvent::Error(format!("Failed to convert messages: {:#}", e));
+                });
+            }
+        };
+        let tools = {
+            let mut tool_items: Vec<ToolItem> = self
+                .cached_tools
+                .clone()
+                .unwrap_or_default()
+                .into_iter()
+                .map(ToolItem::Function)
+                .collect();
+            // Always include image_generation — the API silently ignores it
+            // for models that don't support image output.
+            tool_items.push(ToolItem::ImageGeneration(ImageGenerationToolDef {
+                r#type: "image_generation",
+            }));
+            if tool_items.is_empty() {
+                None
+            } else {
+                Some(tool_items)
+            }
+        };
         let max_output_tokens = options.max_tokens;
         let cache_key = self.cache_key.clone();
 
@@ -578,7 +680,8 @@ impl LLM for OpenAI {
                         }
                     }
 
-                    // Output item done — collect for round-tripping and handle function calls
+                    // Output item done — collect for round-tripping and handle
+                    // function calls and image generation output
                     "response.output_item.done" => {
                         if let Ok(parsed) = serde_json::from_str::<OutputItemDonePayload>(data) {
                             // Move the item into the collection first, then
@@ -625,6 +728,75 @@ impl LLM for OpenAI {
                                     arguments,
                                 });
                             }
+
+                            if item_type == Some("image_generation_call")
+                                && let Some(result) =
+                                    item.get("result").and_then(|v| v.as_str())
+                                    && let Ok(image_bytes) =
+                                        base64::engine::general_purpose::STANDARD.decode(result)
+                                        && let Some(ref images_dir) = images_dir {
+                                            // Process through the resize/compress pipeline in a
+                                            // blocking task to avoid stalling the async runtime.
+                                            let process_result = tokio::task::spawn_blocking(move || {
+                                                crate::image::process_image(&image_bytes)
+                                            })
+                                            .await;
+                                            match process_result {
+                                                Ok(Ok((processed, media_type, ext))) => {
+                                                    let uuid = Uuid::new_v4();
+                                                    let filename = format!("{}.{}", uuid, ext);
+                                                    let file_path = images_dir.join(&filename);
+                                                    // Ensure images dir exists
+                                                    if let Err(e) = std::fs::create_dir_all(images_dir) {
+                                                        yield LLMEvent::Error(format!(
+                                                            "Failed to create images directory: {}",
+                                                            e
+                                                        ));
+                                                        continue;
+                                                    }
+                                                    // Write with 0o600 permissions
+                                                    match std::fs::File::create(&file_path)
+                                                        .and_then(|f| {
+                                                            f.set_permissions(
+                                                                std::fs::Permissions::from_mode(0o600),
+                                                            )?;
+                                                            Ok(f)
+                                                        })
+                                                        .and_then(|mut f| {
+                                                            f.write_all(&processed)?;
+                                                            Ok(())
+                                                        }) {
+                                                        Ok(()) => {
+                                                            yield LLMEvent::ImageOutput {
+                                                                relative_path: filename,
+                                                                media_type,
+                                                            };
+                                                        }
+                                                        Err(e) => {
+                                                            yield LLMEvent::Error(format!(
+                                                                "Failed to write generated image: {}",
+                                                                e
+                                                            ));
+                                                            return;
+                                                        }
+                                                    }
+                                                }
+                                                Ok(Err(e)) => {
+                                                    yield LLMEvent::Error(format!(
+                                                        "Failed to process generated image: {:#}",
+                                                        e
+                                                    ));
+                                                    return;
+                                                }
+                                                Err(join_err) => {
+                                                    yield LLMEvent::Error(format!(
+                                                        "Image processing task panicked: {}",
+                                                        join_err
+                                                    ));
+                                                    return;
+                                                }
+                                            }
+                                        }
                         }
                     }
 

@@ -48,7 +48,7 @@ fn convert_messages_replays_assistant_raw_without_dropping_reasoning_content() -
         raw: Some(raw.clone()),
     }];
 
-    let serialized = serde_json::to_value(convert_messages(&msgs))?;
+    let serialized = serde_json::to_value(convert_messages(&msgs, &None)?)?;
 
     assert_eq!(serialized, serde_json::json!([raw]));
 
@@ -68,7 +68,7 @@ fn convert_messages_forces_assistant_role_for_raw_message() -> anyhow::Result<()
         raw: Some(raw),
     }];
 
-    let serialized = serde_json::to_value(convert_messages(&msgs))?;
+    let serialized = serde_json::to_value(convert_messages(&msgs, &None)?)?;
 
     assert_eq!(serialized[0]["role"], "assistant");
     assert_eq!(serialized[0]["reasoning_content"], "thinking text");

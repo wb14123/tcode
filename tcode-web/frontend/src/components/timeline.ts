@@ -5,6 +5,7 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { renderMarkdownToHtml } from '../markdown';
 import { hrefForRoute } from '../router';
 import type {
+  AssistantImageTimelineItem,
   AssistantTimelineItem,
   RawTimelineItem,
   SubagentTimelineItem,
@@ -28,8 +29,9 @@ import {
   toolDetailRoute,
   toolRowTitle,
 } from '../timeline-render-helpers';
+import { BROKEN_IMAGE_SVG, openLightbox } from '../messages';
 
-type TimelineRowTag = 'tcode-user-message' | 'tcode-assistant-message' | 'tcode-tool-row' | 'tcode-subagent-row' | 'tcode-raw-event-row';
+type TimelineRowTag = 'tcode-user-message' | 'tcode-assistant-message' | 'tcode-tool-row' | 'tcode-subagent-row' | 'tcode-raw-event-row' | 'tcode-assistant-image-row';
 
 function tagForItem(item: TimelineItem): TimelineRowTag | null {
   switch (item.kind) {
@@ -37,6 +39,8 @@ function tagForItem(item: TimelineItem): TimelineRowTag | null {
       return 'tcode-user-message';
     case 'assistant':
       return 'tcode-assistant-message';
+    case 'assistant-image':
+      return 'tcode-assistant-image-row';
     case 'tool':
       return 'tcode-tool-row';
     case 'subagent':
@@ -192,6 +196,8 @@ class TcodeTimeline extends LitElement {
         return html`<tcode-subagent-row data-timeline-item-id=${itemId} .store=${this.store} .itemId=${itemId} .sessionId=${this.sessionId} .currentSubagentId=${this.currentSubagentId}></tcode-subagent-row>`;
       case 'tcode-raw-event-row':
         return html`<tcode-raw-event-row data-timeline-item-id=${itemId} .store=${this.store} .itemId=${itemId} .sessionId=${this.sessionId} .currentSubagentId=${this.currentSubagentId}></tcode-raw-event-row>`;
+      case 'tcode-assistant-image-row':
+        return html`<tcode-assistant-image-row data-timeline-item-id=${itemId} .store=${this.store} .itemId=${itemId} .sessionId=${this.sessionId} .currentSubagentId=${this.currentSubagentId}></tcode-assistant-image-row>`;
     }
   }
 
@@ -417,7 +423,19 @@ class TcodeUserMessage extends TimelineRowElement {
     return html`
       <article class="chat-bubble chat-bubble-user timeline-user">
         <div class="message-meta">You · ${formatTimestamp(item.createdAt)}</div>
-        <pre class="timeline-pre message-bubble-content">${item.content}</pre>
+        ${item.content ? html`<pre class="timeline-pre message-bubble-content">${item.content}</pre>` : nothing}
+        ${item.images && item.images.length > 0 ? html`
+          <div class="message-images-row">
+            ${item.images.map(filename => html`
+              <img src="/api/sessions/${this.sessionId}/images/${filename}"
+                   loading="lazy"
+                   class="message-inline-image"
+                   @click=${(e: Event) => openLightbox((e.target as HTMLImageElement).src)}
+                   @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
+                   alt="User attached image">
+            `)}
+          </div>
+        ` : nothing}
       </article>
     `;
   }
@@ -665,9 +683,36 @@ class TcodeRawEventRow extends TimelineRowElement {
   }
 }
 
+class TcodeAssistantImageRow extends TimelineRowElement {
+  protected expectedKind(): TimelineItem['kind'] {
+    return 'assistant-image';
+  }
+
+  protected renderItem(item: TimelineItem): TemplateResult | typeof nothing {
+    if (item.kind !== 'assistant-image') {
+      return nothing;
+    }
+    return this.renderAssistantImage(item);
+  }
+
+  private renderAssistantImage(item: AssistantImageTimelineItem): TemplateResult {
+    const imgSrc = `/api/sessions/${this.sessionId}/images/${item.image.relative_path}`;
+    return html`
+      <article class="chat-bubble chat-bubble-assistant timeline-assistant-image">
+        <div class="message-meta">Assistant · ${formatTimestamp(item.msgId)}</div>
+        <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
+             @click=${() => openLightbox(imgSrc)}
+             @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
+             alt="AI generated image">
+      </article>
+    `;
+  }
+}
+
 customElements.define('tcode-timeline', TcodeTimeline);
 customElements.define('tcode-user-message', TcodeUserMessage);
 customElements.define('tcode-assistant-message', TcodeAssistantMessage);
 customElements.define('tcode-tool-row', TcodeToolRow);
 customElements.define('tcode-subagent-row', TcodeSubagentRow);
 customElements.define('tcode-raw-event-row', TcodeRawEventRow);
+customElements.define('tcode-assistant-image-row', TcodeAssistantImageRow);

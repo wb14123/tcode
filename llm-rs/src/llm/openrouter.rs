@@ -3,10 +3,13 @@
 //! Works with OpenRouter and other OpenAI Chat Completions-compatible providers.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use anyhow::Context;
 use async_stream::stream;
+use base64::Engine;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
@@ -26,6 +29,8 @@ pub struct OpenRouter {
     api_key: String,
     base_url: String,
     cached_tool_defs: Option<Vec<ToolDefinition>>,
+    /// Directory for loading image files referenced by ContentPart::Image.
+    pub images_dir: Option<PathBuf>,
 }
 
 impl OpenRouter {
@@ -43,6 +48,7 @@ impl OpenRouter {
             api_key: api_key.into(),
             base_url: base_url.into(),
             cached_tool_defs: None,
+            images_dir: None,
         }
     }
 }
@@ -206,23 +212,71 @@ pub(super) fn extract_usage(usage: &Usage) -> (i32, i32, i32, i32, i32) {
     )
 }
 
-pub(super) fn convert_messages(msgs: &[LLMMessage]) -> Vec<ChatMessage> {
+pub(super) fn convert_messages(
+    msgs: &[LLMMessage],
+    images_dir: &Option<PathBuf>,
+) -> anyhow::Result<Vec<ChatMessage>> {
     msgs.iter()
         .map(|msg| match msg {
-            LLMMessage::System(content) => ChatMessage::Structured(StructuredChatMessage {
+            LLMMessage::System(content) => Ok(ChatMessage::Structured(StructuredChatMessage {
                 role: "system",
                 content: Some(content.clone()),
                 tool_call_id: None,
                 tool_calls: None,
                 reasoning_details: None,
-            }),
-            LLMMessage::User(content) => ChatMessage::Structured(StructuredChatMessage {
-                role: "user",
-                content: Some(content.clone()),
-                tool_call_id: None,
-                tool_calls: None,
-                reasoning_details: None,
-            }),
+            })),
+            LLMMessage::User(parts) => {
+                let has_image = parts
+                    .iter()
+                    .any(|p| matches!(p, crate::image::ContentPart::Image(_)));
+                if has_image {
+                    let images_dir = images_dir
+                        .as_ref()
+                        .context("Image present in user message but no images_dir configured")?;
+                    let mut content: Vec<serde_json::Value> = Vec::new();
+                    for part in parts {
+                        match part {
+                            crate::image::ContentPart::Text(t) => {
+                                content.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": t,
+                                }));
+                            }
+                            crate::image::ContentPart::Image(img) => {
+                                let data = img.get_data(images_dir)?;
+                                let encoded =
+                                    base64::engine::general_purpose::STANDARD.encode(data);
+                                let data_uri =
+                                    format!("data:{};base64,{}", img.media_type(), encoded);
+                                content.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": { "url": data_uri },
+                                }));
+                            }
+                        }
+                    }
+                    Ok(ChatMessage::Raw(serde_json::json!({
+                        "role": "user",
+                        "content": content,
+                    })))
+                } else {
+                    let content: String = parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            crate::image::ContentPart::Text(t) => Some(t.clone()),
+                            crate::image::ContentPart::Image(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    Ok(ChatMessage::Structured(StructuredChatMessage {
+                        role: "user",
+                        content: Some(content),
+                        tool_call_id: None,
+                        tool_calls: None,
+                        reasoning_details: None,
+                    }))
+                }
+            }
             LLMMessage::Assistant {
                 content,
                 tool_calls,
@@ -237,7 +291,7 @@ pub(super) fn convert_messages(msgs: &[LLMMessage]) -> Vec<ChatMessage> {
                     // outer enum role cannot be overridden by persisted raw JSON.
                     let mut raw_msg = raw_value.clone();
                     raw_msg["role"] = "assistant".into();
-                    ChatMessage::Raw(raw_msg)
+                    Ok(ChatMessage::Raw(raw_msg))
                 } else {
                     // Fallback: reconstruct from portable fields.
                     let tc = if tool_calls.is_empty() {
@@ -257,7 +311,7 @@ pub(super) fn convert_messages(msgs: &[LLMMessage]) -> Vec<ChatMessage> {
                                 .collect(),
                         )
                     };
-                    ChatMessage::Structured(StructuredChatMessage {
+                    Ok(ChatMessage::Structured(StructuredChatMessage {
                         role: "assistant",
                         content: if content.is_empty() {
                             None
@@ -267,21 +321,21 @@ pub(super) fn convert_messages(msgs: &[LLMMessage]) -> Vec<ChatMessage> {
                         tool_call_id: None,
                         tool_calls: tc,
                         reasoning_details: None,
-                    })
+                    }))
                 }
             }
             LLMMessage::ToolResult {
                 tool_call_id,
                 content,
-            } => ChatMessage::Structured(StructuredChatMessage {
+            } => Ok(ChatMessage::Structured(StructuredChatMessage {
                 role: "tool",
                 content: Some(content.clone()),
                 tool_call_id: Some(tool_call_id.clone()),
                 tool_calls: None,
                 reasoning_details: None,
-            }),
+            })),
         })
-        .collect()
+        .collect::<anyhow::Result<Vec<_>>>()
 }
 
 pub(super) fn build_raw_assistant_message(
@@ -330,7 +384,12 @@ impl LLM for OpenRouter {
             api_key: self.api_key.clone(),
             base_url: self.base_url.clone(),
             cached_tool_defs: None,
+            images_dir: self.images_dir.clone(),
         })
+    }
+
+    fn set_images_dir(&mut self, dir: Option<PathBuf>) {
+        self.images_dir = dir;
     }
 
     fn available_models(&self) -> Vec<ModelInfo> {
@@ -363,8 +422,18 @@ impl LLM for OpenRouter {
         let max_tokens = options.max_tokens;
         let reasoning_request = openai_common::build_reasoning_request(options);
 
-        // Convert messages
-        let messages = convert_messages(msgs);
+        // Convert messages (scope images_dir so it's not captured by the stream)
+        let messages = {
+            let images_dir = self.images_dir.clone();
+            match convert_messages(msgs, &images_dir) {
+                Ok(v) => v,
+                Err(e) => {
+                    return Box::pin(stream! {
+                        yield LLMEvent::Error(format!("Failed to convert messages: {:#}", e));
+                    });
+                }
+            }
+        };
 
         let tool_defs = self.cached_tool_defs.clone();
 

@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use crate::image::{ContentPart, ImageData, media_type_from_extension};
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
 use crate::tool::{CancellationToken, ContainerConfig, Tool, ToolContext};
 use anyhow::{Context, Result};
@@ -87,8 +88,18 @@ impl ConversationState {
 
 fn first_user_description(llm_msgs: &[LLMMessage]) -> Option<String> {
     llm_msgs.iter().find_map(|msg| {
-        if let LLMMessage::User(text) = msg {
-            Some(truncate_preview(text, 80))
+        if let LLMMessage::User(parts) = msg {
+            let first_text = parts.iter().find_map(|p| {
+                if let ContentPart::Text(t) = p {
+                    Some(t.as_str())
+                } else {
+                    None
+                }
+            });
+            match first_text {
+                Some(text) => Some(truncate_preview(text, 80)),
+                None => Some("[Image]".to_string()),
+            }
         } else {
             None
         }
@@ -202,6 +213,9 @@ pub enum Message {
         msg_id: MessageID,
         created_at: u64,
         content: Arc<String>,
+        /// Relative paths from images/ dir like ["uuid.png"].
+        #[serde(default)]
+        images: Vec<String>,
     },
 
     AssistantMessageStart {
@@ -407,6 +421,13 @@ pub enum Message {
         aggregate_output_tokens: i32,
         aggregate_cache_creation_tokens: i32,
         aggregate_cache_read_tokens: i32,
+    },
+
+    /// The LLM generated an image (e.g. via OpenAI's image_generation_call).
+    /// Contains an ImageData reference to the saved file.
+    AssistantImageOutput {
+        msg_id: MessageID,
+        image: ImageData,
     },
 }
 
@@ -844,7 +865,8 @@ impl ConversationManager {
         let mut resumed_subagents = Vec::new();
 
         for (sa_dir, sa_state) in subagent_states {
-            let sa_llm = llm.clone_box();
+            let mut sa_llm = llm.clone_box();
+            sa_llm.set_images_dir(Some(sa_dir.join("images")));
             let sa_tools = tools.clone();
             let (sa_id, sa_client) = self.resume_conversation(
                 sa_state,
@@ -1486,7 +1508,7 @@ impl Conversation {
                 msg = self.input_channel_rx.recv() => {
                     let Some(msg) = msg else { break };
                     match msg {
-                        Message::UserMessage { content, .. } => {
+                        Message::UserMessage { content, images, .. } => {
                             // If tools are pending, cancel them and fill synthetic results
                             if !self.pending_tools.is_empty() {
                                 self.env.client.cancel_silent();
@@ -1501,11 +1523,20 @@ impl Conversation {
                             if self.description.is_none() {
                                 self.description = Some(truncate_preview(&content, 80));
                             }
-                            self.push_llm_msg(LLMMessage::User(content.to_string()))?;
+                            let mut parts = vec![ContentPart::Text(content.to_string())];
+                            for filename in &images {
+                                let media_type = media_type_from_extension(filename);
+                                parts.push(ContentPart::Image(ImageData::new(
+                                    filename.clone(),
+                                    media_type.to_string(),
+                                )));
+                            }
+                            self.push_llm_msg(LLMMessage::User(parts))?;
                             self.broadcast_msg(Message::UserMessage {
                                 msg_id: self.next_msg_id(),
                                 created_at: now_millis(),
                                 content: Arc::clone(&content),
+                                images: images.clone(),
                             })?;
                             self.call_llm().await?;
                             self.maybe_finish_turn()?;
@@ -1774,6 +1805,16 @@ impl Conversation {
                         aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
                     })?;
                     return Ok(());
+                }
+                LLMEvent::ImageOutput {
+                    relative_path,
+                    media_type,
+                } => {
+                    let image = ImageData::new(relative_path, media_type);
+                    self.broadcast_msg(Message::AssistantImageOutput {
+                        msg_id: self.next_msg_id(),
+                        image,
+                    })?;
                 }
             }
         }
@@ -2122,7 +2163,7 @@ fn spawn_subagent_stream_handler(
 async fn execute_subagent(
     tool_call: ToolCall,
     env: ConversationEnv,
-    llm: Box<dyn LLM>,
+    mut llm: Box<dyn LLM>,
     loop_tx: mpsc::Sender<Message>,
     cancel_token: CancellationToken,
 ) -> Result<()> {
@@ -2198,6 +2239,10 @@ async fn execute_subagent(
     };
 
     // Create the subagent conversation
+    // Set images_dir on the cloned LLM to the subagent's own images subdir
+    if let Some(ref sa_dir) = subagent_state_dir {
+        llm.set_images_dir(Some(sa_dir.join("images")));
+    }
     let (subagent_conv_id, subagent_client) =
         match env.conversation_manager.new_conversation_with_id(
             subagent_conv_id_pre,
@@ -2630,6 +2675,25 @@ impl ConversationClient {
                 msg_id: self.next_msg_id(),
                 created_at: now_millis(),
                 content: Arc::new(content.to_string()),
+                images: vec![],
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Send a chat with attached images to the conversation. Images are relative
+    /// filenames from the session's `images/` directory (e.g. `"uuid.png"`).
+    pub async fn send_chat_with_images(
+        &self,
+        content: &str,
+        image_filenames: Vec<String>,
+    ) -> Result<()> {
+        self.input_channel_tx
+            .send(Message::UserMessage {
+                msg_id: self.next_msg_id(),
+                created_at: now_millis(),
+                content: Arc::new(content.to_string()),
+                images: image_filenames,
             })
             .await?;
         Ok(())

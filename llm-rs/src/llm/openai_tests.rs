@@ -12,6 +12,7 @@ mod tests {
 
     use tokio_stream::StreamExt;
 
+    use crate::image::ContentPart;
     use crate::llm::{
         ChatOptions, LLM, LLMEvent, LLMMessage, OpenAI, OpenRouter, ReasoningEffort, StopReason,
     };
@@ -64,6 +65,7 @@ mod tests {
                 LLMEvent::ToolCallDelta { .. } => "ToolCallDelta",
                 LLMEvent::MessageEnd { .. } => "MessageEnd",
                 LLMEvent::Error(_) => "Error",
+                LLMEvent::ImageOutput { .. } => "ImageOutput",
             })
             .collect::<Vec<_>>()
             .join(", ")
@@ -79,7 +81,9 @@ mod tests {
         let client = OpenAI::new(get_openai_key());
         let messages = vec![
             LLMMessage::System("You are a helpful assistant. Be very concise.".to_string()),
-            LLMMessage::User("Say hello in exactly 3 words.".to_string()),
+            LLMMessage::User(vec![ContentPart::Text(
+                "Say hello in exactly 3 words.".to_string(),
+            )]),
         ];
 
         let stream = client.chat("gpt-5-nano", &messages, &ChatOptions::default());
@@ -138,7 +142,9 @@ mod tests {
         let client = OpenAI::new(get_openai_key());
         let messages = vec![
             LLMMessage::System("You are a helpful assistant.".to_string()),
-            LLMMessage::User("What is 17 * 23? Think step by step.".to_string()),
+            LLMMessage::User(vec![ContentPart::Text(
+                "What is 17 * 23? Think step by step.".to_string(),
+            )]),
         ];
 
         let options = ChatOptions {
@@ -234,9 +240,9 @@ mod tests {
         let mut client = OpenAI::new(get_openai_key());
         client.register_tools(vec![Arc::new(tool)]);
 
-        let messages = vec![LLMMessage::User(
+        let messages = vec![LLMMessage::User(vec![ContentPart::Text(
             "What's the weather? Use the get_weather tool.".to_string(),
-        )];
+        )])];
 
         let stream = client.chat("gpt-5-nano", &messages, &ChatOptions::default());
         let events = collect_events(stream).await;
@@ -292,7 +298,7 @@ mod tests {
         // First turn: ask a question that requires reasoning
         let messages = vec![
             LLMMessage::System("You are a helpful assistant.".to_string()),
-            LLMMessage::User("What is 7 + 5?".to_string()),
+            LLMMessage::User(vec![ContentPart::Text("What is 7 + 5?".to_string())]),
         ];
 
         let stream = client.chat("gpt-5-nano", &messages, &options);
@@ -336,13 +342,15 @@ mod tests {
         // "Item 'rs_...' of type 'reasoning' was provided without its required following item."
         let messages = vec![
             LLMMessage::System("You are a helpful assistant.".to_string()),
-            LLMMessage::User("What is 7 + 5?".to_string()),
+            LLMMessage::User(vec![ContentPart::Text("What is 7 + 5?".to_string())]),
             LLMMessage::Assistant {
                 content: accumulated_text,
                 tool_calls: vec![],
                 raw,
             },
-            LLMMessage::User("Now multiply that by 2.".to_string()),
+            LLMMessage::User(vec![ContentPart::Text(
+                "Now multiply that by 2.".to_string(),
+            )]),
         ];
 
         let stream = client.chat("gpt-5-nano", &messages, &options);
@@ -373,7 +381,9 @@ mod tests {
         let client = OpenRouter::new(get_openrouter_key());
         let messages = vec![
             LLMMessage::System("You are a helpful assistant. Be very concise.".to_string()),
-            LLMMessage::User("Say hello in exactly 3 words.".to_string()),
+            LLMMessage::User(vec![ContentPart::Text(
+                "Say hello in exactly 3 words.".to_string(),
+            )]),
         ];
 
         // Use a cheap model
@@ -413,7 +423,7 @@ mod tests {
         // First turn
         let messages = vec![
             LLMMessage::System("You are a helpful assistant. Be concise.".to_string()),
-            LLMMessage::User("What is 3 + 4?".to_string()),
+            LLMMessage::User(vec![ContentPart::Text("What is 3 + 4?".to_string())]),
         ];
 
         let stream = client.chat("deepseek/deepseek-chat", &messages, &ChatOptions::default());
@@ -443,13 +453,13 @@ mod tests {
         // Second turn with raw response
         let messages = vec![
             LLMMessage::System("You are a helpful assistant. Be concise.".to_string()),
-            LLMMessage::User("What is 3 + 4?".to_string()),
+            LLMMessage::User(vec![ContentPart::Text("What is 3 + 4?".to_string())]),
             LLMMessage::Assistant {
                 content: accumulated_text,
                 tool_calls: vec![],
                 raw,
             },
-            LLMMessage::User("Multiply that by 2.".to_string()),
+            LLMMessage::User(vec![ContentPart::Text("Multiply that by 2.".to_string())]),
         ];
 
         let stream = client.chat("deepseek/deepseek-chat", &messages, &ChatOptions::default());

@@ -127,6 +127,7 @@ export interface UserTimelineItem extends TimelineItemBase {
   msgId: number | null;
   createdAt: number | null;
   content: string;
+  images: string[]; // relative image filenames within images/ dir
 }
 
 export interface ToolTimelineItem extends TimelineItemBase {
@@ -181,6 +182,15 @@ export interface RawTimelineItem extends TimelineItemBase {
   rawJson: unknown;
 }
 
+export interface AssistantImageTimelineItem extends TimelineItemBase {
+  kind: 'assistant-image';
+  msgId: number | null;
+  image: {
+    relative_path: string;
+    media_type: string;
+  };
+}
+
 export type TimelineItem =
   | UserTimelineItem
   | AssistantTimelineItem
@@ -188,7 +198,8 @@ export type TimelineItem =
   | SubagentTimelineItem
   | SystemTimelineItem
   | SignalTimelineItem
-  | RawTimelineItem;
+  | RawTimelineItem
+  | AssistantImageTimelineItem;
 
 // Must match llm_rs::permission::ALL_SCOPES in permission.rs
 // When adding a new scope/key to the Rust side, update this constant too.

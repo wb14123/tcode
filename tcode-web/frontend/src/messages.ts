@@ -19,6 +19,7 @@ import {
   toolRowTitle,
 } from './timeline-render-helpers.ts';
 import type {
+  AssistantImageTimelineItem,
   AssistantTimelineItem,
   RawStreamEvent,
   RawTimelineItem,
@@ -300,6 +301,7 @@ export class ConversationTimelineBuilder {
       switch (variant) {
         case 'UserMessage': {
           const msgId = asNumber(payload.msg_id);
+          const images = Array.isArray(payload.images) ? (payload.images as string[]) : [];
           const item: UserTimelineItem = {
             id: msgId !== null ? `user:${msgId}` : this.store.nextSequenceId('user'),
             revision: 0,
@@ -307,6 +309,7 @@ export class ConversationTimelineBuilder {
             msgId,
             createdAt: asNumber(payload.created_at),
             content: asString(payload.content) ?? '',
+            images,
           };
           this.addItem(item);
           break;
@@ -692,6 +695,21 @@ export class ConversationTimelineBuilder {
         case 'SubAgentTokenRollup':
           this.addItem(createSignal(this.store, 'Subagent token rollup recorded'), false);
           break;
+        case 'AssistantImageOutput': {
+          const msgId = asNumber(payload.msg_id);
+          const image = payload.image as { relative_path: string; media_type: string } | undefined;
+          if (image) {
+            const item: AssistantImageTimelineItem = {
+              id: msgId !== null ? `assistant-image:${msgId}` : this.store.nextSequenceId('assistant-image'),
+              revision: 0,
+              kind: 'assistant-image',
+              msgId,
+              image: { relative_path: image.relative_path, media_type: image.media_type },
+            };
+            this.addItem(item);
+          }
+          break;
+        }
         default:
           this.addItem(createRawItem(this.store, event, variant));
           break;
@@ -1013,11 +1031,54 @@ function toggleExpandedOnKeydown(event: KeyboardEvent, toggle: () => void): void
   toggle();
 }
 
-function renderUser(item: UserTimelineItem): TemplateResult {
+export const BROKEN_IMAGE_SVG = 'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100"%3E%3Crect fill="%23eee" width="100" height="100"/%3E%3Ctext x="50" y="55" text-anchor="middle" fill="%23999" font-size="14"%3EBroken%3C/text%3E%3C/svg%3E';
+
+export function openLightbox(src: string): void {
+  const previousFocus = document.activeElement as HTMLElement | null;
+  const overlay = document.createElement('div');
+  overlay.className = 'lightbox-overlay';
+  overlay.setAttribute('role', 'dialog');
+  overlay.setAttribute('aria-modal', 'true');
+  overlay.setAttribute('aria-label', 'Image preview');
+  overlay.setAttribute('tabindex', '-1');
+  overlay.innerHTML = `<img src="${src}" class="lightbox-image" alt="Full size image">`;
+
+  const close = () => {
+    overlay.remove();
+    document.removeEventListener('keydown', onKeyDown);
+    previousFocus?.focus();
+  };
+
+  const onKeyDown = (event: KeyboardEvent) => {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      close();
+    }
+  };
+
+  overlay.addEventListener('click', close);
+  document.addEventListener('keydown', onKeyDown);
+  document.body.appendChild(overlay);
+  overlay.focus();
+}
+
+function renderUser(item: UserTimelineItem, context: TimelineRenderContext): TemplateResult {
   return html`
     <article class="chat-bubble chat-bubble-user timeline-user">
       <div class="message-meta">You · ${formatTimestamp(item.createdAt)}</div>
-      <pre class="timeline-pre message-bubble-content">${item.content}</pre>
+      ${item.content ? html`<pre class="timeline-pre message-bubble-content">${item.content}</pre>` : nothing}
+      ${item.images && item.images.length > 0 ? html`
+        <div class="message-images-row">
+          ${item.images.map(filename => html`
+            <img src="/api/sessions/${context.sessionId}/images/${filename}"
+                 loading="lazy"
+                 class="message-inline-image"
+                 @click=${(e: Event) => openLightbox((e.target as HTMLImageElement).src)}
+                 @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
+                 alt="User attached image">
+          `)}
+        </div>
+      ` : nothing}
     </article>
   `;
 }
@@ -1048,6 +1109,19 @@ function renderAssistant(item: AssistantTimelineItem): TemplateResult {
             </footer>
           `
         : nothing}
+    </article>
+  `;
+}
+
+function renderAssistantImage(item: AssistantImageTimelineItem, context: TimelineRenderContext): TemplateResult {
+  const imgSrc = `/api/sessions/${context.sessionId}/images/${item.image.relative_path}`;
+  return html`
+    <article class="chat-bubble chat-bubble-assistant timeline-assistant-image">
+      <div class="message-meta">Assistant · ${formatTimestamp(item.msgId !== null ? item.msgId : null)}</div>
+      <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
+           @click=${() => openLightbox(imgSrc)}
+           @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
+           alt="AI generated image">
     </article>
   `;
 }
@@ -1186,9 +1260,11 @@ function renderRaw(item: RawTimelineItem): TemplateResult {
 export function renderTimelineItem(item: TimelineItem, context: TimelineRenderContext): TemplateResult {
   switch (item.kind) {
     case 'user':
-      return renderUser(item);
+      return renderUser(item, context);
     case 'assistant':
       return renderAssistant(item);
+    case 'assistant-image':
+      return renderAssistantImage(item, context);
     case 'tool':
       return renderTool(item, context);
     case 'subagent':

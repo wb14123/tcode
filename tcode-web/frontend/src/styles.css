@@ -1312,6 +1312,90 @@ tcode-timeline {
   fill: currentColor;
 }
 
+/* Image support — composer preview */
+.image-preview-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 4px 12px;
+}
+
+.image-preview-item {
+  position: relative;
+  width: 64px;
+  height: 64px;
+}
+
+.image-preview-thumb {
+  width: 64px;
+  height: 64px;
+  object-fit: cover;
+  border-radius: 6px;
+}
+
+.image-preview-remove {
+  position: absolute;
+  top: -6px;
+  right: -6px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #333;
+  color: white;
+  border: none;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+/* Image support — timeline messages */
+.message-images-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 8px;
+}
+
+.message-inline-image {
+  max-width: 400px;
+  max-height: 400px;
+  border-radius: 8px;
+  cursor: pointer;
+  object-fit: contain;
+}
+
+.message-inline-image.broken-image {
+  max-width: 100px;
+  max-height: 100px;
+  opacity: 0.5;
+}
+
+/* Lightbox */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.8);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 10000;
+  cursor: pointer;
+}
+
+.lightbox-image {
+  max-width: 90vw;
+  max-height: 90vh;
+  object-fit: contain;
+}
+
+.chat-bubble-assistant.timeline-assistant-image {
+  display: flex;
+  flex-direction: column;
+}
+
 .chat-status-bar {
   display: flex;
   align-items: center;

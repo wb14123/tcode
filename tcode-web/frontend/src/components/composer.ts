@@ -2,6 +2,7 @@ import { LitElement, html, nothing, type TemplateResult } from 'lit';
 
 export interface MessageSubmitDetail {
   text: string;
+  imageFiles?: File[];
 }
 
 class TcodeComposer extends LitElement {
@@ -14,6 +15,7 @@ class TcodeComposer extends LitElement {
     placeholder: { type: String },
     resetToken: { type: Number },
     secondaryAction: { attribute: false },
+    imageFiles: { type: Array, attribute: false },
   };
 
   disabled = false;
@@ -26,6 +28,7 @@ class TcodeComposer extends LitElement {
   secondaryAction: unknown = nothing;
   private text = '';
   private maxTextareaHeight: number | null = null;
+  declare imageFiles: File[];
 
   createRenderRoot(): this {
     return this;
@@ -38,6 +41,7 @@ class TcodeComposer extends LitElement {
   protected willUpdate(changed: Map<string, unknown>): void {
     if (changed.has('resetToken')) {
       this.text = '';
+      this.clearImageFiles();
     }
   }
 
@@ -45,6 +49,28 @@ class TcodeComposer extends LitElement {
     if (changed.has('resetToken')) {
       this.syncTextareaHeight();
     }
+  }
+
+  connectedCallback(): void {
+    super.connectedCallback();
+    if (this.imageFiles === undefined) {
+      this.imageFiles = [];
+    }
+  }
+
+  disconnectedCallback(): void {
+    super.disconnectedCallback();
+    this.clearImageFiles();
+  }
+
+  private imageFileUrls: string[] = [];
+
+  private clearImageFiles(): void {
+    for (const url of this.imageFileUrls) {
+      URL.revokeObjectURL(url);
+    }
+    this.imageFileUrls = [];
+    this.imageFiles = [];
   }
 
   private get inputDisabled(): boolean {
@@ -56,7 +82,8 @@ class TcodeComposer extends LitElement {
   }
 
   private get canSubmit(): boolean {
-    return Boolean(this.trimmedText) && !this.inputDisabled && !this.sending && !this.generating;
+    return (Boolean(this.trimmedText) || this.imageFiles.length > 0)
+      && !this.inputDisabled && !this.sending && !this.generating;
   }
 
   private syncTextareaHeight(textarea?: HTMLTextAreaElement | null): void {
@@ -102,6 +129,106 @@ class TcodeComposer extends LitElement {
     this.emitSubmit();
   }
 
+  private openFilePicker(): void {
+    const picker = this.querySelector<HTMLInputElement>('[data-role="image-picker"]');
+    picker?.click();
+  }
+
+  private onFilePicked(event: Event): void {
+    const input = event.target as HTMLInputElement;
+    const files = input.files;
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    const imageFiles: File[] = [];
+    for (let i = 0; i < files.length; i++) {
+      const file = files[i];
+      if (file.type.startsWith('image/')) {
+        imageFiles.push(file);
+      }
+    }
+
+    if (imageFiles.length > 0) {
+      this.addImageFiles(imageFiles);
+    }
+
+    // Reset so the same file can be picked again
+    input.value = '';
+  }
+
+  private onDragOver = (event: DragEvent): void => {
+    event.preventDefault();
+    if (event.dataTransfer) {
+      event.dataTransfer.dropEffect = 'copy';
+    }
+  };
+
+  private onDrop = (event: DragEvent): void => {
+    event.preventDefault();
+    const files = event.dataTransfer?.files;
+    if (!files || files.length === 0) {
+      return;
+    }
+
+    const imageFiles: File[] = [];
+    for (let i = 0; i < files.length; i++) {
+      if (files[i].type.startsWith('image/')) {
+        imageFiles.push(files[i]);
+      }
+    }
+
+    if (imageFiles.length > 0) {
+      this.addImageFiles(imageFiles);
+    }
+  };
+
+  private onPaste = (event: ClipboardEvent): void => {
+    const items = event.clipboardData?.items;
+    if (!items) {
+      return;
+    }
+
+    const imageFiles: File[] = [];
+    for (let i = 0; i < items.length; i++) {
+      if (items[i].type.startsWith('image/')) {
+        const file = items[i].getAsFile();
+        if (file) {
+          imageFiles.push(file);
+        }
+      }
+    }
+
+    if (imageFiles.length > 0) {
+      event.preventDefault();
+      this.addImageFiles(imageFiles);
+    }
+  };
+
+  private addImageFiles(files: File[]): void {
+    const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+    const oversized = files.filter(f => f.size > MAX_FILE_SIZE);
+    if (oversized.length > 0) {
+      alert(`Some files exceed 20MB limit and were skipped: ${oversized.map(f => f.name).join(', ')}`);
+      files = files.filter(f => f.size <= MAX_FILE_SIZE);
+    }
+    for (const file of files) {
+      this.imageFileUrls.push(URL.createObjectURL(file));
+    }
+    this.imageFiles = [...this.imageFiles, ...files];
+    this.requestUpdate();
+  }
+
+  private removeImage(index: number): void {
+    const url = this.imageFileUrls[index];
+    if (url) {
+      URL.revokeObjectURL(url);
+    }
+    this.imageFileUrls.splice(index, 1);
+    this.imageFiles = this.imageFiles.filter((_, i) => i !== index);
+    this.requestUpdate();
+  }
+
   private emitSubmit(): void {
     if (!this.canSubmit) {
       return;
@@ -109,7 +236,7 @@ class TcodeComposer extends LitElement {
 
     this.dispatchEvent(
       new CustomEvent<MessageSubmitDetail>('message-submit', {
-        detail: { text: this.trimmedText },
+        detail: { text: this.trimmedText, imageFiles: this.imageFiles.length > 0 ? [...this.imageFiles] : undefined },
         bubbles: true,
         composed: true,
       }),
@@ -146,6 +273,14 @@ class TcodeComposer extends LitElement {
     `;
   }
 
+  private renderAttachIcon(): TemplateResult {
+    return html`
+      <svg viewBox="0 0 24 24" aria-hidden="true" focusable="false">
+        <path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"></path>
+      </svg>
+    `;
+  }
+
   render(): TemplateResult {
     return html`
       <form class="panel chat-composer" @submit=${this.onSubmit}>
@@ -158,34 +293,52 @@ class TcodeComposer extends LitElement {
             ?disabled=${this.inputDisabled}
             @input=${this.onInput}
             @keydown=${this.onKeyDown}
+            @dragover=${this.onDragOver}
+            @drop=${this.onDrop}
+            @paste=${this.onPaste}
           ></textarea>
-          <div class="chat-composer-actions">
-            ${this.secondaryAction}
-            ${this.generating
-              ? html`
-                  <button
-                    class="button danger chat-composer-action"
-                    type="button"
-                    @click=${this.emitCancel}
-                    ?disabled=${this.inputDisabled || this.cancelling}
-                    aria-label=${this.cancelling ? 'Cancelling conversation' : 'Cancel conversation'}
-                    title=${this.cancelling ? 'Cancelling…' : 'Cancel conversation'}
-                  >
-                    ${this.renderCancelIcon()}
-                  </button>
-                `
-              : html`
-                  <button
-                    class="button chat-composer-action"
-                    type="submit"
-                    ?disabled=${!this.canSubmit}
-                    aria-label=${this.sending ? 'Sending message' : 'Send message'}
-                    title=${this.sending ? 'Sending…' : 'Send message'}
-                  >
-                    ${this.renderSendIcon()}
-                  </button>
-                `}
+        </div>
+        ${this.imageFiles.length > 0 ? html`
+          <div class="image-preview-row">
+            ${this.imageFiles.map((_file, index) => html`
+              <div class="image-preview-item">
+                <img src=${this.imageFileUrls[index]} alt="Preview" class="image-preview-thumb">
+                <button class="image-preview-remove" type="button" @click=${() => this.removeImage(index)} aria-label="Remove image">×</button>
+              </div>
+            `)}
           </div>
+        ` : nothing}
+        <input type="file" accept="image/*" multiple hidden data-role="image-picker" @change=${this.onFilePicked}>
+        <div class="chat-composer-actions">
+          ${this.secondaryAction}
+          <button class="button chat-composer-action" type="button" @click=${this.openFilePicker}
+            ?disabled=${this.inputDisabled} aria-label="Attach images" title="Attach images">
+            ${this.renderAttachIcon()}
+          </button>
+          ${this.generating
+            ? html`
+                <button
+                  class="button danger chat-composer-action"
+                  type="button"
+                  @click=${this.emitCancel}
+                  ?disabled=${this.inputDisabled || this.cancelling}
+                  aria-label=${this.cancelling ? 'Cancelling conversation' : 'Cancel conversation'}
+                  title=${this.cancelling ? 'Cancelling…' : 'Cancel conversation'}
+                >
+                  ${this.renderCancelIcon()}
+                </button>
+              `
+            : html`
+                <button
+                  class="button chat-composer-action"
+                  type="submit"
+                  ?disabled=${!this.canSubmit}
+                  aria-label=${this.sending ? 'Sending message' : 'Send message'}
+                  title=${this.sending ? 'Sending…' : 'Send message'}
+                >
+                  ${this.renderSendIcon()}
+                </button>
+              `}
         </div>
       </form>
     `;

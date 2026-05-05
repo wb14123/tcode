@@ -8,7 +8,7 @@ use axum::{
 #[cfg(feature = "bundled-frontend")]
 use include_dir::{Dir, include_dir};
 
-const FRONTEND_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
+const FRONTEND_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self' data: blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'";
 const FRONTEND_REFERRER_POLICY: &str = "no-referrer";
 
 #[cfg(feature = "bundled-frontend")]

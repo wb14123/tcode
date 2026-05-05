@@ -20,12 +20,14 @@ pub use openai::OpenAI;
 pub use openrouter::OpenRouter;
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use tokio_stream::Stream;
 
 use serde::{Deserialize, Serialize};
 
+use crate::image::ContentPart;
 use crate::tool::Tool;
 
 // ============================================================================
@@ -82,10 +84,13 @@ pub struct ChatOptions {
 // ============================================================================
 
 /// Message content for LLM conversations.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize)]
 pub enum LLMMessage {
     System(String),
-    User(String),
+    /// User message with text and/or image content parts.
+    /// Custom deserializer handles backward compat: old string format
+    /// is automatically wrapped as `vec![ContentPart::Text(s)]`.
+    User(Vec<ContentPart>),
     /// Assistant message with optional tool calls.
     Assistant {
         content: String,
@@ -99,6 +104,83 @@ pub enum LLMMessage {
         tool_call_id: String,
         content: String,
     },
+}
+
+impl<'de> Deserialize<'de> for LLMMessage {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de;
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let obj = value
+            .as_object()
+            .ok_or_else(|| de::Error::custom("expected object"))?;
+
+        if obj.len() != 1 {
+            return Err(de::Error::custom(format!(
+                "expected exactly one key, got {}",
+                obj.len()
+            )));
+        }
+
+        let (key, val) = obj.iter().next().expect("checked len == 1");
+
+        match key.as_str() {
+            "System" => {
+                let content: String =
+                    serde_json::from_value(val.clone()).map_err(de::Error::custom)?;
+                Ok(LLMMessage::System(content))
+            }
+            "User" => {
+                if val.is_string() {
+                    let s: String =
+                        serde_json::from_value(val.clone()).map_err(de::Error::custom)?;
+                    Ok(LLMMessage::User(vec![ContentPart::Text(s)]))
+                } else if val.is_array() {
+                    let parts: Vec<ContentPart> =
+                        serde_json::from_value(val.clone()).map_err(de::Error::custom)?;
+                    Ok(LLMMessage::User(parts))
+                } else {
+                    Err(de::Error::custom(format!(
+                        "expected string or array for User, got {}",
+                        val
+                    )))
+                }
+            }
+            "Assistant" => {
+                #[derive(Deserialize)]
+                struct AssistantInner {
+                    content: String,
+                    #[serde(default)]
+                    tool_calls: Vec<ToolCall>,
+                    raw: Option<serde_json::Value>,
+                }
+                let inner: AssistantInner =
+                    serde_json::from_value(val.clone()).map_err(de::Error::custom)?;
+                Ok(LLMMessage::Assistant {
+                    content: inner.content,
+                    tool_calls: inner.tool_calls,
+                    raw: inner.raw,
+                })
+            }
+            "ToolResult" => {
+                #[derive(Deserialize)]
+                struct ToolResultInner {
+                    tool_call_id: String,
+                    content: String,
+                }
+                let inner: ToolResultInner =
+                    serde_json::from_value(val.clone()).map_err(de::Error::custom)?;
+                Ok(LLMMessage::ToolResult {
+                    tool_call_id: inner.tool_call_id,
+                    content: inner.content,
+                })
+            }
+            other => Err(de::Error::custom(format!("unknown variant: {other}"))),
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -179,6 +261,14 @@ pub enum LLMEvent {
     /// Error occurred during generation.
     /// Maps to Claude's error event or OpenAI error responses.
     Error(String),
+
+    /// The LLM generated an image (e.g. OpenAI image_generation_call).
+    /// The provider has saved the image to the session images dir.
+    /// `relative_path` is like "uuid.png" (relative to images/ dir).
+    ImageOutput {
+        relative_path: String,
+        media_type: String,
+    },
 }
 
 pub trait LLM: Send + Sync {
@@ -211,6 +301,12 @@ pub trait LLM: Send + Sync {
     /// Clone this LLM instance into a new boxed trait object.
     /// Used to create LLM instances for subagent conversations.
     fn clone_box(&self) -> Box<dyn LLM>;
+
+    /// Set the directory where image files are stored for this LLM instance.
+    ///
+    /// Must be called before any `chat` call that may involve images.
+    /// Cloned via `clone_box` so subagent clones inherit the setting.
+    fn set_images_dir(&mut self, dir: Option<PathBuf>);
 
     /// Return the list of models available from this provider.
     /// Used to generate the subagent tool description.

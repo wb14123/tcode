@@ -9,6 +9,7 @@ use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
 
+use llm_rs::image::ContentPart;
 use llm_rs::llm::{ChatOptions, Claude, LLM, LLMEvent, LLMMessage, StopReason};
 use llm_rs::tool;
 use llm_rs::tool::{CancellationToken, Tool, ToolContext};
@@ -60,7 +61,9 @@ async fn main() {
 
     let messages = vec![
         LLMMessage::System("You are a helpful assistant. Use tools when needed.".to_string()),
-        LLMMessage::User("What's the weather in Tokyo?".to_string()),
+        LLMMessage::User(vec![ContentPart::Text(
+            "What's the weather in Tokyo?".to_string(),
+        )]),
     ];
 
     println!("User: What's the weather in Tokyo?");
@@ -128,7 +131,9 @@ async fn main() {
             LLMEvent::Error(err) => {
                 eprintln!("\nError: {}", err);
             }
-            LLMEvent::ToolCallStart { .. } | LLMEvent::ToolCallDelta { .. } => {}
+            LLMEvent::ToolCallStart { .. }
+            | LLMEvent::ToolCallDelta { .. }
+            | LLMEvent::ImageOutput { .. } => {}
         }
     }
 }

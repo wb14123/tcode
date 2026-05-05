@@ -244,6 +244,12 @@ pub struct Session {
 }
 
 impl Session {
+    /// Create a `Session` reference from an existing session directory.
+    /// Does not create the directory — it must already exist.
+    pub fn with_dir(session_dir: PathBuf) -> Self {
+        Self { session_dir }
+    }
+
     /// Create a new session with the given ID.
     /// Creates the session directory with restricted permissions.
     pub fn new(session_id: String) -> Result<Self> {
@@ -344,5 +350,98 @@ impl Session {
     /// Path for stderr log (captures injected stderr from tools like proxychains)
     pub fn stderr_log(&self) -> PathBuf {
         self.session_dir.join("stderr.log")
+    }
+
+    // ------------------------------------------------------------------
+    // Image support
+    // ------------------------------------------------------------------
+
+    /// Path to the `images/` subdirectory for this session.
+    pub fn images_dir(&self) -> PathBuf {
+        self.session_dir.join("images")
+    }
+
+    /// Create the `images/` subdirectory with `0o700` permissions.
+    pub fn create_images_dir(&self) -> Result<()> {
+        let dir = self.images_dir();
+        fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create images directory {:?}", dir))?;
+        fs::set_permissions(&dir, Permissions::from_mode(0o700))
+            .with_context(|| format!("Failed to set permissions on {:?}", dir))?;
+        Ok(())
+    }
+
+    /// Copy a source image file into `images/` with a new UUID filename.
+    ///
+    /// Reads the source, processes it through the resize/compression pipeline,
+    /// and writes the result with `0o600` permissions.
+    ///
+    /// Returns `(relative_filename, media_type)` — e.g.
+    /// `("a1b2c3d4.jpg", "image/jpeg")`.
+    pub fn save_image(&self, source: &Path) -> Result<(String, String)> {
+        const MAX_INPUT_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
+
+        let metadata = std::fs::metadata(source)
+            .with_context(|| format!("Failed to stat source image: {}", source.display()))?;
+        if metadata.len() > MAX_INPUT_FILE_SIZE {
+            bail!(
+                "Image file too large: {} bytes (max {} MB)",
+                metadata.len(),
+                MAX_INPUT_FILE_SIZE / (1024 * 1024)
+            );
+        }
+
+        let data = fs::read(source)
+            .with_context(|| format!("Failed to read source image: {}", source.display()))?;
+
+        // Process through the pipeline (decode → resize → re-encode).
+        let (processed, media_type, ext) = llm_rs::image::process_image(&data)?;
+
+        let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+        let dest = self.images_dir().join(&filename);
+
+        std::fs::write(&dest, &processed)
+            .with_context(|| format!("Failed to write image file: {}", dest.display()))?;
+        std::fs::set_permissions(&dest, Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {:?}", dest))?;
+
+        Ok((filename, media_type))
+    }
+
+    /// Save raw image bytes into `images/`.
+    ///
+    /// The bytes are processed through the resize/compression pipeline (which
+    /// determines the actual output format).  The returned filename always
+    /// uses the extension produced by the pipeline.
+    ///
+    /// Returns `(relative_filename, media_type)` — e.g.
+    /// `("a1b2c3d4.png", "image/png")`.
+    pub fn save_image_data(&self, data: &[u8]) -> Result<(String, String)> {
+        const MAX_UPLOAD_SIZE: usize = 20 * 1024 * 1024; // 20 MB
+
+        if data.len() > MAX_UPLOAD_SIZE {
+            bail!(
+                "Image data too large: {} bytes (max {} MB)",
+                data.len(),
+                MAX_UPLOAD_SIZE / (1024 * 1024)
+            );
+        }
+
+        let (processed, media_type, ext) = llm_rs::image::process_image(data)?;
+
+        let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
+        let dest = self.images_dir().join(&filename);
+
+        std::fs::write(&dest, &processed)
+            .with_context(|| format!("Failed to write image file: {}", dest.display()))?;
+        std::fs::set_permissions(&dest, Permissions::from_mode(0o600))
+            .with_context(|| format!("Failed to set permissions on {:?}", dest))?;
+
+        Ok((filename, media_type))
+    }
+
+    /// Get the absolute path for a relative image filename (e.g. `"uuid.png"`).
+    pub fn image_absolute_path(&self, relative_path: &str) -> PathBuf {
+        self.images_dir().join(relative_path)
     }
 }

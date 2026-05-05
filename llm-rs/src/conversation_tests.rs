@@ -4,6 +4,7 @@ mod tests {
         ConversationClient, ConversationManager, ConversationState, ConversationSummary,
         SystemPromptContext, create_subagent_tool, fill_cancelled_tool_results,
     };
+    use crate::image::ContentPart;
     use crate::llm::{ChatOptions, LLMMessage, ModelInfo, ReasoningEffort, ToolCall};
     use std::path::{Path, PathBuf};
 
@@ -51,7 +52,9 @@ mod tests {
             model: "claude-opus-4-6".to_string(),
             llm_msgs: vec![
                 LLMMessage::System("You are helpful.".to_string()),
-                LLMMessage::User("Hello from an old state".to_string()),
+                LLMMessage::User(vec![ContentPart::Text(
+                    "Hello from an old state".to_string(),
+                )]),
             ],
             chat_options: ChatOptions::default(),
             msg_id_counter: 0,
@@ -128,7 +131,7 @@ mod tests {
             model: "claude-opus-4-6".to_string(),
             llm_msgs: vec![
                 LLMMessage::System("You are helpful.".to_string()),
-                LLMMessage::User("Hello".to_string()),
+                LLMMessage::User(vec![ContentPart::Text("Hello".to_string())]),
                 LLMMessage::Assistant {
                     content: "Hi there!".to_string(),
                     tool_calls: vec![make_tool_call("tc1", "web_search")],
@@ -197,7 +200,7 @@ mod tests {
     fn fill_cancelled_no_assistant() {
         let mut msgs = vec![
             LLMMessage::System("sys".to_string()),
-            LLMMessage::User("hello".to_string()),
+            LLMMessage::User(vec![ContentPart::Text("hello".to_string())]),
         ];
         fill_cancelled_tool_results(&mut msgs);
         assert_eq!(msgs.len(), 2);
@@ -206,7 +209,7 @@ mod tests {
     #[test]
     fn fill_cancelled_no_tool_calls_in_last_assistant() {
         let mut msgs = vec![
-            LLMMessage::User("hello".to_string()),
+            LLMMessage::User(vec![ContentPart::Text("hello".to_string())]),
             LLMMessage::Assistant {
                 content: "hi".to_string(),
                 tool_calls: vec![],
@@ -220,7 +223,7 @@ mod tests {
     #[test]
     fn fill_cancelled_all_results_present() {
         let mut msgs = vec![
-            LLMMessage::User("hello".to_string()),
+            LLMMessage::User(vec![ContentPart::Text("hello".to_string())]),
             LLMMessage::Assistant {
                 content: "".to_string(),
                 tool_calls: vec![make_tool_call("a", "tool_a"), make_tool_call("b", "tool_b")],
@@ -242,7 +245,7 @@ mod tests {
     #[test]
     fn fill_cancelled_partial_results() {
         let mut msgs = vec![
-            LLMMessage::User("hello".to_string()),
+            LLMMessage::User(vec![ContentPart::Text("hello".to_string())]),
             LLMMessage::Assistant {
                 content: "".to_string(),
                 tool_calls: vec![
@@ -284,7 +287,7 @@ mod tests {
     #[test]
     fn fill_cancelled_no_results_at_all() {
         let mut msgs = vec![
-            LLMMessage::User("hello".to_string()),
+            LLMMessage::User(vec![ContentPart::Text("hello".to_string())]),
             LLMMessage::Assistant {
                 content: "".to_string(),
                 tool_calls: vec![make_tool_call("a", "tool_a"), make_tool_call("b", "tool_b")],

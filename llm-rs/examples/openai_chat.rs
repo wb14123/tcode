@@ -6,6 +6,7 @@
 use std::env;
 use std::io::{self, Write};
 
+use llm_rs::image::ContentPart;
 use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, OpenAI, ReasoningEffort};
 use tokio_stream::StreamExt;
 
@@ -19,9 +20,9 @@ async fn main() {
     // Simple conversation
     let messages = vec![
         LLMMessage::System("You are a helpful assistant. Be concise.".to_string()),
-        LLMMessage::User(
+        LLMMessage::User(vec![ContentPart::Text(
             "What is Rust programming language in 2 sentences? Think deeply.".to_string(),
-        ),
+        )]),
     ];
 
     let chat_options = ChatOptions {
@@ -79,7 +80,9 @@ async fn main() {
             LLMEvent::Error(err) => {
                 eprintln!("\nError: {}", err);
             }
-            LLMEvent::ToolCallStart { .. } | LLMEvent::ToolCallDelta { .. } => {}
+            LLMEvent::ToolCallStart { .. }
+            | LLMEvent::ToolCallDelta { .. }
+            | LLMEvent::ImageOutput { .. } => {}
         }
     }
 }

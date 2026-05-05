@@ -198,10 +198,12 @@ impl EditClient {
             Some(conv_id) => ClientMessage::SendMessage {
                 conversation_id: Some(conv_id.clone()),
                 content: content.to_string(),
+                image_filenames: None,
             },
             None => ClientMessage::SendMessage {
                 conversation_id: None,
                 content: content.to_string(),
+                image_filenames: None,
             },
         }
     }

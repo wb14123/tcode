@@ -32,7 +32,7 @@ async fn read_http_headers(stream: &mut TcpStream) -> anyhow::Result<String> {
         anyhow::ensure!(read != 0, "connection closed before response headers");
         buf.extend_from_slice(&chunk[..read]);
         if buf.windows(4).any(|window| window == b"\r\n\r\n") {
-            return Ok(String::from_utf8(buf).context("non-utf8 response headers")?);
+            return String::from_utf8(buf).context("non-utf8 response headers");
         }
     }
 }

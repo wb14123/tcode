@@ -16,7 +16,10 @@ tokio = { version = "1.51.1", features = ["macros", "rt", "rt-multi-thread", "ti
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 llm-rs-macros = { path = "../llm-rs-macros" }
+base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 parking_lot = "0.12"
+regex = "1"
 tracing = "0.1"
 uuid = { version = "1.23.0", features = ["v4"] }
 

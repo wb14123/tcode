@@ -3,10 +3,13 @@
 //! Uses the Anthropic Messages API with OAuth authentication.
 
 use std::collections::HashMap;
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use anyhow::Context;
 use async_stream::stream;
+use base64::Engine;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
@@ -31,6 +34,8 @@ pub struct Claude {
     /// When false, use x-api-key header.
     use_oauth: bool,
     cached_tool_defs: Option<Vec<ClaudeToolDefinition>>,
+    /// Directory for loading image files referenced by ContentPart::Image.
+    pub images_dir: Option<PathBuf>,
 }
 
 impl Claude {
@@ -51,6 +56,7 @@ impl Claude {
             base_url: base_url.into(),
             use_oauth: false,
             cached_tool_defs: None,
+            images_dir: None,
         }
     }
 
@@ -73,6 +79,7 @@ impl Claude {
             base_url: base_url.into(),
             use_oauth: true,
             cached_tool_defs: None,
+            images_dir: None,
         }
     }
 
@@ -171,6 +178,14 @@ enum ClaudeContent {
     Blocks(Vec<ContentBlock>),
 }
 
+/// Image source for Claude's image content blocks.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct ImageSource {
+    r#type: String, // "base64"
+    media_type: String,
+    data: String, // base64-encoded
+}
+
 /// Content block types for Claude messages.
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
@@ -190,6 +205,8 @@ enum ContentBlock {
     },
     #[serde(rename = "thinking")]
     Thinking { thinking: String, signature: String },
+    #[serde(rename = "image")]
+    Image { source: ImageSource },
 }
 
 // ============================================================================
@@ -338,7 +355,10 @@ fn strip_tool_prefix(name: &str) -> String {
 /// Convert LLMMessage list to Claude message format.
 /// Returns (system_blocks, messages).
 /// The system prompt is prefixed with CLAUDE_CODE_SYSTEM_PREFIX for OAuth authentication.
-fn convert_messages(msgs: &[LLMMessage]) -> (Option<Vec<SystemBlock>>, Vec<ClaudeMessage>) {
+fn convert_messages(
+    msgs: &[LLMMessage],
+    images_dir: &Option<PathBuf>,
+) -> anyhow::Result<(Option<Vec<SystemBlock>>, Vec<ClaudeMessage>)> {
     let mut user_system_prompt: Option<String> = None;
     let mut claude_messages: Vec<ClaudeMessage> = Vec::new();
 
@@ -348,11 +368,52 @@ fn convert_messages(msgs: &[LLMMessage]) -> (Option<Vec<SystemBlock>>, Vec<Claud
                 // Claude uses top-level system parameter, not a message role
                 user_system_prompt = Some(content.clone());
             }
-            LLMMessage::User(content) => {
-                claude_messages.push(ClaudeMessage {
-                    role: "user",
-                    content: ClaudeContent::Text(content.clone()),
-                });
+            LLMMessage::User(parts) => {
+                let has_image = parts
+                    .iter()
+                    .any(|p| matches!(p, crate::image::ContentPart::Image(_)));
+                if has_image {
+                    let images_dir = images_dir
+                        .as_ref()
+                        .context("Image present in user message but no images_dir configured")?;
+                    let mut blocks: Vec<ContentBlock> = Vec::new();
+                    for part in parts {
+                        match part {
+                            crate::image::ContentPart::Text(t) => {
+                                blocks.push(ContentBlock::Text { text: t.clone() });
+                            }
+                            crate::image::ContentPart::Image(img) => {
+                                let data = img.get_data(images_dir)?;
+                                let encoded =
+                                    base64::engine::general_purpose::STANDARD.encode(data);
+                                blocks.push(ContentBlock::Image {
+                                    source: ImageSource {
+                                        r#type: "base64".to_string(),
+                                        media_type: img.media_type().to_string(),
+                                        data: encoded,
+                                    },
+                                });
+                            }
+                        }
+                    }
+                    claude_messages.push(ClaudeMessage {
+                        role: "user",
+                        content: ClaudeContent::Blocks(blocks),
+                    });
+                } else {
+                    let content: String = parts
+                        .iter()
+                        .filter_map(|p| match p {
+                            crate::image::ContentPart::Text(t) => Some(t.clone()),
+                            crate::image::ContentPart::Image(_) => None,
+                        })
+                        .collect::<Vec<_>>()
+                        .join("");
+                    claude_messages.push(ClaudeMessage {
+                        role: "user",
+                        content: ClaudeContent::Text(content),
+                    });
+                }
             }
             LLMMessage::Assistant {
                 content,
@@ -441,7 +502,7 @@ fn convert_messages(msgs: &[LLMMessage]) -> (Option<Vec<SystemBlock>>, Vec<Claud
         });
     }
 
-    (Some(system_blocks), claude_messages)
+    Ok((Some(system_blocks), claude_messages))
 }
 
 // ============================================================================
@@ -460,7 +521,12 @@ impl LLM for Claude {
             base_url: self.base_url.clone(),
             use_oauth: self.use_oauth,
             cached_tool_defs: None,
+            images_dir: self.images_dir.clone(),
         })
+    }
+
+    fn set_images_dir(&mut self, dir: Option<PathBuf>) {
+        self.images_dir = dir;
     }
 
     fn available_models(&self) -> Vec<ModelInfo> {
@@ -493,8 +559,17 @@ impl LLM for Claude {
         let model = model.to_string();
         let tool_defs = self.cached_tool_defs.clone();
 
+        let images_dir = self.images_dir.clone();
+
         // Convert messages
-        let (system_blocks, messages) = convert_messages(msgs);
+        let (system_blocks, messages) = match convert_messages(msgs, &images_dir) {
+            Ok(v) => v,
+            Err(e) => {
+                return Box::pin(stream! {
+                    yield LLMEvent::Error(format!("Failed to convert messages: {:#}", e));
+                });
+            }
+        };
 
         // Capture max_tokens option
         let max_tokens_option = options.max_tokens;

@@ -482,6 +482,39 @@ export const api = {
     }).then(() => undefined);
   },
 
+  async uploadSessionImages(sessionId: string, files: File[]): Promise<{ files: { filename: string; media_type: string }[] }> {
+    const formData = new FormData();
+    for (const file of files) {
+      formData.append('file', file);
+    }
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30_000);
+    try {
+      const response = await fetch(makeUrl(`api/sessions/${encodeURIComponent(sessionId)}/images`), {
+        method: 'POST',
+        credentials: 'include',
+        body: formData,
+        signal: controller.signal,
+      });
+      if (response.status === 401) {
+        authExpired();
+      }
+      if (!response.ok) {
+        throw new ApiError(response.status, await readErrorText(response));
+      }
+      return response.json();
+    } finally {
+      clearTimeout(timeoutId);
+    }
+  },
+
+  async sendSessionMessageWithImages(sessionId: string, text: string, imageFilenames: string[]): Promise<void> {
+    return request(`api/sessions/${encodeURIComponent(sessionId)}/messages`, {
+      method: 'POST',
+      body: jsonBody({ text, image_filenames: imageFilenames }),
+    }).then(() => undefined);
+  },
+
   cancelSession(sessionId: string): Promise<void> {
     return request(`api/sessions/${encodeURIComponent(sessionId)}/cancel`, {
       method: 'POST',
