@@ -333,7 +333,7 @@ async fn reader_loop(
             // Server-initiated request — respond with empty success
             let id = msg["id"].clone();
             let method = msg["method"].as_str().unwrap_or("<unknown>");
-            tracing::debug!("LSP server request: {method} (id={id})");
+            tracing::trace!("LSP server request: {method} (id={id})");
 
             let response = serde_json::json!({
                 "jsonrpc": "2.0",
@@ -365,7 +365,7 @@ async fn reader_loop(
         } else {
             // Server notification
             let method = msg["method"].as_str().unwrap_or("<unknown>");
-            tracing::debug!("LSP server notification: {method}");
+            tracing::trace!("LSP server notification: {method}");
 
             if method == "$/progress" {
                 handle_progress_notification(&msg, &progress);

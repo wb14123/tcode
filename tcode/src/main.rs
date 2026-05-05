@@ -808,9 +808,9 @@ fn init_tracing(session_id: &str) {
     if let Some(log_file) = log_file {
         tracing_subscriber::fmt()
             .with_writer(std::sync::Mutex::new(log_file))
-            .with_env_filter(
-                EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("debug")),
-            )
+            .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+                EnvFilter::new("debug,h2=info,reqwest=info,hyper_util=info,rustls=info")
+            }))
             .with_ansi(false)
             .init();
     }
