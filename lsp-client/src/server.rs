@@ -5,8 +5,7 @@ use lsp_types::{
     CallHierarchyClientCapabilities, ClientCapabilities, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, GeneralClientCapabilities, GotoCapability, InitializeParams,
     InitializeResult, InitializedParams, TextDocumentClientCapabilities, TextDocumentIdentifier,
-    TextDocumentItem, Uri, WindowClientCapabilities, WorkspaceClientCapabilities,
-    WorkspaceFolder,
+    TextDocumentItem, Uri, WindowClientCapabilities, WorkspaceClientCapabilities, WorkspaceFolder,
     notification::Notification, request::Request,
 };
 use serde::Serialize;

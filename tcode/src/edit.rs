@@ -26,7 +26,10 @@ static RE_WHITESPACE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\s+").expe
 /// session's `images/` directory, and return cleaned content + filenames.
 ///
 /// Returns `(cleaned_content, image_filenames_or_none)`.
-async fn parse_image_refs(content: &str, session: &Session) -> Result<(String, Option<Vec<String>>)> {
+async fn parse_image_refs(
+    content: &str,
+    session: &Session,
+) -> Result<(String, Option<Vec<String>>)> {
     // Collect all image paths from the content
     let mut raw_paths: Vec<String> = Vec::new();
     for cap in RE_IMAGE_PATH.captures_iter(content) {
