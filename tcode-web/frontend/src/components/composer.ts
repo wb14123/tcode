@@ -63,13 +63,13 @@ class TcodeComposer extends LitElement {
     this.clearImageFiles();
   }
 
-  private imageFileUrls: string[] = [];
+  private imageFileUrls = new Map<File, string>();
 
   private clearImageFiles(): void {
-    for (const url of this.imageFileUrls) {
+    for (const url of this.imageFileUrls.values()) {
       URL.revokeObjectURL(url);
     }
-    this.imageFileUrls = [];
+    this.imageFileUrls.clear();
     this.imageFiles = [];
   }
 
@@ -213,18 +213,19 @@ class TcodeComposer extends LitElement {
       files = files.filter(f => f.size <= MAX_FILE_SIZE);
     }
     for (const file of files) {
-      this.imageFileUrls.push(URL.createObjectURL(file));
+      this.imageFileUrls.set(file, URL.createObjectURL(file));
     }
     this.imageFiles = [...this.imageFiles, ...files];
     this.requestUpdate();
   }
 
   private removeImage(index: number): void {
-    const url = this.imageFileUrls[index];
+    const file = this.imageFiles[index];
+    const url = this.imageFileUrls.get(file);
     if (url) {
       URL.revokeObjectURL(url);
+      this.imageFileUrls.delete(file);
     }
-    this.imageFileUrls.splice(index, 1);
     this.imageFiles = this.imageFiles.filter((_, i) => i !== index);
     this.requestUpdate();
   }
@@ -286,9 +287,9 @@ class TcodeComposer extends LitElement {
       <form class="panel chat-composer" @submit=${this.onSubmit}>
         ${this.imageFiles.length > 0 ? html`
           <div class="image-preview-row">
-            ${this.imageFiles.map((_file, index) => html`
+            ${this.imageFiles.map((file, index) => html`
               <div class="image-preview-item">
-                <img src=${this.imageFileUrls[index]} alt="Preview" class="image-preview-thumb">
+                <img src=${this.imageFileUrls.get(file)} alt="Preview" class="image-preview-thumb">
                 <button class="image-preview-remove" type="button" @click=${() => this.removeImage(index)} aria-label="Remove image">×</button>
               </div>
             `)}
