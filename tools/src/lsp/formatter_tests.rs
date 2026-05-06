@@ -264,6 +264,7 @@ fn document_symbols_flat() {
         tags: None,
         location: test_location("/test/src/main.rs", 0, 0),
         container_name: None,
+        deprecated: None,
     };
     let response = DocumentSymbolResponse::Flat(vec![sym]);
     let out = formatters::format_document_symbols(response, "src/main.rs");
@@ -339,6 +340,7 @@ fn workspace_symbols_flat_grouped_by_file() {
             tags: None,
             location: test_location("/test/src/main.rs", 0, 0),
             container_name: None,
+            deprecated: None,
         },
         SymbolInformation {
             name: "Bar".to_string(),
@@ -346,6 +348,7 @@ fn workspace_symbols_flat_grouped_by_file() {
             tags: None,
             location: test_location("/test/src/lib.rs", 4, 0),
             container_name: None,
+            deprecated: None,
         },
         SymbolInformation {
             name: "baz".to_string(),
@@ -353,6 +356,7 @@ fn workspace_symbols_flat_grouped_by_file() {
             tags: None,
             location: test_location("/test/src/main.rs", 9, 0),
             container_name: None,
+            deprecated: None,
         },
     ];
     let response = WorkspaceSymbolResponse::Flat(symbols);
