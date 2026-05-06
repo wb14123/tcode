@@ -319,7 +319,7 @@ class TcodeSubagentView extends LitElement {
     for (let index = items.length - 1; index >= 0; index -= 1) {
       const item = items[index];
       if (item.kind === 'assistant') {
-        return Boolean(item.content.trim());
+        return item.contentBlocks.some((b) => (b.kind === 'text' && b.text.trim()) || b.kind === 'image');
       }
       if (item.kind === 'user') {
         return false;

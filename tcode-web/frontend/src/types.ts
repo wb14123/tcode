@@ -109,11 +109,29 @@ export interface TimelineItemBase {
   revision: number;
 }
 
+export interface AssistantTextBlock {
+  kind: 'text';
+  text: string;
+}
+
+export interface AssistantImageBlock {
+  kind: 'image';
+  imageId: string | null;
+  pending: boolean;
+  createdAt: number | null;
+  image?: {
+    relative_path: string;
+    media_type: string;
+  };
+}
+
+export type AssistantContentBlock = AssistantTextBlock | AssistantImageBlock;
+
 export interface AssistantTimelineItem extends TimelineItemBase {
   kind: 'assistant';
   msgId: number | null;
   createdAt: number | null;
-  content: string;
+  contentBlocks: AssistantContentBlock[];
   thinking: string;
   endStatus: string | null;
   error: string | null;
@@ -182,17 +200,6 @@ export interface RawTimelineItem extends TimelineItemBase {
   rawJson: unknown;
 }
 
-export interface AssistantImageTimelineItem extends TimelineItemBase {
-  kind: 'assistant-image';
-  msgId: number | null;
-  imageId: string | null;
-  pending?: boolean;
-  image?: {
-    relative_path: string;
-    media_type: string;
-  };
-}
-
 export type TimelineItem =
   | UserTimelineItem
   | AssistantTimelineItem
@@ -200,8 +207,7 @@ export type TimelineItem =
   | SubagentTimelineItem
   | SystemTimelineItem
   | SignalTimelineItem
-  | RawTimelineItem
-  | AssistantImageTimelineItem;
+  | RawTimelineItem;
 
 // Must match llm_rs::permission::ALL_SCOPES in permission.rs
 // When adding a new scope/key to the Rust side, update this constant too.

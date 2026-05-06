@@ -2,6 +2,7 @@ import { html, nothing, type TemplateResult } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
 import { renderMarkdownToHtml } from './markdown.ts';
+import { formatTimestamp, prettyJson } from './formatting.ts';
 import { hrefForRoute } from './router.ts';
 import { TimelineStore } from './timeline-store.ts';
 import {
@@ -19,7 +20,6 @@ import {
   toolRowTitle,
 } from './timeline-render-helpers.ts';
 import type {
-  AssistantImageTimelineItem,
   AssistantTimelineItem,
   RawStreamEvent,
   RawTimelineItem,
@@ -113,7 +113,7 @@ function createAssistant(id: string, msgId: number | null): AssistantTimelineIte
     kind: 'assistant',
     msgId,
     createdAt: null,
-    content: '',
+    contentBlocks: [],
     thinking: '',
     endStatus: null,
     error: null,
@@ -199,7 +199,11 @@ function shouldRenderTimelineItem(item: TimelineItem): boolean {
     return true;
   }
 
-  return Boolean(item.content.trim() || item.thinking.trim() || item.error);
+  return Boolean(
+    (item.contentBlocks.some((b) => (b.kind === 'text' && b.text.trim()) || b.kind === 'image')) ||
+    item.thinking.trim() ||
+    item.error,
+  );
 }
 
 interface PendingSubagentInput {
@@ -327,7 +331,13 @@ export class ConversationTimelineBuilder {
           const id = this.ensureActiveAssistantId();
           this.updateAssistant(id, (item) => {
             item.msgId ??= asNumber(payload.msg_id);
-            item.content += asString(payload.content) ?? '';
+            const chunk = asString(payload.content) ?? '';
+            const lastBlock = item.contentBlocks.at(-1);
+            if (lastBlock && lastBlock.kind === 'text') {
+              lastBlock.text += chunk;
+            } else {
+              item.contentBlocks.push({ kind: 'text', text: chunk });
+            }
           });
           this.store.setActiveAssistantId(id);
           break;
@@ -696,51 +706,40 @@ export class ConversationTimelineBuilder {
           this.addItem(createSignal(this.store, 'Subagent token rollup recorded'), false);
           break;
         case 'AssistantImageGenerating': {
-          const msgId = asNumber(payload.msg_id);
-          const imageId = asString(payload.image_id);
-          const item: AssistantImageTimelineItem = {
-            id: imageId ? `assistant-image:${imageId}` : this.store.nextSequenceId('assistant-image'),
-            revision: 0,
-            kind: 'assistant-image',
-            msgId,
-            imageId,
-            pending: true,
-          };
-          this.addItem(item);
+          const id = this.ensureActiveAssistantId();
+          this.updateAssistant(id, (item) => {
+            item.msgId ??= asNumber(payload.msg_id);
+            const imageId = asString(payload.image_id);
+            item.contentBlocks.push({
+              kind: 'image',
+              imageId,
+              pending: true,
+              createdAt: asNumber(payload.created_at),
+            });
+          });
+          this.store.setActiveAssistantId(id);
           break;
         }
 
         case 'AssistantImageOutput': {
-          const msgId = asNumber(payload.msg_id);
+          const id = this.ensureActiveAssistantId();
           const imageId = asString(payload.image_id);
-          const image = payload.image as { relative_path: string; media_type: string } | undefined;
-          if (image) {
-            const itemId = imageId ? `assistant-image:${imageId}` : null;
-            const existingItem = itemId ? this.store.getItem(itemId) : null;
-            if (existingItem && existingItem.kind === 'assistant-image') {
-              // Update existing pending item
-              this.store.updateItem(itemId!, { visibleChange: true }, (item) => {
-                if (item.kind === 'assistant-image') {
-                  item.msgId = msgId;
-                  item.imageId = imageId;
-                  item.pending = false;
-                  item.image = { relative_path: image.relative_path, media_type: image.media_type };
+          const imgData = payload.image as { relative_path: string; media_type: string } | undefined;
+          if (imgData) {
+            this.updateAssistant(id, (item) => {
+              item.msgId ??= asNumber(payload.msg_id);
+              for (let i = item.contentBlocks.length - 1; i >= 0; i--) {
+                const block = item.contentBlocks[i];
+                if (block?.kind === 'image' && block.imageId === imageId && block.pending) {
+                  block.pending = false;
+                  block.image = { relative_path: imgData.relative_path, media_type: imgData.media_type };
+                  block.createdAt ??= asNumber(payload.created_at);
+                  break;
                 }
-              });
-            } else {
-              // Create new item (fallback if we missed the generating event)
-              const item: AssistantImageTimelineItem = {
-                id: itemId ?? this.store.nextSequenceId('assistant-image'),
-                revision: 0,
-                kind: 'assistant-image',
-                msgId,
-                imageId,
-                pending: false,
-                image: { relative_path: image.relative_path, media_type: image.media_type },
-              };
-              this.addItem(item);
-            }
+              }
+            });
           }
+          this.store.setActiveAssistantId(id);
           break;
         }
         default:
@@ -1020,22 +1019,6 @@ export function extractSystemNotification(event: RawStreamEvent): SystemNotifica
   };
 }
 
-function formatTimestamp(timestamp: number | string | null | undefined): string {
-  if (timestamp === null || timestamp === undefined) {
-    return '—';
-  }
-
-  return new Date(timestamp).toLocaleString();
-}
-
-function prettyJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
-  }
-}
-
 function statusBadge(status: string | null, flavor?: string): TemplateResult | typeof nothing {
   if (!status && !flavor) {
     return nothing;
@@ -1116,7 +1099,7 @@ function renderUser(item: UserTimelineItem, context: TimelineRenderContext): Tem
   `;
 }
 
-function renderAssistant(item: AssistantTimelineItem): TemplateResult {
+function renderAssistant(item: AssistantTimelineItem, context: TimelineRenderContext): TemplateResult {
   return html`
     <article class="chat-bubble chat-bubble-assistant timeline-assistant">
       <div class="message-meta">
@@ -1131,9 +1114,31 @@ function renderAssistant(item: AssistantTimelineItem): TemplateResult {
             </details>
           `
         : nothing}
-      ${item.content
-        ? html`<div class="message-bubble-content markdown-content">${unsafeHTML(renderMarkdownToHtml(item.content))}</div>`
-        : nothing}
+      ${item.contentBlocks.map((block) => {
+        if (block.kind === 'text') {
+          return block.text
+            ? html`<div class="message-bubble-content markdown-content">${unsafeHTML(renderMarkdownToHtml(block.text))}</div>`
+            : nothing;
+        }
+        // image block
+        if (block.pending) {
+          return html`
+            <div class="image-placeholder">
+              <div class="image-placeholder-label">Generating image…</div>
+            </div>
+          `;
+        }
+        if (!block.image) {
+          return nothing;
+        }
+        const imgSrc = `/api/sessions/${context.sessionId}/images/${block.image.relative_path}`;
+        return html`
+          <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
+               @click=${() => openLightbox(imgSrc)}
+               @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
+               alt="AI generated image">
+        `;
+      })}
       ${item.error ? html`<div class="inline-alert error">${item.error}</div>` : nothing}
       ${(item.inputTokens ?? item.outputTokens ?? item.reasoningTokens) !== null
         ? html`
@@ -1142,29 +1147,6 @@ function renderAssistant(item: AssistantTimelineItem): TemplateResult {
             </footer>
           `
         : nothing}
-    </article>
-  `;
-}
-
-function renderAssistantImage(item: AssistantImageTimelineItem, context: TimelineRenderContext): TemplateResult {
-  if (item.pending || !item.image) {
-    return html`
-      <article class="chat-bubble chat-bubble-assistant timeline-assistant-image">
-        <div class="message-meta">Assistant · Generating image…</div>
-        <div class="image-placeholder">
-          <div class="image-placeholder-label">Generating image…</div>
-        </div>
-      </article>
-    `;
-  }
-  const imgSrc = `/api/sessions/${context.sessionId}/images/${item.image.relative_path}`;
-  return html`
-    <article class="chat-bubble chat-bubble-assistant timeline-assistant-image">
-      <div class="message-meta">Assistant · ${formatTimestamp(item.msgId)}</div>
-      <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
-           @click=${() => openLightbox(imgSrc)}
-           @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
-           alt="AI generated image">
     </article>
   `;
 }
@@ -1305,9 +1287,7 @@ export function renderTimelineItem(item: TimelineItem, context: TimelineRenderCo
     case 'user':
       return renderUser(item, context);
     case 'assistant':
-      return renderAssistant(item);
-    case 'assistant-image':
-      return renderAssistantImage(item, context);
+      return renderAssistant(item, context);
     case 'tool':
       return renderTool(item, context);
     case 'subagent':

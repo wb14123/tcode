@@ -12,7 +12,8 @@ export class StreamEventBatcher {
   enqueue(event: RawStreamEvent): void {
     if (
       event.wire?.variant === 'AssistantMessageEnd' ||
-      event.wire?.variant === 'AssistantImageGenerating'
+      event.wire?.variant === 'AssistantImageGenerating' ||
+      event.wire?.variant === 'AssistantImageOutput'
     ) {
       this.flush();
       this.applyEvents([event]);

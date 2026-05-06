@@ -5,7 +5,6 @@ import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 import { renderMarkdownToHtml } from '../markdown';
 import { hrefForRoute } from '../router';
 import type {
-  AssistantImageTimelineItem,
   AssistantTimelineItem,
   RawTimelineItem,
   SubagentTimelineItem,
@@ -30,8 +29,9 @@ import {
   toolRowTitle,
 } from '../timeline-render-helpers';
 import { BROKEN_IMAGE_SVG, openLightbox } from '../messages';
+import { formatTimestamp, prettyJson } from '../formatting';
 
-type TimelineRowTag = 'tcode-user-message' | 'tcode-assistant-message' | 'tcode-tool-row' | 'tcode-subagent-row' | 'tcode-raw-event-row' | 'tcode-assistant-image-row';
+type TimelineRowTag = 'tcode-user-message' | 'tcode-assistant-message' | 'tcode-tool-row' | 'tcode-subagent-row' | 'tcode-raw-event-row';
 
 function tagForItem(item: TimelineItem): TimelineRowTag | null {
   switch (item.kind) {
@@ -39,8 +39,6 @@ function tagForItem(item: TimelineItem): TimelineRowTag | null {
       return 'tcode-user-message';
     case 'assistant':
       return 'tcode-assistant-message';
-    case 'assistant-image':
-      return 'tcode-assistant-image-row';
     case 'tool':
       return 'tcode-tool-row';
     case 'subagent':
@@ -50,22 +48,6 @@ function tagForItem(item: TimelineItem): TimelineRowTag | null {
     case 'system':
     case 'signal':
       return null;
-  }
-}
-
-function formatTimestamp(timestamp: number | string | null | undefined): string {
-  if (timestamp === null || timestamp === undefined) {
-    return '—';
-  }
-
-  return new Date(timestamp).toLocaleString();
-}
-
-function prettyJson(value: unknown): string {
-  try {
-    return JSON.stringify(value, null, 2);
-  } catch {
-    return String(value);
   }
 }
 
@@ -196,8 +178,6 @@ class TcodeTimeline extends LitElement {
         return html`<tcode-subagent-row data-timeline-item-id=${itemId} .store=${this.store} .itemId=${itemId} .sessionId=${this.sessionId} .currentSubagentId=${this.currentSubagentId}></tcode-subagent-row>`;
       case 'tcode-raw-event-row':
         return html`<tcode-raw-event-row data-timeline-item-id=${itemId} .store=${this.store} .itemId=${itemId} .sessionId=${this.sessionId} .currentSubagentId=${this.currentSubagentId}></tcode-raw-event-row>`;
-      case 'tcode-assistant-image-row':
-        return html`<tcode-assistant-image-row data-timeline-item-id=${itemId} .store=${this.store} .itemId=${itemId} .sessionId=${this.sessionId} .currentSubagentId=${this.currentSubagentId}></tcode-assistant-image-row>`;
     }
   }
 
@@ -479,9 +459,31 @@ class TcodeAssistantMessage extends TimelineRowElement {
               </details>
             `
           : nothing}
-        ${item.content
-          ? html`<div class="message-bubble-content markdown-content">${unsafeHTML(this.markdownHtmlFor(item))}</div>`
-          : nothing}
+        ${item.contentBlocks.map((block) => {
+          if (block.kind === 'text') {
+            return block.text
+              ? html`<div class="message-bubble-content markdown-content">${unsafeHTML(this.markdownHtmlForBlock(block))}</div>`
+              : nothing;
+          }
+          // image block
+          if (block.pending) {
+            return html`
+              <div class="image-placeholder">
+                <div class="image-placeholder-label">Generating image…</div>
+              </div>
+            `;
+          }
+          if (!block.image) {
+            return nothing;
+          }
+          const imgSrc = `/api/sessions/${this.sessionId}/images/${block.image.relative_path}`;
+          return html`
+            <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
+                 @click=${() => openLightbox(imgSrc)}
+                 @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
+                 alt="AI generated image">
+          `;
+        })}
         ${item.error ? html`<div class="inline-alert error">${item.error}</div>` : nothing}
         ${(item.inputTokens ?? item.outputTokens ?? item.reasoningTokens) !== null
           ? html`
@@ -494,14 +496,15 @@ class TcodeAssistantMessage extends TimelineRowElement {
     `;
   }
 
-  private markdownHtmlFor(item: AssistantTimelineItem): string {
-    const source = item.content;
+  private markdownHtmlForBlock(block: { kind: 'text'; text: string }): string {
+    const source = block.text;
     if (source === this.lastRenderedSource) {
       return this.lastRenderedHtml;
     }
 
-    const isActive = this.store?.getActiveAssistantId() === item.id;
-    const isFinal = !isActive && (item.endStatus !== null || item.error !== null || item.inputTokens !== null || item.outputTokens !== null || item.reasoningTokens !== null);
+    const isActive = this.store?.getActiveAssistantId() === this.item?.id;
+    const item = this.item as AssistantTimelineItem | undefined;
+    const isFinal = item && !isActive && (item.endStatus !== null || item.error !== null || item.inputTokens !== null || item.outputTokens !== null || item.reasoningTokens !== null);
     if (!isActive || isFinal || !this.lastRenderedSource) {
       this.clearPendingMarkdownTimer();
       return this.renderMarkdownNow(source);
@@ -683,46 +686,9 @@ class TcodeRawEventRow extends TimelineRowElement {
   }
 }
 
-class TcodeAssistantImageRow extends TimelineRowElement {
-  protected expectedKind(): TimelineItem['kind'] {
-    return 'assistant-image';
-  }
-
-  protected renderItem(item: TimelineItem): TemplateResult | typeof nothing {
-    if (item.kind !== 'assistant-image') {
-      return nothing;
-    }
-    return this.renderAssistantImage(item);
-  }
-
-  private renderAssistantImage(item: AssistantImageTimelineItem): TemplateResult {
-    if (item.pending || !item.image) {
-      return html`
-        <article class="chat-bubble chat-bubble-assistant timeline-assistant-image">
-          <div class="message-meta">Assistant · Generating image…</div>
-          <div class="image-placeholder">
-            <div class="image-placeholder-label">Generating image…</div>
-          </div>
-        </article>
-      `;
-    }
-    const imgSrc = `/api/sessions/${this.sessionId}/images/${item.image.relative_path}`;
-    return html`
-      <article class="chat-bubble chat-bubble-assistant timeline-assistant-image">
-        <div class="message-meta">Assistant · ${formatTimestamp(item.msgId)}</div>
-        <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
-             @click=${() => openLightbox(imgSrc)}
-             @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
-             alt="AI generated image">
-      </article>
-    `;
-  }
-}
-
 customElements.define('tcode-timeline', TcodeTimeline);
 customElements.define('tcode-user-message', TcodeUserMessage);
 customElements.define('tcode-assistant-message', TcodeAssistantMessage);
 customElements.define('tcode-tool-row', TcodeToolRow);
 customElements.define('tcode-subagent-row', TcodeSubagentRow);
 customElements.define('tcode-raw-event-row', TcodeRawEventRow);
-customElements.define('tcode-assistant-image-row', TcodeAssistantImageRow);

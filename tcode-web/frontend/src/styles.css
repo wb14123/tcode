@@ -1397,11 +1397,6 @@ tcode-timeline {
   object-fit: contain;
 }
 
-.chat-bubble-assistant.timeline-assistant-image {
-  display: flex;
-  flex-direction: column;
-}
-
 .chat-status-bar {
   display: flex;
   align-items: center;
