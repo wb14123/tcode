@@ -588,6 +588,21 @@ details > summary {
   color: var(--accent-strong);
 }
 
+.thinking-content {
+  color: var(--text-subtle);
+  font-size: 0.92rem;
+  line-height: 1.55;
+  padding: 0.5rem 0 0.25rem;
+}
+
+.thinking-content.markdown-content code {
+  color: var(--text-subtle);
+}
+
+.thinking-content.markdown-content pre {
+  color: var(--text-subtle);
+}
+
 .login-shell {
   min-height: 100vh;
   min-height: 100svh;

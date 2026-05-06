@@ -445,6 +445,9 @@ class TcodeAssistantMessage extends TimelineRowElement {
   }
 
   private renderAssistant(item: AssistantTimelineItem): TemplateResult {
+    const isActive = this.store?.getActiveAssistantId() === item.id;
+    const isFinal = !isActive || item.endStatus !== null || item.error !== null || item.inputTokens !== null || item.outputTokens !== null || item.reasoningTokens !== null;
+
     return html`
       <article class="chat-bubble chat-bubble-assistant timeline-assistant">
         <div class="message-meta">
@@ -453,16 +456,16 @@ class TcodeAssistantMessage extends TimelineRowElement {
         </div>
         ${item.thinking
           ? html`
-              <details class="thinking-panel">
+              <details class="thinking-panel" ?open=${isActive && !isFinal}>
                 <summary>Reasoning stream</summary>
-                <pre class="timeline-pre">${item.thinking}</pre>
+                <div class="thinking-content markdown-content">${unsafeHTML(renderMarkdownToHtml(item.thinking))}</div>
               </details>
             `
           : nothing}
         ${item.contentBlocks.map((block) => {
           if (block.kind === 'text') {
             return block.text
-              ? html`<div class="message-bubble-content markdown-content">${unsafeHTML(this.markdownHtmlForBlock(block))}</div>`
+              ? html`<div class="message-bubble-content markdown-content">${unsafeHTML(this.markdownHtmlForBlock(block, isActive, isFinal))}</div>`
               : nothing;
           }
           // image block
@@ -496,15 +499,12 @@ class TcodeAssistantMessage extends TimelineRowElement {
     `;
   }
 
-  private markdownHtmlForBlock(block: { kind: 'text'; text: string }): string {
+  private markdownHtmlForBlock(block: { kind: 'text'; text: string }, isActive: boolean, isFinal: boolean): string {
     const source = block.text;
     if (source === this.lastRenderedSource) {
       return this.lastRenderedHtml;
     }
 
-    const isActive = this.store?.getActiveAssistantId() === this.item?.id;
-    const item = this.item as AssistantTimelineItem | undefined;
-    const isFinal = item && !isActive && (item.endStatus !== null || item.error !== null || item.inputTokens !== null || item.outputTokens !== null || item.reasoningTokens !== null);
     if (!isActive || isFinal || !this.lastRenderedSource) {
       this.clearPendingMarkdownTimer();
       return this.renderMarkdownNow(source);
