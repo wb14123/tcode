@@ -695,18 +695,51 @@ export class ConversationTimelineBuilder {
         case 'SubAgentTokenRollup':
           this.addItem(createSignal(this.store, 'Subagent token rollup recorded'), false);
           break;
+        case 'AssistantImageGenerating': {
+          const msgId = asNumber(payload.msg_id);
+          const imageId = asString(payload.image_id);
+          const item: AssistantImageTimelineItem = {
+            id: imageId ? `assistant-image:${imageId}` : this.store.nextSequenceId('assistant-image'),
+            revision: 0,
+            kind: 'assistant-image',
+            msgId,
+            imageId,
+            pending: true,
+          };
+          this.addItem(item);
+          break;
+        }
+
         case 'AssistantImageOutput': {
           const msgId = asNumber(payload.msg_id);
+          const imageId = asString(payload.image_id);
           const image = payload.image as { relative_path: string; media_type: string } | undefined;
           if (image) {
-            const item: AssistantImageTimelineItem = {
-              id: msgId !== null ? `assistant-image:${msgId}` : this.store.nextSequenceId('assistant-image'),
-              revision: 0,
-              kind: 'assistant-image',
-              msgId,
-              image: { relative_path: image.relative_path, media_type: image.media_type },
-            };
-            this.addItem(item);
+            const itemId = imageId ? `assistant-image:${imageId}` : null;
+            const existingItem = itemId ? this.store.getItem(itemId) : null;
+            if (existingItem && existingItem.kind === 'assistant-image') {
+              // Update existing pending item
+              this.store.updateItem(itemId!, { visibleChange: true }, (item) => {
+                if (item.kind === 'assistant-image') {
+                  item.msgId = msgId;
+                  item.imageId = imageId;
+                  item.pending = false;
+                  item.image = { relative_path: image.relative_path, media_type: image.media_type };
+                }
+              });
+            } else {
+              // Create new item (fallback if we missed the generating event)
+              const item: AssistantImageTimelineItem = {
+                id: itemId ?? this.store.nextSequenceId('assistant-image'),
+                revision: 0,
+                kind: 'assistant-image',
+                msgId,
+                imageId,
+                pending: false,
+                image: { relative_path: image.relative_path, media_type: image.media_type },
+              };
+              this.addItem(item);
+            }
           }
           break;
         }
@@ -987,8 +1020,8 @@ export function extractSystemNotification(event: RawStreamEvent): SystemNotifica
   };
 }
 
-function formatTimestamp(timestamp: number | null | undefined): string {
-  if (!timestamp) {
+function formatTimestamp(timestamp: number | string | null | undefined): string {
+  if (timestamp === null || timestamp === undefined) {
     return '—';
   }
 
@@ -1114,10 +1147,20 @@ function renderAssistant(item: AssistantTimelineItem): TemplateResult {
 }
 
 function renderAssistantImage(item: AssistantImageTimelineItem, context: TimelineRenderContext): TemplateResult {
+  if (item.pending || !item.image) {
+    return html`
+      <article class="chat-bubble chat-bubble-assistant timeline-assistant-image">
+        <div class="message-meta">Assistant · Generating image…</div>
+        <div class="image-placeholder">
+          <div class="image-placeholder-label">Generating image…</div>
+        </div>
+      </article>
+    `;
+  }
   const imgSrc = `/api/sessions/${context.sessionId}/images/${item.image.relative_path}`;
   return html`
     <article class="chat-bubble chat-bubble-assistant timeline-assistant-image">
-      <div class="message-meta">Assistant · ${formatTimestamp(item.msgId !== null ? item.msgId : null)}</div>
+      <div class="message-meta">Assistant · ${formatTimestamp(item.msgId)}</div>
       <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
            @click=${() => openLightbox(imgSrc)}
            @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}

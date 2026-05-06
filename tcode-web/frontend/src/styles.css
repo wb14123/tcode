@@ -2078,3 +2078,28 @@ tcode-timeline {
     width: auto;
   }
 }
+
+/* Image generation placeholder */
+.image-placeholder {
+  width: 100%;
+  max-width: 512px;
+  aspect-ratio: 1;
+  border-radius: var(--radius-lg);
+  background: linear-gradient(90deg, var(--panel-soft) 25%, var(--panel) 50%, var(--panel-soft) 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s ease-in-out infinite;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.image-placeholder-label {
+  color: var(--text-muted);
+  font-size: 0.9rem;
+  font-style: italic;
+}
+
+@keyframes shimmer {
+  0% { background-position: 200% 0; }
+  100% { background-position: -200% 0; }
+}

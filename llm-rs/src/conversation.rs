@@ -423,10 +423,19 @@ pub enum Message {
         aggregate_cache_read_tokens: i32,
     },
 
+    /// The LLM has started generating an image. Provides an image_id for
+    /// correlation with the eventual AssistantImageOutput.
+    AssistantImageGenerating {
+        msg_id: MessageID,
+        image_id: String,
+    },
+
     /// The LLM generated an image (e.g. via OpenAI's image_generation_call).
     /// Contains an ImageData reference to the saved file.
+    /// `image_id` correlates with AssistantImageGenerating.
     AssistantImageOutput {
         msg_id: MessageID,
+        image_id: String,
         image: ImageData,
     },
 }
@@ -1806,13 +1815,21 @@ impl Conversation {
                     })?;
                     return Ok(());
                 }
+                LLMEvent::ImageGenerationStarted { image_id } => {
+                    self.broadcast_msg(Message::AssistantImageGenerating {
+                        msg_id: self.next_msg_id(),
+                        image_id: image_id.clone(),
+                    })?;
+                }
                 LLMEvent::ImageOutput {
+                    image_id,
                     relative_path,
                     media_type,
                 } => {
                     let image = ImageData::new(relative_path, media_type);
                     self.broadcast_msg(Message::AssistantImageOutput {
                         msg_id: self.next_msg_id(),
+                        image_id,
                         image,
                     })?;
                 }

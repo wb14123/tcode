@@ -185,7 +185,9 @@ export interface RawTimelineItem extends TimelineItemBase {
 export interface AssistantImageTimelineItem extends TimelineItemBase {
   kind: 'assistant-image';
   msgId: number | null;
-  image: {
+  imageId: string | null;
+  pending?: boolean;
+  image?: {
     relative_path: string;
     media_type: string;
   };

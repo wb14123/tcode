@@ -53,8 +53,8 @@ function tagForItem(item: TimelineItem): TimelineRowTag | null {
   }
 }
 
-function formatTimestamp(timestamp: number | null | undefined): string {
-  if (!timestamp) {
+function formatTimestamp(timestamp: number | string | null | undefined): string {
+  if (timestamp === null || timestamp === undefined) {
     return '—';
   }
 
@@ -696,6 +696,16 @@ class TcodeAssistantImageRow extends TimelineRowElement {
   }
 
   private renderAssistantImage(item: AssistantImageTimelineItem): TemplateResult {
+    if (item.pending || !item.image) {
+      return html`
+        <article class="chat-bubble chat-bubble-assistant timeline-assistant-image">
+          <div class="message-meta">Assistant · Generating image…</div>
+          <div class="image-placeholder">
+            <div class="image-placeholder-label">Generating image…</div>
+          </div>
+        </article>
+      `;
+    }
     const imgSrc = `/api/sessions/${this.sessionId}/images/${item.image.relative_path}`;
     return html`
       <article class="chat-bubble chat-bubble-assistant timeline-assistant-image">

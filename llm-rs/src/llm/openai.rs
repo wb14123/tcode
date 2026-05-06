@@ -680,6 +680,21 @@ impl LLM for OpenAI {
                         }
                     }
 
+                    // Output item added — detect image_generation_call immediately
+                    // so we can emit ImageGenerationStarted before the result is ready.
+                    "response.output_item.added" => {
+                        if let Ok(parsed) = serde_json::from_str::<OutputItemDonePayload>(data) {
+                            let item_type = parsed.item.get("type").and_then(|t| t.as_str());
+                            if item_type == Some("image_generation_call") {
+                                if let Some(item_id) = parsed.item.get("id").and_then(|v| v.as_str()) {
+                                    yield LLMEvent::ImageGenerationStarted {
+                                        image_id: item_id.to_string(),
+                                    };
+                                }
+                            }
+                        }
+                    }
+
                     // Output item done — collect for round-tripping and handle
                     // function calls and image generation output
                     "response.output_item.done" => {
@@ -735,6 +750,13 @@ impl LLM for OpenAI {
                                     && let Ok(image_bytes) =
                                         base64::engine::general_purpose::STANDARD.decode(result)
                                         && let Some(ref images_dir) = images_dir {
+                                            // Use the item's id to correlate with the already-emitted
+                                            // ImageGenerationStarted (from output_item.added).
+                                            let image_id = match item.get("id").and_then(|v| v.as_str()) {
+                                                Some(id) => id.to_string(),
+                                                None => Uuid::new_v4().to_string(),
+                                            };
+
                                             // Process through the resize/compress pipeline in a
                                             // blocking task to avoid stalling the async runtime.
                                             let process_result = tokio::task::spawn_blocking(move || {
@@ -743,8 +765,8 @@ impl LLM for OpenAI {
                                             .await;
                                             match process_result {
                                                 Ok(Ok((processed, media_type, ext))) => {
-                                                    let uuid = Uuid::new_v4();
-                                                    let filename = format!("{}.{}", uuid, ext);
+                                                    let filename_uuid = Uuid::new_v4();
+                                                    let filename = format!("{}.{}", filename_uuid, ext);
                                                     let file_path = images_dir.join(&filename);
                                                     // Ensure images dir exists
                                                     if let Err(e) = std::fs::create_dir_all(images_dir) {
@@ -768,6 +790,7 @@ impl LLM for OpenAI {
                                                         }) {
                                                         Ok(()) => {
                                                             yield LLMEvent::ImageOutput {
+                                                                image_id,
                                                                 relative_path: filename,
                                                                 media_type,
                                                             };
