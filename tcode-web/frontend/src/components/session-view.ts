@@ -4,6 +4,7 @@ import { ApiError, api, openEventStream, sessionLeaseManager, type LeaseSnapshot
 import { navigate } from '../router';
 import { StreamEventBatcher } from '../stream-event-batcher';
 import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant } from '../messages';
+import { SUPPORTED_IMAGE_TYPES } from '../image-types';
 import type { MessageSubmitDetail } from './composer';
 
 import './composer';
@@ -208,6 +209,10 @@ class TcodeSessionView extends LitElement {
     }
   }
 
+  private onComposerNotification(event: CustomEvent<{ message: string; tone: 'error' | 'info' }>): void {
+    this.showToast(event.detail.message, event.detail.tone);
+  }
+
   private combinedUsageText(): string {
     return [this.tokenUsageText, this.usageText].filter((value) => value.trim()).join(' │ ');
   }
@@ -397,6 +402,17 @@ class TcodeSessionView extends LitElement {
 
     try {
       if (this.draftMode && !this.sessionId) {
+        // Validate image types before creating session
+        if (imageFiles && imageFiles.length > 0) {
+          const unsupported = imageFiles.filter(f => !SUPPORTED_IMAGE_TYPES.includes(f.type));
+          if (unsupported.length > 0) {
+            this.showToast(
+              `Unsupported image type(s): ${unsupported.map(f => `${f.name} (${f.type})`).join(', ')}. Supported formats: PNG, JPEG/JPG, GIF, WebP.`,
+              'error',
+            );
+            return;
+          }
+        }
         // Create session first so we have a session_id for image upload,
         // but don't send the initial prompt yet — we'll send it with images below.
         const created = await api.createSession('');
@@ -430,7 +446,20 @@ class TcodeSessionView extends LitElement {
       this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
       this.timelineScrollToken += 1;
     } catch (error) {
-      this.showToast(error instanceof Error ? error.message : 'Failed to send message', 'error');
+      let message: string;
+      if (error instanceof ApiError) {
+        message = error.message;
+        if (imageFiles && imageFiles.length > 0) {
+          message = `Image upload failed: ${message}`;
+        } else {
+          message = `Failed to send message: ${message}`;
+        }
+      } else if (error instanceof Error) {
+        message = `Failed to send message: ${error.message}`;
+      } else {
+        message = 'Failed to send message';
+      }
+      this.showToast(message, 'error');
     } finally {
       this.sending = false;
       this.requestUpdate();
@@ -534,6 +563,7 @@ class TcodeSessionView extends LitElement {
               .resetToken=${this.composerResetToken}
               @message-submit=${this.submitMessage}
               @cancel-requested=${this.cancelConversation}
+              @composer-notification=${this.onComposerNotification}
             ></tcode-composer>
           </div>
         </div>

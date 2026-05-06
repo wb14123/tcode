@@ -174,6 +174,10 @@ class TcodeSubagentView extends LitElement {
     }
   }
 
+  private onComposerNotification(event: CustomEvent<{ message: string; tone: 'error' | 'info' }>): void {
+    this.showToast(event.detail.message, event.detail.tone);
+  }
+
   private combinedUsageText(): string {
     return this.tokenUsageText.trim();
   }
@@ -434,6 +438,7 @@ class TcodeSubagentView extends LitElement {
               .cancelling=${this.cancelling}
               .placeholder=${'Message subagent…'}
               .resetToken=${this.composerResetToken}
+              .hideImageAttach=${true}
               .secondaryAction=${this.isGenerating()
                 ? nothing
                 : html`
@@ -455,6 +460,7 @@ class TcodeSubagentView extends LitElement {
                   `}
               @message-submit=${this.submitMessage}
               @cancel-requested=${this.cancelConversation}
+              @composer-notification=${this.onComposerNotification}
             ></tcode-composer>
           </div>
         </div>

@@ -1,4 +1,17 @@
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
+import { SUPPORTED_IMAGE_TYPES } from '../image-types';
+
+/** Resolve a file's MIME type, falling back to extension for files with empty type (e.g. HEIC on Chrome). */
+function resolveImageType(file: File): string {
+  if (file.type) return file.type;
+  const name = file.name.toLowerCase();
+  if (name.endsWith('.png')) return 'image/png';
+  if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
+  if (name.endsWith('.gif')) return 'image/gif';
+  if (name.endsWith('.webp')) return 'image/webp';
+  if (name.endsWith('.heic') || name.endsWith('.heif')) return 'image/heic';
+  return '';
+}
 
 export interface MessageSubmitDetail {
   text: string;
@@ -15,6 +28,7 @@ class TcodeComposer extends LitElement {
     placeholder: { type: String },
     resetToken: { type: Number },
     secondaryAction: { attribute: false },
+    hideImageAttach: { type: Boolean },
     imageFiles: { type: Array, attribute: false },
   };
 
@@ -24,6 +38,7 @@ class TcodeComposer extends LitElement {
   generating = false;
   cancelling = false;
   placeholder = 'Message…';
+  hideImageAttach = false;
   resetToken = 0;
   secondaryAction: unknown = nothing;
   private text = '';
@@ -71,6 +86,16 @@ class TcodeComposer extends LitElement {
     }
     this.imageFileUrls.clear();
     this.imageFiles = [];
+  }
+
+  /** Dispatch a notification event so parent views can show a toast. */
+  private notify(message: string, tone: 'error' | 'info'): void {
+    this.dispatchEvent(
+      new CustomEvent('composer-notification', {
+        detail: { message, tone },
+        bubbles: true,
+      }),
+    );
   }
 
   private get inputDisabled(): boolean {
@@ -144,7 +169,7 @@ class TcodeComposer extends LitElement {
     const imageFiles: File[] = [];
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      if (file.type.startsWith('image/')) {
+      if (file.type.startsWith('image/') || file.type === '') {
         imageFiles.push(file);
       }
     }
@@ -173,7 +198,7 @@ class TcodeComposer extends LitElement {
 
     const imageFiles: File[] = [];
     for (let i = 0; i < files.length; i++) {
-      if (files[i].type.startsWith('image/')) {
+      if (files[i].type.startsWith('image/') || files[i].type === '') {
         imageFiles.push(files[i]);
       }
     }
@@ -191,7 +216,7 @@ class TcodeComposer extends LitElement {
 
     const imageFiles: File[] = [];
     for (let i = 0; i < items.length; i++) {
-      if (items[i].type.startsWith('image/')) {
+      if (items[i].type.startsWith('image/') || items[i].type === '') {
         const file = items[i].getAsFile();
         if (file) {
           imageFiles.push(file);
@@ -209,9 +234,15 @@ class TcodeComposer extends LitElement {
     const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
     const oversized = files.filter(f => f.size > MAX_FILE_SIZE);
     if (oversized.length > 0) {
-      alert(`Some files exceed 20MB limit and were skipped: ${oversized.map(f => f.name).join(', ')}`);
+      this.notify(`Some files exceed 20MB limit and were skipped: ${oversized.map(f => f.name).join(', ')}`, 'info');
       files = files.filter(f => f.size <= MAX_FILE_SIZE);
     }
+    const unsupported = files.filter(f => !SUPPORTED_IMAGE_TYPES.includes(resolveImageType(f)));
+    if (unsupported.length > 0) {
+      this.notify(`Unsupported image type(s): ${unsupported.map(f => `${f.name} (${resolveImageType(f) || 'unknown'})`).join(', ')}. Supported formats: PNG, JPEG/JPG, GIF, WebP.`, 'info');
+      files = files.filter(f => SUPPORTED_IMAGE_TYPES.includes(resolveImageType(f)));
+    }
+    if (files.length === 0) return;
     for (const file of files) {
       this.imageFileUrls.set(file, URL.createObjectURL(file));
     }
@@ -310,10 +341,12 @@ class TcodeComposer extends LitElement {
           ></textarea>
           <div class="chat-composer-actions">
             ${this.secondaryAction}
-            <button class="button chat-composer-action" type="button" @click=${this.openFilePicker}
-              ?disabled=${this.inputDisabled} aria-label="Attach images" title="Attach images">
-              ${this.renderAttachIcon()}
-            </button>
+            ${this.hideImageAttach ? nothing : html`
+              <button class="button chat-composer-action" type="button" @click=${this.openFilePicker}
+                ?disabled=${this.inputDisabled} aria-label="Attach images" title="Attach images">
+                ${this.renderAttachIcon()}
+              </button>
+            `}
             ${this.generating
               ? html`
                   <button
@@ -340,7 +373,9 @@ class TcodeComposer extends LitElement {
                 `}
           </div>
         </div>
-        <input type="file" accept="image/*" multiple hidden data-role="image-picker" @change=${this.onFilePicked}>
+        ${this.hideImageAttach ? nothing : html`
+          <input type="file" accept="image/*" multiple hidden data-role="image-picker" @change=${this.onFilePicked}>
+        `}
       </form>
     `;
   }
