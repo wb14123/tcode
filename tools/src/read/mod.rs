@@ -3,7 +3,6 @@ use std::path::Path;
 use anyhow::{Result, anyhow};
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
-use quick_xml::escape::escape;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
 
@@ -62,40 +61,59 @@ fn is_binary_content(data: &[u8]) -> bool {
 
 /// Result of processing a single line for output.
 struct ProcessedLine {
-    xml: String,
+    /// The content line: "N| verbatim content"
+    content_line: String,
+    /// Optional annotation lines after the content line (e.g. truncation / offset info)
+    annotations: Vec<String>,
+    /// Number of content characters consumed (for char cap tracking)
     chars_used: usize,
+    /// The character end position (chars_start + chars_used), for truncation annotations
+    chars_end: u64,
     /// True when the global char cap was exhausted — signals the caller to stop reading.
     hit_char_cap: bool,
 }
 
-/// Process a raw line into XML output, handling first_line_offset and char cap truncation.
+/// Result when a line is skipped — e.g. first_line_offset beyond line length.
+const SKIPPED_LINE: ProcessedLine = ProcessedLine {
+    content_line: String::new(),
+    annotations: Vec::new(),
+    chars_used: 0,
+    chars_end: 0,
+    hit_char_cap: false,
+};
+
+/// Process a raw line into plain-text output, handling first_line_offset and char cap truncation.
 ///
 /// `line_buf_capped` indicates the line was too long to fully read into the buffer,
-/// so the content is incomplete and the XML tag will include `truncated="true"`.
+/// so the content is incomplete and a truncation annotation will be emitted.
 fn process_line(
     line_content: &str,
     line_num: u64,
-    is_first: bool,
-    first_line_offset: usize,
+    effective_offset: usize,
     chars_remaining: usize,
     line_buf_capped: bool,
 ) -> ProcessedLine {
     if chars_remaining == 0 {
         return ProcessedLine {
-            xml: String::new(),
+            content_line: String::new(),
+            annotations: Vec::new(),
             chars_used: 0,
+            chars_end: 0,
             hit_char_cap: true,
         };
     }
 
-    // Step 1: Apply first_line_offset to get the visible portion
-    let effective_offset = if is_first { first_line_offset } else { 0 };
+    // Step 1: Apply effective_offset to get the visible portion
     let (content, chars_start) = if effective_offset > 0 {
         let byte_offset = line_content
             .char_indices()
             .nth(effective_offset)
             .map(|(i, _)| i)
             .unwrap_or(line_content.len());
+        // Offset beyond line length → skip this line entirely
+        if byte_offset >= line_content.len() {
+            return SKIPPED_LINE;
+        }
         (&line_content[byte_offset..], effective_offset as u64)
     } else {
         (line_content, 0u64)
@@ -120,83 +138,104 @@ fn process_line(
     } else {
         content_chars
     };
-    let xml_truncated = line_buf_capped || hit_cap;
+    let chars_end = chars_start + chars_used as u64;
+    let is_truncated = line_buf_capped || hit_cap;
 
-    // Only add char range attrs when there's an offset or truncation to report
-    let char_info = if chars_start > 0 || xml_truncated {
-        Some((chars_start, chars_start + chars_used as u64, xml_truncated))
-    } else {
-        None
-    };
+    // Build content line: "N| verbatim content"
+    let content_line = format!("{}| {}", line_num, final_content);
+
+    // Build annotation lines
+    let mut annotations = Vec::new();
+    if chars_start > 0 || is_truncated {
+        if chars_start > 0 && is_truncated {
+            annotations.push(format!(
+                "#| Line {} above starts at character {} and is truncated at character {}.",
+                line_num, chars_start, chars_end
+            ));
+        } else if chars_start > 0 {
+            annotations.push(format!(
+                "#| Line {} above starts at character {}.",
+                line_num, chars_start
+            ));
+        } else {
+            annotations.push(format!(
+                "#| Line {} above is truncated at character {}.",
+                line_num, chars_end
+            ));
+        }
+        // Per-line "To continue" only for buffer-cap truncation (same line).
+        // Global char cap truncation gets the footer-level "To read more" instead,
+        // which includes the line number change.
+        if line_buf_capped {
+            annotations.push(format!(
+                "#| To continue, re-read with first_line_offset={}.",
+                chars_end
+            ));
+        }
+    }
 
     ProcessedLine {
-        xml: format_line_xml(line_num, final_content, char_info),
+        content_line,
+        annotations,
         chars_used,
+        chars_end,
         hit_char_cap: hit_cap,
     }
 }
 
-/// Format a single line as XML.
-///
-/// `char_info` is `(chars_start, chars_end, truncated)` — only present when the line
-/// was read from an offset or truncated. Plain lines get just `<line n="...">`.
-fn format_line_xml(line_num: u64, content: &str, char_info: Option<(u64, u64, bool)>) -> String {
-    let escaped = escape(content);
-    let mut tag = format!("<line n=\"{line_num}\"");
-    if let Some((start, end, truncated)) = char_info {
-        tag.push_str(&format!(" chars_start=\"{start}\" chars_end=\"{end}\""));
-        if truncated {
-            tag.push_str(" truncated=\"true\"");
-        }
-    }
-    tag.push('>');
-    tag.push_str(&escaped);
-    tag.push_str("</line>");
-    tag
-}
-
 /// Try to emit a processed line into `batch`.
 /// Returns `Some(chars_used)` if a line was appended, `None` if the char cap
-/// prevented any output. `*was_truncated` is set in either truncation case.
+/// prevented any output. `*was_truncated` is set when the global char cap is hit.
+/// `*last_truncated_line` and `*last_truncated_offset` are set when mid-line truncation occurs.
 #[allow(clippy::too_many_arguments)]
 fn emit_line(
     line_content: &str,
     line_num: u64,
-    lines_yielded: u64,
+    flo_applied: bool,
     flo: usize,
     chars_consumed: usize,
     max_chars: usize,
     line_buf_capped: bool,
     batch: &mut String,
     was_truncated: &mut bool,
+    last_truncated_line: &mut u64,
+    last_truncated_offset: &mut u64,
 ) -> Option<usize> {
     let remaining = max_chars.saturating_sub(chars_consumed);
-    let is_first = lines_yielded == 0;
-    let line_flo = if is_first { flo } else { 0 };
+    let effective_offset = if flo_applied { 0 } else { flo };
     let processed = process_line(
         line_content,
         line_num,
-        is_first,
-        line_flo,
+        effective_offset,
         remaining,
         line_buf_capped,
     );
-    if processed.hit_char_cap && processed.xml.is_empty() {
+    if processed.hit_char_cap && processed.content_line.is_empty() {
         *was_truncated = true;
+        *last_truncated_line = line_num;
+        *last_truncated_offset = 0;
+        return None;
+    }
+    // Line was skipped (e.g. first_line_offset beyond line length) — nothing to emit
+    if processed.content_line.is_empty() {
         return None;
     }
     batch.push('\n');
-    batch.push_str(&processed.xml);
+    batch.push_str(&processed.content_line);
+    for annotation in &processed.annotations {
+        batch.push('\n');
+        batch.push_str(annotation);
+    }
     if processed.hit_char_cap {
         *was_truncated = true;
+        *last_truncated_line = line_num;
+        *last_truncated_offset = processed.chars_end;
     }
     Some(processed.chars_used)
 }
 
-/// Read a directory and return XML-formatted listing.
+/// Read a directory and return a plain-text listing with a footer.
 async fn read_directory(path: &Path) -> Result<String> {
-    let mut entries: Vec<String> = Vec::new();
-
     let mut dir_iter = tokio::fs::read_dir(path)
         .await
         .map_err(|e| anyhow!("Failed to read directory {}: {}", path.display(), e))?;
@@ -213,21 +252,26 @@ async fn read_directory(path: &Path) -> Result<String> {
     }
     items.sort_by_key(|e| e.file_name());
 
+    let mut entries: Vec<String> = Vec::new();
     for entry in items {
         let name = entry.file_name().to_string_lossy().to_string();
         match entry.file_type().await {
-            Ok(ft) if ft.is_dir() => entries.push(format!("{}/", escape(&name))),
-            _ => entries.push(escape(&name).into_owned()),
+            Ok(ft) if ft.is_dir() => entries.push(format!("{}/", name)),
+            _ => entries.push(name),
         }
     }
 
+    let count = entries.len();
     let path_display = path.to_string_lossy().into_owned();
-    let path_str = escape(&path_display);
-    Ok(format!(
-        "<directory path=\"{}\">\n<entries>\n{}\n</entries>\n</directory>",
-        path_str,
-        entries.join("\n")
-    ))
+    let mut output = entries.join("\n");
+    if !output.is_empty() {
+        output.push('\n');
+    }
+    output.push_str(&format!(
+        "#| Directory: {} ({} entries)",
+        path_display, count
+    ));
+    Ok(output)
 }
 
 /// Read a file or directory from the local filesystem. Error if path doesn't exist.
@@ -239,12 +283,25 @@ async fn read_directory(path: &Path) -> Result<String> {
 /// - Use glob tool if unsure of path. Call in parallel for multiple files.
 /// - Avoid tiny repeated slices (30 line chunks) — read a larger window instead.
 ///
-/// Output: XML `<line n="...">` tags (1-indexed). Lines read from offset or truncated include
-/// `chars_start`/`chars_end`; truncated lines also include `truncated="true"`.
-/// Directories: `<directory path="..."><entries>name\nsubdir/\n...</entries></directory>` (subdirs trailing "/").
+/// Output format: content lines start with `N| ` (line number, pipe, space); everything after is verbatim content.
+/// Annotation lines start with `#|` and describe truncation/offset status.
+/// NOTE: `#|` annotations are metadata, NOT file content. A line like `42| #| something` means line 42 contains
+/// the text `#| something` — the `42| ` prefix is the sole disambiguator.
 ///
-/// Char cap: 20000 by default (max_read_chars adjustable up to 50000). Mid-line truncation adds
-/// `chars_start`, `chars_end`, `truncated="true"` to the line tag.
+///   #| File: /absolute/path                  (header — first line of every file output)
+///   #| Line N above is truncated at character X.
+///   #| Line N above starts at character X.
+///   #| Line N above starts at character X and is truncated at character Y.
+///   #| To continue, re-read with first_line_offset=X.
+///   #| Lines X-Y of Z total.                 (footer — last line of every file output)
+///   #| No content after line Z.              (offset past EOF)
+///   #| Output capped at N characters (max_read_chars=N, file size: M bytes).
+///   #| To read more, re-read with offset=X and first_line_offset=Y.
+///   #| Directory: /path (N entries)          (footer — last line of directory output)
+///
+/// All character counts are Unicode scalar values (Rust `char`), not byte offsets.
+///
+/// Char cap: 20000 by default (max_read_chars adjustable up to 50000).
 /// Pagination: offset/limit for lines; first_line_offset to skip chars within the first line.
 #[tool]
 pub fn read(
@@ -344,18 +401,17 @@ pub fn read(
 
         let start = offset.unwrap_or(1).max(1);
         let lim = limit.unwrap_or(DEFAULT_LIMIT);
-        let max_chars = max_read_chars.unwrap_or(DEFAULT_MAX_READ_CHARS) as usize;
+        let max_chars = max_read_chars.unwrap_or(DEFAULT_MAX_READ_CHARS).max(1) as usize;
         let flo = first_line_offset.unwrap_or(0) as usize;
 
-        // Yield opening XML tag (total_lines not known yet — reported at end)
         let path_display = path.to_string_lossy().into_owned();
-        yield Ok(format!(
-            "<file path=\"{}\">\n<lines start=\"{}\">",
-            escape(&path_display), start
-        ));
+
+        // Yield header
+        yield Ok(format!("#| File: {}", path_display));
 
         let mut current_line: u64 = 0;
         let mut lines_yielded: u64 = 0;
+        let mut flo_applied = false;
         let mut chars_consumed: usize = 0;
         let mut was_truncated = false;
         let mut partial_line: Vec<u8> = Vec::new();
@@ -364,6 +420,10 @@ pub fn read(
         let mut partial_buf_chars: usize = 0;
         let mut partial_capped = false;
         let mut batch = String::new();
+        // Track the last truncated line info for the final "To read more" annotation
+        let mut last_truncated_line: u64 = 0;
+        let mut last_truncated_offset: u64 = 0;
+        let mut first_emitted_line: u64 = 0;
 
         loop {
             let buf = match reader.fill_buf().await {
@@ -379,7 +439,10 @@ pub fn read(
                     current_line += 1;
                     if current_line >= start {
                         let line_str = String::from_utf8_lossy(&partial_line);
-                        if emit_line(&line_str, current_line, lines_yielded, flo, chars_consumed, max_chars, partial_capped, &mut batch, &mut was_truncated).is_some() {
+                        if emit_line(&line_str, current_line, flo_applied, flo, chars_consumed, max_chars, partial_capped, &mut batch, &mut was_truncated, &mut last_truncated_line, &mut last_truncated_offset).is_some() {
+                            if first_emitted_line == 0 {
+                                first_emitted_line = current_line;
+                            }
                             lines_yielded += 1;
                         }
                     }
@@ -404,9 +467,18 @@ pub fn read(
                                 partial_line.extend_from_slice(&buf_owned[pos..line_end]);
                             }
                             let line_str = String::from_utf8_lossy(&partial_line);
-                            if let Some(chars_used) = emit_line(&line_str, current_line, lines_yielded, flo, chars_consumed, max_chars, partial_capped, &mut batch, &mut was_truncated) {
+                            if let Some(chars_used) = emit_line(&line_str, current_line, flo_applied, flo, chars_consumed, max_chars, partial_capped, &mut batch, &mut was_truncated, &mut last_truncated_line, &mut last_truncated_offset) {
                                 chars_consumed += chars_used + 1; // +1 for \n
+                                flo_applied = true;
+                                if first_emitted_line == 0 {
+                                    first_emitted_line = current_line;
+                                }
                                 lines_yielded += 1;
+                            } else if !flo_applied {
+                                // Line was skipped (e.g. offset beyond its length).
+                                // The first_line_offset was applied to this line — don't
+                                // re-apply it to subsequent lines.
+                                flo_applied = true;
                             }
                         }
                         partial_line.clear();
@@ -476,23 +548,47 @@ pub fn read(
             yield Ok(std::mem::take(&mut batch));
         }
 
-        // Closing tags with end and total
+        // Build footer
         let actual_end = if lines_yielded > 0 {
-            start + lines_yielded - 1
+            first_emitted_line + lines_yielded - 1
         } else {
             0
         };
         let total_lines = current_line;
-        let mut closing = format!(
-            "\n</lines>\n<read end=\"{}\" total_lines=\"{}\" />\n</file>",
-            actual_end, total_lines
-        );
+        let mut closing = String::new();
+
+        // Offset beyond EOF or empty file
+        if lines_yielded == 0 {
+            if total_lines == 0 {
+                closing.push_str("\n#| File is empty.");
+            } else {
+                closing.push_str(&format!("\n#| No content after line {}.", start));
+            }
+        }
+
+        closing.push_str(&format!(
+            "\n#| Lines {}-{} of {} total.",
+            if lines_yielded > 0 { first_emitted_line } else { 0 },
+            actual_end,
+            total_lines
+        ));
+
         if was_truncated {
             closing.push_str(&format!(
-                "\n(File truncated at {} chars, total file size: {} bytes)",
-                max_chars, file_size
+                "\n#| Output capped at {} characters (max_read_chars={}, file size: {} bytes).",
+                max_chars, max_chars, file_size
             ));
+            if last_truncated_line > 0 {
+                closing.push_str(&format!(
+                    "\n#| To read more, re-read with offset={} and first_line_offset={}.",
+                    last_truncated_line, last_truncated_offset
+                ));
+            }
         }
+
         yield Ok(closing);
     }
 }
+
+#[cfg(test)]
+mod read_tests;

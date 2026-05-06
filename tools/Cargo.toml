@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 anyhow = "1"
 chrono = "0.4"
-quick-xml = "0.39"
 async-stream = "0.3"
 browser-server = { path = "../browser-server" }
 lsp-client = { path = "../lsp-client" }
