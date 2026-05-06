@@ -1,17 +1,5 @@
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
-import { SUPPORTED_IMAGE_TYPES } from '../image-types';
-
-/** Resolve a file's MIME type, falling back to extension for files with empty type (e.g. HEIC on Chrome). */
-function resolveImageType(file: File): string {
-  if (file.type) return file.type;
-  const name = file.name.toLowerCase();
-  if (name.endsWith('.png')) return 'image/png';
-  if (name.endsWith('.jpg') || name.endsWith('.jpeg')) return 'image/jpeg';
-  if (name.endsWith('.gif')) return 'image/gif';
-  if (name.endsWith('.webp')) return 'image/webp';
-  if (name.endsWith('.heic') || name.endsWith('.heif')) return 'image/heic';
-  return '';
-}
+import { processImageFile } from '../image-processing';
 
 export interface MessageSubmitDetail {
   text: string;
@@ -29,6 +17,7 @@ class TcodeComposer extends LitElement {
     resetToken: { type: Number },
     secondaryAction: { attribute: false },
     hideImageAttach: { type: Boolean },
+    processingImages: { type: Boolean },
     imageFiles: { type: Array, attribute: false },
   };
 
@@ -39,6 +28,7 @@ class TcodeComposer extends LitElement {
   cancelling = false;
   placeholder = 'Message…';
   hideImageAttach = false;
+  processingImages = false;
   resetToken = 0;
   secondaryAction: unknown = nothing;
   private text = '';
@@ -108,7 +98,7 @@ class TcodeComposer extends LitElement {
 
   private get canSubmit(): boolean {
     return (Boolean(this.trimmedText) || this.imageFiles.length > 0)
-      && !this.inputDisabled && !this.sending && !this.generating;
+      && !this.inputDisabled && !this.sending && !this.generating && !this.processingImages;
   }
 
   private syncTextareaHeight(textarea?: HTMLTextAreaElement | null): void {
@@ -175,7 +165,7 @@ class TcodeComposer extends LitElement {
     }
 
     if (imageFiles.length > 0) {
-      this.addImageFiles(imageFiles);
+      void this.addImageFiles(imageFiles);
     }
 
     // Reset so the same file can be picked again
@@ -204,7 +194,7 @@ class TcodeComposer extends LitElement {
     }
 
     if (imageFiles.length > 0) {
-      this.addImageFiles(imageFiles);
+      void this.addImageFiles(imageFiles);
     }
   };
 
@@ -226,27 +216,58 @@ class TcodeComposer extends LitElement {
 
     if (imageFiles.length > 0) {
       event.preventDefault();
-      this.addImageFiles(imageFiles);
+      void this.addImageFiles(imageFiles);
     }
   };
 
-  private addImageFiles(files: File[]): void {
-    const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20MB
+  private async addImageFiles(files: File[]): Promise<void> {
+    if (this.processingImages) {
+      this.notify('Still processing previous images, please wait.', 'info');
+      return;
+    }
+    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
     const oversized = files.filter(f => f.size > MAX_FILE_SIZE);
     if (oversized.length > 0) {
-      this.notify(`Some files exceed 20MB limit and were skipped: ${oversized.map(f => f.name).join(', ')}`, 'info');
+      this.notify(
+        `Some files exceed 10 MB limit and were skipped: ${oversized.map(f => f.name).join(', ')}`,
+        'info',
+      );
       files = files.filter(f => f.size <= MAX_FILE_SIZE);
     }
-    const unsupported = files.filter(f => !SUPPORTED_IMAGE_TYPES.includes(resolveImageType(f)));
-    if (unsupported.length > 0) {
-      this.notify(`Unsupported image type(s): ${unsupported.map(f => `${f.name} (${resolveImageType(f) || 'unknown'})`).join(', ')}. Supported formats: PNG, JPEG/JPG, GIF, WebP.`, 'info');
-      files = files.filter(f => SUPPORTED_IMAGE_TYPES.includes(resolveImageType(f)));
-    }
+
+    // Filter to image-like files (type starts with image/ or empty type for HEIC etc.)
+    files = files.filter(f => f.type.startsWith('image/') || f.type === '');
     if (files.length === 0) return;
+
+    this.processingImages = true;
+    this.requestUpdate();
+
+    const processed: File[] = [];
+    const errors: string[] = [];
     for (const file of files) {
+      try {
+        const result = await processImageFile(file);
+        processed.push(result);
+      } catch (err) {
+        errors.push(err instanceof Error ? err.message : `Failed to process ${file.name}`);
+      }
+    }
+
+    this.processingImages = false;
+
+    if (errors.length > 0) {
+      this.notify(errors.join(' '), 'error');
+    }
+
+    if (processed.length === 0) {
+      this.requestUpdate();
+      return;
+    }
+
+    for (const file of processed) {
       this.imageFileUrls.set(file, URL.createObjectURL(file));
     }
-    this.imageFiles = [...this.imageFiles, ...files];
+    this.imageFiles = [...this.imageFiles, ...processed];
     this.requestUpdate();
   }
 
@@ -316,6 +337,11 @@ class TcodeComposer extends LitElement {
   render(): TemplateResult {
     return html`
       <form class="panel chat-composer" @submit=${this.onSubmit}>
+        ${this.processingImages ? html`
+          <div class="image-preview-row">
+            <span class="image-processing-text">Processing…</span>
+          </div>
+        ` : nothing}
         ${this.imageFiles.length > 0 ? html`
           <div class="image-preview-row">
             ${this.imageFiles.map((file, index) => html`

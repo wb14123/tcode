@@ -1320,6 +1320,12 @@ tcode-timeline {
   padding: 4px 12px;
 }
 
+.image-processing-text {
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  padding: 4px 0;
+}
+
 .image-preview-item {
   position: relative;
   width: 64px;
