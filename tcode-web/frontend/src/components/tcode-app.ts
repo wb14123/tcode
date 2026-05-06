@@ -371,11 +371,6 @@ class TcodeApp extends LitElement {
     window.dispatchEvent(new PopStateEvent('popstate'));
   };
 
-  private openSidebar = (): void => {
-    this.sidebarOpen = true;
-    this.requestUpdate();
-  };
-
   private closeSidebar = (): void => {
     this.sidebarOpen = false;
     this.requestUpdate();
