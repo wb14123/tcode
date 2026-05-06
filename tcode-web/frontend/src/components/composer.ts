@@ -284,6 +284,16 @@ class TcodeComposer extends LitElement {
   render(): TemplateResult {
     return html`
       <form class="panel chat-composer" @submit=${this.onSubmit}>
+        ${this.imageFiles.length > 0 ? html`
+          <div class="image-preview-row">
+            ${this.imageFiles.map((_file, index) => html`
+              <div class="image-preview-item">
+                <img src=${this.imageFileUrls[index]} alt="Preview" class="image-preview-thumb">
+                <button class="image-preview-remove" type="button" @click=${() => this.removeImage(index)} aria-label="Remove image">×</button>
+              </div>
+            `)}
+          </div>
+        ` : nothing}
         <div class="chat-composer-row">
           <textarea
             class="chat-composer-input"
@@ -297,49 +307,39 @@ class TcodeComposer extends LitElement {
             @drop=${this.onDrop}
             @paste=${this.onPaste}
           ></textarea>
-        </div>
-        ${this.imageFiles.length > 0 ? html`
-          <div class="image-preview-row">
-            ${this.imageFiles.map((_file, index) => html`
-              <div class="image-preview-item">
-                <img src=${this.imageFileUrls[index]} alt="Preview" class="image-preview-thumb">
-                <button class="image-preview-remove" type="button" @click=${() => this.removeImage(index)} aria-label="Remove image">×</button>
-              </div>
-            `)}
+          <div class="chat-composer-actions">
+            ${this.secondaryAction}
+            <button class="button chat-composer-action" type="button" @click=${this.openFilePicker}
+              ?disabled=${this.inputDisabled} aria-label="Attach images" title="Attach images">
+              ${this.renderAttachIcon()}
+            </button>
+            ${this.generating
+              ? html`
+                  <button
+                    class="button danger chat-composer-action"
+                    type="button"
+                    @click=${this.emitCancel}
+                    ?disabled=${this.inputDisabled || this.cancelling}
+                    aria-label=${this.cancelling ? 'Cancelling conversation' : 'Cancel conversation'}
+                    title=${this.cancelling ? 'Cancelling…' : 'Cancel conversation'}
+                  >
+                    ${this.renderCancelIcon()}
+                  </button>
+                `
+              : html`
+                  <button
+                    class="button chat-composer-action"
+                    type="submit"
+                    ?disabled=${!this.canSubmit}
+                    aria-label=${this.sending ? 'Sending message' : 'Send message'}
+                    title=${this.sending ? 'Sending…' : 'Send message'}
+                  >
+                    ${this.renderSendIcon()}
+                  </button>
+                `}
           </div>
-        ` : nothing}
-        <input type="file" accept="image/*" multiple hidden data-role="image-picker" @change=${this.onFilePicked}>
-        <div class="chat-composer-actions">
-          ${this.secondaryAction}
-          <button class="button chat-composer-action" type="button" @click=${this.openFilePicker}
-            ?disabled=${this.inputDisabled} aria-label="Attach images" title="Attach images">
-            ${this.renderAttachIcon()}
-          </button>
-          ${this.generating
-            ? html`
-                <button
-                  class="button danger chat-composer-action"
-                  type="button"
-                  @click=${this.emitCancel}
-                  ?disabled=${this.inputDisabled || this.cancelling}
-                  aria-label=${this.cancelling ? 'Cancelling conversation' : 'Cancel conversation'}
-                  title=${this.cancelling ? 'Cancelling…' : 'Cancel conversation'}
-                >
-                  ${this.renderCancelIcon()}
-                </button>
-              `
-            : html`
-                <button
-                  class="button chat-composer-action"
-                  type="submit"
-                  ?disabled=${!this.canSubmit}
-                  aria-label=${this.sending ? 'Sending message' : 'Send message'}
-                  title=${this.sending ? 'Sending…' : 'Send message'}
-                >
-                  ${this.renderSendIcon()}
-                </button>
-              `}
         </div>
+        <input type="file" accept="image/*" multiple hidden data-role="image-picker" @change=${this.onFilePicked}>
       </form>
     `;
   }
