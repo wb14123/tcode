@@ -714,7 +714,6 @@ export class ConversationTimelineBuilder {
               kind: 'image',
               imageId,
               pending: true,
-              createdAt: asNumber(payload.created_at),
             });
           });
           this.store.setActiveAssistantId(id);
@@ -733,7 +732,6 @@ export class ConversationTimelineBuilder {
                 if (block?.kind === 'image' && block.imageId === imageId && block.pending) {
                   block.pending = false;
                   block.image = { relative_path: imgData.relative_path, media_type: imgData.media_type };
-                  block.createdAt ??= asNumber(payload.created_at);
                   break;
                 }
               }
