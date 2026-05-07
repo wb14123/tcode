@@ -28,7 +28,7 @@ import {
   toolDetailRoute,
   toolRowTitle,
 } from '../timeline-render-helpers';
-import { BROKEN_IMAGE_SVG, openLightbox } from '../messages';
+import { BROKEN_IMAGE_SVG, openLightbox, renderAssistantImageBlock } from '../messages';
 import { formatTimestamp, prettyJson } from '../formatting';
 
 type TimelineRowTag = 'tcode-user-message' | 'tcode-assistant-message' | 'tcode-tool-row' | 'tcode-subagent-row' | 'tcode-raw-event-row';
@@ -468,24 +468,9 @@ class TcodeAssistantMessage extends TimelineRowElement {
               ? html`<div class="message-bubble-content markdown-content">${unsafeHTML(this.markdownHtmlForBlock(block, isActive, isFinal))}</div>`
               : nothing;
           }
-          // image block
-          if (block.pending) {
-            return html`
-              <div class="image-placeholder">
-                <div class="image-placeholder-label">Generating image…</div>
-              </div>
-            `;
+          if (block.kind === 'image') {
+            return renderAssistantImageBlock(block, this.sessionId);
           }
-          if (!block.image) {
-            return nothing;
-          }
-          const imgSrc = `/api/sessions/${this.sessionId}/images/${block.image.relative_path}`;
-          return html`
-            <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
-                 @click=${() => openLightbox(imgSrc)}
-                 @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
-                 alt="AI generated image">
-          `;
         })}
         ${item.error ? html`<div class="inline-alert error">${item.error}</div>` : nothing}
         ${(item.inputTokens ?? item.outputTokens ?? item.reasoningTokens) !== null

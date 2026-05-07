@@ -1078,6 +1078,29 @@ export function openLightbox(src: string): void {
   overlay.focus();
 }
 
+export function renderAssistantImageBlock(
+  block: { kind: 'image'; pending: boolean; image?: { relative_path: string } },
+  sessionId: string,
+): TemplateResult | typeof nothing {
+  if (block.pending) {
+    return html`
+      <div class="image-placeholder">
+        <div class="image-placeholder-label">Generating image…</div>
+      </div>
+    `;
+  }
+  if (!block.image) {
+    return nothing;
+  }
+  const imgSrc = `/api/sessions/${sessionId}/images/${block.image.relative_path}`;
+  return html`
+    <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
+         @click=${() => openLightbox(imgSrc)}
+         @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
+         alt="AI generated image">
+  `;
+}
+
 function renderUser(item: UserTimelineItem, context: TimelineRenderContext): TemplateResult {
   return html`
     <article class="chat-bubble chat-bubble-user timeline-user">
@@ -1120,24 +1143,9 @@ function renderAssistant(item: AssistantTimelineItem, context: TimelineRenderCon
             ? html`<div class="message-bubble-content markdown-content">${unsafeHTML(renderMarkdownToHtml(block.text))}</div>`
             : nothing;
         }
-        // image block
-        if (block.pending) {
-          return html`
-            <div class="image-placeholder">
-              <div class="image-placeholder-label">Generating image…</div>
-            </div>
-          `;
+        if (block.kind === 'image') {
+          return renderAssistantImageBlock(block, context.sessionId);
         }
-        if (!block.image) {
-          return nothing;
-        }
-        const imgSrc = `/api/sessions/${context.sessionId}/images/${block.image.relative_path}`;
-        return html`
-          <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
-               @click=${() => openLightbox(imgSrc)}
-               @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
-               alt="AI generated image">
-        `;
       })}
       ${item.error ? html`<div class="inline-alert error">${item.error}</div>` : nothing}
       ${(item.inputTokens ?? item.outputTokens ?? item.reasoningTokens) !== null
