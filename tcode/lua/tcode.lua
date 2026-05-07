@@ -1301,6 +1301,22 @@ local function render_event(buf, ns, event)
       end
     end
 
+  elseif variant == 'AssistantImageGenerating' then
+    -- Status bar updated by server-side status file; nothing to render in buffer.
+
+  elseif variant == 'AssistantImageOutput' then
+    -- Render image as clickable markdown: ![img](file:///absolute/path)
+    if not M.display_file then
+      return
+    end
+    local session_dir = vim.fn.fnamemodify(M.display_file, ':h')
+    local rel_path = data.image and data.image.relative_path
+    if rel_path then
+      local abs_path = session_dir .. '/images/' .. rel_path
+      local encoded = vim.uri_encode(abs_path)
+      append_lines(buf, { '', '![img](file://' .. encoded .. ')' })
+    end
+
   elseif variant == 'AssistantRequestEnd' then
     append_lines(buf, { '► END' })
     local info_line = vim.api.nvim_buf_line_count(buf) - 1

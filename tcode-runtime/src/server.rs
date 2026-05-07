@@ -1120,6 +1120,7 @@ fn run_event_writer(
         // Maps tool_call_index -> tool_call_id for AssistantToolCallArgChunk routing
         let mut tool_call_index_map: HashMap<usize, String> = HashMap::new();
         let mut is_thinking = false;
+        let mut image_gen_count: usize = 0;
         let mut activity_guard = EventWriterActivityGuard::new(Arc::clone(&work_activity));
 
         tracing::info!("event_writer started");
@@ -1622,6 +1623,7 @@ fn run_event_writer(
                         .await
                         .context("Failed to append display event")?;
                     is_thinking = false;
+                    image_gen_count = 0;
                     tool_call_index_map.clear();
                     tokio::fs::write(&status_file, "Ready")
                         .await
@@ -1650,6 +1652,34 @@ fn run_event_writer(
                         *aggregate_cache_read_tokens,
                     )
                     .await?;
+                }
+
+                Message::AssistantImageGenerating { .. } => {
+                    let was_zero = image_gen_count == 0;
+                    image_gen_count = image_gen_count.saturating_add(1);
+                    if was_zero {
+                        tokio::fs::write(&status_file, "Generating image...")
+                            .await
+                            .context("Failed to write status file")?;
+                    }
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append display event")?;
+                }
+
+                Message::AssistantImageOutput { .. } => {
+                    if image_gen_count == 0 {
+                        tracing::warn!("AssistantImageOutput with no pending image generation");
+                    }
+                    image_gen_count = image_gen_count.saturating_sub(1);
+                    if image_gen_count == 0 {
+                        tokio::fs::write(&status_file, "Streaming...")
+                            .await
+                            .context("Failed to write status file")?;
+                    }
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append display event")?;
                 }
 
                 _ => {
