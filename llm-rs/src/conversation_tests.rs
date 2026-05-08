@@ -139,7 +139,7 @@ mod tests {
                 },
                 LLMMessage::ToolResult {
                     tool_call_id: "tc1".to_string(),
-                    content: "Search results...".to_string(),
+                    content: vec![ContentPart::Text("Search results...".to_string())],
                 },
                 LLMMessage::Assistant {
                     content: "Based on the search...".to_string(),
@@ -231,11 +231,11 @@ mod tests {
             },
             LLMMessage::ToolResult {
                 tool_call_id: "a".to_string(),
-                content: "result a".to_string(),
+                content: vec![ContentPart::Text("result a".to_string())],
             },
             LLMMessage::ToolResult {
                 tool_call_id: "b".to_string(),
-                content: "result b".to_string(),
+                content: vec![ContentPart::Text("result b".to_string())],
             },
         ];
         fill_cancelled_tool_results(&mut msgs);
@@ -257,7 +257,7 @@ mod tests {
             },
             LLMMessage::ToolResult {
                 tool_call_id: "a".to_string(),
-                content: "result a".to_string(),
+                content: vec![ContentPart::Text("result a".to_string())],
             },
         ];
         fill_cancelled_tool_results(&mut msgs);
@@ -268,7 +268,10 @@ mod tests {
                 content,
             } => {
                 assert_eq!(tool_call_id, "b");
-                assert!(content.contains("cancelled"));
+                let has_cancelled = content
+                    .iter()
+                    .any(|p| matches!(p, ContentPart::Text(t) if t.contains("cancelled")));
+                assert!(has_cancelled);
             }
             _ => panic!("Expected ToolResult"),
         }
@@ -278,7 +281,10 @@ mod tests {
                 content,
             } => {
                 assert_eq!(tool_call_id, "c");
-                assert!(content.contains("cancelled"));
+                let has_cancelled = content
+                    .iter()
+                    .any(|p| matches!(p, ContentPart::Text(t) if t.contains("cancelled")));
+                assert!(has_cancelled);
             }
             _ => panic!("Expected ToolResult"),
         }
@@ -508,8 +514,19 @@ mod tests {
     fn tool_denial_wrapper_matches_no_reason_text() {
         use crate::conversation::{MessageEndStatus, build_tool_result_content};
 
-        let wrapped =
-            build_tool_result_content(&MessageEndStatus::UserDenied, "raw tool output".to_string());
+        let wrapped = build_tool_result_content(
+            &MessageEndStatus::UserDenied,
+            vec![ContentPart::Text("raw tool output".to_string())],
+        );
+
+        let text: String = wrapped
+            .iter()
+            .filter_map(|p| match p {
+                ContentPart::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect::<Vec<_>>()
+            .join("");
 
         // Exact byte-equal text we send on the denial path. The reason (if
         // any) is already baked into the raw_content by ask_permission_inner,
@@ -519,7 +536,7 @@ mod tests {
                         the human operator chose not to allow this action. Do not retry this tool call. \
                         Instead, ask the user what they would like to do.\n\
                         Original tool output: raw tool output";
-        assert_eq!(wrapped, expected);
+        assert_eq!(text, expected);
     }
 
     #[test]
@@ -532,8 +549,17 @@ mod tests {
             MessageEndStatus::Cancelled,
             MessageEndStatus::Timeout,
         ] {
-            let wrapped = build_tool_result_content(&status, "hello".to_string());
-            assert_eq!(wrapped, "hello", "status {status:?} should be pass-through");
+            let wrapped =
+                build_tool_result_content(&status, vec![ContentPart::Text("hello".to_string())]);
+            let text: String = wrapped
+                .iter()
+                .filter_map(|p| match p {
+                    ContentPart::Text(t) => Some(t.as_str()),
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("");
+            assert_eq!(text, "hello", "status {status:?} should be pass-through");
         }
     }
 }

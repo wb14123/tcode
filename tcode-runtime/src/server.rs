@@ -460,6 +460,7 @@ pub struct Server {
     token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
     container_config: Option<ContainerConfig>,
     runtime_options: ServerRuntimeOptions,
+    supports_vision: bool,
 }
 
 impl Server {
@@ -494,6 +495,7 @@ impl Server {
             token_manager,
             container_config,
             ServerRuntimeOptions::default(),
+            false,
         )
     }
 
@@ -513,6 +515,7 @@ impl Server {
         token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
         container_config: Option<ContainerConfig>,
         runtime_options: ServerRuntimeOptions,
+        supports_vision: bool,
     ) -> Self {
         Self {
             socket_path,
@@ -529,6 +532,7 @@ impl Server {
             token_manager,
             container_config,
             runtime_options,
+            supports_vision,
         }
     }
 
@@ -771,6 +775,7 @@ impl Server {
                 tools_list,
                 self.max_subagent_depth,
                 self.session_dir.clone(),
+                self.supports_vision,
             )?;
 
             // Close stale pending permission requests from previous session
@@ -860,6 +865,7 @@ impl Server {
                 0, // root conversation depth
                 self.max_subagent_depth,
                 Some(self.session_dir.clone()),
+                self.supports_vision,
             )?;
 
             let manager_clone = Arc::clone(&manager);
@@ -1279,11 +1285,15 @@ fn run_event_writer(
                     content,
                     ..
                 } => {
+                    let content_text = match content.as_ref() {
+                        llm_rs::image::ContentPart::Text(t) => t.as_str(),
+                        _ => "",
+                    };
                     let tracked = tool_calls.contains_key(tool_call_id.as_str());
                     tracing::debug!(
                         tool_call_id,
                         tracked,
-                        content_len = content.len(),
+                        content_len = content_text.len(),
                         "ToolOutputChunk received"
                     );
                     if let Some(state) = tool_calls.get_mut(tool_call_id) {
@@ -1295,7 +1305,7 @@ fn run_event_writer(
                         // Accumulate first N chars for preview
                         if state.accumulated_preview.len() < PREVIEW_MAX_CHARS {
                             let remaining = PREVIEW_MAX_CHARS - state.accumulated_preview.len();
-                            let chunk: String = content.chars().take(remaining).collect();
+                            let chunk: String = content_text.chars().take(remaining).collect();
                             state.accumulated_preview.push_str(&chunk);
                         }
                     } else {
@@ -1329,7 +1339,7 @@ fn run_event_writer(
                                 msg_id: 0,
                                 tool_call_id: tool_call_id.clone(),
                                 tool_name: state.tool_name,
-                                content: Arc::new(preview),
+                                content: Arc::new(llm_rs::image::ContentPart::Text(preview)),
                             };
                             append_event(&display_file, &preview_event)
                                 .await

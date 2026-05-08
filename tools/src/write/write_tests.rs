@@ -46,6 +46,8 @@ mod tests {
             cancel_token: CancellationToken::new(),
             permission: scoped,
             container_config: None,
+            images_dir: None,
+            supports_vision: false,
         })
     }
 
@@ -121,6 +123,8 @@ mod tests {
             cancel_token: CancellationToken::new(),
             permission: ScopedPermissionManager::always_allow("write"),
             container_config: None,
+            images_dir: None,
+            supports_vision: false,
         };
         let stream =
             crate::write::write(ctx, "relative/path.txt".to_string(), "content".to_string());
@@ -147,6 +151,8 @@ mod tests {
             cancel_token: CancellationToken::new(),
             permission: ScopedPermissionManager::always_allow("write"),
             container_config: None,
+            images_dir: None,
+            supports_vision: false,
         };
         let stream = crate::write::write(
             ctx,

@@ -144,6 +144,55 @@ pub enum ContentPart {
     Image(ImageData),
 }
 
+impl ContentPart {
+    /// Returns the text content if this is a `Text` variant, or `None` otherwise.
+    pub fn as_text(&self) -> Option<&str> {
+        match self {
+            ContentPart::Text(t) => Some(t.as_str()),
+            ContentPart::Image(_) => None,
+        }
+    }
+}
+
+/// Join all `Text` parts into a single string, skipping non-text parts.
+pub fn join_text_parts(parts: &[ContentPart]) -> String {
+    parts
+        .iter()
+        .filter_map(ContentPart::as_text)
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+impl From<String> for ContentPart {
+    fn from(s: String) -> Self {
+        ContentPart::Text(s)
+    }
+}
+
+impl From<ImageData> for ContentPart {
+    fn from(img: ImageData) -> Self {
+        ContentPart::Image(img)
+    }
+}
+
+impl PartialEq<str> for ContentPart {
+    fn eq(&self, other: &str) -> bool {
+        match self {
+            ContentPart::Text(t) => t == other,
+            ContentPart::Image(_) => false,
+        }
+    }
+}
+
+impl PartialEq<&str> for ContentPart {
+    fn eq(&self, other: &&str) -> bool {
+        match self {
+            ContentPart::Text(t) => t == *other,
+            ContentPart::Image(_) => false,
+        }
+    }
+}
+
 /// Resolve `image_dir / filename` and verify the canonicalized result is
 /// still within `image_dir`. Returns the canonical path.
 pub fn resolve_image_path(image_dir: &Path, filename: &str) -> Result<PathBuf> {

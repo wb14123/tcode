@@ -11,6 +11,8 @@ mod tests {
             cancel_token: CancellationToken::new(),
             permission: crate::permission::ScopedPermissionManager::always_allow("test"),
             container_config: None,
+            images_dir: None,
+            supports_vision: false,
         }
     }
 
@@ -150,7 +152,8 @@ mod tests {
             .next()
             .await
             .expect("stream should yield at least one item");
-        assert!(result.starts_with("Error: Failed to parse tool arguments:"));
+        let result_text = result.as_text().expect("expected text content");
+        assert!(result_text.starts_with("Error: Failed to parse tool arguments:"));
     }
 
     #[tokio::test]
@@ -172,8 +175,9 @@ mod tests {
             .next()
             .await
             .expect("stream should yield at least one item");
-        assert!(result.starts_with("Error: Failed to parse tool arguments:"));
-        assert!(result.contains("message"));
+        let result_text = result.as_text().expect("expected text content");
+        assert!(result_text.starts_with("Error: Failed to parse tool arguments:"));
+        assert!(result_text.contains("message"));
     }
 
     #[tokio::test]
@@ -261,7 +265,7 @@ mod tests {
         // Should get "first", then timeout error, but not "second"
         assert_eq!(results.len(), 2);
         assert_eq!(results[0], "first");
-        assert!(results[1].contains("timed out"));
+        assert!(results[1].as_text().unwrap_or("").contains("timed out"));
     }
 
     #[tokio::test]
@@ -286,10 +290,11 @@ mod tests {
             .next()
             .await
             .expect("stream should yield a timeout error");
+        let result_text = result.as_text().expect("expected text content");
         assert!(
-            result.contains("timed out"),
+            result_text.contains("timed out"),
             "Expected timeout, got: {}",
-            result
+            result_text
         );
     }
 
@@ -313,6 +318,8 @@ mod tests {
             cancel_token: cancel_token.clone(),
             permission: crate::permission::ScopedPermissionManager::always_allow("test"),
             container_config: None,
+            images_dir: None,
+            supports_vision: false,
         };
 
         let json_args = r#"{"message": "test"}"#.to_string();
@@ -330,10 +337,11 @@ mod tests {
             .next()
             .await
             .expect("stream should yield cancellation message");
+        let cancelled_text = cancelled.as_text().expect("expected text content");
         assert!(
-            cancelled.contains("cancelled"),
+            cancelled_text.contains("cancelled"),
             "Expected cancelled, got: {}",
-            cancelled
+            cancelled_text
         );
 
         // Stream should end
@@ -394,6 +402,8 @@ mod tests {
                 cancel_token: CancellationToken::new(),
                 permission: crate::permission::ScopedPermissionManager::always_allow("test"),
                 container_config: None,
+                images_dir: None,
+                supports_vision: false,
             }
         }
 

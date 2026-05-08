@@ -472,14 +472,48 @@ fn convert_messages(
                 tool_call_id,
                 content,
             } => {
-                // Claude requires tool_result in a user message as content block
-                claude_messages.push(ClaudeMessage {
-                    role: "user",
-                    content: ClaudeContent::Blocks(vec![ContentBlock::ToolResult {
+                if crate::llm::is_all_text(content) {
+                    let text: String = crate::image::join_text_parts(content);
+                    claude_messages.push(ClaudeMessage {
+                        role: "user",
+                        content: ClaudeContent::Blocks(vec![ContentBlock::ToolResult {
+                            tool_use_id: tool_call_id.clone(),
+                            content: text,
+                        }]),
+                    });
+                } else {
+                    let images_dir = images_dir
+                        .as_ref()
+                        .context("Image present in tool result but no images_dir configured")?;
+                    let text_content: String = crate::image::join_text_parts(content);
+                    let tool_result_content = if text_content.is_empty() {
+                        "[Image output]".to_string()
+                    } else {
+                        text_content
+                    };
+                    let mut blocks: Vec<ContentBlock> = Vec::new();
+                    blocks.push(ContentBlock::ToolResult {
                         tool_use_id: tool_call_id.clone(),
-                        content: content.clone(),
-                    }]),
-                });
+                        content: tool_result_content,
+                    });
+                    for part in content {
+                        if let crate::image::ContentPart::Image(img) = part {
+                            let data = img.get_data(images_dir)?;
+                            let encoded = base64::engine::general_purpose::STANDARD.encode(data);
+                            blocks.push(ContentBlock::Image {
+                                source: ImageSource {
+                                    r#type: "base64".to_string(),
+                                    media_type: img.media_type().to_string(),
+                                    data: encoded,
+                                },
+                            });
+                        }
+                    }
+                    claude_messages.push(ClaudeMessage {
+                        role: "user",
+                        content: ClaudeContent::Blocks(blocks),
+                    });
+                }
             }
         }
     }

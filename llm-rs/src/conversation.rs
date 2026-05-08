@@ -148,7 +148,9 @@ pub fn fill_cancelled_tool_results(llm_msgs: &mut Vec<LLMMessage>) {
     for tc in missing {
         llm_msgs.push(LLMMessage::ToolResult {
             tool_call_id: tc.id,
-            content: "Tool call was cancelled due to conversation interruption.".to_string(),
+            content: vec![ContentPart::Text(
+                "Tool call was cancelled due to conversation interruption.".to_string(),
+            )],
         });
     }
 }
@@ -172,29 +174,31 @@ pub enum MessageEndStatus {
     UserDenied,
 }
 
-/// Wrap a raw tool output string based on the tool call's final status.
+/// Wrap raw tool output content based on the tool call's final status.
 ///
 /// For `UserDenied`, this prepends boilerplate instructing the LLM that the
 /// denial was a deliberate human choice (not a technical error). The user's
 /// reason (if any) is already baked into `raw_content` by
 /// `ask_permission_inner`, so this wrapper does not interpolate it
-/// separately. For every other status the raw content is returned unchanged.
+/// separately. For every other status the raw content parts are returned unchanged.
 ///
 /// Kept `pub(crate)` so sibling tests in `conversation_tests.rs` can call it
 /// directly without driving the full conversation loop.
 pub(crate) fn build_tool_result_content(
     end_status: &MessageEndStatus,
-    raw_content: String,
-) -> String {
+    raw_content: Vec<ContentPart>,
+) -> Vec<ContentPart> {
     match end_status {
         MessageEndStatus::UserDenied => {
-            format!(
+            let mut parts = vec![ContentPart::Text(
                 "The user denied permission for this tool call. This is not a technical error — \
                  the human operator chose not to allow this action. Do not retry this tool call. \
                  Instead, ask the user what they would like to do.\n\
-                 Original tool output: {}",
-                raw_content
-            )
+                 Original tool output: "
+                    .to_string(),
+            )];
+            parts.extend(raw_content);
+            parts
         }
         _ => raw_content,
     }
@@ -260,7 +264,7 @@ pub enum Message {
         msg_id: MessageID,
         tool_call_id: String,
         tool_name: String,
-        content: Arc<String>,
+        content: Arc<ContentPart>,
     },
 
     ToolMessageEnd {
@@ -471,6 +475,10 @@ struct ConversationEnv {
     subagent_depth: usize,
     max_subagent_depth: usize,
     state_dir: Option<PathBuf>,
+    /// Where tools can write processed images (session's images/ dir).
+    images_dir: Option<PathBuf>,
+    /// Whether the current model supports visual/image input.
+    supports_vision: bool,
     /// Permission manager shared across all conversations.
     permission_manager: Arc<crate::permission::PermissionManager>,
     /// Optional container configuration for Docker/Podman sandbox mode.
@@ -620,6 +628,7 @@ impl ConversationManager {
         subagent_depth: usize,
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
+        supports_vision: bool,
     ) -> Result<(String, Arc<ConversationClient>)> {
         let conversation_id = Uuid::new_v4().to_string();
         self.new_conversation_with_id(
@@ -632,6 +641,7 @@ impl ConversationManager {
             subagent_depth,
             max_subagent_depth,
             state_dir,
+            supports_vision,
         )
     }
 
@@ -647,6 +657,7 @@ impl ConversationManager {
         subagent_depth: usize,
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
+        supports_vision: bool,
     ) -> Result<(String, Arc<ConversationClient>)> {
         let now = now_millis();
         let (tools_map, input_rx, client) = prepare_conversation(
@@ -689,7 +700,9 @@ impl ConversationManager {
                 chat_options,
                 subagent_depth,
                 max_subagent_depth,
-                state_dir,
+                state_dir: state_dir.clone(),
+                images_dir: state_dir.as_ref().map(|d| d.join("images")),
+                supports_vision,
                 permission_manager: Arc::clone(&self.permission_manager),
                 container_config: self.container_config.clone(),
             },
@@ -783,6 +796,7 @@ impl ConversationManager {
         tools: Vec<Arc<Tool>>,
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
+        supports_vision: bool,
     ) -> Result<(String, Arc<ConversationClient>)> {
         fill_cancelled_tool_results(&mut state.llm_msgs);
         let summary = state.summary();
@@ -820,7 +834,9 @@ impl ConversationManager {
                 chat_options: state.chat_options,
                 subagent_depth: state.subagent_depth,
                 max_subagent_depth,
-                state_dir,
+                state_dir: state_dir.clone(),
+                images_dir: state_dir.as_ref().map(|d| d.join("images")),
+                supports_vision,
                 permission_manager: Arc::clone(&self.permission_manager),
                 container_config: self.container_config.clone(),
             },
@@ -843,6 +859,7 @@ impl ConversationManager {
         tools: Vec<Arc<Tool>>,
         max_subagent_depth: usize,
         state_dir: PathBuf,
+        supports_vision: bool,
     ) -> Result<(String, Arc<ConversationClient>, Vec<ResumedSubagent>)> {
         // Find all subagent states (depth-first: nested before parent)
         let subagent_states = find_subagent_states(&state_dir);
@@ -883,6 +900,7 @@ impl ConversationManager {
                 sa_tools,
                 max_subagent_depth,
                 Some(sa_dir.clone()),
+                supports_vision,
             )?;
             resumed_subagents.push(ResumedSubagent {
                 conversation_id: sa_id,
@@ -892,8 +910,14 @@ impl ConversationManager {
         }
 
         // Resume root conversation
-        let (root_id, root_client) =
-            self.resume_conversation(state, llm, tools, max_subagent_depth, Some(state_dir))?;
+        let (root_id, root_client) = self.resume_conversation(
+            state,
+            llm,
+            tools,
+            max_subagent_depth,
+            Some(state_dir),
+            supports_vision,
+        )?;
 
         Ok((root_id, root_client, resumed_subagents))
     }
@@ -951,7 +975,9 @@ fn find_tool_call_for_subagent(llm_msgs: &[LLMMessage], subagent_conv_id: &str) 
             tool_call_id,
             content,
         } = msg
-            && content.starts_with(&prefix)
+            && content
+                .iter()
+                .any(|p| matches!(p, ContentPart::Text(t) if t.starts_with(&prefix)))
         {
             return Some(tool_call_id.clone());
         }
@@ -1206,7 +1232,7 @@ async fn collect_subagent_response(
                         msg_id: 0,
                         tool_call_id: tool_call_id.to_string(),
                         tool_name: "subagent".to_string(),
-                        content: Arc::new(text),
+                        content: Arc::new(ContentPart::Text(text)),
                     })
                     .await
                     .context("failed to send ToolOutputChunk")?;
@@ -1374,8 +1400,8 @@ pub struct Conversation {
     /// automatically — instead a SystemMessage is broadcast and the turn pauses.
     cancelled_tools: HashSet<String>,
 
-    /// Accumulated tool output per tool_call_id (chunks joined).
-    accumulated_tool_content: HashMap<String, String>,
+    /// Accumulated tool output per tool_call_id (ContentPart chunks collected).
+    accumulated_tool_content: HashMap<String, Vec<ContentPart>>,
 
     /// Truncated first user input used as session description.
     description: Option<String>,
@@ -1554,7 +1580,7 @@ impl Conversation {
                             if self.pending_tools.contains(&tool_call_id) {
                                 self.accumulated_tool_content
                                     .entry(tool_call_id).or_default()
-                                    .push_str(&content);
+                                    .push(content.as_ref().clone());
                             }
                             // else: stale message from cancelled tool, ignore
                         }
@@ -1596,7 +1622,7 @@ impl Conversation {
                                 if let LLMMessage::ToolResult { tool_call_id: id, content: c } = msg
                                     && *id == tool_call_id
                                 {
-                                    *c = content.to_string();
+                                    *c = vec![ContentPart::Text(content.to_string())];
                                     found = true;
                                     break;
                                 }
@@ -1868,18 +1894,29 @@ impl Conversation {
                 .unwrap_or_default();
             let content = if user_interrupted {
                 if raw.is_empty() {
-                    "Tool execution was interrupted because the user sent a new message.".into()
+                    vec![ContentPart::Text(
+                        "Tool execution was interrupted because the user sent a new message."
+                            .into(),
+                    )]
                 } else {
-                    format!(
+                    let mut parts = vec![ContentPart::Text(
                         "Tool execution was interrupted because the user sent \
-                         a new message. Partial result:\n{}",
-                        raw
-                    )
+                         a new message. Partial result:\n"
+                            .to_string(),
+                    )];
+                    parts.extend(raw);
+                    parts
                 }
             } else if raw.is_empty() {
-                "Tool call was cancelled due to conversation interruption.".into()
+                vec![ContentPart::Text(
+                    "Tool call was cancelled due to conversation interruption.".into(),
+                )]
             } else {
-                format!("Tool call was cancelled. Partial result:\n{}", raw)
+                let mut parts = vec![ContentPart::Text(
+                    "Tool call was cancelled. Partial result:\n".into(),
+                )];
+                parts.extend(raw);
+                parts
             };
             self.push_llm_msg(LLMMessage::ToolResult {
                 tool_call_id: id,
@@ -2046,38 +2083,47 @@ async fn execute_regular_tool(
         cancel_token: cancel_token.clone(),
         permission: scoped_pm,
         container_config: env.container_config.clone(),
+        images_dir: env.images_dir.clone(),
+        supports_vision: env.supports_vision,
     };
-    let (end_status, tool_result) = if let Some(tool) = tool_arc {
+    let end_status = if let Some(tool) = tool_arc {
         tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");
         let mut output_stream = tool.execute(tool_ctx, tool_call.arguments.clone());
-        let mut result_parts = Vec::new();
+        let mut chunk_count: usize = 0;
         while let Some(chunk) = output_stream.next().await {
             tracing::debug!(
                 tool_call_id = %tool_call.id,
-                chunk_len = chunk.len(),
                 "tool output chunk"
             );
+            let content = Arc::new(chunk.clone());
             env.client.notify_msg(Message::ToolOutputChunk {
                 msg_id: env.client.next_msg_id(),
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
-                content: Arc::new(chunk.clone()),
+                content: Arc::clone(&content),
             })?;
-            result_parts.push(chunk);
+            loop_tx
+                .send(Message::ToolOutputChunk {
+                    msg_id: 0,
+                    tool_call_id: tool_call.id.clone(),
+                    tool_name: tool_call.name.clone(),
+                    content,
+                })
+                .await?;
+            chunk_count += 1;
         }
         tracing::info!(
             tool_call_id = %tool_call.id,
-            result_len = result_parts.iter().map(|s| s.len()).sum::<usize>(),
+            chunk_count,
             "tool stream finished"
         );
-        let status = if cancel_token.is_cancelled() {
+        if cancel_token.is_cancelled() {
             MessageEndStatus::Cancelled
         } else if scoped_pm_ref.was_denied() {
             MessageEndStatus::UserDenied
         } else {
             MessageEndStatus::Succeeded
-        };
-        (status, result_parts.join(""))
+        }
     } else {
         let error_msg = format!("Error: Tool '{}' not found", tool_call.name);
         log_and_broadcast_system_message(
@@ -2085,13 +2131,22 @@ async fn execute_regular_tool(
             SystemMessageLevel::Error,
             format!("Tool '{}' not found", tool_call.name),
         );
+        let content = Arc::new(ContentPart::Text(error_msg.clone()));
         env.client.notify_msg(Message::ToolOutputChunk {
             msg_id: env.client.next_msg_id(),
             tool_call_id: tool_call.id.clone(),
             tool_name: tool_call.name.clone(),
-            content: Arc::new(error_msg.clone()),
+            content: Arc::clone(&content),
         })?;
-        (MessageEndStatus::Failed, error_msg)
+        loop_tx
+            .send(Message::ToolOutputChunk {
+                msg_id: 0,
+                tool_call_id: tool_call.id.clone(),
+                tool_name: tool_call.name.clone(),
+                content,
+            })
+            .await?;
+        MessageEndStatus::Failed
     };
 
     env.client.unregister_tool_token(&tool_call.id);
@@ -2105,16 +2160,6 @@ async fn execute_regular_tool(
     {
         tracing::error!(error = %e, "failed to send PermissionUpdated on cancel");
     }
-
-    // Send full result to main event loop
-    loop_tx
-        .send(Message::ToolOutputChunk {
-            msg_id: 0,
-            tool_call_id: tool_call.id.clone(),
-            tool_name: tool_call.name.clone(),
-            content: Arc::new(tool_result),
-        })
-        .await?;
 
     // Broadcast ToolMessageEnd for UI
     env.client.notify_msg(Message::ToolMessageEnd {
@@ -2193,7 +2238,7 @@ async fn execute_subagent(
                     msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
-                    content: Arc::new(error),
+                    content: Arc::new(ContentPart::Text(error)),
                 })
                 .await?;
             loop_tx
@@ -2239,7 +2284,7 @@ async fn execute_subagent(
                     msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
-                    content: Arc::new(error),
+                    content: Arc::new(ContentPart::Text(error)),
                 })
                 .await?;
             loop_tx
@@ -2271,6 +2316,7 @@ async fn execute_subagent(
             child_depth,
             env.max_subagent_depth,
             subagent_state_dir,
+            env.supports_vision,
         ) {
             Ok(result) => result,
             Err(e) => {
@@ -2280,7 +2326,7 @@ async fn execute_subagent(
                         msg_id: 0,
                         tool_call_id: tool_call.id.clone(),
                         tool_name: tool_call.name.clone(),
-                        content: Arc::new(error),
+                        content: Arc::new(ContentPart::Text(error)),
                     })
                     .await?;
                 loop_tx
@@ -2343,7 +2389,7 @@ async fn execute_subagent(
                 msg_id: 0,
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
-                content: Arc::new(error),
+                content: Arc::new(ContentPart::Text(error)),
             })
             .await?;
         loop_tx
@@ -2387,7 +2433,7 @@ async fn execute_continue_subagent(
                     msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
-                    content: Arc::new(error),
+                    content: Arc::new(ContentPart::Text(error)),
                 })
                 .await?;
             loop_tx
@@ -2418,7 +2464,7 @@ async fn execute_continue_subagent(
                     msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
-                    content: Arc::new(error),
+                    content: Arc::new(ContentPart::Text(error)),
                 })
                 .await?;
             loop_tx
@@ -2439,7 +2485,7 @@ async fn execute_continue_subagent(
                     msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
-                    content: Arc::new(error),
+                    content: Arc::new(ContentPart::Text(error)),
                 })
                 .await?;
             loop_tx
@@ -2498,7 +2544,7 @@ async fn execute_continue_subagent(
                 msg_id: 0,
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
-                content: Arc::new(error),
+                content: Arc::new(ContentPart::Text(error)),
             })
             .await?;
         loop_tx

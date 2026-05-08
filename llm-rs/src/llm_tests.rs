@@ -77,9 +77,11 @@ mod tests {
 
     #[test]
     fn llm_message_tool_result_serde() -> anyhow::Result<()> {
+        use crate::image::ContentPart;
+
         let msg = LLMMessage::ToolResult {
             tool_call_id: "tc1".to_string(),
-            content: "result data".to_string(),
+            content: vec![ContentPart::Text("result data".to_string())],
         };
         let json = serde_json::to_string(&msg)?;
         let deserialized: LLMMessage = serde_json::from_str(&json)?;
@@ -89,7 +91,11 @@ mod tests {
                 content,
             } => {
                 assert_eq!(tool_call_id, "tc1");
-                assert_eq!(content, "result data");
+                assert_eq!(content.len(), 1);
+                match &content[0] {
+                    ContentPart::Text(t) => assert_eq!(t, "result data"),
+                    _ => panic!("Expected Text content"),
+                }
             }
             _ => panic!("Expected ToolResult variant"),
         }

@@ -25,10 +25,11 @@
 //!
 //! // Execute with JSON string
 //! use tokio_util::sync::CancellationToken;
-//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None };
+//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, images_dir: None, supports_vision: false };
 //! let stream = tool.execute(ctx, r#"{"path": "/tmp/test.txt"}"#.to_string());
 //! ```
 
+use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -41,6 +42,8 @@ use serde::de::DeserializeOwned;
 
 use tokio::time::{Instant, Sleep};
 use tokio_stream::{Stream, StreamExt};
+
+use crate::image::ContentPart;
 
 pub use tokio_util::sync::CancellationToken;
 
@@ -64,10 +67,14 @@ pub struct ToolContext {
     pub permission: crate::permission::ScopedPermissionManager,
     /// Optional container configuration for Docker/Podman sandbox mode.
     pub container_config: Option<Arc<ContainerConfig>>,
+    /// Where tools can write processed images (session's images/ dir).
+    pub images_dir: Option<PathBuf>,
+    /// Whether the current model supports visual/image input.
+    pub supports_vision: bool,
 }
 
 /// Type alias for the boxed stream returned by tool execution.
-pub type ToolOutputStream = Pin<Box<dyn Stream<Item = String> + Send>>;
+pub type ToolOutputStream = Pin<Box<dyn Stream<Item = ContentPart> + Send>>;
 
 pin_project! {
     /// A stream wrapper that enforces a total timeout across all items.
@@ -85,8 +92,8 @@ pin_project! {
     }
 }
 
-impl<S: Stream<Item = String>> Stream for TimeoutStream<S> {
-    type Item = String;
+impl<S: Stream<Item = ContentPart>> Stream for TimeoutStream<S> {
+    type Item = ContentPart;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let mut this = self.project();
@@ -115,10 +122,10 @@ impl<S: Stream<Item = String>> Stream for TimeoutStream<S> {
                     .reset(Instant::now() + *this.timeout_duration);
             } else {
                 *this.timed_out = true;
-                let msg = format!(
+                let msg = ContentPart::Text(format!(
                     "Error: Tool execution timed out after {}ms",
                     this.timeout_duration.as_millis()
-                );
+                ));
                 return Poll::Ready(Some(msg));
             }
         }
@@ -138,8 +145,8 @@ pin_project! {
     }
 }
 
-impl<S: Stream<Item = String>> Stream for CancellableStream<S> {
-    type Item = String;
+impl<S: Stream<Item = ContentPart>> Stream for CancellableStream<S> {
+    type Item = ContentPart;
 
     fn poll_next(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         let this = self.project();
@@ -155,7 +162,7 @@ impl<S: Stream<Item = String>> Stream for CancellableStream<S> {
         if cancelled_fut.poll(cx).is_ready() {
             *this.cancelled = true;
             return Poll::Ready(Some(
-                "Error: Tool execution was cancelled by the user. Do not retry this tool call. Instead, ask the user what they would like to do.".to_string(),
+                ContentPart::Text("Error: Tool execution was cancelled by the user. Do not retry this tool call. Instead, ask the user what they would like to do.".to_string()),
             ));
         }
 
@@ -258,7 +265,7 @@ impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send
 ///
 /// // Execute with JSON string
 /// use tokio_util::sync::CancellationToken;
-/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None };
+/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, images_dir: None, supports_vision: false };
 /// let stream = tool.execute(ctx, r#"{"query": "foo"}"#.to_string());
 /// ```
 pub struct Tool {
@@ -284,7 +291,7 @@ impl Tool {
     /// - `P`: Parameter type (must implement `Deserialize` + `JsonSchema`)
     /// - `F`: Handler function type
     /// - `S`: Stream type returned by handler
-    /// - `T`: Success type (must implement `ToString`)
+    /// - `T`: Success type (must implement `Into<ContentPart>`)
     /// - `E`: Error type (must implement `ToString`)
     ///
     /// # Arguments
@@ -302,7 +309,7 @@ impl Tool {
         P: ToolParams,
         F: Fn(ToolContext, P) -> S + Send + Sync + 'static,
         S: Stream<Item = Result<T, E>> + Send + 'static,
-        T: ToString + Send + 'static,
+        T: Into<ContentPart> + Send + 'static,
         E: ToString + Send + 'static,
     {
         Tool {
@@ -318,11 +325,14 @@ impl Tool {
                 };
                 match serde_json::from_str::<P>(&json_str) {
                     Ok(params) => Box::pin(handler(ctx, params).map(|item| match item {
-                        Ok(v) => v.to_string(),
-                        Err(e) => format!("Error: {}", e.to_string()),
+                        Ok(v) => v.into(),
+                        Err(e) => ContentPart::Text(format!("Error: {}", e.to_string())),
                     })),
                     Err(e) => {
-                        let error = format!("Error: Failed to parse tool arguments: {}", e);
+                        let error = ContentPart::Text(format!(
+                            "Error: Failed to parse tool arguments: {}",
+                            e
+                        ));
                         Box::pin(tokio_stream::once(error))
                     }
                 }
@@ -346,16 +356,16 @@ impl Tool {
             param_schema,
             timeout: None,
             handler: Box::new(|_ctx, _| {
-                Box::pin(tokio_stream::once(
+                Box::pin(tokio_stream::once(ContentPart::Text(
                     "Error: This tool's execution is handled internally".to_string(),
-                ))
+                )))
             }),
         }
     }
 
     /// Execute the tool with a JSON string argument.
     ///
-    /// Returns a stream of string outputs that can be consumed incrementally.
+    /// Returns a stream of `ContentPart` outputs that can be consumed incrementally.
     /// The stream is always wrapped with `CancellableStream` so cancellation
     /// stops output. If a timeout is set, `TimeoutStream` is also applied.
     pub fn execute(&self, ctx: ToolContext, arguments: String) -> ToolOutputStream {

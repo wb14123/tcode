@@ -102,7 +102,7 @@ pub enum LLMMessage {
     /// Tool result message. Includes the tool_call_id from the original ToolCall.
     ToolResult {
         tool_call_id: String,
-        content: String,
+        content: Vec<ContentPart>,
     },
 }
 
@@ -167,20 +167,37 @@ impl<'de> Deserialize<'de> for LLMMessage {
             }
             "ToolResult" => {
                 #[derive(Deserialize)]
-                struct ToolResultInner {
+                struct New {
+                    tool_call_id: String,
+                    content: Vec<ContentPart>,
+                }
+                #[derive(Deserialize)]
+                struct Old {
                     tool_call_id: String,
                     content: String,
                 }
-                let inner: ToolResultInner =
-                    serde_json::from_value(val.clone()).map_err(de::Error::custom)?;
-                Ok(LLMMessage::ToolResult {
-                    tool_call_id: inner.tool_call_id,
-                    content: inner.content,
-                })
+
+                if let Ok(n) = serde_json::from_value::<New>(val.clone()) {
+                    Ok(LLMMessage::ToolResult {
+                        tool_call_id: n.tool_call_id,
+                        content: n.content,
+                    })
+                } else {
+                    let o: Old = serde_json::from_value(val.clone()).map_err(de::Error::custom)?;
+                    Ok(LLMMessage::ToolResult {
+                        tool_call_id: o.tool_call_id,
+                        content: vec![ContentPart::Text(o.content)],
+                    })
+                }
             }
             other => Err(de::Error::custom(format!("unknown variant: {other}"))),
         }
     }
+}
+
+/// Returns true if all content parts are `ContentPart::Text`.
+pub(crate) fn is_all_text(parts: &[ContentPart]) -> bool {
+    parts.iter().all(|p| matches!(p, ContentPart::Text(_)))
 }
 
 #[derive(Clone, Debug)]

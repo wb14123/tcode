@@ -69,9 +69,10 @@ async fn main() -> anyhow::Result<()> {
             ..Default::default()
         },
         false,
-        0,    // subagent_depth (root)
-        3,    // max_subagent_depth
-        None, // state_dir (no persistence for this example)
+        0,     // subagent_depth (root)
+        3,     // max_subagent_depth
+        None,  // state_dir (no persistence for this example)
+        false, // supports_vision
     )?;
 
     // Subscribe to messages (this must be done before sending to receive all messages)
@@ -180,7 +181,7 @@ fn print_message(msg: &Message) {
         Message::ToolOutputChunk {
             tool_name, content, ..
         } => {
-            println!("    [Tool {} output: {}]", tool_name, content);
+            println!("    [Tool {} output: {:?}]", tool_name, content);
         }
         Message::ToolMessageEnd { .. } => {
             println!("    [Tool execution completed]");
@@ -289,6 +290,9 @@ fn print_message(msg: &Message) {
         }
         Message::AssistantImageOutput { image, .. } => {
             println!("    [Image generated: {}]", image.relative_path());
+        }
+        Message::AssistantImageGenerating { image_id, .. } => {
+            println!("    [Image generating: {}]", image_id);
         }
     }
 }

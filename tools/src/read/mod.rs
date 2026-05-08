@@ -1,10 +1,12 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
+use llm_rs::image::{ContentPart, ImageData, process_image};
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+use uuid::Uuid;
 
 const DEFAULT_LIMIT: u64 = 500;
 const DEFAULT_MAX_READ_CHARS: u64 = 20_000;
@@ -14,8 +16,9 @@ const BINARY_EXTENSIONS: &[&str] = &[
     // Executables / libraries
     "exe", "bin", "so", "dll", "o", "a", "dylib", "lib", "obj", "pyc", "pyo", "class",
     // Archives
-    "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst", "lz4", // Images
-    "jpg", "jpeg", "png", "gif", "bmp", "ico", "webp", "tiff", "tif", "psd", // Audio
+    "zip", "tar", "gz", "bz2", "xz", "7z", "rar", "zst", "lz4",
+    // Images (unsupported — handled by image pipeline: png, jpg, jpeg, gif, bmp, webp)
+    "ico", "tiff", "tif", "psd", // Audio
     "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", // Video
     "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", // Fonts
     "woff", "woff2", "ttf", "eot", "otf", // Documents (binary)
@@ -274,7 +277,10 @@ async fn read_directory(path: &Path) -> Result<String> {
     Ok(output)
 }
 
-/// Read a file or directory from the local filesystem. Error if path doesn't exist.
+/// Read a file or directory from the local filesystem. Supports text files,
+/// image files (png, jpg, jpeg, gif, webp, bmp), and directories. Error if
+/// path doesn't exist. Image files are auto-detected by extension — no special
+/// parameters needed.
 ///
 /// - file_path must be absolute. Returns up to 500 lines from start by default.
 /// - offset is the 1-indexed line number to start from.
@@ -283,7 +289,9 @@ async fn read_directory(path: &Path) -> Result<String> {
 /// - Use glob tool if unsure of path. Call in parallel for multiple files.
 /// - Avoid tiny repeated slices (30 line chunks) — read a larger window instead.
 ///
-/// Output format: content lines start with `N| ` (line number, pipe, space); everything after is verbatim content.
+/// ## Text file output format
+///
+/// Content lines start with `N| ` (line number, pipe, space); everything after is verbatim content.
 /// Annotation lines start with `#|` and describe truncation/offset status.
 /// NOTE: `#|` annotations are metadata, NOT file content. A line like `42| #| something` means line 42 contains
 /// the text `#| something` — the `42| ` prefix is the sole disambiguator.
@@ -303,6 +311,12 @@ async fn read_directory(path: &Path) -> Result<String> {
 ///
 /// Char cap: 20000 by default (max_read_chars adjustable up to 50000).
 /// Pagination: offset/limit for lines; first_line_offset to skip chars within the first line.
+///
+/// ## Image output
+///
+/// Image files produce a visual content block followed by a text annotation:
+/// `[Image: /absolute/path (image/png)]`. The offset, limit, max_read_chars, and
+/// first_line_offset parameters have no effect on image files.
 #[tool]
 pub fn read(
     ctx: ToolContext,
@@ -321,7 +335,7 @@ pub fn read(
     /// Useful for reading very long lines across multiple passes.
     #[serde(default)]
     first_line_offset: Option<u64>,
-) -> impl tokio_stream::Stream<Item = Result<String>> {
+) -> impl tokio_stream::Stream<Item = Result<ContentPart>> {
     async_stream::stream! {
         let path = Path::new(&file_path);
 
@@ -349,7 +363,7 @@ pub fn read(
         // Handle directory
         if metadata.is_dir() {
             match read_directory(path).await {
-                Ok(output) => yield Ok(output),
+                Ok(output) => yield Ok(ContentPart::Text(output)),
                 Err(e) => yield Err(e),
             }
             return;
@@ -380,6 +394,94 @@ pub fn read(
             }
         };
 
+        // Image handling: check if file extension indicates a supported image type
+        let is_image = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| matches!(ext.to_lowercase().as_str(), "png" | "jpg" | "jpeg" | "gif" | "webp" | "bmp"))
+            .unwrap_or(false);
+
+        if is_image {
+            let path_display = path.to_string_lossy().into_owned();
+
+            // Capability check
+            if !ctx.supports_vision {
+                yield Err(anyhow!(
+                    "Cannot read image file: visual input is disabled. Ask the user to set `supports_vision = true` in their tcode config if their model supports images."
+                ));
+                return;
+            }
+
+            // Require images_dir when vision is supported
+            let images_dir = match ctx.images_dir {
+                Some(ref dir) => dir.clone(),
+                None => {
+                    yield Err(anyhow!(
+                        "Cannot read image file: no images directory configured."
+                    ));
+                    return;
+                }
+            };
+
+            // Reject large images before reading (50MB max — matches process_image limit)
+            const MAX_IMAGE_SIZE: u64 = 50 * 1024 * 1024;
+            if file_size > MAX_IMAGE_SIZE {
+                yield Err(anyhow!(
+                    "Cannot read image file: {} is too large ({} bytes, max {}).",
+                    path_display, file_size, MAX_IMAGE_SIZE
+                ));
+                return;
+            }
+
+            // Read entire file bytes
+            let mut file = file;
+            let mut data = Vec::with_capacity(file_size as usize);
+            if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut file, &mut data).await {
+                yield Err(anyhow!("Failed to read image file {}: {}", path.display(), e));
+                return;
+            }
+
+            // Process image (resize, re-encode)
+            let (processed, media_type, extension) = match process_image(&data) {
+                Ok(result) => result,
+                Err(e) => {
+                    yield Err(anyhow!("Failed to process image file {}: {}", path.display(), e));
+                    return;
+                }
+            };
+
+            // Write processed image to images_dir
+            let filename = format!("{}.{}", Uuid::new_v4(), extension);
+            if let Err(e) = tokio::fs::create_dir_all(&images_dir).await {
+                yield Err(anyhow!(
+                    "Failed to create images directory {}: {}",
+                    images_dir.display(),
+                    e
+                ));
+                return;
+            }
+            let image_path = images_dir.join(&filename);
+            if let Err(e) = tokio::fs::write(&image_path, &processed).await {
+                yield Err(anyhow!(
+                    "Failed to write processed image to {}: {}",
+                    image_path.display(),
+                    e
+                ));
+                return;
+            }
+
+            // Yield image content part
+            yield Ok(ContentPart::Image(ImageData::new(filename, media_type.clone())));
+
+            // Yield text annotation
+            yield Ok(ContentPart::Text(format!(
+                "[Image: {} ({})]",
+                path_display, media_type
+            )));
+
+            return;
+        }
+
         // Binary content check via fill_buf (peeks without consuming)
         let mut reader = BufReader::new(file);
         {
@@ -407,7 +509,7 @@ pub fn read(
         let path_display = path.to_string_lossy().into_owned();
 
         // Yield header
-        yield Ok(format!("#| File: {}", path_display));
+        yield Ok(ContentPart::Text(format!("#| File: {}", path_display)));
 
         let mut current_line: u64 = 0;
         let mut lines_yielded: u64 = 0;
@@ -515,7 +617,7 @@ pub fn read(
             }
 
             if !batch.is_empty() {
-                yield Ok(std::mem::take(&mut batch));
+                yield Ok(ContentPart::Text(std::mem::take(&mut batch)));
             }
 
             if lines_yielded >= lim || was_truncated {
@@ -545,7 +647,7 @@ pub fn read(
         }
 
         if !batch.is_empty() {
-            yield Ok(std::mem::take(&mut batch));
+            yield Ok(ContentPart::Text(std::mem::take(&mut batch)));
         }
 
         // Build footer
@@ -586,7 +688,7 @@ pub fn read(
             }
         }
 
-        yield Ok(closing);
+        yield Ok(ContentPart::Text(closing));
     }
 }
 

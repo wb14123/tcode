@@ -91,6 +91,7 @@ fn test_server(socket_path: PathBuf, session_dir: PathBuf, owner_token: &str) ->
             owner_shutdown_token: owner_token.to_string(),
             lease_timeout: Duration::from_secs(60),
         },
+        false,
     )
 }
 
@@ -373,6 +374,7 @@ async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow:
             owner_shutdown_token: owner_token.to_string(),
             lease_timeout: Duration::from_secs(60),
         },
+        false,
     );
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(server.run(Some(ready_tx)));

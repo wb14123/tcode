@@ -18,11 +18,13 @@ async fn main() {
         cancel_token: CancellationToken::new(),
         permission: llm_rs::permission::ScopedPermissionManager::always_allow("web_search"),
         container_config: None,
+        images_dir: None,
+        supports_vision: false,
     };
     let json_params = serde_json::json!({ "query": query }).to_string();
     let mut stream = tool.execute(ctx, json_params);
 
     while let Some(output) = stream.next().await {
-        println!("{}", output);
+        println!("{:?}", output);
     }
 }

@@ -92,6 +92,7 @@ impl RuntimeSettings {
                 session_mode,
                 ..ServerRuntimeOptions::default()
             },
+            self.config.supports_vision,
         );
 
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

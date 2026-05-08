@@ -327,13 +327,49 @@ pub(super) fn convert_messages(
             LLMMessage::ToolResult {
                 tool_call_id,
                 content,
-            } => Ok(ChatMessage::Structured(StructuredChatMessage {
-                role: "tool",
-                content: Some(content.clone()),
-                tool_call_id: Some(tool_call_id.clone()),
-                tool_calls: None,
-                reasoning_details: None,
-            })),
+            } => {
+                if crate::llm::is_all_text(content) {
+                    let text: String = crate::image::join_text_parts(content);
+                    Ok(ChatMessage::Structured(StructuredChatMessage {
+                        role: "tool",
+                        content: Some(text),
+                        tool_call_id: Some(tool_call_id.clone()),
+                        tool_calls: None,
+                        reasoning_details: None,
+                    }))
+                } else {
+                    let images_dir = images_dir
+                        .as_ref()
+                        .context("Image present in tool result but no images_dir configured")?;
+                    let mut content_items: Vec<serde_json::Value> = Vec::new();
+                    for part in content {
+                        match part {
+                            crate::image::ContentPart::Text(t) => {
+                                content_items.push(serde_json::json!({
+                                    "type": "text",
+                                    "text": t,
+                                }));
+                            }
+                            crate::image::ContentPart::Image(img) => {
+                                let data = img.get_data(images_dir)?;
+                                let encoded =
+                                    base64::engine::general_purpose::STANDARD.encode(data);
+                                let data_uri =
+                                    format!("data:{};base64,{}", img.media_type(), encoded);
+                                content_items.push(serde_json::json!({
+                                    "type": "image_url",
+                                    "image_url": { "url": data_uri },
+                                }));
+                            }
+                        }
+                    }
+                    Ok(ChatMessage::Raw(serde_json::json!({
+                        "role": "tool",
+                        "tool_call_id": tool_call_id,
+                        "content": content_items,
+                    })))
+                }
+            }
         })
         .collect::<anyhow::Result<Vec<_>>>()
 }

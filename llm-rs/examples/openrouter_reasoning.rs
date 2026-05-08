@@ -99,7 +99,8 @@ async fn main() {
             }
             LLMEvent::ToolCallStart { .. }
             | LLMEvent::ToolCallDelta { .. }
-            | LLMEvent::ImageOutput { .. } => {}
+            | LLMEvent::ImageOutput { .. }
+            | LLMEvent::ImageGenerationStarted { .. } => {}
         }
     }
 }

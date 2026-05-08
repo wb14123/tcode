@@ -4,6 +4,7 @@ mod tests {
     use std::sync::Arc;
 
     use anyhow::Result;
+    use llm_rs::image::ContentPart;
     use llm_rs::permission::{
         PermissionDecision, PermissionKey, PermissionManager, ScopedPermissionManager,
     };
@@ -42,17 +43,28 @@ mod tests {
             cancel_token: CancellationToken::new(),
             permission: scoped,
             container_config: None,
+            images_dir: None,
+            supports_vision: false,
         })
     }
 
     /// Collect all stream items into a single string (or first error).
     async fn collect_stream(
-        stream: impl tokio_stream::Stream<Item = Result<String>>,
+        stream: impl tokio_stream::Stream<Item = Result<ContentPart>>,
     ) -> Result<String> {
         tokio::pin!(stream);
         let mut out = String::new();
         while let Some(item) = stream.next().await {
-            out.push_str(&item?);
+            match item? {
+                ContentPart::Text(text) => out.push_str(&text),
+                ContentPart::Image(img) => {
+                    out.push_str(&format!(
+                        "[Image: {} {}]",
+                        img.relative_path(),
+                        img.media_type()
+                    ));
+                }
+            }
         }
         Ok(out)
     }

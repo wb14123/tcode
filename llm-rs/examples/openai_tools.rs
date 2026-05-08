@@ -106,11 +106,15 @@ async fn main() {
                                         &tool_call.name,
                                     ),
                                 container_config: None,
+                                images_dir: None,
+                                supports_vision: false,
                             };
                             let mut result_stream = tool.execute(ctx, tool_call.arguments.clone());
                             let mut result = String::new();
                             while let Some(chunk) = result_stream.next().await {
-                                result.push_str(&chunk);
+                                if let Some(text) = chunk.as_text() {
+                                    result.push_str(text);
+                                }
                             }
                             result
                         } else {
@@ -132,7 +136,8 @@ async fn main() {
             }
             LLMEvent::ToolCallStart { .. }
             | LLMEvent::ToolCallDelta { .. }
-            | LLMEvent::ImageOutput { .. } => {}
+            | LLMEvent::ImageOutput { .. }
+            | LLMEvent::ImageGenerationStarted { .. } => {}
         }
     }
 }

@@ -425,11 +425,46 @@ fn convert_messages(
                 tool_call_id,
                 content,
             } => {
-                items.push(InputItem::Item(serde_json::json!({
-                    "type": "function_call_output",
-                    "call_id": tool_call_id,
-                    "output": content,
-                })));
+                if crate::llm::is_all_text(content) {
+                    let output: String = crate::image::join_text_parts(content);
+                    items.push(InputItem::Item(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": tool_call_id,
+                        "output": output,
+                    })));
+                } else {
+                    let images_dir = images_dir
+                        .as_ref()
+                        .context("Image present in tool result but no images_dir configured")?;
+                    let mut output: Vec<serde_json::Value> = Vec::new();
+                    for part in content {
+                        match part {
+                            crate::image::ContentPart::Text(t) => {
+                                output.push(serde_json::json!({
+                                    "type": "input_text",
+                                    "text": t,
+                                }));
+                            }
+                            crate::image::ContentPart::Image(img) => {
+                                let data = img.get_data(images_dir)?;
+                                let encoded =
+                                    base64::engine::general_purpose::STANDARD.encode(data);
+                                let data_uri =
+                                    format!("data:{};base64,{}", img.media_type(), encoded);
+                                output.push(serde_json::json!({
+                                    "type": "input_image",
+                                    "image_url": data_uri,
+                                    "detail": "auto",
+                                }));
+                            }
+                        }
+                    }
+                    items.push(InputItem::Item(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": tool_call_id,
+                        "output": output,
+                    })));
+                }
             }
         }
     }
@@ -685,12 +720,12 @@ impl LLM for OpenAI {
                     "response.output_item.added" => {
                         if let Ok(parsed) = serde_json::from_str::<OutputItemDonePayload>(data) {
                             let item_type = parsed.item.get("type").and_then(|t| t.as_str());
-                            if item_type == Some("image_generation_call") {
-                                if let Some(item_id) = parsed.item.get("id").and_then(|v| v.as_str()) {
-                                    yield LLMEvent::ImageGenerationStarted {
-                                        image_id: item_id.to_string(),
-                                    };
-                                }
+                            if item_type == Some("image_generation_call")
+                                && let Some(item_id) = parsed.item.get("id").and_then(|v| v.as_str())
+                            {
+                                yield LLMEvent::ImageGenerationStarted {
+                                    image_id: item_id.to_string(),
+                                };
                             }
                         }
                     }

@@ -19,6 +19,8 @@ pub struct TcodeConfig {
     #[serde(default = "default_shortcuts")]
     pub shortcuts: HashMap<String, String>,
     pub layout: Option<LayoutNode>,
+    #[serde(default)]
+    pub supports_vision: bool,
 }
 
 impl Default for TcodeConfig {
@@ -35,6 +37,7 @@ impl Default for TcodeConfig {
             search_engine: None,
             shortcuts: default_shortcuts(),
             layout: None,
+            supports_vision: false,
         }
     }
 }
@@ -289,6 +292,7 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # browser_server_url = ""
 # browser_server_token = ""
 # search_engine = "google"         # kagi | google
+# supports_vision = false         # set to true if your model supports image/visual input
 
 [shortcuts]
 brainstorm = """\
