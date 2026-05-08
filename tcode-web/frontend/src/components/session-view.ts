@@ -52,6 +52,12 @@ class TcodeSessionView extends LitElement {
   private streamReconnectHandle: number | null = null;
   private streamRetryDelayMs = 1000;
   private streamEventsReceived = 0;
+  // Map<File, string> relies on JS Map reference equality for File keys.
+  // The composer must preserve the same File objects across submits for
+  // retry deduplication to work (currently it does via [...this.imageFiles]).
+  private pendingUploadMap: Map<File, string> | null = null;
+  private draftSessionId: string | null = null;
+  private uploadProgress: string | null = null;
 
   createRenderRoot(): this {
     return this;
@@ -94,6 +100,9 @@ class TcodeSessionView extends LitElement {
     this.lastLeaseError = '';
     this.streamRetryDelayMs = 1000;
     this.streamEventsReceived = 0;
+    this.pendingUploadMap = null;
+    this.draftSessionId = null;
+    this.uploadProgress = null;
     this.clearToasts();
 
     if (!this.sessionId) {
@@ -401,59 +410,133 @@ class TcodeSessionView extends LitElement {
     this.requestUpdate();
 
     try {
+      // Determine the effective session ID (cached draft, or existing)
+      let effectiveSessionId: string;
+      let isDraft = false;
+
       if (this.draftMode && !this.sessionId) {
-        // Validate image types before creating session
-        if (imageFiles && imageFiles.length > 0) {
-          const unsupported = imageFiles.filter(f => !SUPPORTED_IMAGE_TYPES.includes(f.type));
-          if (unsupported.length > 0) {
-            this.showToast(
-              `Unsupported image type(s): ${unsupported.map(f => `${f.name} (${f.type})`).join(', ')}. Supported formats: PNG, JPEG/JPG, GIF, WebP.`,
-              'error',
-            );
-            return;
+        isDraft = true;
+        if (!this.draftSessionId) {
+          // Validate image types before creating session
+          if (imageFiles && imageFiles.length > 0) {
+            const unsupported = imageFiles.filter((f) => !SUPPORTED_IMAGE_TYPES.includes(f.type));
+            if (unsupported.length > 0) {
+              this.showToast(
+                `Unsupported image type(s): ${unsupported.map((f) => `${f.name} (${f.type})`).join(', ')}. Supported formats: PNG, JPEG/JPG, GIF, WebP.`,
+                'error',
+              );
+              return;
+            }
+          }
+          const created = await api.createSession('');
+          this.draftSessionId = created.id;
+        }
+        effectiveSessionId = this.draftSessionId;
+      } else {
+        effectiveSessionId = this.sessionId;
+      }
+
+      if (!effectiveSessionId) {
+        return;
+      }
+
+      let filenames: string[] = [];
+
+      if (imageFiles && imageFiles.length > 0) {
+        // Initialize pendingUploadMap on first submit
+        if (!this.pendingUploadMap) {
+          this.pendingUploadMap = new Map();
+        }
+
+        // Cleanup stale entries for files no longer in imageFiles
+        // (user may have removed an image between retries)
+        for (const file of this.pendingUploadMap.keys()) {
+          if (!imageFiles.includes(file)) {
+            this.pendingUploadMap.delete(file);
           }
         }
-        // Create session first so we have a session_id for image upload,
-        // but don't send the initial prompt yet — we'll send it with images below.
-        const created = await api.createSession('');
-        if (imageFiles && imageFiles.length > 0) {
-          const result = await api.uploadSessionImages(created.id, imageFiles);
-          const filenames = result.files.map((f) => f.filename);
-          await api.sendSessionMessageWithImages(created.id, text, filenames);
+
+        // Separate into already-uploaded and need-upload
+        const needUpload: File[] = [];
+        for (const file of imageFiles) {
+          if (!this.pendingUploadMap.has(file)) {
+            needUpload.push(file);
+          }
+        }
+
+        // Upload each file sequentially, one at a time
+        let failures = 0;
+        const alreadyCount = imageFiles.length - needUpload.length;
+        const totalCount = imageFiles.length;
+
+        for (let i = 0; i < needUpload.length; i++) {
+          const file = needUpload[i];
+          this.uploadProgress = `Uploading images… [${alreadyCount + i + 1}/${totalCount}]`;
+          this.requestUpdate();
+
+          try {
+            const result = await api.uploadSessionImages(effectiveSessionId, [file]);
+            const filename = result.files[0]?.filename;
+            if (filename) {
+              this.pendingUploadMap.set(file, filename);
+            }
+          } catch {
+            failures += 1;
+          }
+        }
+
+        this.uploadProgress = null;
+
+        // Collect all filenames from the map
+        for (const file of imageFiles) {
+          const filename = this.pendingUploadMap.get(file);
+          if (filename) {
+            filenames.push(filename);
+          }
+        }
+
+        if (failures > 0) {
+          // Partial failure: keep state for retry, don't send message
+          this.showToast(
+            `${failures} of ${totalCount} image${totalCount !== 1 ? 's' : ''} failed to upload. Please retry.`,
+            'error',
+          );
+          return;
+        }
+      }
+
+      // All images uploaded successfully (or no images) — send the message
+      if (isDraft) {
+        if (filenames.length > 0) {
+          await api.sendSessionMessageWithImages(effectiveSessionId, text, filenames);
         } else {
-          await api.sendSessionMessage(created.id, text);
+          await api.sendSessionMessage(effectiveSessionId, text);
         }
         this.composerResetToken += 1;
         this.requestUpdate();
         this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
-        navigate({ kind: 'session', sessionId: created.id }, false);
-        return;
-      }
-
-      const eventsBeforeSend = this.streamEventsReceived;
-
-      if (imageFiles && imageFiles.length > 0) {
-        const result = await api.uploadSessionImages(this.sessionId, imageFiles);
-        const filenames = result.files.map((f) => f.filename);
-        await api.sendSessionMessageWithImages(this.sessionId, text || '', filenames);
+        navigate({ kind: 'session', sessionId: effectiveSessionId }, false);
+        this.pendingUploadMap = null;
+        this.draftSessionId = null;
       } else {
-        await api.sendSessionMessage(this.sessionId, text);
+        const eventsBeforeSend = this.streamEventsReceived;
+        if (filenames.length > 0) {
+          await api.sendSessionMessageWithImages(effectiveSessionId, text || '', filenames);
+        } else {
+          await api.sendSessionMessage(effectiveSessionId, text);
+        }
+        this.scheduleSendCatchUp(effectiveSessionId, eventsBeforeSend);
+        this.composerResetToken += 1;
+        this.requestUpdate();
+        this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
+        this.timelineScrollToken += 1;
+        this.pendingUploadMap = null;
+        this.draftSessionId = null;
       }
-
-      this.scheduleSendCatchUp(this.sessionId, eventsBeforeSend);
-      this.composerResetToken += 1;
-      this.requestUpdate();
-      this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
-      this.timelineScrollToken += 1;
     } catch (error) {
       let message: string;
       if (error instanceof ApiError) {
-        message = error.message;
-        if (imageFiles && imageFiles.length > 0) {
-          message = `Image upload failed: ${message}`;
-        } else {
-          message = `Failed to send message: ${message}`;
-        }
+        message = `Failed to send message: ${error.message}`;
       } else if (error instanceof Error) {
         message = `Failed to send message: ${error.message}`;
       } else {
@@ -462,6 +545,7 @@ class TcodeSessionView extends LitElement {
       this.showToast(message, 'error');
     } finally {
       this.sending = false;
+      this.uploadProgress = null;
       this.requestUpdate();
     }
   }
@@ -552,6 +636,10 @@ class TcodeSessionView extends LitElement {
                     </button>
                   </div>
                 `
+              : nothing}
+
+            ${this.uploadProgress
+              ? html`<div class="upload-progress">${this.uploadProgress}</div>`
               : nothing}
 
             <tcode-composer

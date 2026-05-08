@@ -483,6 +483,13 @@ code {
   border-color: var(--focus-border);
 }
 
+.upload-progress {
+  padding: 0.5rem 1rem;
+  font-size: 0.85rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
 .pill {
   display: inline-flex;
   align-items: center;
