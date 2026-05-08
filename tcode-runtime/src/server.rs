@@ -1762,8 +1762,6 @@ async fn handle_client(stream: UnixStream, context: ClientHandlerContext) {
 
 /// Dispatch the message to the appropriate conversation client, optionally
 /// with pre-saved image filenames (from the session's `images/` directory).
-/// `@image()` path parsing is handled by the client (CLI or web) before
-/// sending — the runtime accepts text and image filenames as-is.
 async fn handle_send_message(
     content: &str,
     conversation_id: Option<&str>,

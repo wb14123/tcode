@@ -371,43 +371,6 @@ impl Session {
         Ok(())
     }
 
-    /// Copy a source image file into `images/` with a new UUID filename.
-    ///
-    /// Reads the source, processes it through the resize/compression pipeline,
-    /// and writes the result with `0o600` permissions.
-    ///
-    /// Returns `(relative_filename, media_type)` — e.g.
-    /// `("a1b2c3d4.jpg", "image/jpeg")`.
-    pub fn save_image(&self, source: &Path) -> Result<(String, String)> {
-        const MAX_INPUT_FILE_SIZE: u64 = 50 * 1024 * 1024; // 50 MB
-
-        let metadata = std::fs::metadata(source)
-            .with_context(|| format!("Failed to stat source image: {}", source.display()))?;
-        if metadata.len() > MAX_INPUT_FILE_SIZE {
-            bail!(
-                "Image file too large: {} bytes (max {} MB)",
-                metadata.len(),
-                MAX_INPUT_FILE_SIZE / (1024 * 1024)
-            );
-        }
-
-        let data = fs::read(source)
-            .with_context(|| format!("Failed to read source image: {}", source.display()))?;
-
-        // Process through the pipeline (decode → resize → re-encode).
-        let (processed, media_type, ext) = llm_rs::image::process_image(&data)?;
-
-        let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
-        let dest = self.images_dir().join(&filename);
-
-        std::fs::write(&dest, &processed)
-            .with_context(|| format!("Failed to write image file: {}", dest.display()))?;
-        std::fs::set_permissions(&dest, Permissions::from_mode(0o600))
-            .with_context(|| format!("Failed to set permissions on {:?}", dest))?;
-
-        Ok((filename, media_type))
-    }
-
     /// Save raw image bytes into `images/`.
     ///
     /// The bytes are processed through the resize/compression pipeline (which
