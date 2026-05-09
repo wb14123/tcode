@@ -15,6 +15,7 @@ import type {
 import { TimelineStore, type TimelineUnsubscribe } from '../timeline-store';
 import {
   firstLinePreview,
+  formatTokenFooter,
   renderCollapsedExpandableRow,
   renderExpandedExpandableRow,
   renderExpandedRowAction,
@@ -473,10 +474,10 @@ class TcodeAssistantMessage extends TimelineRowElement {
           }
         })}
         ${item.error ? html`<div class="inline-alert error">${item.error}</div>` : nothing}
-        ${(item.inputTokens ?? item.outputTokens ?? item.reasoningTokens) !== null
+        ${(item.inputTokens ?? item.outputTokens ?? item.reasoningTokens ?? item.cacheCreationTokens ?? item.cacheReadTokens) !== null
           ? html`
               <footer class="timeline-footer">
-                in ${item.inputTokens ?? 0} · out ${item.outputTokens ?? 0} · reasoning ${item.reasoningTokens ?? 0}
+                ${formatTokenFooter(item.inputTokens, item.outputTokens, item.cacheCreationTokens, item.cacheReadTokens, item.reasoningTokens)}
               </footer>
             `
           : nothing}

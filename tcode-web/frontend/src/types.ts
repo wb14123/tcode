@@ -137,6 +137,8 @@ export interface AssistantTimelineItem extends TimelineItemBase {
   inputTokens: number | null;
   outputTokens: number | null;
   reasoningTokens: number | null;
+  cacheCreationTokens: number | null;
+  cacheReadTokens: number | null;
 }
 
 export interface UserTimelineItem extends TimelineItemBase {
@@ -173,6 +175,8 @@ export interface SubagentTimelineItem extends TimelineItemBase {
   endStatus: string | null;
   inputTokens: number | null;
   outputTokens: number | null;
+  cacheCreationTokens: number | null;
+  cacheReadTokens: number | null;
   permissionState: 'waiting' | 'approved' | 'denied' | null;
   pending?: boolean;
 }

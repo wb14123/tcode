@@ -219,14 +219,31 @@ export function renderExpandedRowAction(label: string, href: string): TemplateRe
   `;
 }
 
+export function formatTokenFooter(
+  input: number | null,
+  output: number | null,
+  cacheCreation: number | null,
+  cacheRead: number | null,
+  reasoning?: number | null,
+): string {
+  const processed = (input ?? 0) + (cacheCreation ?? 0);
+  const cached = (cacheRead ?? 0) > 0 ? ` · cached ${cacheRead}` : '';
+  const reason = (reasoning ?? 0) > 0 ? ` · reasoning ${reasoning}` : '';
+  return `in ${processed}${cached} · out ${output ?? 0}${reason}`;
+}
+
 export function renderToolFooterContent(item: Pick<ToolTimelineItem, 'toolCallId'>): TemplateResult {
   return html`<span>tool call id: ${item.toolCallId}</span>`;
 }
 
-export function renderSubagentFooterContent(item: Pick<SubagentTimelineItem, 'toolCallId' | 'pending'>): TemplateResult {
+export function renderSubagentFooterContent(item: Pick<SubagentTimelineItem, 'toolCallId' | 'pending' | 'inputTokens' | 'outputTokens' | 'cacheCreationTokens' | 'cacheReadTokens'>): TemplateResult {
+  const hasTokens = item.inputTokens !== null || item.outputTokens !== null || item.cacheCreationTokens !== null || item.cacheReadTokens !== null;
   return html`
     <span>${item.toolCallId ? `spawned by ${item.toolCallId}` : item.pending ? 'pending subagent input' : 'subagent session'}</span>
     ${item.pending ? html`<span>Waiting for subagent conversation…</span>` : nothing}
+    ${hasTokens
+      ? html`<span>${formatTokenFooter(item.inputTokens, item.outputTokens, item.cacheCreationTokens, item.cacheReadTokens)}</span>`
+      : nothing}
   `;
 }
 

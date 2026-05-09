@@ -6,6 +6,7 @@ import { formatTimestamp, prettyJson } from './formatting.ts';
 import { hrefForRoute } from './router.ts';
 import { TimelineStore } from './timeline-store.ts';
 import {
+  formatTokenFooter,
   renderCollapsedExpandableRow,
   renderExpandedExpandableRow,
   renderExpandedRowAction,
@@ -120,6 +121,8 @@ function createAssistant(id: string, msgId: number | null): AssistantTimelineIte
     inputTokens: null,
     outputTokens: null,
     reasoningTokens: null,
+    cacheCreationTokens: null,
+    cacheReadTokens: null,
   };
 }
 
@@ -156,6 +159,8 @@ function createSubagent(conversationId: string): SubagentTimelineItem {
     endStatus: null,
     inputTokens: null,
     outputTokens: null,
+    cacheCreationTokens: null,
+    cacheReadTokens: null,
     permissionState: null,
   };
 }
@@ -360,6 +365,8 @@ export class ConversationTimelineBuilder {
             item.inputTokens = asNumber(payload.input_tokens);
             item.outputTokens = asNumber(payload.output_tokens);
             item.reasoningTokens = asNumber(payload.reasoning_tokens);
+            item.cacheCreationTokens = asNumber(payload.cache_creation_input_tokens);
+            item.cacheReadTokens = asNumber(payload.cache_read_input_tokens);
           });
           this.store.setActiveAssistantId(null);
           break;
@@ -607,6 +614,8 @@ export class ConversationTimelineBuilder {
             item.pending = false;
             item.inputTokens = asNumber(payload.input_tokens);
             item.outputTokens = asNumber(payload.output_tokens);
+            item.cacheCreationTokens = asNumber(payload.cache_creation_input_tokens) ?? item.cacheCreationTokens;
+            item.cacheReadTokens = asNumber(payload.cache_read_input_tokens) ?? item.cacheReadTokens;
           });
           break;
         }
@@ -1146,10 +1155,10 @@ function renderAssistant(item: AssistantTimelineItem, context: TimelineRenderCon
         }
       })}
       ${item.error ? html`<div class="inline-alert error">${item.error}</div>` : nothing}
-      ${(item.inputTokens ?? item.outputTokens ?? item.reasoningTokens) !== null
+      ${(item.inputTokens ?? item.outputTokens ?? item.reasoningTokens ?? item.cacheCreationTokens ?? item.cacheReadTokens) !== null
         ? html`
             <footer class="timeline-footer">
-              in ${item.inputTokens ?? 0} · out ${item.outputTokens ?? 0} · reasoning ${item.reasoningTokens ?? 0}
+              ${formatTokenFooter(item.inputTokens, item.outputTokens, item.cacheCreationTokens, item.cacheReadTokens, item.reasoningTokens)}
             </footer>
           `
         : nothing}
