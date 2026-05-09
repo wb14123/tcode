@@ -1602,8 +1602,20 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     end
   end
 
-  local check_updates = create_jsonl_reader(M.display_file, buf, ns)
+  local bell_pending = false
+  local bell_enabled = false
+  local check_updates = create_jsonl_reader(M.display_file, buf, ns, function(variant, event_data)
+    if variant == 'AssistantMessageStart' then
+      bell_pending = true
+    elseif variant == 'AssistantMessageEnd' then
+      if bell_enabled and bell_pending and (event_data.tool_call_count or 0) == 0 then
+        os.execute('printf "\\a"')
+      end
+      bell_pending = false
+    end
+  end)
   M.display_watcher = watch_file(M.display_file, check_updates)
+  vim.schedule(function() bell_enabled = true end)
   M.status_watcher = create_status_watcher(M.status_file, function(status)
     if status == 'Shutdown' then
       vim.cmd('qa!')

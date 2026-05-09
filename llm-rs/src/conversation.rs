@@ -250,6 +250,8 @@ pub enum Message {
         aggregate_output_tokens: i32,
         aggregate_cache_creation_tokens: i32,
         aggregate_cache_read_tokens: i32,
+        #[serde(default)]
+        tool_call_count: usize,
     },
 
     ToolMessageStart {
@@ -1537,6 +1539,7 @@ impl Conversation {
                         aggregate_output_tokens: self.aggregate_output_tokens,
                         aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
                         aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
+                        tool_call_count: 0,
                     })?;
                     self.finish_turn()?;
                 }
@@ -1693,6 +1696,7 @@ impl Conversation {
                         aggregate_output_tokens: self.aggregate_output_tokens,
                         aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
                         aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
+                        tool_call_count: 0,
                     })?;
                     return Ok(());
                 }
@@ -1805,6 +1809,7 @@ impl Conversation {
                         aggregate_output_tokens: self.aggregate_output_tokens,
                         aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
                         aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
+                        tool_call_count: pending_tool_calls.len(),
                     })?;
 
                     if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
@@ -1838,6 +1843,7 @@ impl Conversation {
                         aggregate_output_tokens: self.aggregate_output_tokens,
                         aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
                         aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
+                        tool_call_count: 0,
                     })?;
                     return Ok(());
                 }
