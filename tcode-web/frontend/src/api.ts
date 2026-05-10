@@ -521,8 +521,19 @@ export const api = {
     }).then(() => undefined);
   },
 
-  sessionDisplayPath(sessionId: string): string {
-    return `api/sessions/${encodeURIComponent(sessionId)}/display.jsonl`;
+  sessionDisplayPath(
+    sessionId: string,
+    byteOffset?: number,
+    startLineNumber?: number,
+  ): string {
+    const base = `api/sessions/${encodeURIComponent(sessionId)}/display.jsonl`;
+    const params = new URLSearchParams();
+    if (byteOffset !== undefined && byteOffset > 0)
+      params.set('byte_offset', String(byteOffset));
+    if (startLineNumber !== undefined && startLineNumber > 0)
+      params.set('start_line_number', String(startLineNumber));
+    const qs = params.toString();
+    return qs ? `${base}?${qs}` : base;
   },
 
   sessionToolCallDisplayPath(sessionId: string, toolCallId: string): string {
@@ -582,8 +593,20 @@ export const api = {
     ).then(() => undefined);
   },
 
-  subagentDisplayPath(sessionId: string, subagentId: string): string {
-    return `api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}/display.jsonl`;
+  subagentDisplayPath(
+    sessionId: string,
+    subagentId: string,
+    byteOffset?: number,
+    startLineNumber?: number,
+  ): string {
+    const base = `api/sessions/${encodeURIComponent(sessionId)}/subagents/${encodeURIComponent(subagentId)}/display.jsonl`;
+    const params = new URLSearchParams();
+    if (byteOffset !== undefined && byteOffset > 0)
+      params.set('byte_offset', String(byteOffset));
+    if (startLineNumber !== undefined && startLineNumber > 0)
+      params.set('start_line_number', String(startLineNumber));
+    const qs = params.toString();
+    return qs ? `${base}?${qs}` : base;
   },
 
   subagentToolCallDisplayPath(sessionId: string, subagentId: string, toolCallId: string): string {

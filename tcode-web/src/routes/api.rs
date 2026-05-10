@@ -6,7 +6,7 @@ use std::time::Duration;
 use axum::{
     Json,
     body::Body,
-    extract::{Multipart, Path as AxumPath, State},
+    extract::{Multipart, Path as AxumPath, Query, State},
     http::{StatusCode, header},
     response::{
         IntoResponse, Response, Sse,
@@ -134,6 +134,12 @@ pub(crate) struct ResolvePermissionRequest {
 pub(crate) struct AddPermissionRequest {
     key: PermissionKey,
     scope: PermissionScope,
+}
+
+#[derive(Deserialize, Default)]
+pub(crate) struct SseQuery {
+    byte_offset: Option<u64>,
+    start_line_number: Option<u64>,
 }
 
 #[derive(Deserialize)]
@@ -343,10 +349,13 @@ pub(crate) async fn get_session_token_usage(
 
 pub(crate) async fn stream_session_display(
     AxumPath(session_id): AxumPath<String>,
+    Query(query): Query<SseQuery>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     let session_dir = existing_session_dir(&session_id)?;
     let path = session_dir.join("display.jsonl");
-    sse_jsonl(path, true)
+    let initial_offset = query.byte_offset.unwrap_or(0);
+    let initial_line_number = query.start_line_number.unwrap_or(0);
+    sse_jsonl(path, true, initial_offset, initial_line_number)
 }
 
 pub(crate) async fn stream_session_tool_call(
@@ -355,7 +364,7 @@ pub(crate) async fn stream_session_tool_call(
     let session_dir = existing_session_dir(&session_id)?;
     let tool_call_id = decode_jsonl_file_id(&tool_call_file)?;
     let path = session_dir.join(format!("tool-call-{tool_call_id}.jsonl"));
-    sse_jsonl(path, false)
+    sse_jsonl(path, false, 0, 0)
 }
 
 pub(crate) async fn get_session_tool_call_status(
@@ -410,11 +419,14 @@ pub(crate) async fn get_subagent_token_usage(
 
 pub(crate) async fn stream_subagent_display(
     AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
+    Query(query): Query<SseQuery>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     let session_dir = existing_session_dir(&session_id)?;
     let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
     let path = subagent_dir.join("display.jsonl");
-    sse_jsonl(path, true)
+    let initial_offset = query.byte_offset.unwrap_or(0);
+    let initial_line_number = query.start_line_number.unwrap_or(0);
+    sse_jsonl(path, true, initial_offset, initial_line_number)
 }
 
 pub(crate) async fn stream_subagent_tool_call(
@@ -424,7 +436,7 @@ pub(crate) async fn stream_subagent_tool_call(
     let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
     let tool_call_id = decode_jsonl_file_id(&tool_call_file)?;
     let path = subagent_dir.join(format!("tool-call-{tool_call_id}.jsonl"));
-    sse_jsonl(path, false)
+    sse_jsonl(path, false, 0, 0)
 }
 
 pub(crate) async fn get_subagent_tool_call_status(
@@ -931,6 +943,8 @@ const JSONL_READ_CHUNK_BYTES: usize = 16 * 1024;
 fn sse_jsonl(
     path: PathBuf,
     wait_for_file: bool,
+    initial_offset: u64,
+    initial_line_number: u64,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
     if !wait_for_file && !path.is_file() {
         return Err(ApiError::not_found("event stream not found"));
@@ -938,14 +952,21 @@ fn sse_jsonl(
 
     let (tx, rx) = tokio::sync::mpsc::channel(32);
     tokio::spawn(async move {
-        let mut offset = 0u64;
+        let mut offset = initial_offset;
+        let mut line_number = initial_line_number;
         let mut partial_line = Vec::new();
         loop {
             if tx.is_closed() {
                 return;
             }
-            if let Err(e) =
-                send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await
+            if let Err(e) = send_appended_jsonl_events(
+                &path,
+                &mut offset,
+                &mut partial_line,
+                &mut line_number,
+                &tx,
+            )
+            .await
             {
                 tracing::warn!(path = %path.display(), error = %e, "jsonl stream reader error; retrying");
             }
@@ -964,6 +985,7 @@ pub(crate) async fn send_appended_jsonl_events(
     path: &Path,
     offset: &mut u64,
     partial_line: &mut Vec<u8>,
+    line_number: &mut u64,
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
 ) -> Result<(), std::io::Error> {
     let mut file = match tokio::fs::File::open(path).await {
@@ -981,6 +1003,7 @@ pub(crate) async fn send_appended_jsonl_events(
             "jsonl stream source shrank; restarting from beginning"
         );
         *offset = 0;
+        *line_number = 0;
         partial_line.clear();
     }
     if snapshot_len == *offset {
@@ -1001,7 +1024,15 @@ pub(crate) async fn send_appended_jsonl_events(
         }
         remaining = remaining.saturating_sub(bytes_read as u64);
 
-        if !send_jsonl_events_from_chunk(&read_buf[..bytes_read], offset, partial_line, tx).await? {
+        if !send_jsonl_events_from_chunk(
+            &read_buf[..bytes_read],
+            offset,
+            partial_line,
+            line_number,
+            tx,
+        )
+        .await?
+        {
             return Ok(());
         }
     }
@@ -1012,6 +1043,7 @@ async fn send_jsonl_events_from_chunk(
     chunk: &[u8],
     offset: &mut u64,
     partial_line: &mut Vec<u8>,
+    line_number: &mut u64,
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
 ) -> Result<bool, std::io::Error> {
     let mut start = 0;
@@ -1020,12 +1052,12 @@ async fn send_jsonl_events_from_chunk(
         let newline_idx = start + relative_newline_idx;
         let line_bytes = &chunk[start..newline_idx];
         let sent = if partial_line.is_empty() {
-            send_jsonl_event(line_bytes, tx).await?
+            send_jsonl_event(line_bytes, line_number, tx).await?
         } else {
             let mut completed_line = Vec::with_capacity(partial_line.len() + line_bytes.len());
             completed_line.extend_from_slice(partial_line);
             completed_line.extend_from_slice(line_bytes);
-            send_jsonl_event(&completed_line, tx).await?
+            send_jsonl_event(&completed_line, line_number, tx).await?
         };
         if !sent {
             return Ok(false);
@@ -1047,10 +1079,16 @@ async fn send_jsonl_events_from_chunk(
 
 async fn send_jsonl_event(
     line_bytes: &[u8],
+    line_number: &mut u64,
     tx: &tokio::sync::mpsc::Sender<Result<Event, Infallible>>,
 ) -> Result<bool, std::io::Error> {
     let line = jsonl_line_from_bytes(line_bytes)?;
-    Ok(tx.send(Ok(Event::default().data(line))).await.is_ok())
+    let sent = tx
+        .send(Ok(Event::default().id(line_number.to_string()).data(line)))
+        .await
+        .is_ok();
+    *line_number += 1;
+    Ok(sent)
 }
 
 pub(crate) fn jsonl_line_from_bytes(line_bytes: &[u8]) -> Result<String, std::io::Error> {

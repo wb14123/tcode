@@ -184,7 +184,7 @@ async fn jsonl_stream_reader_retains_partial_utf8_line_between_polls() -> anyhow
     let mut offset = 0;
     let mut partial_line = Vec::new();
 
-    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await?;
+    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &mut 0u64, &tx).await?;
     assert_eq!(offset, 3);
     assert_eq!(partial_line, b"ok\xE2");
     assert!(matches!(
@@ -193,7 +193,7 @@ async fn jsonl_stream_reader_retains_partial_utf8_line_between_polls() -> anyhow
     ));
 
     tokio::fs::write(&path, b"ok\xE2\x82\xAC\n").await?;
-    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await?;
+    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &mut 0u64, &tx).await?;
     assert_eq!(offset, 6);
     assert!(partial_line.is_empty());
     drop(rx.try_recv()?.map_err(|never| match never {})?);
@@ -215,7 +215,7 @@ async fn jsonl_stream_reader_restarts_after_truncation() -> anyhow::Result<()> {
     let mut offset = 0;
     let mut partial_line = Vec::new();
 
-    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await?;
+    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &mut 0u64, &tx).await?;
     assert_eq!(offset, old_partial.len() as u64);
     assert_eq!(partial_line, old_partial);
     assert!(matches!(
@@ -224,7 +224,7 @@ async fn jsonl_stream_reader_restarts_after_truncation() -> anyhow::Result<()> {
     ));
 
     tokio::fs::write(&path, b"new\n").await?;
-    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx).await?;
+    send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &mut 0u64, &tx).await?;
     assert_eq!(offset, 4);
     assert!(partial_line.is_empty());
     drop(rx.try_recv()?.map_err(|never| match never {})?);
@@ -245,7 +245,7 @@ async fn jsonl_stream_reader_does_not_advance_past_invalid_utf8_line() -> anyhow
     let mut offset = 0;
     let mut partial_line = Vec::new();
 
-    let err = send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &tx)
+    let err = send_appended_jsonl_events(&path, &mut offset, &mut partial_line, &mut 0u64, &tx)
         .await
         .expect_err("invalid UTF-8 line should fail");
     assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);

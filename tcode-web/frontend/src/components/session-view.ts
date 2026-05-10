@@ -5,6 +5,7 @@ import { navigate } from '../router';
 import { StreamEventBatcher } from '../stream-event-batcher';
 import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant } from '../messages';
 import { SUPPORTED_IMAGE_TYPES } from '../image-types';
+import { TimelineCacheManager } from '../timeline-cache-manager';
 import type { MessageSubmitDetail } from './composer';
 
 import './composer';
@@ -58,6 +59,7 @@ class TcodeSessionView extends LitElement {
   private pendingUploadMap: Map<File, string> | null = null;
   private draftSessionId: string | null = null;
   private uploadProgress: string | null = null;
+  private cache = new TimelineCacheManager();
 
   createRenderRoot(): this {
     return this;
@@ -69,6 +71,7 @@ class TcodeSessionView extends LitElement {
   }
 
   disconnectedCallback(): void {
+    this.cache.flushSave();
     super.disconnectedCallback();
     this.stopView();
     for (const timeout of this.toastTimeouts.values()) {
@@ -84,6 +87,11 @@ class TcodeSessionView extends LitElement {
   }
 
   private startView(): void {
+    // Flush old cache BEFORE clearing state
+    if (this.cache.hasCache && !this.cache.matches(this.sessionId)) {
+      this.cache.flushSave();
+    }
+
     this.stopView();
     this.statusText = '';
     this.usageText = '';
@@ -104,6 +112,7 @@ class TcodeSessionView extends LitElement {
     this.draftSessionId = null;
     this.uploadProgress = null;
     this.clearToasts();
+    this.cache.reset();
 
     if (!this.sessionId) {
       this.loading = false;
@@ -114,10 +123,31 @@ class TcodeSessionView extends LitElement {
     this.requestUpdate();
     void this.refreshSnapshots(true);
     this.attachLease();
-    this.openStream();
+
+    // Load cache (will call openStream when ready)
+    if (!this.draftMode) {
+      void this.loadCacheAndRestore();
+    } else {
+      this.openStream(this.cache.byteOffset, this.cache.nextLineNumber);
+    }
+
     this.pollHandle = window.setInterval(() => {
       void this.refreshSnapshots(false);
     }, 3000);
+  }
+
+  private async loadCacheAndRestore(): Promise<void> {
+    const hit = await this.cache.loadAndRestore(
+      this.sessionId,
+      undefined,
+      (events) => this.timelineBuilder.appendEvents(events),
+    );
+    if (hit) {
+      this.loading = false;
+      this.timelineScrollToken += 1;
+      this.requestUpdate();
+    }
+    this.openStream(this.cache.byteOffset, this.cache.nextLineNumber);
   }
 
   private stopView(): void {
@@ -136,6 +166,8 @@ class TcodeSessionView extends LitElement {
       window.clearTimeout(this.streamReconnectHandle);
       this.streamReconnectHandle = null;
     }
+
+    this.cache.cancelSave();
 
     this.streamBatcher.clear();
   }
@@ -274,8 +306,8 @@ class TcodeSessionView extends LitElement {
     }
   }
 
-  private resetTimelineFromReplay(): void {
-    this.timelineBuilder.reset();
+  private get isStreamConnected(): boolean {
+    return this.eventSource !== null && this.eventSource.readyState !== EventSource.CLOSED;
   }
 
   private closeStream(): void {
@@ -295,25 +327,13 @@ class TcodeSessionView extends LitElement {
       if (!this.isConnected || !this.sessionId || this.draftMode) {
         return;
       }
-      this.restartStreamFromBeginning();
+      this.openStream(this.cache.byteOffset, this.cache.nextLineNumber);
     }, delayMs);
-  }
-
-  private restartStreamFromBeginning(): void {
-    if (this.streamReconnectHandle !== null) {
-      window.clearTimeout(this.streamReconnectHandle);
-      this.streamReconnectHandle = null;
-    }
-
-    this.closeStream();
-    this.resetTimelineFromReplay();
-    this.requestUpdate();
-    this.openStream();
   }
 
   private scheduleSendCatchUp(sessionId: string, eventsBeforeSend: number): void {
     window.setTimeout(() => {
-      if (!this.isConnected || this.sessionId !== sessionId || this.draftMode) {
+      if (!this.isStreamConnected || this.sessionId !== sessionId || this.draftMode) {
         return;
       }
 
@@ -321,15 +341,20 @@ class TcodeSessionView extends LitElement {
         return;
       }
 
-      this.restartStreamFromBeginning();
+      if (this.streamReconnectHandle !== null) {
+        window.clearTimeout(this.streamReconnectHandle);
+        this.streamReconnectHandle = null;
+      }
+      this.closeStream();
+      this.openStream(this.cache.byteOffset, this.cache.nextLineNumber);
     }, 1500);
   }
 
-  private openStream(): void {
+  private openStream(byteOffset: number, startLineNumber: number): void {
     if (this.eventSource || !this.sessionId || this.draftMode) {
       return;
     }
-    const source = openEventStream(api.sessionDisplayPath(this.sessionId));
+    const source = openEventStream(api.sessionDisplayPath(this.sessionId, byteOffset, startLineNumber));
     this.eventSource = source;
 
     source.onopen = () => {
@@ -354,6 +379,13 @@ class TcodeSessionView extends LitElement {
       if (!parsed) {
         return;
       }
+
+      // Track for cache
+      this.cache.accumulateEvent(
+        raw,
+        message.lastEventId ? Number(message.lastEventId) : null,
+      );
+      this.cache.scheduleSave();
 
       this.streamEventsReceived += 1;
       this.streamBatcher.enqueue(parsed);

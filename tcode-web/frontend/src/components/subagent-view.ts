@@ -6,6 +6,7 @@ import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine
 
 import './composer';
 import './timeline';
+import { TimelineCacheManager } from '../timeline-cache-manager';
 
 interface ToastNotice {
   id: number;
@@ -45,6 +46,10 @@ class TcodeSubagentView extends LitElement {
   private reconnecting = false;
   private leaseErrorMessage = '';
   private lastLeaseError = '';
+  private streamReconnectHandle: number | null = null;
+  private streamRetryDelayMs = 1000;
+  private streamEventsReceived = 0;
+  private cache = new TimelineCacheManager();
 
   createRenderRoot(): this {
     return this;
@@ -56,6 +61,7 @@ class TcodeSubagentView extends LitElement {
   }
 
   disconnectedCallback(): void {
+    this.cache.flushSave();
     super.disconnectedCallback();
     this.stopView();
     for (const timeout of this.toastTimeouts.values()) {
@@ -71,11 +77,16 @@ class TcodeSubagentView extends LitElement {
   }
 
   private startView(): void {
+    if (this.cache.hasCache && !this.cache.matches(this.sessionId, this.subagentId)) {
+      this.cache.flushSave();
+    }
+
+    this.stopView();
+
     if (!this.sessionId || !this.subagentId) {
       return;
     }
 
-    this.stopView();
     this.statusText = '';
     this.tokenUsageText = '';
     this.timelineBuilder.reset();
@@ -91,10 +102,14 @@ class TcodeSubagentView extends LitElement {
     this.leaseErrorMessage = '';
     this.lastLeaseError = '';
     this.clearToasts();
+    this.streamReconnectHandle = null;
+    this.streamRetryDelayMs = 1000;
+    this.streamEventsReceived = 0;
+    this.cache.reset();
     this.requestUpdate();
     void this.refreshSnapshots(true);
     this.attachLease();
-    this.openStream();
+    void this.loadCacheAndRestore();
     this.pollHandle = window.setInterval(() => {
       void this.refreshSnapshots(false);
     }, 3000);
@@ -111,6 +126,13 @@ class TcodeSubagentView extends LitElement {
 
     this.eventSource?.close();
     this.eventSource = null;
+
+    if (this.streamReconnectHandle !== null) {
+      window.clearTimeout(this.streamReconnectHandle);
+      this.streamReconnectHandle = null;
+    }
+
+    this.cache.cancelSave();
 
     this.streamBatcher.clear();
   }
@@ -139,6 +161,10 @@ class TcodeSubagentView extends LitElement {
       this.lastLeaseError = '';
     }
     this.requestUpdate();
+  }
+
+  private get isStreamConnected(): boolean {
+    return this.eventSource !== null && this.eventSource.readyState !== EventSource.CLOSED;
   }
 
   private clearToasts(): void {
@@ -235,15 +261,79 @@ class TcodeSubagentView extends LitElement {
     }
   }
 
-  private openStream(): void {
-    const source = openEventStream(api.subagentDisplayPath(this.sessionId, this.subagentId));
+  private async loadCacheAndRestore(): Promise<void> {
+    const hit = await this.cache.loadAndRestore(
+      this.sessionId,
+      this.subagentId,
+      (events) => this.timelineBuilder.appendEvents(events),
+    );
+    if (hit) {
+      this.loading = false;
+      this.timelineScrollToken += 1;
+      this.requestUpdate();
+    }
+    this.openStream(this.cache.byteOffset, this.cache.nextLineNumber);
+  }
+
+  private closeStream(): void {
+    this.eventSource?.close();
+    this.eventSource = null;
+  }
+
+  private scheduleStreamReconnect(): void {
+    if (this.streamReconnectHandle !== null || !this.sessionId || !this.subagentId) {
+      return;
+    }
+    const delayMs = this.streamRetryDelayMs;
+    this.streamRetryDelayMs = Math.min(this.streamRetryDelayMs * 2, 10000);
+    this.streamReconnectHandle = window.setTimeout(() => {
+      this.streamReconnectHandle = null;
+      if (!this.isConnected || !this.sessionId || !this.subagentId) {
+        return;
+      }
+      this.openStream(this.cache.byteOffset, this.cache.nextLineNumber);
+    }, delayMs);
+  }
+
+  private scheduleSendCatchUp(eventsBeforeSend: number): void {
+    const sessionId = this.sessionId;
+    const subagentId = this.subagentId;
+    window.setTimeout(() => {
+      if (!this.isStreamConnected || this.sessionId !== sessionId || this.subagentId !== subagentId) {
+        return;
+      }
+      if (this.streamEventsReceived !== eventsBeforeSend) {
+        return;
+      }
+      if (this.streamReconnectHandle !== null) {
+        window.clearTimeout(this.streamReconnectHandle);
+        this.streamReconnectHandle = null;
+      }
+      this.closeStream();
+      this.openStream(this.cache.byteOffset, this.cache.nextLineNumber);
+    }, 1500);
+  }
+
+  private openStream(byteOffset: number, startLineNumber: number): void {
+    if (this.eventSource || !this.sessionId || !this.subagentId) {
+      return;
+    }
+    const source = openEventStream(api.subagentDisplayPath(this.sessionId, this.subagentId, byteOffset, startLineNumber));
     this.eventSource = source;
 
     source.onopen = () => {
+      if (this.eventSource !== source) {
+        return;
+      }
+      this.streamRetryDelayMs = 1000;
       this.requestUpdate();
     };
 
     source.onmessage = (message) => {
+      if (this.eventSource !== source) {
+        return;
+      }
+
       const raw = message.data;
       if (typeof raw !== 'string') {
         return;
@@ -253,6 +343,14 @@ class TcodeSubagentView extends LitElement {
       if (!parsed) {
         return;
       }
+
+      this.cache.accumulateEvent(
+        raw,
+        message.lastEventId ? Number(message.lastEventId) : null,
+      );
+      this.cache.scheduleSave();
+
+      this.streamEventsReceived += 1;
 
       this.streamBatcher.enqueue(parsed);
       const variant = rawVariant(parsed);
@@ -287,7 +385,12 @@ class TcodeSubagentView extends LitElement {
     };
 
     source.onerror = () => {
+      if (this.eventSource !== source) {
+        return;
+      }
+      this.closeStream();
       this.requestUpdate();
+      this.scheduleStreamReconnect();
     };
   }
 
@@ -300,8 +403,11 @@ class TcodeSubagentView extends LitElement {
     this.sending = true;
     this.requestUpdate();
 
+    const eventsBeforeSend = this.streamEventsReceived;
+
     try {
       await api.sendSubagentMessage(this.sessionId, this.subagentId, text);
+      this.scheduleSendCatchUp(eventsBeforeSend);
       this.composerResetToken += 1;
       this.requestUpdate();
       this.dispatchEvent(new CustomEvent('sessions-refresh-requested', { bubbles: true, composed: true }));
