@@ -4,8 +4,9 @@ import { ApiError, api, sessionLeaseManager } from '../api';
 import { runtimeConfig } from '../config';
 import { activeSessionId, hrefForRoute, navigate, parseRoute } from '../router';
 import type { AppRoute, PendingPermissionInfo, PermissionDecisionPayload, PermissionKey, PermissionState, SessionMode, SessionSummary } from '../types';
-import { ALL_SCOPES } from '../types';
 
+import './add-permission-form';
+import './permission-tree';
 import './session-view';
 import './subagent-view';
 import './tool-call-view';
@@ -59,11 +60,6 @@ class TcodeApp extends LitElement {
   private toastCounter = 0;
   private toastTimeouts = new Map<number, number>();
   private showAddPermissionForm = false;
-  private addPermissionTool: string | null = null;
-  private addPermissionKey: string | null = null;
-  private addPermissionValue = '';
-  private addPermissionWildcard = false;
-  private addPermissionBusy = false;
 
   createRenderRoot(): this {
     return this;
@@ -222,6 +218,14 @@ class TcodeApp extends LitElement {
 
     const sessionId = activeSessionId(this.route);
     if (!sessionId) {
+      this.permissionState = null;
+      this.permissionsError = '';
+      this.lastPermissionsErrorToast = '';
+      this.requestUpdate();
+      return;
+    }
+
+    if (this.route.kind === 'permissions') {
       this.permissionState = null;
       this.permissionsError = '';
       this.lastPermissionsErrorToast = '';
@@ -393,10 +397,6 @@ class TcodeApp extends LitElement {
 
   private openAddPermissionForm = (): void => {
     this.showAddPermissionForm = true;
-    this.addPermissionTool = null;
-    this.addPermissionKey = null;
-    this.addPermissionValue = '';
-    this.addPermissionWildcard = false;
     this.requestUpdate();
   };
 
@@ -405,53 +405,12 @@ class TcodeApp extends LitElement {
     this.requestUpdate();
   };
 
-  private onAddPermissionToolSelect = (tool: string): void => {
-    this.addPermissionTool = tool;
-    this.addPermissionKey = null;
-    this.addPermissionValue = '';
-    this.addPermissionWildcard = false;
-    this.requestUpdate();
-  };
-
-  private onAddPermissionKeySelect = (key: string): void => {
-    this.addPermissionKey = key;
-    this.addPermissionValue = '';
-    this.addPermissionWildcard = false;
-    this.requestUpdate();
-  };
-
-  private onAddPermissionValueInput = (event: Event): void => {
-    this.addPermissionValue = (event.target as HTMLInputElement).value;
-    this.requestUpdate();
-  };
-
-  private onAddPermissionWildcardToggle = (event: Event): void => {
-    this.addPermissionWildcard = (event.target as HTMLInputElement).checked;
-    if (this.addPermissionWildcard) {
-      this.addPermissionValue = '';
-    }
-    this.requestUpdate();
-  };
-
-  private async submitAddPermission(): Promise<void> {
+  private async handleAddPermissionSubmit(event: CustomEvent): Promise<void> {
     const sessionId = activeSessionId(this.route);
-    if (!sessionId || !this.addPermissionTool || !this.addPermissionKey || this.addPermissionBusy) {
+    const key = event.detail?.key as PermissionKey | undefined;
+    if (!sessionId || !key) {
       return;
     }
-
-    const value = this.addPermissionWildcard ? '*' : this.addPermissionValue.trim();
-    if (!value) {
-      return;
-    }
-
-    const key: PermissionKey = {
-      tool: this.addPermissionTool,
-      key: this.addPermissionKey,
-      value,
-    };
-
-    this.addPermissionBusy = true;
-    this.requestUpdate();
 
     try {
       await api.addPermission(sessionId, key);
@@ -461,9 +420,7 @@ class TcodeApp extends LitElement {
     } catch (error) {
       const message = error instanceof Error ? error.message : 'Failed to add permission';
       this.showToast(message, 'error', 7000);
-    } finally {
-      this.addPermissionBusy = false;
-      this.requestUpdate();
+      (event.target as HTMLElement & { busy?: boolean }).busy = false;
     }
   }
 
@@ -641,6 +598,12 @@ class TcodeApp extends LitElement {
         `;
       case 'login':
         return this.renderLogin();
+      case 'permissions':
+        return html`
+          <tcode-permission-tree
+            .sessionId=${this.route.sessionId}
+          ></tcode-permission-tree>
+        `;
     }
   }
 
@@ -679,13 +642,26 @@ class TcodeApp extends LitElement {
     `;
   }
 
-  private renderMobileTopbar() {
+  private renderTopbar() {
+    const sessionId = activeSessionId(this.route);
+    const showPermissionsLink = sessionId !== null && this.route.kind !== 'permissions';
+    const isPermissionsPage = this.route.kind === 'permissions';
+
     return html`
-      <header class="mobile-topbar">
-        <button class="button ghost mobile-topbar-button" type="button" @click=${this.toggleSidebar} aria-label="Open conversations">
-          ☰
-        </button>
-        <button class="button ghost mobile-topbar-button" type="button" @click=${this.startNewConversation}>New</button>
+      <header class="topbar">
+        <span class="topbar-left">
+          <button class="button ghost topbar-hamburger" type="button" @click=${this.toggleSidebar} aria-label="Open conversations">
+            ☰
+          </button>
+        </span>
+        <span class="topbar-title">${isPermissionsPage ? 'Permissions' : 'TCode'}</span>
+        <span class="topbar-right">
+          ${showPermissionsLink
+            ? html`<a class="button ghost topbar-link" href="${hrefForRoute({ kind: 'permissions', sessionId })}">Permissions</a>`
+            : sessionId !== null
+              ? html`<a class="button ghost topbar-link" href="${hrefForRoute({ kind: 'session', sessionId })}">Back</a>`
+              : nothing}
+        </span>
       </header>
     `;
   }
@@ -698,17 +674,11 @@ class TcodeApp extends LitElement {
 
     if (this.showAddPermissionForm) {
       return html`
-        <div class="modal-backdrop permission-modal-backdrop">
-          <section class="modal-card permission-modal-card" role="dialog" aria-modal="true" aria-labelledby="add-permission-modal-title">
-            <header class="permission-modal-header">
-              <div>
-                <h2 id="add-permission-modal-title" class="page-title">Add session permission</h2>
-                <p class="page-subtitle">Manually grant a permission for this session</p>
-              </div>
-            </header>
-            ${this.renderAddPermissionForm()}
-          </section>
-        </div>
+        <tcode-add-permission-form
+          cancelLabel="Back"
+          @tcode-add-permission-submit=${this.handleAddPermissionSubmit}
+          @tcode-add-permission-cancel=${this.closeAddPermissionForm}
+        ></tcode-add-permission-form>
       `;
     }
 
@@ -777,7 +747,7 @@ class TcodeApp extends LitElement {
                     </button>
                   `}
             </div>
-            <div class="permission-deny-actions">
+            <div class="permission-add-actions">
               <button
                 type="button"
                 class="button danger"
@@ -789,106 +759,10 @@ class TcodeApp extends LitElement {
               >
                 Deny
               </button>
-            </div>
-            <div class="permission-add-actions">
-              <button type="button" class="button ghost" @click=${this.openAddPermissionForm}>
-                Add Permission
-              </button>
+              <a class="button ghost" href="${hrefForRoute({ kind: 'permissions', sessionId: activeSessionId(this.route)! })}">View all permissions</a>
             </div>
           </div>
         </section>
-      </div>
-    `;
-  }
-
-  private renderAddPermissionForm() {
-    const toolKeys = Object.keys(ALL_SCOPES);
-    const selectedToolKeys = this.addPermissionTool ? (ALL_SCOPES[this.addPermissionTool] ?? []) : [];
-    const canSubmit = this.addPermissionTool !== null
-      && this.addPermissionKey !== null
-      && (this.addPermissionWildcard || this.addPermissionValue.trim().length > 0);
-
-    return html`
-      <div class="add-permission-form">
-        <div class="add-permission-content">
-          <div class="add-permission-step">
-            <div class="add-permission-step-label">1. Select tool</div>
-            <div class="add-permission-tool-options">
-              ${toolKeys.map(
-                (tool) => html`
-                  <button
-                    type="button"
-                    class="add-permission-option-button ${this.addPermissionTool === tool ? 'selected' : ''}"
-                    @click=${() => this.onAddPermissionToolSelect(tool)}
-                  >
-                    ${tool}
-                  </button>
-                `,
-              )}
-            </div>
-          </div>
-
-          ${this.addPermissionTool
-            ? html`
-                <div class="add-permission-step">
-                  <div class="add-permission-step-label">2. Select key</div>
-                  <div class="add-permission-key-options">
-                    ${selectedToolKeys.map(
-                      (key) => html`
-                        <button
-                          type="button"
-                          class="add-permission-option-button ${this.addPermissionKey === key ? 'selected' : ''}"
-                          @click=${() => this.onAddPermissionKeySelect(key)}
-                        >
-                          ${key}
-                        </button>
-                      `,
-                    )}
-                  </div>
-                </div>
-              `
-            : nothing}
-
-          ${this.addPermissionKey
-            ? html`
-                <div class="add-permission-step">
-                  <div class="add-permission-step-label">3. Enter value</div>
-                  <div class="add-permission-value-row">
-                    <input
-                      type="text"
-                      class="add-permission-value-input"
-                      placeholder="e.g. /home/user/*"
-                      .value=${this.addPermissionValue}
-                      @input=${this.onAddPermissionValueInput}
-                      ?disabled=${this.addPermissionWildcard}
-                    />
-                  </div>
-                  <label class="add-permission-wildcard">
-                    <input
-                      type="checkbox"
-                      .checked=${this.addPermissionWildcard}
-                      @change=${this.onAddPermissionWildcardToggle}
-                    />
-                    Allow all values (*)
-                  </label>
-                </div>
-              `
-            : nothing}
-        </div>
-
-        <div class="modal-actions add-permission-actions">
-          <button
-            type="button"
-            class="button add-permission-submit"
-            @click=${() => void this.submitAddPermission()}
-            ?disabled=${!canSubmit || this.addPermissionBusy}
-          >
-            ${this.addPermissionBusy ? 'Adding…' : 'Add to session'}
-          </button>
-          <button type="button" class="button ghost add-permission-back" @click=${this.closeAddPermissionForm} ?disabled=${this.addPermissionBusy}>
-            Back
-          </button>
-        </div>
       </div>
     `;
   }
@@ -935,7 +809,7 @@ class TcodeApp extends LitElement {
         <div class="sidebar-backdrop" @click=${this.closeSidebar}></div>
         ${this.renderSidebar()}
         <main class="main-column">
-          ${this.renderMobileTopbar()}
+          ${this.renderTopbar()}
           ${this.renderMainView()}
         </main>
       </div>

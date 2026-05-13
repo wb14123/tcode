@@ -89,7 +89,8 @@ export type AppRoute =
       sessionId: string;
       subagentId: string;
       toolCallId: string;
-    };
+    }
+  | { kind: 'permissions'; sessionId: string };
 
 export interface WireMessageEnvelope {
   variant: string;

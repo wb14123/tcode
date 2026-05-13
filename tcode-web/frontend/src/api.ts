@@ -655,4 +655,15 @@ export const api = {
       body: jsonBody({ key, decision, request_id: pending.request_id }),
     }).then(() => undefined);
   },
+
+  revokePermission(sessionId: string, key: PermissionKey): Promise<void> {
+    const json = JSON.stringify(key);
+    const bytes = new TextEncoder().encode(json);
+    const binary = String.fromCharCode(...bytes);
+    const permissionId = btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+    return request(
+      `api/sessions/${encodeURIComponent(sessionId)}/permissions/${permissionId}`,
+      { method: 'DELETE' },
+    ).then(() => undefined);
+  },
 };

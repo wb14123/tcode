@@ -39,6 +39,8 @@ export function hrefForRoute(route: AppRoute): string {
       return joinRoute(
         `sessions/${encodeURIComponent(route.sessionId)}/subagents/${encodeURIComponent(route.subagentId)}/tool-calls/${encodeURIComponent(route.toolCallId)}`,
       );
+    case 'permissions':
+      return joinRoute(`sessions/${encodeURIComponent(route.sessionId)}/permissions`);
   }
 }
 
@@ -63,6 +65,10 @@ export function parseRoute(pathname = window.location.pathname): AppRoute {
 
     if (segments[2] === 'tool-calls' && segments[3] && segments.length === 4) {
       return { kind: 'tool', sessionId, toolCallId: segments[3] };
+    }
+
+    if (segments[2] === 'permissions' && segments.length === 3) {
+      return { kind: 'permissions', sessionId };
     }
 
     if (segments[2] === 'subagents' && segments[3]) {
@@ -97,6 +103,7 @@ export function activeSessionId(route: AppRoute): string | null {
     case 'tool':
     case 'subagent':
     case 'subagent-tool':
+    case 'permissions':
       return route.sessionId;
     default:
       return null;
