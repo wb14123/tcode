@@ -291,11 +291,51 @@ fn build_raw_output(
     streamed_output_items: &[serde_json::Value],
     saw_function_calls: bool,
 ) -> Vec<serde_json::Value> {
-    if response_output.is_empty() && !streamed_output_items.is_empty() {
-        return streamed_output_items.to_vec();
+    // Prefer response.completed.output, but the ChatGPT proxy sometimes
+    // returns an empty output array — fall back to streamed output_item.done
+    // events in that case.
+    let mut output = if response_output.is_empty() && !streamed_output_items.is_empty() {
+        streamed_output_items.to_vec()
+    } else {
+        response_output.to_vec()
+    };
+
+    // The ChatGPT proxy may return items in response.completed.output
+    // without a "type" field (e.g. image_generation_call), but streamed
+    // output_item.done events always include the full type.  Cross-reference
+    // by id to fill in any missing structural fields.
+    for item in &mut output {
+        if item.get("type").is_none()
+            && let Some(id) = item.get("id").and_then(|v| v.as_str())
+        {
+            for streamed in streamed_output_items {
+                if streamed.get("id").and_then(|v| v.as_str()) == Some(id) {
+                    if let Some(typ) = streamed.get("type") {
+                        item["type"] = typ.clone();
+                    }
+                    break;
+                }
+            }
+        }
     }
 
-    let mut output = response_output.to_vec();
+    // Strip output-only fields from image_generation_call items so they
+    // can be round-tripped as input.  The API rejects call-parameter fields
+    // (action, background, output_format, quality, size) when replayed.
+    // Keep type, id, status, revised_prompt, and result.
+    for item in &mut output {
+        if item.get("type").and_then(|v| v.as_str()) == Some("image_generation_call")
+            && let Some(obj) = item.as_object_mut()
+        {
+            obj.retain(|k, _| {
+                matches!(
+                    k.as_str(),
+                    "type" | "id" | "status" | "revised_prompt" | "result"
+                )
+            });
+        }
+    }
+
     if saw_function_calls {
         let has_fc_in_output = output
             .iter()
