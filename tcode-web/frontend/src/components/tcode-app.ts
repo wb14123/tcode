@@ -60,6 +60,8 @@ class TcodeApp extends LitElement {
   private toastCounter = 0;
   private toastTimeouts = new Map<number, number>();
   private showAddPermissionForm = false;
+  private dismissedApprovalRequestId: string | null = null;
+  private treeApprovalOpen = false;
 
   createRenderRoot(): this {
     return this;
@@ -94,6 +96,7 @@ class TcodeApp extends LitElement {
     this.route = parseRoute();
     this.sidebarOpen = false;
     this.showAddPermissionForm = false;
+    this.treeApprovalOpen = false;
     this.syncActiveSessionLease();
     this.resetPermissionPolling();
     this.requestUpdate();
@@ -318,6 +321,11 @@ class TcodeApp extends LitElement {
       this.permissionState = await api.getPermissions(sessionId);
       this.permissionsError = '';
       this.lastPermissionsErrorToast = '';
+      // Re-show approval if pending permission changed since dismissal
+      const pending = this.permissionState?.pending?.[0];
+      if (!pending || pending.request_id !== this.dismissedApprovalRequestId) {
+        this.dismissedApprovalRequestId = null;
+      }
     } catch (error) {
       if (error instanceof ApiError && error.status === 404) {
         this.permissionState = null;
@@ -402,6 +410,28 @@ class TcodeApp extends LitElement {
 
   private closeAddPermissionForm = (): void => {
     this.showAddPermissionForm = false;
+    this.requestUpdate();
+  };
+
+  private handleApprovalBack = (e: Event): void => {
+    e.preventDefault();
+    const pending = this.pendingPermission();
+    if (pending) {
+      this.dismissedApprovalRequestId = pending.request_id;
+    }
+    const sessionId = activeSessionId(this.route);
+    if (sessionId) {
+      navigate({ kind: 'session', sessionId });
+    }
+  };
+
+  private handleTreeApprovalOpened = (): void => {
+    this.treeApprovalOpen = true;
+    this.requestUpdate();
+  };
+
+  private handleTreeApprovalClosed = (): void => {
+    this.treeApprovalOpen = false;
     this.requestUpdate();
   };
 
@@ -554,6 +584,11 @@ class TcodeApp extends LitElement {
   }
 
   private renderMainView() {
+    const pending = this.pendingPermission();
+    if (pending && !this.showAddPermissionForm && pending.request_id !== this.dismissedApprovalRequestId) {
+      return this.renderPermissionApproval(pending);
+    }
+
     switch (this.route.kind) {
       case 'home':
         return this.renderHome();
@@ -602,6 +637,8 @@ class TcodeApp extends LitElement {
         return html`
           <tcode-permission-tree
             .sessionId=${this.route.sessionId}
+            @tree-approval-opened=${this.handleTreeApprovalOpened}
+            @tree-approval-closed=${this.handleTreeApprovalClosed}
           ></tcode-permission-tree>
         `;
     }
@@ -643,6 +680,40 @@ class TcodeApp extends LitElement {
   }
 
   private renderTopbar() {
+    // Auto-popup approval (permission popped up over conversation)
+    const pending = this.pendingPermission();
+    if (pending && pending.request_id !== this.dismissedApprovalRequestId) {
+      const sessionId = activeSessionId(this.route);
+      return html`
+        <header class="topbar">
+          <span class="topbar-left">
+            <button class="button ghost topbar-hamburger" type="button" @click=${this.toggleSidebar} aria-label="Open conversations">☰</button>
+          </span>
+          <span class="topbar-title">Permission Approval</span>
+          <span class="topbar-right">
+            ${sessionId !== null
+              ? html`<a class="button ghost topbar-link" href="${hrefForRoute({ kind: 'session', sessionId })}" @click=${this.handleApprovalBack}>Back</a>`
+              : nothing}
+          </span>
+        </header>
+      `;
+    }
+
+    // Tree approval (permission-tree component showing approval)
+    if (this.treeApprovalOpen) {
+      return html`
+        <header class="topbar">
+          <span class="topbar-left">
+            <button class="button ghost topbar-hamburger" type="button" @click=${this.toggleSidebar} aria-label="Open conversations">☰</button>
+          </span>
+          <span class="topbar-title">Permission Approval</span>
+          <span class="topbar-right">
+            <a class="button ghost topbar-link" href="#" @click=${(e: Event) => { e.preventDefault(); history.back(); }}>Back</a>
+          </span>
+        </header>
+      `;
+    }
+
     const sessionId = activeSessionId(this.route);
     const showPermissionsLink = sessionId !== null && this.route.kind !== 'permissions';
     const isPermissionsPage = this.route.kind === 'permissions';
@@ -667,7 +738,6 @@ class TcodeApp extends LitElement {
   }
 
   private renderPermissionModal() {
-    const pending = this.pendingPermission();
     if (this.authState !== 'authenticated') {
       return nothing;
     }
@@ -682,87 +752,49 @@ class TcodeApp extends LitElement {
       `;
     }
 
-    if (!pending) {
-      return nothing;
-    }
+    return nothing;
+  }
 
+  private renderPermissionApproval(pending: PendingPermissionInfo) {
     return html`
-      <div class="modal-backdrop permission-modal-backdrop">
-        <section class="modal-card permission-modal-card" role="dialog" aria-modal="true" aria-labelledby="permission-modal-title">
-          <header class="permission-modal-header">
-            <div>
-              <h2 id="permission-modal-title" class="page-title">Permission required</h2>
-              <p class="page-subtitle">
-                Request <code>${pending.request_id}</code> · Tool <code>${pending.tool}</code>
-              </p>
-            </div>
-          </header>
-          <div class="permission-modal-content">
-            ${this.permissionsError ? html`<div class="inline-alert error">${this.permissionsError}</div>` : nothing}
-            <section class="permission-prompt-card" aria-label="Permission prompt">
-              <div class="permission-section-label">Prompt</div>
-              <div class="permission-prompt">${pending.prompt}</div>
-            </section>
-            <dl class="meta-list permission-meta-list">
-              <div>
-                <dt>Key</dt>
-                <dd>${pending.key}</dd>
+      <div class="permission-approval-page">
+        ${this.permissionsError ? html`<div class="inline-alert error">${this.permissionsError}</div>` : nothing}
+
+        <p class="permission-prompt-text">${pending.prompt}</p>
+
+        <div class="permission-primary-actions">
+          <button type="button" class="button success" @click=${() => void this.resolvePermission('AllowOnce')} ?disabled=${this.resolvingPermission}>
+            Allow Once
+          </button>
+          <button type="button" class="button danger" @click=${() => void this.resolvePermission({ Deny: { reason: this.denyReason.trim() || null } })} ?disabled=${this.resolvingPermission}>
+            Deny
+          </button>
+        </div>
+
+        <label class="permission-deny-reason">
+          <span class="muted">Deny reason (optional)</span>
+          <textarea
+            rows="2"
+            placeholder="Only used when denying this request"
+            .value=${this.denyReason}
+            @input=${this.onDenyReasonInput}
+          ></textarea>
+        </label>
+
+        ${pending.once_only
+          ? nothing
+          : html`
+              <div class="permission-separator"><span>Or allow all matching requests</span></div>
+              <p class="permission-allow-all-text">Allow all ${pending.tool} when ${pending.key} = ${pending.value} ?</p>
+              <div class="permission-broader-actions">
+                <button type="button" class="button" @click=${() => void this.resolvePermission('AllowSession')} ?disabled=${this.resolvingPermission}>
+                  Allow for Session
+                </button>
+                <button type="button" class="button secondary" @click=${() => void this.resolvePermission('AllowProject')} ?disabled=${this.resolvingPermission}>
+                  Allow for Project
+                </button>
               </div>
-              <div>
-                <dt>Value</dt>
-                <dd><code class="permission-code-value">${pending.value}</code></dd>
-              </div>
-              <div>
-                <dt>Queued requests</dt>
-                <dd>${this.permissionState?.pending.length ?? 0}</dd>
-              </div>
-              <div>
-                <dt>Once only</dt>
-                <dd>${pending.once_only ? 'yes' : 'no'}</dd>
-              </div>
-            </dl>
-            <label class="permission-deny-reason">
-              <span class="muted">Optional deny reason</span>
-              <textarea
-                rows="2"
-                placeholder="Only used when denying this request"
-                .value=${this.denyReason}
-                @input=${this.onDenyReasonInput}
-              ></textarea>
-            </label>
-          </div>
-          <div class="modal-actions permission-modal-actions">
-            <div class="permission-allow-actions">
-              <button type="button" class="button success" @click=${() => void this.resolvePermission('AllowOnce')} ?disabled=${this.resolvingPermission}>
-                Allow once
-              </button>
-              ${pending.once_only
-                ? nothing
-                : html`
-                    <button type="button" class="button" @click=${() => void this.resolvePermission('AllowSession')} ?disabled=${this.resolvingPermission}>
-                      Allow for session
-                    </button>
-                    <button type="button" class="button secondary" @click=${() => void this.resolvePermission('AllowProject')} ?disabled=${this.resolvingPermission}>
-                      Allow for project
-                    </button>
-                  `}
-            </div>
-            <div class="permission-add-actions">
-              <button
-                type="button"
-                class="button danger"
-                @click=${() =>
-                  void this.resolvePermission({
-                    Deny: { reason: this.denyReason.trim() || null },
-                  })}
-                ?disabled=${this.resolvingPermission}
-              >
-                Deny
-              </button>
-              <a class="button ghost" href="${hrefForRoute({ kind: 'permissions', sessionId: activeSessionId(this.route)! })}">View all permissions</a>
-            </div>
-          </div>
-        </section>
+            `}
       </div>
     `;
   }

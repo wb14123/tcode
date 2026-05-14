@@ -688,207 +688,6 @@ details > summary {
   min-height: 110px;
 }
 
-.permission-modal-backdrop {
-  align-items: start;
-  justify-items: center;
-  overflow-y: auto;
-  padding: calc(clamp(0.4rem, 1.5vh, 0.85rem) + env(safe-area-inset-top)) calc(0.75rem + env(safe-area-inset-right)) calc(clamp(0.4rem, 1.5vh, 0.85rem) + env(safe-area-inset-bottom)) calc(0.75rem + env(safe-area-inset-left));
-}
-
-.permission-modal-card {
-  width: min(820px, 100%);
-  max-height: calc(100vh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-  max-height: calc(100svh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-  max-height: calc(100dvh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-  max-height: calc(100dvh - var(--tcode-keyboard-inset, 0px) - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
-  min-height: min(32rem, calc(100vh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
-  min-height: min(32rem, calc(100svh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
-  min-height: min(32rem, calc(100dvh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
-  min-height: min(32rem, calc(100dvh - var(--tcode-keyboard-inset, 0px) - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
-  min-width: 0;
-  gap: 0;
-  overflow: hidden;
-  padding: 0;
-  border-radius: var(--radius-md);
-}
-
-.permission-modal-header {
-  flex: 0 0 auto;
-  padding: 0.75rem 0.85rem 0.6rem;
-  border-bottom: 1px solid var(--border);
-}
-
-.permission-modal-header .page-title {
-  font-size: 1.12rem;
-  line-height: 1.2;
-}
-
-.permission-modal-header .page-subtitle {
-  margin-top: 0.2rem;
-  font-size: 0.9rem;
-}
-
-.permission-modal-header code,
-.permission-code-value {
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.permission-modal-content {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 0;
-  flex-direction: column;
-  gap: 0.55rem;
-  overflow-y: auto;
-  -webkit-overflow-scrolling: touch;
-  padding: 0.65rem 0.75rem;
-}
-
-.permission-prompt-card {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: clamp(10rem, 34vh, 23rem);
-  min-height: clamp(10rem, 34svh, 23rem);
-  min-height: clamp(10rem, 34dvh, 23rem);
-  flex-direction: column;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--pre-bg);
-  overflow: hidden;
-}
-
-.permission-section-label {
-  flex: 0 0 auto;
-  padding: 0.5rem 0.7rem 0;
-  color: var(--text-muted);
-  font-size: 0.72rem;
-  font-weight: 700;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-}
-
-.permission-prompt {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  -webkit-overflow-scrolling: touch;
-  padding: 0.45rem 0.7rem 0.7rem;
-  color: var(--text);
-  font-size: 0.93rem;
-  line-height: 1.45;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.permission-meta-list {
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 0.4rem;
-  font-size: 0.86rem;
-}
-
-.permission-meta-list > div {
-  padding: 0.38rem 0.5rem;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-sm);
-  background: var(--panel-soft);
-}
-
-.permission-meta-list > div:nth-child(-n + 2) {
-  grid-column: 1 / -1;
-}
-
-.permission-meta-list dt {
-  margin-bottom: 0.12rem;
-  font-size: 0.68rem;
-}
-
-.permission-meta-list dd {
-  line-height: 1.3;
-}
-
-.permission-deny-reason {
-  display: flex;
-  flex: 0 0 auto;
-  flex-direction: column;
-  gap: 0.25rem;
-  font-size: 0.9rem;
-}
-
-.permission-deny-reason textarea {
-  min-height: 3.2rem;
-  max-height: 6.5rem;
-  resize: vertical;
-  padding: 0.45rem 0.55rem;
-  border-radius: var(--radius-md);
-}
-
-.permission-modal-actions {
-  position: sticky;
-  bottom: 0;
-  z-index: 1;
-  flex: 0 0 auto;
-  flex-wrap: nowrap;
-  align-items: stretch;
-  gap: 0.65rem;
-  margin: 0;
-  padding: 0.6rem 0.75rem calc(0.6rem + env(safe-area-inset-bottom));
-  border-top: 1px solid var(--border);
-  background: var(--panel);
-}
-
-.permission-allow-actions,
-.permission-deny-actions {
-  display: flex;
-  gap: 0.45rem;
-}
-
-.permission-allow-actions {
-  flex: 1 1 auto;
-  min-width: 0;
-  flex-wrap: wrap;
-}
-
-.permission-deny-actions {
-  flex: 0 0 auto;
-  align-items: stretch;
-  padding-left: 0.65rem;
-  border-left: 1px solid var(--border);
-}
-
-.permission-modal-actions .button {
-  flex: 1 1 9rem;
-  min-height: 36px;
-  padding: 0.48rem 0.65rem;
-}
-
-.permission-deny-actions .button {
-  flex: 0 0 auto;
-  min-width: 6.5rem;
-}
-
-.permission-add-actions {
-  display: flex;
-  flex: 1 1 100%;
-  min-width: 0;
-  justify-content: flex-end;
-  align-items: center;
-  gap: 0.65rem;
-  padding-top: 0.5rem;
-  border-top: 1px solid var(--border);
-}
-
-@media (min-width: 721px) {
-  .permission-add-actions {
-    flex: 0 0 auto;
-    padding-top: 0;
-    padding-left: 0.65rem;
-    border-top: 0;
-    border-left: 1px solid var(--border);
-  }
-}
-
 .add-permission-form {
   display: flex;
   flex: 1 1 auto;
@@ -1006,12 +805,6 @@ details > summary {
 }
 
 @media (max-width: 720px) {
-  .permission-add-actions {
-    justify-content: flex-start;
-    padding-top: 0.5rem;
-    border-top: 1px solid var(--border);
-  }
-
   .add-permission-content {
     padding: 0.5rem calc(0.65rem + env(safe-area-inset-right)) 0.5rem calc(0.65rem + env(safe-area-inset-left));
     gap: 0.85rem;
@@ -1115,15 +908,201 @@ details > summary {
   .page-header {
     flex-direction: column;
   }
+}
 
-  .permission-modal-backdrop {
+/* Add-permission form modal (replaces old permission-modal-*) */
+.add-permission-form-backdrop {
+  align-items: start;
+  justify-items: center;
+  overflow-y: auto;
+  padding: calc(clamp(0.4rem, 1.5vh, 0.85rem) + env(safe-area-inset-top)) calc(0.75rem + env(safe-area-inset-right)) calc(clamp(0.4rem, 1.5vh, 0.85rem) + env(safe-area-inset-bottom)) calc(0.75rem + env(safe-area-inset-left));
+}
+
+.add-permission-form-card {
+  width: min(820px, 100%);
+  max-height: calc(100vh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  max-height: calc(100svh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  max-height: calc(100dvh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  max-height: calc(100dvh - var(--tcode-keyboard-inset, 0px) - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom));
+  min-height: min(32rem, calc(100vh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+  min-height: min(32rem, calc(100svh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+  min-height: min(32rem, calc(100dvh - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+  min-height: min(32rem, calc(100dvh - var(--tcode-keyboard-inset, 0px) - 1.7rem - env(safe-area-inset-top) - env(safe-area-inset-bottom)));
+  min-width: 0;
+  gap: 0;
+  overflow: hidden;
+  padding: 0;
+  border-radius: var(--radius-md);
+}
+
+.add-permission-form-header {
+  flex: 0 0 auto;
+  padding: 0.75rem 0.85rem 0.6rem;
+  border-bottom: 1px solid var(--border);
+}
+
+.add-permission-form-header .page-title {
+  font-size: 1.12rem;
+  line-height: 1.2;
+}
+
+.add-permission-form-header .page-subtitle {
+  margin-top: 0.2rem;
+  font-size: 0.9rem;
+}
+
+/* Permission approval page (page content, not modal) */
+.permission-approval-page {
+  max-width: 720px;
+  width: 100%;
+  margin: 0 auto;
+  padding: 1.5rem 1rem;
+  display: flex;
+  flex-direction: column;
+  gap: 1rem;
+}
+
+.permission-prompt-text {
+  font-size: 1.05rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  color: var(--text);
+  margin: 0;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+
+.permission-separator {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--text-muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+  margin: 0.25rem 0;
+}
+
+.permission-separator::before,
+.permission-separator::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.permission-separator span {
+  flex: 0 0 auto;
+}
+
+.permission-allow-all-text {
+  font-size: 0.95rem;
+  line-height: 1.45;
+  color: var(--text);
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.permission-primary-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.permission-primary-actions .button {
+  flex: 1;
+  min-height: 38px;
+}
+
+.permission-broader-actions {
+  display: flex;
+  gap: 0.75rem;
+}
+
+.permission-broader-actions .button {
+  flex: 1;
+  min-height: 38px;
+}
+
+/* Deny reason field - always visible, compact */
+.permission-approval-page .permission-deny-reason {
+  display: flex;
+  flex-direction: column;
+  gap: 0.3rem;
+  font-size: 0.9rem;
+}
+
+.permission-approval-page .permission-deny-reason textarea {
+  min-height: 2.8rem;
+  max-height: 5rem;
+  resize: vertical;
+  padding: 0.45rem 0.55rem;
+  border-radius: var(--radius-md);
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 0.9rem;
+  line-height: 1.4;
+  width: 100%;
+  box-sizing: border-box;
+}
+
+@media (max-width: 720px) {
+  .permission-approval-page {
+    padding: 1rem 0.75rem;
+    gap: 0.85rem;
+  }
+
+  .permission-prompt-text {
+    font-size: 0.95rem;
+    line-height: 1.5;
+    max-height: 40vh;
+  }
+
+  .permission-primary-actions {
+    gap: 0.6rem;
+  }
+
+  .permission-primary-actions .button {
+    min-height: 36px;
+    font-size: 0.9rem;
+  }
+
+  .permission-broader-actions {
+    gap: 0.6rem;
+  }
+
+  .permission-broader-actions .button {
+    min-height: 36px;
+    font-size: 0.9rem;
+  }
+
+  .permission-separator {
+    font-size: 0.8rem;
+    gap: 0.5rem;
+  }
+
+  .permission-allow-all-text {
+    font-size: 0.9rem;
+  }
+
+  .permission-approval-page .permission-deny-reason {
+    font-size: 0.84rem;
+  }
+
+  .permission-approval-page .permission-deny-reason textarea {
+    min-height: 2.5rem;
+    max-height: 4.5rem;
+  }
+
+  .add-permission-form-backdrop {
     align-items: stretch;
     justify-items: stretch;
     overflow: hidden;
     padding: 0;
   }
 
-  .permission-modal-card {
+  .add-permission-form-card {
     width: 100%;
     height: 100vh;
     height: 100svh;
@@ -1136,83 +1115,16 @@ details > summary {
     border-radius: 0;
   }
 
-  .permission-modal-header {
+  .add-permission-form-header {
     padding: calc(0.55rem + env(safe-area-inset-top)) calc(0.65rem + env(safe-area-inset-right)) 0.5rem calc(0.65rem + env(safe-area-inset-left));
   }
 
-  .permission-modal-header .page-title {
+  .add-permission-form-header .page-title {
     font-size: 1.05rem;
   }
 
-  .permission-modal-header .page-subtitle {
+  .add-permission-form-header .page-subtitle {
     font-size: 0.84rem;
-  }
-
-  .permission-modal-content {
-    gap: 0.45rem;
-    padding: 0.5rem calc(0.65rem + env(safe-area-inset-right)) 0.5rem calc(0.65rem + env(safe-area-inset-left));
-  }
-
-  .permission-prompt-card {
-    min-height: 0;
-  }
-
-  .permission-section-label {
-    padding: 0.4rem 0.55rem 0;
-    font-size: 0.68rem;
-  }
-
-  .permission-prompt {
-    padding: 0.35rem 0.55rem 0.55rem;
-    font-size: 0.9rem;
-  }
-
-  .permission-meta-list {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: 0.32rem;
-    font-size: 0.8rem;
-  }
-
-  .permission-meta-list > div {
-    padding: 0.3rem 0.4rem;
-  }
-
-  .permission-deny-reason {
-    font-size: 0.84rem;
-  }
-
-  .permission-deny-reason textarea {
-    min-height: 2.75rem;
-    max-height: 5.5rem;
-  }
-
-  .permission-modal-actions {
-    flex-direction: column;
-    gap: 0.5rem;
-    padding: 0.5rem calc(0.65rem + env(safe-area-inset-right)) calc(0.55rem + env(safe-area-inset-bottom)) calc(0.65rem + env(safe-area-inset-left));
-  }
-
-  .permission-allow-actions {
-    display: grid;
-    grid-template-columns: repeat(auto-fit, minmax(min(8.5rem, 100%), 1fr));
-    gap: 0.4rem;
-  }
-
-  .permission-deny-actions {
-    justify-content: flex-end;
-    padding-top: 0.5rem;
-    padding-left: 0;
-    border-top: 1px solid var(--border);
-    border-left: 0;
-  }
-
-  .permission-modal-actions .button {
-    min-height: 34px;
-    padding: 0.42rem 0.55rem;
-  }
-
-  .permission-deny-actions .button {
-    width: min(10rem, 100%);
   }
 }
 

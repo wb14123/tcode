@@ -75,9 +75,15 @@ class TcodePermissionTree extends LitElement {
     return this
   }
 
+  connectedCallback(): void {
+    super.connectedCallback()
+    window.addEventListener('popstate', this.handlePopState)
+  }
+
   disconnectedCallback(): void {
     super.disconnectedCallback()
     this.closeSseStream()
+    window.removeEventListener('popstate', this.handlePopState)
   }
 
   updated(changed: Map<string, unknown>): void {
@@ -93,6 +99,15 @@ class TcodePermissionTree extends LitElement {
       this.resolvingPermission = false
       void this.refreshPermissions(true)
       this.openSseStream()
+    }
+  }
+
+  private handlePopState = (e: PopStateEvent): void => {
+    if (this.selectedPending && !(e.state && e.state.approval)) {
+      this.selectedPending = null
+      this.denyReason = ''
+      this.requestUpdate()
+      this.dispatchEvent(new CustomEvent('tree-approval-closed', { bubbles: true, composed: true }))
     }
   }
 
@@ -375,6 +390,7 @@ class TcodePermissionTree extends LitElement {
   }
 
   private selectPending(value: TreeValue, tool: string, key: string): void {
+    if (this.selectedPending) return;
     this.selectedPending = {
       tool,
       key,
@@ -385,16 +401,12 @@ class TcodePermissionTree extends LitElement {
     }
     this.denyReason = ''
     this.requestUpdate()
+    history.pushState({ approval: true }, '')
+    this.dispatchEvent(new CustomEvent('tree-approval-opened', { bubbles: true, composed: true }))
   }
 
   private onDenyReasonInput = (event: Event): void => {
     this.denyReason = (event.target as HTMLTextAreaElement).value
-    this.requestUpdate()
-  }
-
-  private dismissApprovalModal = (): void => {
-    this.selectedPending = null
-    this.denyReason = ''
     this.requestUpdate()
   }
 
@@ -412,6 +424,8 @@ class TcodePermissionTree extends LitElement {
       await api.resolvePermission(this.sessionId, pending, decision)
       this.selectedPending = null
       this.denyReason = ''
+      this.dispatchEvent(new CustomEvent('tree-approval-closed', { bubbles: true, composed: true }))
+      history.back()
       await this.refreshPermissions(true)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to resolve permission'
@@ -438,6 +452,8 @@ class TcodePermissionTree extends LitElement {
       })
       this.selectedPending = null
       this.denyReason = ''
+      this.dispatchEvent(new CustomEvent('tree-approval-closed', { bubbles: true, composed: true }))
+      history.back()
       await this.refreshPermissions(true)
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Failed to resolve permission'
@@ -457,97 +473,46 @@ class TcodePermissionTree extends LitElement {
     const busy = this.resolvingPermission
 
     return html`
-      <div class="modal-backdrop permission-modal-backdrop" @click=${this.dismissApprovalModal}>
-        <section
-          class="modal-card permission-modal-card"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="tree-permission-modal-title"
-          @click=${(e: Event) => e.stopPropagation()}
-        >
-          <header class="permission-modal-header">
-            <div>
-              <h2 id="tree-permission-modal-title" class="page-title">Permission required</h2>
-              <p class="page-subtitle">
-                Request <code>${pending.request_id}</code> · Tool <code>${pending.tool}</code>
-              </p>
-            </div>
-          </header>
-          <div class="permission-modal-content">
-            ${this.error ? html`<div class="inline-alert error">${this.error}</div>` : nothing}
-            <section class="permission-prompt-card" aria-label="Permission prompt">
-              <div class="permission-section-label">Prompt</div>
-              <div class="permission-prompt">${pending.prompt}</div>
-            </section>
-            <dl class="meta-list permission-meta-list">
-              <div>
-                <dt>Key</dt>
-                <dd>${pending.key}</dd>
-              </div>
-              <div>
-                <dt>Value</dt>
-                <dd><code class="permission-code-value">${pending.value}</code></dd>
-              </div>
-              <div>
-                <dt>Once only</dt>
-                <dd>${pending.once_only ? 'yes' : 'no'}</dd>
-              </div>
-            </dl>
-            <label class="permission-deny-reason">
-              <span class="muted">Optional deny reason</span>
-              <textarea
-                rows="2"
-                placeholder="Only used when denying this request"
-                .value=${this.denyReason}
-                @input=${this.onDenyReasonInput}
-              ></textarea>
-            </label>
-          </div>
-          <div class="modal-actions permission-modal-actions">
-            <div class="permission-allow-actions">
-              <button
-                type="button"
-                class="button success"
-                @click=${() => void this.approvePending('AllowOnce')}
-                ?disabled=${busy}
-              >
-                Allow Once
-              </button>
-              ${pending.once_only
-                ? nothing
-                : html`
-                    <button
-                      type="button"
-                      class="button"
-                      @click=${() => void this.approvePending('AllowSession')}
-                      ?disabled=${busy}
-                    >
-                      Allow Session
-                    </button>
-                    <button
-                      type="button"
-                      class="button secondary"
-                      @click=${() => void this.approvePending('AllowProject')}
-                      ?disabled=${busy}
-                    >
-                      Allow Project
-                    </button>
-                  `}
-            </div>
-            <div class="permission-deny-actions">
-              <button
-                type="button"
-                class="button danger"
-                @click=${() => void this.denyPending()}
-                ?disabled=${busy}
-              >
-                Deny
-              </button>
-            </div>
-          </div>
-        </section>
+    <div class="permission-approval-page">
+      ${this.error ? html`<div class="inline-alert error">${this.error}</div>` : nothing}
+
+      <p class="permission-prompt-text">${pending.prompt}</p>
+
+      <div class="permission-primary-actions">
+        <button type="button" class="button success" @click=${() => void this.approvePending('AllowOnce')} ?disabled=${busy}>
+          Allow Once
+        </button>
+        <button type="button" class="button danger" @click=${() => void this.denyPending()} ?disabled=${busy}>
+          Deny
+        </button>
       </div>
-    `
+
+      <label class="permission-deny-reason">
+        <span class="muted">Deny reason (optional)</span>
+        <textarea
+          rows="2"
+          placeholder="Only used when denying this request"
+          .value=${this.denyReason}
+          @input=${this.onDenyReasonInput}
+        ></textarea>
+      </label>
+
+      ${pending.once_only
+        ? nothing
+        : html`
+            <div class="permission-separator"><span>Or allow all matching requests</span></div>
+            <p class="permission-allow-all-text">Allow all ${pending.tool} when ${pending.key} = ${pending.value} ?</p>
+            <div class="permission-broader-actions">
+              <button type="button" class="button" @click=${() => void this.approvePending('AllowSession')} ?disabled=${busy}>
+                Allow for Session
+              </button>
+              <button type="button" class="button secondary" @click=${() => void this.approvePending('AllowProject')} ?disabled=${busy}>
+                Allow for Project
+              </button>
+            </div>
+          `}
+    </div>
+  `;
   }
 
   private async handleAddPermissionSubmit(event: CustomEvent): Promise<void> {
@@ -784,6 +749,14 @@ class TcodePermissionTree extends LitElement {
   }
 
   render() {
+    if (this.selectedPending) {
+      return html`
+        <div class="permission-tree-page">
+          ${this.renderApprovalModal()}
+        </div>
+      `;
+    }
+
     return html`
       <div class="permission-tree-page">
         ${this.renderLoadingBar()}
@@ -792,7 +765,6 @@ class TcodePermissionTree extends LitElement {
         ${this.renderFooter()}
       </div>
       ${this.renderAddModal()}
-      ${this.renderApprovalModal()}
     `
   }
 }

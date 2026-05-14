@@ -98,15 +98,15 @@ class TcodeAddPermissionForm extends LitElement {
       && (this.wildcard || this.value.trim().length > 0);
 
     return html`
-      <div class="modal-backdrop permission-modal-backdrop" @click=${this.onCancel}>
+      <div class="modal-backdrop add-permission-form-backdrop" @click=${this.onCancel}>
         <section
-          class="modal-card permission-modal-card"
+          class="modal-card add-permission-form-card"
           role="dialog"
           aria-modal="true"
           aria-labelledby="add-permission-modal-title"
           @click=${(e: Event) => e.stopPropagation()}
         >
-          <header class="permission-modal-header">
+          <header class="add-permission-form-header">
             <div>
               <h2 id="add-permission-modal-title" class="page-title">Add session permission</h2>
               <p class="page-subtitle">Manually grant a permission for this session</p>
