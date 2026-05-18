@@ -231,6 +231,8 @@ pub fn media_type_from_extension(filename: &str) -> &'static str {
         "image/bmp"
     } else if lower.ends_with(".tiff") || lower.ends_with(".tif") {
         "image/tiff"
+    } else if lower.ends_with(".pdf") {
+        "application/pdf"
     } else {
         "application/octet-stream"
     }

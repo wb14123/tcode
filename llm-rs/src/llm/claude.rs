@@ -186,6 +186,14 @@ struct ImageSource {
     data: String, // base64-encoded
 }
 
+/// Document source for Claude's document content blocks (PDFs).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct DocumentSource {
+    r#type: String, // "base64"
+    media_type: String,
+    data: String, // base64-encoded
+}
+
 /// Content block types for Claude messages.
 #[derive(Serialize, Deserialize, Clone)]
 #[serde(tag = "type")]
@@ -207,6 +215,8 @@ enum ContentBlock {
     Thinking { thinking: String, signature: String },
     #[serde(rename = "image")]
     Image { source: ImageSource },
+    #[serde(rename = "document")]
+    Document { source: DocumentSource },
 }
 
 // ============================================================================
@@ -382,13 +392,24 @@ fn convert_messages(
                                 let data = img.get_data(images_dir)?;
                                 let encoded =
                                     base64::engine::general_purpose::STANDARD.encode(data);
-                                blocks.push(ContentBlock::Image {
-                                    source: ImageSource {
-                                        r#type: "base64".to_string(),
-                                        media_type: img.media_type().to_string(),
-                                        data: encoded,
-                                    },
-                                });
+                                let media_type = img.media_type().to_string();
+                                if media_type == "application/pdf" {
+                                    blocks.push(ContentBlock::Document {
+                                        source: DocumentSource {
+                                            r#type: "base64".to_string(),
+                                            media_type,
+                                            data: encoded,
+                                        },
+                                    });
+                                } else {
+                                    blocks.push(ContentBlock::Image {
+                                        source: ImageSource {
+                                            r#type: "base64".to_string(),
+                                            media_type,
+                                            data: encoded,
+                                        },
+                                    });
+                                }
                             }
                         }
                     }
@@ -500,13 +521,24 @@ fn convert_messages(
                         if let crate::image::ContentPart::Image(img) = part {
                             let data = img.get_data(images_dir)?;
                             let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-                            blocks.push(ContentBlock::Image {
-                                source: ImageSource {
-                                    r#type: "base64".to_string(),
-                                    media_type: img.media_type().to_string(),
-                                    data: encoded,
-                                },
-                            });
+                            let media_type = img.media_type().to_string();
+                            if media_type == "application/pdf" {
+                                blocks.push(ContentBlock::Document {
+                                    source: DocumentSource {
+                                        r#type: "base64".to_string(),
+                                        media_type,
+                                        data: encoded,
+                                    },
+                                });
+                            } else {
+                                blocks.push(ContentBlock::Image {
+                                    source: ImageSource {
+                                        r#type: "base64".to_string(),
+                                        media_type,
+                                        data: encoded,
+                                    },
+                                });
+                            }
                         }
                     }
                     claude_messages.push(ClaudeMessage {

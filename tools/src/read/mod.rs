@@ -22,7 +22,7 @@ const BINARY_EXTENSIONS: &[&str] = &[
     "mp3", "wav", "flac", "aac", "ogg", "wma", "m4a", // Video
     "mp4", "avi", "mkv", "mov", "wmv", "flv", "webm", // Fonts
     "woff", "woff2", "ttf", "eot", "otf", // Documents (binary)
-    "pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx", // Database
+    "doc", "docx", "xls", "xlsx", "ppt", "pptx", // Database
     "db", "sqlite", "sqlite3", // Other
     "wasm",
 ];
@@ -278,9 +278,9 @@ async fn read_directory(path: &Path) -> Result<String> {
 }
 
 /// Read a file or directory from the local filesystem. Supports text files,
-/// image files (png, jpg, jpeg, gif, webp, bmp), and directories. Error if
-/// path doesn't exist. Image files are auto-detected by extension — no special
-/// parameters needed.
+/// image files (png, jpg, jpeg, gif, webp, bmp), PDF files, and directories.
+/// Error if path doesn't exist. Image and PDF files are auto-detected by
+/// extension — no special parameters needed.
 ///
 /// - file_path must be absolute. Returns up to 500 lines from start by default.
 /// - offset is the 1-indexed line number to start from.
@@ -312,11 +312,13 @@ async fn read_directory(path: &Path) -> Result<String> {
 /// Char cap: 20000 by default (max_read_chars adjustable up to 50000).
 /// Pagination: offset/limit for lines; first_line_offset to skip chars within the first line.
 ///
-/// ## Image output
+/// ## Image / PDF output
 ///
 /// Image files produce a visual content block followed by a text annotation:
-/// `[Image: /absolute/path (image/png)]`. The offset, limit, max_read_chars, and
-/// first_line_offset parameters have no effect on image files.
+/// `[Image: /absolute/path (image/png)]`. PDF files produce a content part
+/// followed by: `[PDF: /absolute/path (application/pdf)]`. The offset, limit,
+/// max_read_chars, and first_line_offset parameters have no effect on image
+/// or PDF files.
 #[tool]
 pub fn read(
     ctx: ToolContext,
@@ -477,6 +479,128 @@ pub fn read(
             yield Ok(ContentPart::Text(format!(
                 "[Image: {} ({})]",
                 path_display, media_type
+            )));
+
+            return;
+        }
+
+        // PDF handling: check if file extension indicates a PDF document
+        let is_pdf = path
+            .extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| ext.to_lowercase().as_str() == "pdf")
+            .unwrap_or(false);
+
+        if is_pdf {
+            let path_display = path.to_string_lossy().into_owned();
+
+            // Capability check
+            if !ctx.supports_vision {
+                yield Err(anyhow!(
+                    "Cannot read PDF file: visual input is disabled."
+                ));
+                return;
+            }
+
+            // Require images_dir
+            let images_dir = match ctx.images_dir {
+                Some(ref dir) => dir.clone(),
+                None => {
+                    yield Err(anyhow!(
+                        "Cannot read PDF file: no images directory configured."
+                    ));
+                    return;
+                }
+            };
+
+            // Size check: 20 MB max
+            const MAX_PDF_SIZE: u64 = 20 * 1024 * 1024;
+            if file_size > MAX_PDF_SIZE {
+                yield Err(anyhow!(
+                    "Cannot read PDF file: {} is too large ({} bytes, max {}).",
+                    path_display, file_size, MAX_PDF_SIZE
+                ));
+                return;
+            }
+
+            // Read entire file bytes
+            let mut file = file;
+            let mut data = Vec::with_capacity(file_size as usize);
+            if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut file, &mut data).await {
+                yield Err(anyhow!("Failed to read PDF file {}: {}", path.display(), e));
+                return;
+            }
+
+            // Validate PDF magic bytes
+            if !data.starts_with(b"%PDF-") {
+                yield Err(anyhow!(
+                    "Cannot read file: {} does not appear to be a valid PDF (wrong magic bytes).",
+                    path_display
+                ));
+                return;
+            }
+
+            // Client-side validation: parse with lopdf
+            match lopdf::Document::load_mem(&data) {
+                Ok(doc) => {
+                    // Check for encryption
+                    if doc.is_encrypted() {
+                        yield Err(anyhow!(
+                            "Cannot read PDF file: {} is password-protected. Please decrypt it first.",
+                            path_display
+                        ));
+                        return;
+                    }
+                    // Check page count
+                    const MAX_PDF_PAGES: usize = 100;
+                    let page_count = doc.get_pages().len();
+                    if page_count > MAX_PDF_PAGES {
+                        yield Err(anyhow!(
+                            "Cannot read PDF file: {} has {} pages (max {}).",
+                            path_display, page_count, MAX_PDF_PAGES
+                        ));
+                        return;
+                    }
+                }
+                Err(e) => {
+                    yield Err(anyhow!(
+                        "Cannot read PDF file: {} is corrupted or invalid: {}",
+                        path_display, e
+                    ));
+                    return;
+                }
+            }
+
+            // Save raw bytes to images_dir
+            let filename = format!("{}.pdf", Uuid::new_v4());
+            if let Err(e) = tokio::fs::create_dir_all(&images_dir).await {
+                yield Err(anyhow!(
+                    "Failed to create images directory {}: {}",
+                    images_dir.display(),
+                    e
+                ));
+                return;
+            }
+            let pdf_path = images_dir.join(&filename);
+            if let Err(e) = tokio::fs::write(&pdf_path, &data).await {
+                yield Err(anyhow!(
+                    "Failed to save PDF file {}: {}",
+                    pdf_path.display(),
+                    e
+                ));
+                return;
+            }
+
+            // Yield PDF content part
+            yield Ok(ContentPart::Image(ImageData::new(
+                filename,
+                "application/pdf".to_string(),
+            )));
+
+            // Yield text annotation
+            yield Ok(ContentPart::Text(format!(
+                "[PDF: {} (application/pdf)]",
+                path_display
             )));
 
             return;

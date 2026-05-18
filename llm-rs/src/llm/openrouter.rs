@@ -246,12 +246,23 @@ pub(super) fn convert_messages(
                                 let data = img.get_data(images_dir)?;
                                 let encoded =
                                     base64::engine::general_purpose::STANDARD.encode(data);
-                                let data_uri =
-                                    format!("data:{};base64,{}", img.media_type(), encoded);
-                                content.push(serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": { "url": data_uri },
-                                }));
+                                let media_type = img.media_type();
+                                if media_type == "application/pdf" {
+                                    content.push(serde_json::json!({
+                                        "type": "file",
+                                        "file": {
+                                            "filename": img.relative_path(),
+                                            "file_data": format!("data:application/pdf;base64,{}", encoded),
+                                        },
+                                    }));
+                                } else {
+                                    let data_uri =
+                                        format!("data:{};base64,{}", media_type, encoded);
+                                    content.push(serde_json::json!({
+                                        "type": "image_url",
+                                        "image_url": { "url": data_uri },
+                                    }));
+                                }
                             }
                         }
                     }
@@ -354,12 +365,23 @@ pub(super) fn convert_messages(
                                 let data = img.get_data(images_dir)?;
                                 let encoded =
                                     base64::engine::general_purpose::STANDARD.encode(data);
-                                let data_uri =
-                                    format!("data:{};base64,{}", img.media_type(), encoded);
-                                content_items.push(serde_json::json!({
-                                    "type": "image_url",
-                                    "image_url": { "url": data_uri },
-                                }));
+                                let media_type = img.media_type();
+                                if media_type == "application/pdf" {
+                                    content_items.push(serde_json::json!({
+                                        "type": "file",
+                                        "file": {
+                                            "filename": img.relative_path(),
+                                            "file_data": format!("data:application/pdf;base64,{}", encoded),
+                                        },
+                                    }));
+                                } else {
+                                    let data_uri =
+                                        format!("data:{};base64,{}", media_type, encoded);
+                                    content_items.push(serde_json::json!({
+                                        "type": "image_url",
+                                        "image_url": { "url": data_uri },
+                                    }));
+                                }
                             }
                         }
                     }
