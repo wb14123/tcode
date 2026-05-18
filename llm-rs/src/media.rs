@@ -1,7 +1,7 @@
-//! Image data types for LLM conversations.
+//! Media data types for LLM conversations (images, PDFs, etc.).
 //!
-//! Provides `ImageData` for referencing image files on disk (lazy-loaded and
-//! cached) and `ContentPart` for mixing text and images in user messages.
+//! Provides `MediaData` for referencing media files on disk (lazy-loaded and
+//! cached) and `ContentPart` for mixing text and media in user messages.
 
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
@@ -9,25 +9,25 @@ use std::sync::OnceLock;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// References an image file in a session's images/ directory.
+/// References a media file in a session's media directory.
 ///
 /// Serializes only `relative_path` and `media_type`. The `cached_data`
 /// field is lazily populated on first call to `get_data()`.
 #[derive(Clone)]
-pub struct ImageData {
-    /// Relative path from the images/ dir, e.g. "uuid.png".
+pub struct MediaData {
+    /// Relative path from the media dir, e.g. "uuid.png".
     relative_path: String,
 
     /// MIME type, e.g. "image/png", "image/jpeg".
     media_type: String,
 
-    /// Lazily cached (image_dir, bytes). Set on first `get_data()` call.
+    /// Lazily cached (media_dir, bytes). Set on first `get_data()` call.
     cached_data: OnceLock<(PathBuf, Vec<u8>)>,
 }
 
-impl std::fmt::Debug for ImageData {
+impl std::fmt::Debug for MediaData {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ImageData")
+        f.debug_struct("MediaData")
             .field("relative_path", &self.relative_path)
             .field("media_type", &self.media_type)
             .field("cached", &self.cached_data.get().is_some())
@@ -35,8 +35,8 @@ impl std::fmt::Debug for ImageData {
     }
 }
 
-impl ImageData {
-    /// Create a new `ImageData` with the given relative path and media type.
+impl MediaData {
+    /// Create a new `MediaData` with the given relative path and media type.
     pub fn new(relative_path: String, media_type: String) -> Self {
         // Defense-in-depth: validate against path traversal in case callers
         // forgot to validate upstream.
@@ -45,8 +45,8 @@ impl ImageData {
             || relative_path.contains('\\')
             || relative_path.contains("..")
         {
-            tracing::warn!(
-                "ImageData::new() called with potentially dangerous relative_path: {:?}",
+            tracing::error!(
+                "MediaData::new() called with potentially dangerous relative_path (caller should have validated): {:?}",
                 relative_path
             );
         }
@@ -57,71 +57,71 @@ impl ImageData {
         }
     }
 
-    /// Get the image bytes, loading from disk on first call.
+    /// Get the media bytes, loading from disk on first call.
     ///
-    /// `image_dir` is the absolute path to the session's images/ directory.
-    /// On first call, reads `image_dir / relative_path` and caches the bytes
+    /// `media_dir` is the absolute path to the session's media directory.
+    /// On first call, reads `media_dir / relative_path` and caches the bytes
     /// together with the directory path. Subsequent calls validate that the
-    /// same `image_dir` is used and return the cached bytes.
-    pub fn get_data(&self, image_dir: &Path) -> Result<&[u8]> {
+    /// same `media_dir` is used and return the cached bytes.
+    pub fn get_data(&self, media_dir: &Path) -> Result<&[u8]> {
         if let Some((cached_dir, cached_bytes)) = self.cached_data.get() {
-            if cached_dir == image_dir {
+            if cached_dir == media_dir {
                 return Ok(cached_bytes);
             }
             return Err(anyhow::anyhow!(
-                "ImageData::get_data called with different image_dir than cached"
+                "MediaData::get_data called with different media_dir than cached"
             ));
         }
 
-        // Canonicalize and verify the resolved path stays within image_dir
-        let path = resolve_image_path(image_dir, &self.relative_path)?;
+        // Canonicalize and verify the resolved path stays within media_dir
+        let path = resolve_media_path(media_dir, &self.relative_path)?;
         let bytes = std::fs::read(&path)
-            .with_context(|| format!("Failed to read image file: {}", path.display()))?;
+            .with_context(|| format!("Failed to read media file: {}", path.display()))?;
 
         self.cached_data
-            .set((image_dir.to_path_buf(), bytes))
-            .map_err(|_| anyhow::anyhow!("ImageData cached_data already set (race condition)"))?;
+            .set((media_dir.to_path_buf(), bytes))
+            .map_err(|_| anyhow::anyhow!("MediaData cached_data already set (race condition)"))?;
 
         Ok(&self.cached_data.get().expect("just set").1)
     }
 
-    /// Return the media type (MIME type) of this image.
+    /// Return the media type (MIME type) of this media.
     pub fn media_type(&self) -> &str {
         &self.media_type
     }
 
-    /// Return the relative path of this image within the images/ directory.
+    /// Return the relative path of this media file within the media directory.
     pub fn relative_path(&self) -> &str {
         &self.relative_path
     }
 }
 
-impl Serialize for ImageData {
+impl Serialize for MediaData {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
         S: serde::Serializer,
     {
         use serde::ser::SerializeStruct;
-        let mut state = serializer.serialize_struct("ImageData", 2)?;
+        let mut state = serializer.serialize_struct("MediaData", 2)?;
         state.serialize_field("relative_path", &self.relative_path)?;
         state.serialize_field("media_type", &self.media_type)?;
         state.end()
     }
 }
 
-impl<'de> Deserialize<'de> for ImageData {
+impl<'de> Deserialize<'de> for MediaData {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
     where
         D: serde::Deserializer<'de>,
     {
         #[derive(Deserialize)]
-        struct ImageDataHelper {
+        struct MediaDataHelper {
             relative_path: String,
             media_type: String,
         }
 
-        let helper = ImageDataHelper::deserialize(deserializer)?;
-        Ok(ImageData {
+        let helper = MediaDataHelper::deserialize(deserializer)?;
+        Ok(MediaData {
             relative_path: helper.relative_path,
             media_type: helper.media_type,
             cached_data: OnceLock::new(),
@@ -129,19 +129,19 @@ impl<'de> Deserialize<'de> for ImageData {
     }
 }
 
-/// A single part of a user message — either plain text or an image reference.
+/// A single part of a user message — either plain text or a media reference.
 ///
-/// **Important:** `Text` must be listed before `Image` so that
+/// **Important:** `Text` must be listed before `Media` so that
 /// `#[serde(untagged)]` deserialization tries `Text(String)` first.
-/// A `String` would always successfully deserialize, preventing `Image`
+/// A `String` would always successfully deserialize, preventing `Media`
 /// from ever matching if it were listed first.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum ContentPart {
     /// Plain text content.
     Text(String),
-    /// An image reference.
-    Image(ImageData),
+    /// A media reference (image, PDF, etc.).
+    Media(MediaData),
 }
 
 impl ContentPart {
@@ -149,7 +149,7 @@ impl ContentPart {
     pub fn as_text(&self) -> Option<&str> {
         match self {
             ContentPart::Text(t) => Some(t.as_str()),
-            ContentPart::Image(_) => None,
+            ContentPart::Media(_) => None,
         }
     }
 }
@@ -169,9 +169,9 @@ impl From<String> for ContentPart {
     }
 }
 
-impl From<ImageData> for ContentPart {
-    fn from(img: ImageData) -> Self {
-        ContentPart::Image(img)
+impl From<MediaData> for ContentPart {
+    fn from(media: MediaData) -> Self {
+        ContentPart::Media(media)
     }
 }
 
@@ -179,7 +179,7 @@ impl PartialEq<str> for ContentPart {
     fn eq(&self, other: &str) -> bool {
         match self {
             ContentPart::Text(t) => t == other,
-            ContentPart::Image(_) => false,
+            ContentPart::Media(_) => false,
         }
     }
 }
@@ -188,30 +188,30 @@ impl PartialEq<&str> for ContentPart {
     fn eq(&self, other: &&str) -> bool {
         match self {
             ContentPart::Text(t) => t == *other,
-            ContentPart::Image(_) => false,
+            ContentPart::Media(_) => false,
         }
     }
 }
 
-/// Resolve `image_dir / filename` and verify the canonicalized result is
-/// still within `image_dir`. Returns the canonical path.
-pub fn resolve_image_path(image_dir: &Path, filename: &str) -> Result<PathBuf> {
-    let joined = image_dir.join(filename);
+/// Resolve `media_dir / filename` and verify the canonicalized result is
+/// still within `media_dir`. Returns the canonical path.
+pub fn resolve_media_path(media_dir: &Path, filename: &str) -> Result<PathBuf> {
+    let joined = media_dir.join(filename);
     let canonical = std::fs::canonicalize(&joined)
-        .with_context(|| format!("Failed to resolve image path: {}", joined.display()))?;
-    let canonical_dir = std::fs::canonicalize(image_dir)
-        .with_context(|| format!("Failed to resolve image dir: {}", image_dir.display()))?;
+        .with_context(|| format!("Failed to resolve media path: {}", joined.display()))?;
+    let canonical_dir = std::fs::canonicalize(media_dir)
+        .with_context(|| format!("Failed to resolve media dir: {}", media_dir.display()))?;
     if !canonical.starts_with(&canonical_dir) {
-        anyhow::bail!("Image path escapes its directory: {}", joined.display());
+        anyhow::bail!("Media path escapes its directory: {}", joined.display());
     }
     Ok(canonical)
 }
 
 /// Validate that a filename is a safe basename — rejects empty strings,
 /// path separators, and directory traversal attempts.
-pub fn validate_image_filename(name: &str) -> Result<()> {
+pub fn validate_media_filename(name: &str) -> Result<()> {
     if name.is_empty() || name.contains('/') || name.contains('\\') || name.contains("..") {
-        anyhow::bail!("Invalid image filename");
+        anyhow::bail!("Invalid media filename");
     }
     Ok(())
 }

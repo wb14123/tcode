@@ -1,7 +1,7 @@
 #[cfg(test)]
 mod tests {
-    use crate::image::ContentPart;
     use crate::llm::{ChatOptions, LLMMessage, ReasoningEffort, ToolCall};
+    use crate::media::ContentPart;
 
     fn make_tool_call(id: &str, name: &str) -> ToolCall {
         ToolCall {
@@ -77,7 +77,7 @@ mod tests {
 
     #[test]
     fn llm_message_tool_result_serde() -> anyhow::Result<()> {
-        use crate::image::ContentPart;
+        use crate::media::ContentPart;
 
         let msg = LLMMessage::ToolResult {
             tool_call_id: "tc1".to_string(),

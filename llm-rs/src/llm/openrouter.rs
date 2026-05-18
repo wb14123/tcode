@@ -29,8 +29,8 @@ pub struct OpenRouter {
     api_key: String,
     base_url: String,
     cached_tool_defs: Option<Vec<ToolDefinition>>,
-    /// Directory for loading image files referenced by ContentPart::Image.
-    pub images_dir: Option<PathBuf>,
+    /// Directory for loading media files (images, PDFs) referenced by ContentPart::Media.
+    pub media_dir: Option<PathBuf>,
 }
 
 impl OpenRouter {
@@ -48,7 +48,7 @@ impl OpenRouter {
             api_key: api_key.into(),
             base_url: base_url.into(),
             cached_tool_defs: None,
-            images_dir: None,
+            media_dir: None,
         }
     }
 }
@@ -214,7 +214,7 @@ pub(super) fn extract_usage(usage: &Usage) -> (i32, i32, i32, i32, i32) {
 
 pub(super) fn convert_messages(
     msgs: &[LLMMessage],
-    images_dir: &Option<PathBuf>,
+    media_dir: &Option<PathBuf>,
 ) -> anyhow::Result<Vec<ChatMessage>> {
     msgs.iter()
         .map(|msg| match msg {
@@ -228,30 +228,30 @@ pub(super) fn convert_messages(
             LLMMessage::User(parts) => {
                 let has_image = parts
                     .iter()
-                    .any(|p| matches!(p, crate::image::ContentPart::Image(_)));
+                    .any(|p| matches!(p, crate::media::ContentPart::Media(_)));
                 if has_image {
-                    let images_dir = images_dir
+                    let media_dir = media_dir
                         .as_ref()
-                        .context("Image present in user message but no images_dir configured")?;
+                        .context("Media present in user message but no media_dir configured")?;
                     let mut content: Vec<serde_json::Value> = Vec::new();
                     for part in parts {
                         match part {
-                            crate::image::ContentPart::Text(t) => {
+                            crate::media::ContentPart::Text(t) => {
                                 content.push(serde_json::json!({
                                     "type": "text",
                                     "text": t,
                                 }));
                             }
-                            crate::image::ContentPart::Image(img) => {
-                                let data = img.get_data(images_dir)?;
+                            crate::media::ContentPart::Media(media) => {
+                                let data = media.get_data(media_dir)?;
                                 let encoded =
                                     base64::engine::general_purpose::STANDARD.encode(data);
-                                let media_type = img.media_type();
+                                let media_type = media.media_type();
                                 if media_type == "application/pdf" {
                                     content.push(serde_json::json!({
                                         "type": "file",
                                         "file": {
-                                            "filename": img.relative_path(),
+                                            "filename": media.relative_path(),
                                             "file_data": format!("data:application/pdf;base64,{}", encoded),
                                         },
                                     }));
@@ -274,8 +274,8 @@ pub(super) fn convert_messages(
                     let content: String = parts
                         .iter()
                         .filter_map(|p| match p {
-                            crate::image::ContentPart::Text(t) => Some(t.clone()),
-                            crate::image::ContentPart::Image(_) => None,
+                            crate::media::ContentPart::Text(t) => Some(t.clone()),
+                            crate::media::ContentPart::Media(_) => None,
                         })
                         .collect::<Vec<_>>()
                         .join("");
@@ -340,7 +340,7 @@ pub(super) fn convert_messages(
                 content,
             } => {
                 if crate::llm::is_all_text(content) {
-                    let text: String = crate::image::join_text_parts(content);
+                    let text: String = crate::media::join_text_parts(content);
                     Ok(ChatMessage::Structured(StructuredChatMessage {
                         role: "tool",
                         content: Some(text),
@@ -349,28 +349,28 @@ pub(super) fn convert_messages(
                         reasoning_details: None,
                     }))
                 } else {
-                    let images_dir = images_dir
+                    let media_dir = media_dir
                         .as_ref()
-                        .context("Image present in tool result but no images_dir configured")?;
+                        .context("Media present in tool result but no media_dir configured")?;
                     let mut content_items: Vec<serde_json::Value> = Vec::new();
                     for part in content {
                         match part {
-                            crate::image::ContentPart::Text(t) => {
+                            crate::media::ContentPart::Text(t) => {
                                 content_items.push(serde_json::json!({
                                     "type": "text",
                                     "text": t,
                                 }));
                             }
-                            crate::image::ContentPart::Image(img) => {
-                                let data = img.get_data(images_dir)?;
+                            crate::media::ContentPart::Media(media) => {
+                                let data = media.get_data(media_dir)?;
                                 let encoded =
                                     base64::engine::general_purpose::STANDARD.encode(data);
-                                let media_type = img.media_type();
+                                let media_type = media.media_type();
                                 if media_type == "application/pdf" {
                                     content_items.push(serde_json::json!({
                                         "type": "file",
                                         "file": {
-                                            "filename": img.relative_path(),
+                                            "filename": media.relative_path(),
                                             "file_data": format!("data:application/pdf;base64,{}", encoded),
                                         },
                                     }));
@@ -442,12 +442,12 @@ impl LLM for OpenRouter {
             api_key: self.api_key.clone(),
             base_url: self.base_url.clone(),
             cached_tool_defs: None,
-            images_dir: self.images_dir.clone(),
+            media_dir: self.media_dir.clone(),
         })
     }
 
-    fn set_images_dir(&mut self, dir: Option<PathBuf>) {
-        self.images_dir = dir;
+    fn set_media_dir(&mut self, dir: Option<PathBuf>) {
+        self.media_dir = dir;
     }
 
     fn available_models(&self) -> Vec<ModelInfo> {
@@ -480,10 +480,10 @@ impl LLM for OpenRouter {
         let max_tokens = options.max_tokens;
         let reasoning_request = openai_common::build_reasoning_request(options);
 
-        // Convert messages (scope images_dir so it's not captured by the stream)
+        // Convert messages (scope media_dir so it's not captured by the stream)
         let messages = {
-            let images_dir = self.images_dir.clone();
-            match convert_messages(msgs, &images_dir) {
+            let media_dir = self.media_dir.clone();
+            match convert_messages(msgs, &media_dir) {
                 Ok(v) => v,
                 Err(e) => {
                     return Box::pin(stream! {

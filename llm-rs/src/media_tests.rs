@@ -1,12 +1,12 @@
 #[cfg(test)]
 mod tests {
-    use crate::image::{ContentPart, ImageData, process_image};
     use crate::llm::LLMMessage;
+    use crate::media::{ContentPart, MediaData, process_image};
     use image::{GenericImageView, ImageBuffer, Rgb, Rgba};
     use std::path::Path;
 
     fn test_root() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/image")
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/media")
     }
 
     fn temp_dir() -> std::path::PathBuf {
@@ -23,28 +23,28 @@ mod tests {
         path
     }
 
-    // ======== ImageData tests ========
+    // ======== MediaData tests ========
 
     #[test]
-    fn test_image_data_new() {
-        let img = ImageData::new("abc.png".to_string(), "image/png".to_string());
-        assert_eq!(img.relative_path(), "abc.png");
-        assert_eq!(img.media_type(), "image/png");
+    fn test_media_data_new() {
+        let media = MediaData::new("abc.png".to_string(), "image/png".to_string());
+        assert_eq!(media.relative_path(), "abc.png");
+        assert_eq!(media.media_type(), "image/png");
     }
 
     #[test]
-    fn test_image_data_get_data_caching() -> anyhow::Result<()> {
+    fn test_media_data_get_data_caching() -> anyhow::Result<()> {
         let dir = temp_dir();
         let path = write_png_to_dir(&dir, "test.png", 10, 10);
         let expected = std::fs::read(&path)?;
 
-        let img = ImageData::new("test.png".to_string(), "image/png".to_string());
+        let media = MediaData::new("test.png".to_string(), "image/png".to_string());
 
-        let data1 = img.get_data(&dir)?;
+        let data1 = media.get_data(&dir)?;
         assert_eq!(data1, expected.as_slice());
 
         // Second call should return the same bytes from cache.
-        let data2 = img.get_data(&dir)?;
+        let data2 = media.get_data(&dir)?;
         assert_eq!(data2, expected.as_slice());
 
         // Verify it's the same pointer (same cache hit, not re-read).
@@ -54,32 +54,32 @@ mod tests {
     }
 
     #[test]
-    fn test_image_data_get_data_different_dir() -> anyhow::Result<()> {
+    fn test_media_data_get_data_different_dir() -> anyhow::Result<()> {
         let dir1 = temp_dir();
         write_png_to_dir(&dir1, "test.png", 10, 10);
         let dir2 = temp_dir();
 
-        let img = ImageData::new("test.png".to_string(), "image/png".to_string());
+        let media = MediaData::new("test.png".to_string(), "image/png".to_string());
 
         // First call with dir1 succeeds.
-        let _data = img.get_data(&dir1)?;
+        let _data = media.get_data(&dir1)?;
 
         // Second call with dir2 should fail.
-        let result = img.get_data(&dir2);
+        let result = media.get_data(&dir2);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("different image_dir"),
-            "expected 'different image_dir' error, got: {err}"
+            err.contains("different media_dir"),
+            "expected 'different media_dir' error, got: {err}"
         );
 
         Ok(())
     }
 
     #[test]
-    fn test_image_data_serialization() -> anyhow::Result<()> {
-        let img = ImageData::new("abc.png".to_string(), "image/png".to_string());
-        let json = serde_json::to_value(&img)?;
+    fn test_media_data_serialization() -> anyhow::Result<()> {
+        let media = MediaData::new("abc.png".to_string(), "image/png".to_string());
+        let json = serde_json::to_value(&media)?;
 
         let obj = json.as_object().expect("expected JSON object");
         assert_eq!(obj.len(), 2, "expected exactly 2 fields");
@@ -92,35 +92,35 @@ mod tests {
     }
 
     #[test]
-    fn test_image_data_deserialization() -> anyhow::Result<()> {
+    fn test_media_data_deserialization() -> anyhow::Result<()> {
         let json = serde_json::json!({
             "relative_path": "abc.png",
             "media_type": "image/png"
         });
-        let img: ImageData = serde_json::from_value(json)?;
+        let media: MediaData = serde_json::from_value(json)?;
 
-        assert_eq!(img.relative_path(), "abc.png");
-        assert_eq!(img.media_type(), "image/png");
+        assert_eq!(media.relative_path(), "abc.png");
+        assert_eq!(media.media_type(), "image/png");
 
         // cached_data should be empty — trying to get_data on a nonexistent
         // file should fail (not panic).
         let nonexistent = std::path::Path::new("/nonexistent/images");
-        let result = img.get_data(nonexistent);
+        let result = media.get_data(nonexistent);
         assert!(result.is_err());
 
         Ok(())
     }
 
     #[test]
-    fn test_image_data_get_data_file_not_found() {
+    fn test_media_data_get_data_file_not_found() {
         let dir = temp_dir();
         // Don't create any file — the path won't exist.
-        let img = ImageData::new("no_such_file.png".to_string(), "image/png".to_string());
-        let result = img.get_data(&dir);
+        let media = MediaData::new("no_such_file.png".to_string(), "image/png".to_string());
+        let result = media.get_data(&dir);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("Failed to resolve image path"),
+            err.contains("Failed to resolve media path"),
             "expected file-not-found error, got: {err}"
         );
     }
@@ -145,9 +145,9 @@ mod tests {
     }
 
     #[test]
-    fn test_content_part_image_serde_roundtrip() -> anyhow::Result<()> {
-        let img_data = ImageData::new("uuid.png".to_string(), "image/png".to_string());
-        let part = ContentPart::Image(img_data);
+    fn test_content_part_media_serde_roundtrip() -> anyhow::Result<()> {
+        let media_data = MediaData::new("uuid.png".to_string(), "image/png".to_string());
+        let part = ContentPart::Media(media_data);
         let json_str = serde_json::to_string(&part)?;
 
         let value: serde_json::Value = serde_json::from_str(&json_str)?;
@@ -157,11 +157,11 @@ mod tests {
 
         let deserialized: ContentPart = serde_json::from_str(&json_str)?;
         match deserialized {
-            ContentPart::Image(img) => {
-                assert_eq!(img.relative_path(), "uuid.png");
-                assert_eq!(img.media_type(), "image/png");
+            ContentPart::Media(media) => {
+                assert_eq!(media.relative_path(), "uuid.png");
+                assert_eq!(media.media_type(), "image/png");
             }
-            ContentPart::Text(_) => panic!("Expected Image variant, got Text"),
+            ContentPart::Text(_) => panic!("Expected Media variant, got Text"),
         }
 
         Ok(())
@@ -191,10 +191,10 @@ mod tests {
 
     #[test]
     fn test_llm_message_user_new_format_roundtrip() -> anyhow::Result<()> {
-        let img = ImageData::new("img.png".to_string(), "image/png".to_string());
+        let media = MediaData::new("img.png".to_string(), "image/png".to_string());
         let msg = LLMMessage::User(vec![
             ContentPart::Text("look at this: ".to_string()),
-            ContentPart::Image(img),
+            ContentPart::Media(media),
         ]);
 
         let json = serde_json::to_string(&msg)?;
@@ -208,11 +208,11 @@ mod tests {
                     _ => panic!("Expected Text as first part"),
                 }
                 match &parts[1] {
-                    ContentPart::Image(img) => {
-                        assert_eq!(img.relative_path(), "img.png");
-                        assert_eq!(img.media_type(), "image/png");
+                    ContentPart::Media(media) => {
+                        assert_eq!(media.relative_path(), "img.png");
+                        assert_eq!(media.media_type(), "image/png");
                     }
-                    ContentPart::Text(_) => panic!("Expected Image as second part"),
+                    ContentPart::Text(_) => panic!("Expected Media as second part"),
                 }
             }
             _ => panic!("Expected User variant"),

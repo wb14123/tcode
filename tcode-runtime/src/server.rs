@@ -460,7 +460,7 @@ pub struct Server {
     token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
     container_config: Option<ContainerConfig>,
     runtime_options: ServerRuntimeOptions,
-    supports_vision: bool,
+    supports_media: bool,
 }
 
 impl Server {
@@ -515,7 +515,7 @@ impl Server {
         token_manager: Option<Arc<dyn auth::OAuthTokenManager>>,
         container_config: Option<ContainerConfig>,
         runtime_options: ServerRuntimeOptions,
-        supports_vision: bool,
+        supports_media: bool,
     ) -> Self {
         Self {
             socket_path,
@@ -532,7 +532,7 @@ impl Server {
             token_manager,
             container_config,
             runtime_options,
-            supports_vision,
+            supports_media,
         }
     }
 
@@ -752,9 +752,8 @@ impl Server {
         let tool_clients: ToolClientMap = Arc::new(parking_lot::Mutex::new(HashMap::new()));
         let work_activity = Arc::new(WorkActivityTracker::new());
 
-        // Wire images_dir so the LLM can load/save image files
-        self.llm
-            .set_images_dir(Some(self.session_dir.join("images")));
+        // Wire media_dir so the LLM can load/save media files
+        self.llm.set_media_dir(Some(self.session_dir.join("media")));
 
         let conversation_client = if resuming {
             tracing::info!(
@@ -775,7 +774,7 @@ impl Server {
                 tools_list,
                 self.max_subagent_depth,
                 self.session_dir.clone(),
-                self.supports_vision,
+                self.supports_media,
             )?;
 
             // Close stale pending permission requests from previous session
@@ -865,7 +864,7 @@ impl Server {
                 0, // root conversation depth
                 self.max_subagent_depth,
                 Some(self.session_dir.clone()),
-                self.supports_vision,
+                self.supports_media,
             )?;
 
             let manager_clone = Arc::clone(&manager);
@@ -1126,7 +1125,7 @@ fn run_event_writer(
         // Maps tool_call_index -> tool_call_id for AssistantToolCallArgChunk routing
         let mut tool_call_index_map: HashMap<usize, String> = HashMap::new();
         let mut is_thinking = false;
-        let mut image_gen_count: usize = 0;
+        let mut media_gen_count: usize = 0;
         let mut activity_guard = EventWriterActivityGuard::new(Arc::clone(&work_activity));
 
         tracing::info!("event_writer started");
@@ -1286,7 +1285,7 @@ fn run_event_writer(
                     ..
                 } => {
                     let content_text = match content.as_ref() {
-                        llm_rs::image::ContentPart::Text(t) => t.as_str(),
+                        llm_rs::media::ContentPart::Text(t) => t.as_str(),
                         _ => "",
                     };
                     let tracked = tool_calls.contains_key(tool_call_id.as_str());
@@ -1339,7 +1338,7 @@ fn run_event_writer(
                                 msg_id: 0,
                                 tool_call_id: tool_call_id.clone(),
                                 tool_name: state.tool_name,
-                                content: Arc::new(llm_rs::image::ContentPart::Text(preview)),
+                                content: Arc::new(llm_rs::media::ContentPart::Text(preview)),
                             };
                             append_event(&display_file, &preview_event)
                                 .await
@@ -1633,7 +1632,7 @@ fn run_event_writer(
                         .await
                         .context("Failed to append display event")?;
                     is_thinking = false;
-                    image_gen_count = 0;
+                    media_gen_count = 0;
                     tool_call_index_map.clear();
                     tokio::fs::write(&status_file, "Ready")
                         .await
@@ -1664,11 +1663,11 @@ fn run_event_writer(
                     .await?;
                 }
 
-                Message::AssistantImageGenerating { .. } => {
-                    let was_zero = image_gen_count == 0;
-                    image_gen_count = image_gen_count.saturating_add(1);
+                Message::AssistantMediaGenerating { .. } => {
+                    let was_zero = media_gen_count == 0;
+                    media_gen_count = media_gen_count.saturating_add(1);
                     if was_zero {
-                        tokio::fs::write(&status_file, "Generating image...")
+                        tokio::fs::write(&status_file, "Generating media...")
                             .await
                             .context("Failed to write status file")?;
                     }
@@ -1677,12 +1676,12 @@ fn run_event_writer(
                         .context("Failed to append display event")?;
                 }
 
-                Message::AssistantImageOutput { .. } => {
-                    if image_gen_count == 0 {
-                        tracing::warn!("AssistantImageOutput with no pending image generation");
+                Message::AssistantMediaOutput { .. } => {
+                    if media_gen_count == 0 {
+                        tracing::warn!("AssistantMediaOutput with no pending media generation");
                     }
-                    image_gen_count = image_gen_count.saturating_sub(1);
-                    if image_gen_count == 0 {
+                    media_gen_count = media_gen_count.saturating_sub(1);
+                    if media_gen_count == 0 {
                         tokio::fs::write(&status_file, "Streaming...")
                             .await
                             .context("Failed to write status file")?;
@@ -1761,22 +1760,22 @@ async fn handle_client(stream: UnixStream, context: ClientHandlerContext) {
 }
 
 /// Dispatch the message to the appropriate conversation client, optionally
-/// with pre-saved image filenames (from the session's `images/` directory).
+/// with pre-saved media filenames (from the session's `media/` directory).
 async fn handle_send_message(
     content: &str,
     conversation_id: Option<&str>,
     conv_client: &Arc<ConversationClient>,
     manager: &Arc<ConversationManager>,
-    image_filenames: Option<Vec<String>>,
+    media_filenames: Option<Vec<String>>,
 ) -> Result<()> {
     let client = resolve_client(conversation_id, conv_client, manager)?;
-    match image_filenames {
+    match media_filenames {
         Some(filenames) if !filenames.is_empty() => {
             // Validate each filename to prevent path traversal
             for f in &filenames {
-                llm_rs::image::validate_image_filename(f).context("Invalid image filename")?;
+                llm_rs::media::validate_media_filename(f).context("Invalid media filename")?;
             }
-            client.send_chat_with_images(content, filenames).await?;
+            client.send_chat_with_media(content, filenames).await?;
         }
         _ => {
             client.send_chat(content).await?;
@@ -1831,13 +1830,13 @@ async fn handle_client_inner(
                 let Ok(msg) = serde_json::from_slice::<ClientMessage>(&bytes) else { continue };
 
                 match msg {
-                    ClientMessage::SendMessage { conversation_id, content, image_filenames } => {
+                    ClientMessage::SendMessage { conversation_id, content, media_filenames } => {
                         let result = handle_send_message(
                             &content,
                             conversation_id.as_deref(),
                             &conv_client,
                             &manager,
-                            image_filenames,
+                            media_filenames,
                         )
                         .await;
                         match result {

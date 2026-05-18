@@ -12,10 +12,10 @@ mod tests {
 
     use tokio_stream::StreamExt;
 
-    use crate::image::ContentPart;
     use crate::llm::{
         ChatOptions, LLM, LLMEvent, LLMMessage, OpenAI, OpenRouter, ReasoningEffort, StopReason,
     };
+    use crate::media::ContentPart;
     use crate::tool::Tool;
 
     /// Empty params struct for tool tests.
@@ -65,8 +65,8 @@ mod tests {
                 LLMEvent::ToolCallDelta { .. } => "ToolCallDelta",
                 LLMEvent::MessageEnd { .. } => "MessageEnd",
                 LLMEvent::Error(_) => "Error",
-                LLMEvent::ImageGenerationStarted { .. } => "ImageGenerationStarted",
-                LLMEvent::ImageOutput { .. } => "ImageOutput",
+                LLMEvent::MediaGenerationStarted { .. } => "MediaGenerationStarted",
+                LLMEvent::MediaOutput { .. } => "MediaOutput",
             })
             .collect::<Vec<_>>()
             .join(", ")

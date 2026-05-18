@@ -79,7 +79,7 @@ subagent_model_selection = false
 browser_server_url = ""          # remote browser-server URL (TCP mode)
 browser_server_token = ""        # bearer token for remote browser-server
 search_engine = "google"         # kagi | google
-supports_vision = false          # set to true if your model supports image/visual input
+supports_media = false            # set to true if your model supports visual/media input (images, PDFs)
 
 [shortcuts]                      # see Shortcut Templates section below
 brainstorm = "..."

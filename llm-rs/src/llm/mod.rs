@@ -27,7 +27,7 @@ use tokio_stream::Stream;
 
 use serde::{Deserialize, Serialize};
 
-use crate::image::ContentPart;
+use crate::media::ContentPart;
 use crate::tool::Tool;
 
 // ============================================================================
@@ -279,16 +279,16 @@ pub enum LLMEvent {
     /// Maps to Claude's error event or OpenAI error responses.
     Error(String),
 
-    /// Emitted when an image generation call is detected, before processing begins.
-    /// Carries a correlation ID that the subsequent ImageOutput event will reuse.
-    ImageGenerationStarted { image_id: String },
+    /// Emitted when a media generation call is detected, before processing begins.
+    /// Carries a correlation ID that the subsequent MediaOutput event will reuse.
+    MediaGenerationStarted { media_id: String },
 
-    /// The LLM generated an image (e.g. OpenAI image_generation_call).
-    /// The provider has saved the image to the session images dir.
-    /// `relative_path` is like "uuid.png" (relative to images/ dir).
-    /// `image_id` correlates with ImageGenerationStarted.
-    ImageOutput {
-        image_id: String,
+    /// The LLM generated media (e.g. OpenAI image_generation_call).
+    /// The provider has saved the media file to the session media dir.
+    /// `relative_path` is like "uuid.png" (relative to media/ dir).
+    /// `media_id` correlates with MediaGenerationStarted.
+    MediaOutput {
+        media_id: String,
         relative_path: String,
         media_type: String,
     },
@@ -325,11 +325,11 @@ pub trait LLM: Send + Sync {
     /// Used to create LLM instances for subagent conversations.
     fn clone_box(&self) -> Box<dyn LLM>;
 
-    /// Set the directory where image files are stored for this LLM instance.
+    /// Set the directory where media files (images, PDFs) are stored for this LLM instance.
     ///
-    /// Must be called before any `chat` call that may involve images.
+    /// Must be called before any `chat` call that may involve media.
     /// Cloned via `clone_box` so subagent clones inherit the setting.
-    fn set_images_dir(&mut self, dir: Option<PathBuf>);
+    fn set_media_dir(&mut self, dir: Option<PathBuf>);
 
     /// Return the list of models available from this provider.
     /// Used to generate the subagent tool description.

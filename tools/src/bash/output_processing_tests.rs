@@ -355,8 +355,8 @@ mod e2e {
             cancel_token: CancellationToken::new(),
             permission: ScopedPermissionManager::always_allow("bash"),
             container_config: None,
-            images_dir: None,
-            supports_vision: false,
+            media_dir: None,
+            supports_media: false,
         }
     }
 

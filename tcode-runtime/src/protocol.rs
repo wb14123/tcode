@@ -59,11 +59,11 @@ pub enum ClientMessage {
     SendMessage {
         conversation_id: Option<String>,
         content: String,
-        /// Pre-saved image filenames from the session's `images/` directory
-        /// (e.g. `["uuid1.png", "uuid2.jpg"]`). The client handles image
+        /// Pre-saved media filenames from the session's `media/` directory
+        /// (e.g. `["uuid1.png", "uuid2.jpg"]`). The client handles media
         /// upload and supplies these filenames; the runtime accepts them as-is.
         #[serde(default)]
-        image_filenames: Option<Vec<String>>,
+        media_filenames: Option<Vec<String>>,
     },
     /// Notify that the user finished interacting with a subagent (/done command)
     UserRequestEnd { conversation_id: String },

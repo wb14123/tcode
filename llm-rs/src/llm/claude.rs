@@ -34,8 +34,8 @@ pub struct Claude {
     /// When false, use x-api-key header.
     use_oauth: bool,
     cached_tool_defs: Option<Vec<ClaudeToolDefinition>>,
-    /// Directory for loading image files referenced by ContentPart::Image.
-    pub images_dir: Option<PathBuf>,
+    /// Directory for loading media files (images, PDFs) referenced by ContentPart::Media.
+    pub media_dir: Option<PathBuf>,
 }
 
 impl Claude {
@@ -56,7 +56,7 @@ impl Claude {
             base_url: base_url.into(),
             use_oauth: false,
             cached_tool_defs: None,
-            images_dir: None,
+            media_dir: None,
         }
     }
 
@@ -79,7 +79,7 @@ impl Claude {
             base_url: base_url.into(),
             use_oauth: true,
             cached_tool_defs: None,
-            images_dir: None,
+            media_dir: None,
         }
     }
 
@@ -363,7 +363,7 @@ fn strip_tool_prefix(name: &str) -> String {
 /// The system prompt is prefixed with CLAUDE_CODE_SYSTEM_PREFIX for OAuth authentication.
 fn convert_messages(
     msgs: &[LLMMessage],
-    images_dir: &Option<PathBuf>,
+    media_dir: &Option<PathBuf>,
 ) -> anyhow::Result<(Option<Vec<SystemBlock>>, Vec<ClaudeMessage>)> {
     let mut user_system_prompt: Option<String> = None;
     let mut claude_messages: Vec<ClaudeMessage> = Vec::new();
@@ -377,22 +377,22 @@ fn convert_messages(
             LLMMessage::User(parts) => {
                 let has_image = parts
                     .iter()
-                    .any(|p| matches!(p, crate::image::ContentPart::Image(_)));
+                    .any(|p| matches!(p, crate::media::ContentPart::Media(_)));
                 if has_image {
-                    let images_dir = images_dir
+                    let media_dir = media_dir
                         .as_ref()
-                        .context("Image present in user message but no images_dir configured")?;
+                        .context("Media present in user message but no media_dir configured")?;
                     let mut blocks: Vec<ContentBlock> = Vec::new();
                     for part in parts {
                         match part {
-                            crate::image::ContentPart::Text(t) => {
+                            crate::media::ContentPart::Text(t) => {
                                 blocks.push(ContentBlock::Text { text: t.clone() });
                             }
-                            crate::image::ContentPart::Image(img) => {
-                                let data = img.get_data(images_dir)?;
+                            crate::media::ContentPart::Media(media) => {
+                                let data = media.get_data(media_dir)?;
                                 let encoded =
                                     base64::engine::general_purpose::STANDARD.encode(data);
-                                let media_type = img.media_type().to_string();
+                                let media_type = media.media_type().to_string();
                                 if media_type == "application/pdf" {
                                     blocks.push(ContentBlock::Document {
                                         source: DocumentSource {
@@ -421,8 +421,8 @@ fn convert_messages(
                     let content: String = parts
                         .iter()
                         .filter_map(|p| match p {
-                            crate::image::ContentPart::Text(t) => Some(t.clone()),
-                            crate::image::ContentPart::Image(_) => None,
+                            crate::media::ContentPart::Text(t) => Some(t.clone()),
+                            crate::media::ContentPart::Media(_) => None,
                         })
                         .collect::<Vec<_>>()
                         .join("");
@@ -494,7 +494,7 @@ fn convert_messages(
                 content,
             } => {
                 if crate::llm::is_all_text(content) {
-                    let text: String = crate::image::join_text_parts(content);
+                    let text: String = crate::media::join_text_parts(content);
                     claude_messages.push(ClaudeMessage {
                         role: "user",
                         content: ClaudeContent::Blocks(vec![ContentBlock::ToolResult {
@@ -503,10 +503,10 @@ fn convert_messages(
                         }]),
                     });
                 } else {
-                    let images_dir = images_dir
+                    let media_dir = media_dir
                         .as_ref()
-                        .context("Image present in tool result but no images_dir configured")?;
-                    let text_content: String = crate::image::join_text_parts(content);
+                        .context("Media present in tool result but no media_dir configured")?;
+                    let text_content: String = crate::media::join_text_parts(content);
                     let tool_result_content = if text_content.is_empty() {
                         "[Image output]".to_string()
                     } else {
@@ -518,10 +518,10 @@ fn convert_messages(
                         content: tool_result_content,
                     });
                     for part in content {
-                        if let crate::image::ContentPart::Image(img) = part {
-                            let data = img.get_data(images_dir)?;
+                        if let crate::media::ContentPart::Media(media) = part {
+                            let data = media.get_data(media_dir)?;
                             let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-                            let media_type = img.media_type().to_string();
+                            let media_type = media.media_type().to_string();
                             if media_type == "application/pdf" {
                                 blocks.push(ContentBlock::Document {
                                     source: DocumentSource {
@@ -583,12 +583,12 @@ impl LLM for Claude {
             base_url: self.base_url.clone(),
             use_oauth: self.use_oauth,
             cached_tool_defs: None,
-            images_dir: self.images_dir.clone(),
+            media_dir: self.media_dir.clone(),
         })
     }
 
-    fn set_images_dir(&mut self, dir: Option<PathBuf>) {
-        self.images_dir = dir;
+    fn set_media_dir(&mut self, dir: Option<PathBuf>) {
+        self.media_dir = dir;
     }
 
     fn available_models(&self) -> Vec<ModelInfo> {
@@ -621,10 +621,10 @@ impl LLM for Claude {
         let model = model.to_string();
         let tool_defs = self.cached_tool_defs.clone();
 
-        let images_dir = self.images_dir.clone();
+        let media_dir = self.media_dir.clone();
 
         // Convert messages
-        let (system_blocks, messages) = match convert_messages(msgs, &images_dir) {
+        let (system_blocks, messages) = match convert_messages(msgs, &media_dir) {
             Ok(v) => v,
             Err(e) => {
                 return Box::pin(stream! {

@@ -209,9 +209,8 @@ pub struct OpenAI {
     /// gets a fresh UUID so the server can cache prompt prefixes per conversation.
     cache_key: String,
     cached_tools: Option<Vec<FunctionToolDef>>,
-    /// Directory for session image files. Set when a conversation is created
-    /// or resumed; used for loading images from ContentPart::Image.
-    pub images_dir: Option<PathBuf>,
+    /// Directory for session media files (images, PDFs) referenced by ContentPart::Media.
+    pub media_dir: Option<PathBuf>,
 }
 
 impl OpenAI {
@@ -233,7 +232,7 @@ impl OpenAI {
             account_id: None,
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
-            images_dir: None,
+            media_dir: None,
         }
     }
 
@@ -247,7 +246,7 @@ impl OpenAI {
             account_id: None,
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
-            images_dir: None,
+            media_dir: None,
         }
     }
 
@@ -360,7 +359,7 @@ fn build_raw_output(
 /// and remaining messages become input items.
 fn convert_messages(
     msgs: &[LLMMessage],
-    images_dir: &Option<PathBuf>,
+    media_dir: &Option<PathBuf>,
 ) -> anyhow::Result<(Option<String>, Vec<InputItem>)> {
     let mut items = Vec::new();
     let mut instructions: Option<String> = None;
@@ -375,29 +374,29 @@ fn convert_messages(
             LLMMessage::User(parts) => {
                 let has_image = parts
                     .iter()
-                    .any(|p| matches!(p, crate::image::ContentPart::Image(_)));
+                    .any(|p| matches!(p, crate::media::ContentPart::Media(_)));
                 if has_image {
-                    let images_dir = images_dir
+                    let media_dir = media_dir
                         .as_ref()
-                        .context("Image present in user message but no images_dir configured")?;
+                        .context("Media present in user message but no media_dir configured")?;
                     let mut content: Vec<serde_json::Value> = Vec::new();
                     for part in parts {
                         match part {
-                            crate::image::ContentPart::Text(t) => {
+                            crate::media::ContentPart::Text(t) => {
                                 content.push(serde_json::json!({
                                     "type": "input_text",
                                     "text": t,
                                 }));
                             }
-                            crate::image::ContentPart::Image(img) => {
-                                let data = img.get_data(images_dir)?;
+                            crate::media::ContentPart::Media(media) => {
+                                let data = media.get_data(media_dir)?;
                                 let encoded =
                                     base64::engine::general_purpose::STANDARD.encode(data);
-                                let media_type = img.media_type();
+                                let media_type = media.media_type();
                                 if media_type == "application/pdf" {
                                     content.push(serde_json::json!({
                                         "type": "input_file",
-                                        "filename": img.relative_path(),
+                                        "filename": media.relative_path(),
                                         "file_data": format!("data:application/pdf;base64,{}", encoded),
                                     }));
                                 } else {
@@ -419,8 +418,8 @@ fn convert_messages(
                     let content: String = parts
                         .iter()
                         .filter_map(|p| match p {
-                            crate::image::ContentPart::Text(t) => Some(t.clone()),
-                            crate::image::ContentPart::Image(_) => None,
+                            crate::media::ContentPart::Text(t) => Some(t.clone()),
+                            crate::media::ContentPart::Media(_) => None,
                         })
                         .collect::<Vec<_>>()
                         .join("");
@@ -475,34 +474,34 @@ fn convert_messages(
                 content,
             } => {
                 if crate::llm::is_all_text(content) {
-                    let output: String = crate::image::join_text_parts(content);
+                    let output: String = crate::media::join_text_parts(content);
                     items.push(InputItem::Item(serde_json::json!({
                         "type": "function_call_output",
                         "call_id": tool_call_id,
                         "output": output,
                     })));
                 } else {
-                    let images_dir = images_dir
+                    let media_dir = media_dir
                         .as_ref()
-                        .context("Image present in tool result but no images_dir configured")?;
+                        .context("Media present in tool result but no media_dir configured")?;
                     let mut output: Vec<serde_json::Value> = Vec::new();
                     for part in content {
                         match part {
-                            crate::image::ContentPart::Text(t) => {
+                            crate::media::ContentPart::Text(t) => {
                                 output.push(serde_json::json!({
                                     "type": "input_text",
                                     "text": t,
                                 }));
                             }
-                            crate::image::ContentPart::Image(img) => {
-                                let data = img.get_data(images_dir)?;
+                            crate::media::ContentPart::Media(media) => {
+                                let data = media.get_data(media_dir)?;
                                 let encoded =
                                     base64::engine::general_purpose::STANDARD.encode(data);
-                                let media_type = img.media_type();
+                                let media_type = media.media_type();
                                 if media_type == "application/pdf" {
                                     output.push(serde_json::json!({
                                         "type": "input_file",
-                                        "filename": img.relative_path(),
+                                        "filename": media.relative_path(),
                                         "file_data": format!("data:application/pdf;base64,{}", encoded),
                                     }));
                                 } else {
@@ -561,12 +560,12 @@ impl LLM for OpenAI {
             account_id: self.account_id.clone(),
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
-            images_dir: self.images_dir.clone(),
+            media_dir: self.media_dir.clone(),
         })
     }
 
-    fn set_images_dir(&mut self, dir: Option<PathBuf>) {
-        self.images_dir = dir;
+    fn set_media_dir(&mut self, dir: Option<PathBuf>) {
+        self.media_dir = dir;
     }
 
     fn available_models(&self) -> Vec<ModelInfo> {
@@ -601,8 +600,8 @@ impl LLM for OpenAI {
         let base_url = self.base_url.clone();
         let account_id = self.account_id.clone();
         let model = model.to_string();
-        let images_dir = self.images_dir.clone();
-        let (instructions, input_items) = match convert_messages(msgs, &images_dir) {
+        let media_dir = self.media_dir.clone();
+        let (instructions, input_items) = match convert_messages(msgs, &media_dir) {
             Ok(v) => v,
             Err(e) => {
                 return Box::pin(stream! {
@@ -774,15 +773,15 @@ impl LLM for OpenAI {
                     }
 
                     // Output item added — detect image_generation_call immediately
-                    // so we can emit ImageGenerationStarted before the result is ready.
+                    // so we can emit MediaGenerationStarted before the result is ready.
                     "response.output_item.added" => {
                         if let Ok(parsed) = serde_json::from_str::<OutputItemDonePayload>(data) {
                             let item_type = parsed.item.get("type").and_then(|t| t.as_str());
                             if item_type == Some("image_generation_call")
                                 && let Some(item_id) = parsed.item.get("id").and_then(|v| v.as_str())
                             {
-                                yield LLMEvent::ImageGenerationStarted {
-                                    image_id: item_id.to_string(),
+                                yield LLMEvent::MediaGenerationStarted {
+                                    media_id: item_id.to_string(),
                                 };
                             }
                         }
@@ -842,10 +841,10 @@ impl LLM for OpenAI {
                                     item.get("result").and_then(|v| v.as_str())
                                     && let Ok(image_bytes) =
                                         base64::engine::general_purpose::STANDARD.decode(result)
-                                        && let Some(ref images_dir) = images_dir {
+                                        && let Some(ref media_dir) = media_dir {
                                             // Use the item's id to correlate with the already-emitted
-                                            // ImageGenerationStarted (from output_item.added).
-                                            let image_id = match item.get("id").and_then(|v| v.as_str()) {
+                                            // MediaGenerationStarted (from output_item.added).
+                                            let media_id = match item.get("id").and_then(|v| v.as_str()) {
                                                 Some(id) => id.to_string(),
                                                 None => Uuid::new_v4().to_string(),
                                             };
@@ -853,18 +852,18 @@ impl LLM for OpenAI {
                                             // Process through the resize/compress pipeline in a
                                             // blocking task to avoid stalling the async runtime.
                                             let process_result = tokio::task::spawn_blocking(move || {
-                                                crate::image::process_image(&image_bytes)
+                                                crate::media::process_image(&image_bytes)
                                             })
                                             .await;
                                             match process_result {
                                                 Ok(Ok((processed, media_type, ext))) => {
                                                     let filename_uuid = Uuid::new_v4();
                                                     let filename = format!("{}.{}", filename_uuid, ext);
-                                                    let file_path = images_dir.join(&filename);
-                                                    // Ensure images dir exists
-                                                    if let Err(e) = std::fs::create_dir_all(images_dir) {
+                                                    let file_path = media_dir.join(&filename);
+                                                    // Ensure media dir exists
+                                                    if let Err(e) = std::fs::create_dir_all(media_dir) {
                                                         yield LLMEvent::Error(format!(
-                                                            "Failed to create images directory: {}",
+                                                            "Failed to create media directory: {}",
                                                             e
                                                         ));
                                                         continue;
@@ -882,15 +881,15 @@ impl LLM for OpenAI {
                                                             Ok(())
                                                         }) {
                                                         Ok(()) => {
-                                                            yield LLMEvent::ImageOutput {
-                                                                image_id,
+                                                            yield LLMEvent::MediaOutput {
+                                                                media_id,
                                                                 relative_path: filename,
                                                                 media_type,
                                                             };
                                                         }
                                                         Err(e) => {
                                                             yield LLMEvent::Error(format!(
-                                                                "Failed to write generated image: {}",
+                                                                "Failed to write generated media: {}",
                                                                 e
                                                             ));
                                                             return;
@@ -899,14 +898,14 @@ impl LLM for OpenAI {
                                                 }
                                                 Ok(Err(e)) => {
                                                     yield LLMEvent::Error(format!(
-                                                        "Failed to process generated image: {:#}",
+                                                        "Failed to process generated media: {:#}",
                                                         e
                                                     ));
                                                     return;
                                                 }
                                                 Err(join_err) => {
                                                     yield LLMEvent::Error(format!(
-                                                        "Image processing task panicked: {}",
+                                                        "Media processing task panicked: {}",
                                                         join_err
                                                     ));
                                                     return;

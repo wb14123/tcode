@@ -9,8 +9,8 @@
 use std::env;
 use std::io::{self, Write};
 
-use llm_rs::image::ContentPart;
 use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, OpenRouter, ReasoningEffort};
+use llm_rs::media::ContentPart;
 use tokio_stream::StreamExt;
 
 #[tokio::main]
@@ -99,8 +99,8 @@ async fn main() {
             }
             LLMEvent::ToolCallStart { .. }
             | LLMEvent::ToolCallDelta { .. }
-            | LLMEvent::ImageOutput { .. }
-            | LLMEvent::ImageGenerationStarted { .. } => {}
+            | LLMEvent::MediaOutput { .. }
+            | LLMEvent::MediaGenerationStarted { .. } => {}
         }
     }
 }

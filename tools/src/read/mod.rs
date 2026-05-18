@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use llm_rs::image::{ContentPart, ImageData, process_image};
+use llm_rs::media::{ContentPart, MediaData, process_image};
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 use tokio::fs::File;
@@ -396,7 +396,7 @@ pub fn read(
             }
         };
 
-        // Image handling: check if file extension indicates a supported image type
+        // Media handling: check if file extension indicates a supported image type
         let is_image = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -407,19 +407,19 @@ pub fn read(
             let path_display = path.to_string_lossy().into_owned();
 
             // Capability check
-            if !ctx.supports_vision {
+            if !ctx.supports_media {
                 yield Err(anyhow!(
-                    "Cannot read image file: visual input is disabled. Ask the user to set `supports_vision = true` in their tcode config if their model supports images."
+                    "Cannot read image file: visual input is disabled. Ask the user to set `supports_media = true` in their tcode config if their model supports media."
                 ));
                 return;
             }
 
-            // Require images_dir when vision is supported
-            let images_dir = match ctx.images_dir {
+            // Require media_dir when media is supported
+            let media_dir = match ctx.media_dir {
                 Some(ref dir) => dir.clone(),
                 None => {
                     yield Err(anyhow!(
-                        "Cannot read image file: no images directory configured."
+                        "Cannot read image file: no media directory configured."
                     ));
                     return;
                 }
@@ -452,17 +452,17 @@ pub fn read(
                 }
             };
 
-            // Write processed image to images_dir
+            // Write processed image to media_dir
             let filename = format!("{}.{}", Uuid::new_v4(), extension);
-            if let Err(e) = tokio::fs::create_dir_all(&images_dir).await {
+            if let Err(e) = tokio::fs::create_dir_all(&media_dir).await {
                 yield Err(anyhow!(
-                    "Failed to create images directory {}: {}",
-                    images_dir.display(),
+                    "Failed to create media directory {}: {}",
+                    media_dir.display(),
                     e
                 ));
                 return;
             }
-            let image_path = images_dir.join(&filename);
+            let image_path = media_dir.join(&filename);
             if let Err(e) = tokio::fs::write(&image_path, &processed).await {
                 yield Err(anyhow!(
                     "Failed to write processed image to {}: {}",
@@ -473,7 +473,7 @@ pub fn read(
             }
 
             // Yield image content part
-            yield Ok(ContentPart::Image(ImageData::new(filename, media_type.clone())));
+            yield Ok(ContentPart::Media(MediaData::new(filename, media_type.clone())));
 
             // Yield text annotation
             yield Ok(ContentPart::Text(format!(
@@ -495,19 +495,19 @@ pub fn read(
             let path_display = path.to_string_lossy().into_owned();
 
             // Capability check
-            if !ctx.supports_vision {
+            if !ctx.supports_media {
                 yield Err(anyhow!(
                     "Cannot read PDF file: visual input is disabled."
                 ));
                 return;
             }
 
-            // Require images_dir
-            let images_dir = match ctx.images_dir {
+            // Require media_dir
+            let media_dir = match ctx.media_dir {
                 Some(ref dir) => dir.clone(),
                 None => {
                     yield Err(anyhow!(
-                        "Cannot read PDF file: no images directory configured."
+                        "Cannot read PDF file: no media directory configured."
                     ));
                     return;
                 }
@@ -571,17 +571,17 @@ pub fn read(
                 }
             }
 
-            // Save raw bytes to images_dir
+            // Save raw bytes to media_dir
             let filename = format!("{}.pdf", Uuid::new_v4());
-            if let Err(e) = tokio::fs::create_dir_all(&images_dir).await {
+            if let Err(e) = tokio::fs::create_dir_all(&media_dir).await {
                 yield Err(anyhow!(
-                    "Failed to create images directory {}: {}",
-                    images_dir.display(),
+                    "Failed to create media directory {}: {}",
+                    media_dir.display(),
                     e
                 ));
                 return;
             }
-            let pdf_path = images_dir.join(&filename);
+            let pdf_path = media_dir.join(&filename);
             if let Err(e) = tokio::fs::write(&pdf_path, &data).await {
                 yield Err(anyhow!(
                     "Failed to save PDF file {}: {}",
@@ -592,7 +592,7 @@ pub fn read(
             }
 
             // Yield PDF content part
-            yield Ok(ContentPart::Image(ImageData::new(
+            yield Ok(ContentPart::Media(MediaData::new(
                 filename,
                 "application/pdf".to_string(),
             )));

@@ -72,7 +72,7 @@ async fn main() -> anyhow::Result<()> {
         0,     // subagent_depth (root)
         3,     // max_subagent_depth
         None,  // state_dir (no persistence for this example)
-        false, // supports_vision
+        false, // supports_media
     )?;
 
     // Subscribe to messages (this must be done before sending to receive all messages)
@@ -288,11 +288,11 @@ fn print_message(msg: &Message) {
                 aggregate_input_tokens, aggregate_output_tokens
             );
         }
-        Message::AssistantImageOutput { image, .. } => {
-            println!("    [Image generated: {}]", image.relative_path());
+        Message::AssistantMediaOutput { media, .. } => {
+            println!("    [Media generated: {}]", media.relative_path());
         }
-        Message::AssistantImageGenerating { image_id, .. } => {
-            println!("    [Image generating: {}]", image_id);
+        Message::AssistantMediaGenerating { media_id, .. } => {
+            println!("    [Media generating: {}]", media_id);
         }
     }
 }

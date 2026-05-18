@@ -496,7 +496,7 @@ async fn main() -> Result<()> {
                     session_mode,
                     ..server::ServerRuntimeOptions::default()
                 },
-                config.supports_vision,
+                config.supports_media,
             );
             server.run(None).await
         }
@@ -1249,7 +1249,7 @@ async fn run_unified_with_session(
                     session_mode,
                     ..server::ServerRuntimeOptions::default()
                 },
-                config.supports_vision,
+                config.supports_media,
             );
 
             let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();

@@ -105,7 +105,7 @@ pub(crate) struct CreateSessionResponse {
 #[serde(deny_unknown_fields)]
 pub(crate) struct MessageRequest {
     text: String,
-    /// Pre-uploaded image filenames relative to the session's `images/` directory.
+    /// Pre-uploaded media filenames relative to the session's media directory.
     #[serde(default)]
     image_filenames: Vec<String>,
 }
@@ -233,7 +233,7 @@ pub(crate) async fn post_sessions(
             ClientMessage::SendMessage {
                 conversation_id: None,
                 content: body.initial_prompt,
-                image_filenames: None,
+                media_filenames: None,
             },
         )
         .await?;
@@ -456,7 +456,7 @@ pub(crate) async fn post_session_message(
     Json(body): Json<MessageRequest>,
 ) -> ApiResult<StatusCode> {
     existing_session_dir(&session_id)?;
-    // Validate image filenames to prevent path traversal
+    // Validate media filenames to prevent path traversal
     for f in &body.image_filenames {
         validate_basename(f)?;
     }
@@ -466,7 +466,7 @@ pub(crate) async fn post_session_message(
         ClientMessage::SendMessage {
             conversation_id: None,
             content: body.text,
-            image_filenames: if body.image_filenames.is_empty() {
+            media_filenames: if body.image_filenames.is_empty() {
                 None
             } else {
                 Some(body.image_filenames)
@@ -484,7 +484,7 @@ pub(crate) async fn post_subagent_message(
 ) -> ApiResult<StatusCode> {
     let session_dir = existing_session_dir(&session_id)?;
     find_subagent_dir(&session_dir, &subagent_id)?;
-    // Validate image filenames to prevent path traversal
+    // Validate media filenames to prevent path traversal
     for f in &body.image_filenames {
         validate_basename(f)?;
     }
@@ -494,7 +494,7 @@ pub(crate) async fn post_subagent_message(
         ClientMessage::SendMessage {
             conversation_id: Some(subagent_id),
             content: body.text,
-            image_filenames: if body.image_filenames.is_empty() {
+            media_filenames: if body.image_filenames.is_empty() {
                 None
             } else {
                 Some(body.image_filenames)
@@ -512,7 +512,7 @@ pub(crate) async fn upload_images(
     let session_dir = existing_session_dir(&session_id)?;
     let session = Session::with_dir(session_dir);
     session
-        .create_images_dir()
+        .create_media_dir()
         .map_err(|e| ApiError::internal(e.to_string()))?;
 
     let mut files = Vec::new();
@@ -556,7 +556,7 @@ pub(crate) async fn upload_images(
 }
 
 fn validate_basename(name: &str) -> ApiResult<()> {
-    llm_rs::image::validate_image_filename(name).map_err(|e| ApiError::bad_request(e.to_string()))
+    llm_rs::media::validate_media_filename(name).map_err(|e| ApiError::bad_request(e.to_string()))
 }
 
 pub(crate) async fn serve_image(
@@ -565,7 +565,7 @@ pub(crate) async fn serve_image(
     validate_basename(&filename)?;
     let session_dir = existing_session_dir(&session_id)?;
     let session = Session::with_dir(session_dir);
-    let path = llm_rs::image::resolve_image_path(&session.images_dir(), &filename)
+    let path = llm_rs::media::resolve_media_path(&session.media_dir(), &filename)
         .map_err(|e| ApiError::bad_request(e.to_string()))?;
 
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
@@ -576,7 +576,7 @@ pub(crate) async fn serve_image(
         }
     })?;
 
-    let media_type = llm_rs::image::media_type_from_extension(&filename);
+    let media_type = llm_rs::media::media_type_from_extension(&filename);
 
     Response::builder()
         .header(header::CONTENT_TYPE, media_type)

@@ -4,8 +4,8 @@ mod tests {
         ConversationClient, ConversationManager, ConversationState, ConversationSummary,
         SystemPromptContext, create_subagent_tool, fill_cancelled_tool_results,
     };
-    use crate::image::ContentPart;
     use crate::llm::{ChatOptions, LLMMessage, ModelInfo, ReasoningEffort, ToolCall};
+    use crate::media::ContentPart;
     use std::path::{Path, PathBuf};
 
     fn make_tool_call(id: &str, name: &str) -> ToolCall {

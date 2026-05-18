@@ -18,8 +18,8 @@ async fn main() {
         cancel_token: CancellationToken::new(),
         permission: llm_rs::permission::ScopedPermissionManager::always_allow("web_search"),
         container_config: None,
-        images_dir: None,
-        supports_vision: false,
+        media_dir: None,
+        supports_media: false,
     };
     let json_params = serde_json::json!({ "query": query }).to_string();
     let mut stream = tool.execute(ctx, json_params);

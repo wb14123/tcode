@@ -11,8 +11,8 @@ mod tests {
             cancel_token: CancellationToken::new(),
             permission: crate::permission::ScopedPermissionManager::always_allow("test"),
             container_config: None,
-            images_dir: None,
-            supports_vision: false,
+            media_dir: None,
+            supports_media: false,
         }
     }
 
@@ -318,8 +318,8 @@ mod tests {
             cancel_token: cancel_token.clone(),
             permission: crate::permission::ScopedPermissionManager::always_allow("test"),
             container_config: None,
-            images_dir: None,
-            supports_vision: false,
+            media_dir: None,
+            supports_media: false,
         };
 
         let json_args = r#"{"message": "test"}"#.to_string();
@@ -402,8 +402,8 @@ mod tests {
                 cancel_token: CancellationToken::new(),
                 permission: crate::permission::ScopedPermissionManager::always_allow("test"),
                 container_config: None,
-                images_dir: None,
-                supports_vision: false,
+                media_dir: None,
+                supports_media: false,
             }
         }
 

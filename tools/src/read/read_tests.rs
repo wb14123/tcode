@@ -4,7 +4,7 @@ mod tests {
     use std::sync::Arc;
 
     use anyhow::Result;
-    use llm_rs::image::ContentPart;
+    use llm_rs::media::ContentPart;
     use llm_rs::permission::{
         PermissionDecision, PermissionKey, PermissionManager, ScopedPermissionManager,
     };
@@ -43,8 +43,8 @@ mod tests {
             cancel_token: CancellationToken::new(),
             permission: scoped,
             container_config: None,
-            images_dir: None,
-            supports_vision: false,
+            media_dir: None,
+            supports_media: false,
         })
     }
 
@@ -57,11 +57,11 @@ mod tests {
         while let Some(item) = stream.next().await {
             match item? {
                 ContentPart::Text(text) => out.push_str(&text),
-                ContentPart::Image(img) => {
+                ContentPart::Media(media) => {
                     out.push_str(&format!(
                         "[Image: {} {}]",
-                        img.relative_path(),
-                        img.media_type()
+                        media.relative_path(),
+                        media.media_type()
                     ));
                 }
             }

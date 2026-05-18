@@ -25,7 +25,7 @@
 //!
 //! // Execute with JSON string
 //! use tokio_util::sync::CancellationToken;
-//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, images_dir: None, supports_vision: false };
+//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, media_dir: None, supports_media: false };
 //! let stream = tool.execute(ctx, r#"{"path": "/tmp/test.txt"}"#.to_string());
 //! ```
 
@@ -43,7 +43,7 @@ use serde::de::DeserializeOwned;
 use tokio::time::{Instant, Sleep};
 use tokio_stream::{Stream, StreamExt};
 
-use crate::image::ContentPart;
+use crate::media::ContentPart;
 
 pub use tokio_util::sync::CancellationToken;
 
@@ -67,10 +67,10 @@ pub struct ToolContext {
     pub permission: crate::permission::ScopedPermissionManager,
     /// Optional container configuration for Docker/Podman sandbox mode.
     pub container_config: Option<Arc<ContainerConfig>>,
-    /// Where tools can write processed images (session's images/ dir).
-    pub images_dir: Option<PathBuf>,
-    /// Whether the current model supports visual/image input.
-    pub supports_vision: bool,
+    /// Where tools can write processed media (session's media/ dir).
+    pub media_dir: Option<PathBuf>,
+    /// Whether the current model supports visual/media input (images, PDFs).
+    pub supports_media: bool,
 }
 
 /// Type alias for the boxed stream returned by tool execution.
@@ -265,7 +265,7 @@ impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send
 ///
 /// // Execute with JSON string
 /// use tokio_util::sync::CancellationToken;
-/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, images_dir: None, supports_vision: false };
+/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, media_dir: None, supports_media: false };
 /// let stream = tool.execute(ctx, r#"{"query": "foo"}"#.to_string());
 /// ```
 pub struct Tool {

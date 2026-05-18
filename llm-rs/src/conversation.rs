@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use crate::image::{ContentPart, ImageData, media_type_from_extension};
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
+use crate::media::{ContentPart, MediaData, media_type_from_extension};
 use crate::tool::{CancellationToken, ContainerConfig, Tool, ToolContext};
 use anyhow::{Context, Result};
 use schemars::JsonSchema;
@@ -98,7 +98,7 @@ fn first_user_description(llm_msgs: &[LLMMessage]) -> Option<String> {
             });
             match first_text {
                 Some(text) => Some(truncate_preview(text, 80)),
-                None => Some("[Image]".to_string()),
+                None => Some("[Media]".to_string()),
             }
         } else {
             None
@@ -217,9 +217,10 @@ pub enum Message {
         msg_id: MessageID,
         created_at: u64,
         content: Arc<String>,
-        /// Relative paths from images/ dir like ["uuid.png"].
+        /// Relative paths from media/ dir like ["uuid.png"].
         #[serde(default)]
-        images: Vec<String>,
+        #[serde(alias = "images")]
+        media_filenames: Vec<String>,
     },
 
     AssistantMessageStart {
@@ -429,20 +430,20 @@ pub enum Message {
         aggregate_cache_read_tokens: i32,
     },
 
-    /// The LLM has started generating an image. Provides an image_id for
-    /// correlation with the eventual AssistantImageOutput.
-    AssistantImageGenerating {
+    /// The LLM has started generating media. Provides a media_id for
+    /// correlation with the eventual AssistantMediaOutput.
+    AssistantMediaGenerating {
         msg_id: MessageID,
-        image_id: String,
+        media_id: String,
     },
 
-    /// The LLM generated an image (e.g. via OpenAI's image_generation_call).
-    /// Contains an ImageData reference to the saved file.
-    /// `image_id` correlates with AssistantImageGenerating.
-    AssistantImageOutput {
+    /// The LLM generated media (e.g. via OpenAI's image_generation_call).
+    /// Contains a MediaData reference to the saved file.
+    /// `media_id` correlates with AssistantMediaGenerating.
+    AssistantMediaOutput {
         msg_id: MessageID,
-        image_id: String,
-        image: ImageData,
+        media_id: String,
+        media: MediaData,
     },
 }
 
@@ -477,10 +478,10 @@ struct ConversationEnv {
     subagent_depth: usize,
     max_subagent_depth: usize,
     state_dir: Option<PathBuf>,
-    /// Where tools can write processed images (session's images/ dir).
-    images_dir: Option<PathBuf>,
-    /// Whether the current model supports visual/image input.
-    supports_vision: bool,
+    /// Where tools can write processed media (session's media/ dir).
+    media_dir: Option<PathBuf>,
+    /// Whether the current model supports visual/media input (images, PDFs).
+    supports_media: bool,
     /// Permission manager shared across all conversations.
     permission_manager: Arc<crate::permission::PermissionManager>,
     /// Optional container configuration for Docker/Podman sandbox mode.
@@ -630,7 +631,7 @@ impl ConversationManager {
         subagent_depth: usize,
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
-        supports_vision: bool,
+        supports_media: bool,
     ) -> Result<(String, Arc<ConversationClient>)> {
         let conversation_id = Uuid::new_v4().to_string();
         self.new_conversation_with_id(
@@ -643,7 +644,7 @@ impl ConversationManager {
             subagent_depth,
             max_subagent_depth,
             state_dir,
-            supports_vision,
+            supports_media,
         )
     }
 
@@ -659,7 +660,7 @@ impl ConversationManager {
         subagent_depth: usize,
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
-        supports_vision: bool,
+        supports_media: bool,
     ) -> Result<(String, Arc<ConversationClient>)> {
         let now = now_millis();
         let (tools_map, input_rx, client) = prepare_conversation(
@@ -703,8 +704,8 @@ impl ConversationManager {
                 subagent_depth,
                 max_subagent_depth,
                 state_dir: state_dir.clone(),
-                images_dir: state_dir.as_ref().map(|d| d.join("images")),
-                supports_vision,
+                media_dir: state_dir.as_ref().map(|d| d.join("media")),
+                supports_media,
                 permission_manager: Arc::clone(&self.permission_manager),
                 container_config: self.container_config.clone(),
             },
@@ -798,7 +799,7 @@ impl ConversationManager {
         tools: Vec<Arc<Tool>>,
         max_subagent_depth: usize,
         state_dir: Option<PathBuf>,
-        supports_vision: bool,
+        supports_media: bool,
     ) -> Result<(String, Arc<ConversationClient>)> {
         fill_cancelled_tool_results(&mut state.llm_msgs);
         let summary = state.summary();
@@ -837,8 +838,8 @@ impl ConversationManager {
                 subagent_depth: state.subagent_depth,
                 max_subagent_depth,
                 state_dir: state_dir.clone(),
-                images_dir: state_dir.as_ref().map(|d| d.join("images")),
-                supports_vision,
+                media_dir: state_dir.as_ref().map(|d| d.join("media")),
+                supports_media,
                 permission_manager: Arc::clone(&self.permission_manager),
                 container_config: self.container_config.clone(),
             },
@@ -861,7 +862,7 @@ impl ConversationManager {
         tools: Vec<Arc<Tool>>,
         max_subagent_depth: usize,
         state_dir: PathBuf,
-        supports_vision: bool,
+        supports_media: bool,
     ) -> Result<(String, Arc<ConversationClient>, Vec<ResumedSubagent>)> {
         // Find all subagent states (depth-first: nested before parent)
         let subagent_states = find_subagent_states(&state_dir);
@@ -894,7 +895,7 @@ impl ConversationManager {
 
         for (sa_dir, sa_state) in subagent_states {
             let mut sa_llm = llm.clone_box();
-            sa_llm.set_images_dir(Some(sa_dir.join("images")));
+            sa_llm.set_media_dir(Some(sa_dir.join("media")));
             let sa_tools = tools.clone();
             let (sa_id, sa_client) = self.resume_conversation(
                 sa_state,
@@ -902,7 +903,7 @@ impl ConversationManager {
                 sa_tools,
                 max_subagent_depth,
                 Some(sa_dir.clone()),
-                supports_vision,
+                supports_media,
             )?;
             resumed_subagents.push(ResumedSubagent {
                 conversation_id: sa_id,
@@ -918,7 +919,7 @@ impl ConversationManager {
             tools,
             max_subagent_depth,
             Some(state_dir),
-            supports_vision,
+            supports_media,
         )?;
 
         Ok((root_id, root_client, resumed_subagents))
@@ -1546,7 +1547,7 @@ impl Conversation {
                 msg = self.input_channel_rx.recv() => {
                     let Some(msg) = msg else { break };
                     match msg {
-                        Message::UserMessage { content, images, .. } => {
+                        Message::UserMessage { content, media_filenames, .. } => {
                             // If tools are pending, cancel them and fill synthetic results
                             if !self.pending_tools.is_empty() {
                                 self.env.client.cancel_silent();
@@ -1562,9 +1563,9 @@ impl Conversation {
                                 self.description = Some(truncate_preview(&content, 80));
                             }
                             let mut parts = vec![ContentPart::Text(content.to_string())];
-                            for filename in &images {
+                            for filename in &media_filenames {
                                 let media_type = media_type_from_extension(filename);
-                                parts.push(ContentPart::Image(ImageData::new(
+                                parts.push(ContentPart::Media(MediaData::new(
                                     filename.clone(),
                                     media_type.to_string(),
                                 )));
@@ -1574,7 +1575,7 @@ impl Conversation {
                                 msg_id: self.next_msg_id(),
                                 created_at: now_millis(),
                                 content: Arc::clone(&content),
-                                images: images.clone(),
+                                media_filenames: media_filenames.clone(),
                             })?;
                             self.call_llm().await?;
                             self.maybe_finish_turn()?;
@@ -1847,22 +1848,22 @@ impl Conversation {
                     })?;
                     return Ok(());
                 }
-                LLMEvent::ImageGenerationStarted { image_id } => {
-                    self.broadcast_msg(Message::AssistantImageGenerating {
+                LLMEvent::MediaGenerationStarted { media_id } => {
+                    self.broadcast_msg(Message::AssistantMediaGenerating {
                         msg_id: self.next_msg_id(),
-                        image_id: image_id.clone(),
+                        media_id: media_id.clone(),
                     })?;
                 }
-                LLMEvent::ImageOutput {
-                    image_id,
+                LLMEvent::MediaOutput {
+                    media_id,
                     relative_path,
                     media_type,
                 } => {
-                    let image = ImageData::new(relative_path, media_type);
-                    self.broadcast_msg(Message::AssistantImageOutput {
+                    let media = MediaData::new(relative_path, media_type);
+                    self.broadcast_msg(Message::AssistantMediaOutput {
                         msg_id: self.next_msg_id(),
-                        image_id,
-                        image,
+                        media_id,
+                        media,
                     })?;
                 }
             }
@@ -2089,8 +2090,8 @@ async fn execute_regular_tool(
         cancel_token: cancel_token.clone(),
         permission: scoped_pm,
         container_config: env.container_config.clone(),
-        images_dir: env.images_dir.clone(),
-        supports_vision: env.supports_vision,
+        media_dir: env.media_dir.clone(),
+        supports_media: env.supports_media,
     };
     let end_status = if let Some(tool) = tool_arc {
         tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");
@@ -2307,9 +2308,9 @@ async fn execute_subagent(
     };
 
     // Create the subagent conversation
-    // Set images_dir on the cloned LLM to the subagent's own images subdir
+    // Set media_dir on the cloned LLM to the subagent's own media subdir
     if let Some(ref sa_dir) = subagent_state_dir {
-        llm.set_images_dir(Some(sa_dir.join("images")));
+        llm.set_media_dir(Some(sa_dir.join("media")));
     }
     let (subagent_conv_id, subagent_client) =
         match env.conversation_manager.new_conversation_with_id(
@@ -2322,7 +2323,7 @@ async fn execute_subagent(
             child_depth,
             env.max_subagent_depth,
             subagent_state_dir,
-            env.supports_vision,
+            env.supports_media,
         ) {
             Ok(result) => result,
             Err(e) => {
@@ -2744,25 +2745,25 @@ impl ConversationClient {
                 msg_id: self.next_msg_id(),
                 created_at: now_millis(),
                 content: Arc::new(content.to_string()),
-                images: vec![],
+                media_filenames: vec![],
             })
             .await?;
         Ok(())
     }
 
-    /// Send a chat with attached images to the conversation. Images are relative
-    /// filenames from the session's `images/` directory (e.g. `"uuid.png"`).
-    pub async fn send_chat_with_images(
+    /// Send a chat with attached media to the conversation. Media are relative
+    /// filenames from the session's `media/` directory (e.g. `"uuid.png"`).
+    pub async fn send_chat_with_media(
         &self,
         content: &str,
-        image_filenames: Vec<String>,
+        media_filenames: Vec<String>,
     ) -> Result<()> {
         self.input_channel_tx
             .send(Message::UserMessage {
                 msg_id: self.next_msg_id(),
                 created_at: now_millis(),
                 content: Arc::new(content.to_string()),
-                images: image_filenames,
+                media_filenames,
             })
             .await?;
         Ok(())

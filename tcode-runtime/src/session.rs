@@ -247,11 +247,13 @@ impl Session {
     /// Create a `Session` reference from an existing session directory.
     /// Does not create the directory — it must already exist.
     pub fn with_dir(session_dir: PathBuf) -> Self {
+        Self::migrate_legacy_media_dir(&session_dir);
         Self { session_dir }
     }
 
     /// Create a new session with the given ID.
     /// Creates the session directory with restricted permissions.
+    /// Also migrates any legacy `images/` subdirectory to `media/`.
     pub fn new(session_id: String) -> Result<Self> {
         validate_session_path(&session_id)?;
         let base_dir = base_path()?;
@@ -267,7 +269,33 @@ impl Session {
             .with_context(|| format!("Failed to create session directory {:?}", session_dir))?;
         fs::set_permissions(&session_dir, Permissions::from_mode(0o700))?;
 
+        Self::migrate_legacy_media_dir(&session_dir);
+
         Ok(Self { session_dir })
+    }
+
+    /// If a legacy `images/` subdirectory exists (from before the image→media
+    /// rename) and `media/` does not yet exist, rename `images/` → `media/`.
+    fn migrate_legacy_media_dir(session_dir: &Path) {
+        let legacy = session_dir.join("images");
+        let modern = session_dir.join("media");
+        if legacy.is_dir() && !modern.exists() {
+            match std::fs::rename(&legacy, &modern) {
+                Ok(()) => {
+                    tracing::info!(
+                        "Migrated legacy images/ → media/ for session {:?}",
+                        session_dir.file_name()
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "Failed to migrate legacy images/ dir {:?} → {:?}: {e}",
+                        legacy,
+                        modern
+                    );
+                }
+            }
+        }
     }
 
     pub fn session_dir(&self) -> &PathBuf {
@@ -353,25 +381,25 @@ impl Session {
     }
 
     // ------------------------------------------------------------------
-    // Image support
+    // Media support
     // ------------------------------------------------------------------
 
-    /// Path to the `images/` subdirectory for this session.
-    pub fn images_dir(&self) -> PathBuf {
-        self.session_dir.join("images")
+    /// Path to the `media/` subdirectory for this session.
+    pub fn media_dir(&self) -> PathBuf {
+        self.session_dir.join("media")
     }
 
-    /// Create the `images/` subdirectory with `0o700` permissions.
-    pub fn create_images_dir(&self) -> Result<()> {
-        let dir = self.images_dir();
+    /// Create the `media/` subdirectory with `0o700` permissions.
+    pub fn create_media_dir(&self) -> Result<()> {
+        let dir = self.media_dir();
         fs::create_dir_all(&dir)
-            .with_context(|| format!("Failed to create images directory {:?}", dir))?;
+            .with_context(|| format!("Failed to create media directory {:?}", dir))?;
         fs::set_permissions(&dir, Permissions::from_mode(0o700))
             .with_context(|| format!("Failed to set permissions on {:?}", dir))?;
         Ok(())
     }
 
-    /// Save raw image bytes into `images/`.
+    /// Save raw media bytes into `media/`.
     ///
     /// The bytes are processed through the resize/compression pipeline (which
     /// determines the actual output format).  The returned filename always
@@ -384,27 +412,27 @@ impl Session {
 
         if data.len() > MAX_UPLOAD_SIZE {
             bail!(
-                "Image data too large: {} bytes (max {} MB)",
+                "Media data too large: {} bytes (max {} MB)",
                 data.len(),
                 MAX_UPLOAD_SIZE / (1024 * 1024)
             );
         }
 
-        let (processed, media_type, ext) = llm_rs::image::process_image(data)?;
+        let (processed, media_type, ext) = llm_rs::media::process_image(data)?;
 
         let filename = format!("{}.{}", uuid::Uuid::new_v4(), ext);
-        let dest = self.images_dir().join(&filename);
+        let dest = self.media_dir().join(&filename);
 
         std::fs::write(&dest, &processed)
-            .with_context(|| format!("Failed to write image file: {}", dest.display()))?;
+            .with_context(|| format!("Failed to write media file: {}", dest.display()))?;
         std::fs::set_permissions(&dest, Permissions::from_mode(0o600))
             .with_context(|| format!("Failed to set permissions on {:?}", dest))?;
 
         Ok((filename, media_type))
     }
 
-    /// Get the absolute path for a relative image filename (e.g. `"uuid.png"`).
-    pub fn image_absolute_path(&self, relative_path: &str) -> PathBuf {
-        self.images_dir().join(relative_path)
+    /// Get the absolute path for a relative media filename (e.g. `"uuid.png"`).
+    pub fn media_absolute_path(&self, relative_path: &str) -> PathBuf {
+        self.media_dir().join(relative_path)
     }
 }

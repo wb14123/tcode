@@ -8,8 +8,8 @@ use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use llm_rs::image::ContentPart;
 use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, OpenAI, StopReason};
+use llm_rs::media::ContentPart;
 use llm_rs::tool;
 use llm_rs::tool::{CancellationToken, Tool, ToolContext};
 use tokio_stream::StreamExt;
@@ -106,8 +106,8 @@ async fn main() {
                                         &tool_call.name,
                                     ),
                                 container_config: None,
-                                images_dir: None,
-                                supports_vision: false,
+                                media_dir: None,
+                                supports_media: false,
                             };
                             let mut result_stream = tool.execute(ctx, tool_call.arguments.clone());
                             let mut result = String::new();
@@ -136,8 +136,8 @@ async fn main() {
             }
             LLMEvent::ToolCallStart { .. }
             | LLMEvent::ToolCallDelta { .. }
-            | LLMEvent::ImageOutput { .. }
-            | LLMEvent::ImageGenerationStarted { .. } => {}
+            | LLMEvent::MediaOutput { .. }
+            | LLMEvent::MediaGenerationStarted { .. } => {}
         }
     }
 }
