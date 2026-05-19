@@ -7,6 +7,7 @@ pub mod file_write_util;
 pub mod glob_tool;
 pub mod grep_tool;
 pub mod lsp;
+pub mod media_util;
 pub mod read;
 pub mod skill;
 pub mod web_fetch;
@@ -15,6 +16,9 @@ pub mod write;
 
 #[cfg(test)]
 mod file_permission_tests;
+
+#[cfg(test)]
+mod media_util_tests;
 
 pub use bash::bash_tool;
 pub use current_time::current_time_tool;

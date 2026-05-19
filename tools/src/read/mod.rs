@@ -1,12 +1,13 @@
 use std::path::Path;
 
 use anyhow::{Result, anyhow};
-use llm_rs::media::{ContentPart, MediaData, process_image};
+use llm_rs::media::ContentPart;
 use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 use tokio::fs::File;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
-use uuid::Uuid;
+
+use crate::media_util;
 
 const DEFAULT_LIMIT: u64 = 500;
 const DEFAULT_MAX_READ_CHARS: u64 = 20_000;
@@ -338,65 +339,48 @@ pub fn read(
     #[serde(default)]
     first_line_offset: Option<u64>,
 ) -> impl tokio_stream::Stream<Item = Result<ContentPart>> {
-    async_stream::stream! {
+    async_stream::try_stream! {
         let path = Path::new(&file_path);
 
         if !path.is_absolute() {
-            yield Err(anyhow!("file_path must be an absolute path, got: {}", file_path));
-            return;
+            Err(anyhow!("file_path must be an absolute path, got: {}", file_path))?;
         }
 
-        let metadata = match tokio::fs::metadata(path).await {
-            Ok(m) => m,
-            Err(_) => {
-                yield Err(anyhow!("Path does not exist: {}", file_path));
-                return;
-            }
-        };
+        let metadata = tokio::fs::metadata(path)
+            .await
+            .map_err(|e| anyhow!("Failed to access {}: {}", file_path, e))?;
 
         // Permission check for paths outside current working directory
-        if let Err(e) = crate::file_permission::check_file_read_permission(
+        crate::file_permission::check_file_read_permission(
             &ctx.permission, path, metadata.is_dir(),
-        ).await {
-            yield Err(e);
-            return;
-        }
+        ).await?;
 
         // Handle directory
         if metadata.is_dir() {
-            match read_directory(path).await {
-                Ok(output) => yield Ok(ContentPart::Text(output)),
-                Err(e) => yield Err(e),
-            }
+            let output = read_directory(path).await?;
+            yield ContentPart::Text(output);
             return;
         }
 
         // Binary extension check (no I/O needed)
         if is_binary_extension(path) {
-            yield Err(anyhow!(
+            Err(anyhow!(
                 "Cannot read binary file: {}. This appears to be a binary file based on its extension.",
                 path.display()
-            ));
-            return;
+            ))?;
         }
 
         // Open file
-        let file = match File::open(path).await {
-            Ok(f) => f,
-            Err(e) => {
-                yield Err(anyhow!("Failed to open file {}: {}", path.display(), e));
-                return;
-            }
-        };
-        let file_size = match file.metadata().await {
-            Ok(m) => m.len(),
-            Err(e) => {
-                yield Err(anyhow!("Failed to get file metadata {}: {}", path.display(), e));
-                return;
-            }
-        };
+        let file = File::open(path)
+            .await
+            .map_err(|e| anyhow!("Failed to open file {}: {}", path.display(), e))?;
+        let file_size = file
+            .metadata()
+            .await
+            .map_err(|e| anyhow!("Failed to get file metadata {}: {}", path.display(), e))?
+            .len();
 
-        // Media handling: check if file extension indicates a supported image type
+        // Media handling: check if file extension indicates a supported image or PDF type
         let is_image = path
             .extension()
             .and_then(|ext| ext.to_str())
@@ -406,80 +390,29 @@ pub fn read(
         if is_image {
             let path_display = path.to_string_lossy().into_owned();
 
-            // Capability check
-            if !ctx.supports_media {
-                yield Err(anyhow!(
-                    "Cannot read image file: visual input is disabled. Ask the user to set `supports_media = true` in their tcode config if their model supports media."
-                ));
-                return;
-            }
+            let media_dir = media_util::require_media_dir(&ctx, "read image file")?;
 
-            // Require media_dir when media is supported
-            let media_dir = match ctx.media_dir {
-                Some(ref dir) => dir.clone(),
-                None => {
-                    yield Err(anyhow!(
-                        "Cannot read image file: no media directory configured."
-                    ));
-                    return;
-                }
-            };
-
-            // Reject large images before reading (50MB max — matches process_image limit)
-            const MAX_IMAGE_SIZE: u64 = 50 * 1024 * 1024;
-            if file_size > MAX_IMAGE_SIZE {
-                yield Err(anyhow!(
+            // Reject large images before reading
+            if file_size > media_util::MAX_IMAGE_SIZE {
+                Err(anyhow!(
                     "Cannot read image file: {} is too large ({} bytes, max {}).",
-                    path_display, file_size, MAX_IMAGE_SIZE
-                ));
-                return;
+                    path_display, file_size, media_util::MAX_IMAGE_SIZE
+                ))?;
             }
 
             // Read entire file bytes
             let mut file = file;
             let mut data = Vec::with_capacity(file_size as usize);
-            if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut file, &mut data).await {
-                yield Err(anyhow!("Failed to read image file {}: {}", path.display(), e));
-                return;
-            }
+            tokio::io::AsyncReadExt::read_to_end(&mut file, &mut data)
+                .await
+                .map_err(|e| anyhow!("Failed to read image file {}: {}", path.display(), e))?;
 
-            // Process image (resize, re-encode)
-            let (processed, media_type, extension) = match process_image(&data) {
-                Ok(result) => result,
-                Err(e) => {
-                    yield Err(anyhow!("Failed to process image file {}: {}", path.display(), e));
-                    return;
-                }
-            };
-
-            // Write processed image to media_dir
-            let filename = format!("{}.{}", Uuid::new_v4(), extension);
-            if let Err(e) = tokio::fs::create_dir_all(&media_dir).await {
-                yield Err(anyhow!(
-                    "Failed to create media directory {}: {}",
-                    media_dir.display(),
-                    e
-                ));
-                return;
-            }
-            let image_path = media_dir.join(&filename);
-            if let Err(e) = tokio::fs::write(&image_path, &processed).await {
-                yield Err(anyhow!(
-                    "Failed to write processed image to {}: {}",
-                    image_path.display(),
-                    e
-                ));
-                return;
-            }
-
-            // Yield image content part
-            yield Ok(ContentPart::Media(MediaData::new(filename, media_type.clone())));
-
-            // Yield text annotation
-            yield Ok(ContentPart::Text(format!(
-                "[Image: {} ({})]",
-                path_display, media_type
-            )));
+            // Delegate to shared utility for processing + saving
+            let (media_data, annotation) = media_util::save_image_to_media(data, &path_display, &media_dir)
+                .await
+                .map_err(|e| anyhow!("Failed to process image file {}: {}", path.display(), e))?;
+            yield ContentPart::Media(media_data);
+            yield ContentPart::Text(annotation);
 
             return;
         }
@@ -494,114 +427,28 @@ pub fn read(
         if is_pdf {
             let path_display = path.to_string_lossy().into_owned();
 
-            // Capability check
-            if !ctx.supports_media {
-                yield Err(anyhow!(
-                    "Cannot read PDF file: visual input is disabled."
-                ));
-                return;
-            }
+            let media_dir = media_util::require_media_dir(&ctx, "read PDF file")?;
 
-            // Require media_dir
-            let media_dir = match ctx.media_dir {
-                Some(ref dir) => dir.clone(),
-                None => {
-                    yield Err(anyhow!(
-                        "Cannot read PDF file: no media directory configured."
-                    ));
-                    return;
-                }
-            };
-
-            // Size check: 20 MB max
-            const MAX_PDF_SIZE: u64 = 20 * 1024 * 1024;
-            if file_size > MAX_PDF_SIZE {
-                yield Err(anyhow!(
+            if file_size > media_util::MAX_PDF_SIZE {
+                Err(anyhow!(
                     "Cannot read PDF file: {} is too large ({} bytes, max {}).",
-                    path_display, file_size, MAX_PDF_SIZE
-                ));
-                return;
+                    path_display, file_size, media_util::MAX_PDF_SIZE
+                ))?;
             }
 
             // Read entire file bytes
             let mut file = file;
             let mut data = Vec::with_capacity(file_size as usize);
-            if let Err(e) = tokio::io::AsyncReadExt::read_to_end(&mut file, &mut data).await {
-                yield Err(anyhow!("Failed to read PDF file {}: {}", path.display(), e));
-                return;
-            }
+            tokio::io::AsyncReadExt::read_to_end(&mut file, &mut data)
+                .await
+                .map_err(|e| anyhow!("Failed to read PDF file {}: {}", path.display(), e))?;
 
-            // Validate PDF magic bytes
-            if !data.starts_with(b"%PDF-") {
-                yield Err(anyhow!(
-                    "Cannot read file: {} does not appear to be a valid PDF (wrong magic bytes).",
-                    path_display
-                ));
-                return;
-            }
-
-            // Client-side validation: parse with lopdf
-            match lopdf::Document::load_mem(&data) {
-                Ok(doc) => {
-                    // Check for encryption
-                    if doc.is_encrypted() {
-                        yield Err(anyhow!(
-                            "Cannot read PDF file: {} is password-protected. Please decrypt it first.",
-                            path_display
-                        ));
-                        return;
-                    }
-                    // Check page count
-                    const MAX_PDF_PAGES: usize = 100;
-                    let page_count = doc.get_pages().len();
-                    if page_count > MAX_PDF_PAGES {
-                        yield Err(anyhow!(
-                            "Cannot read PDF file: {} has {} pages (max {}).",
-                            path_display, page_count, MAX_PDF_PAGES
-                        ));
-                        return;
-                    }
-                }
-                Err(e) => {
-                    yield Err(anyhow!(
-                        "Cannot read PDF file: {} is corrupted or invalid: {}",
-                        path_display, e
-                    ));
-                    return;
-                }
-            }
-
-            // Save raw bytes to media_dir
-            let filename = format!("{}.pdf", Uuid::new_v4());
-            if let Err(e) = tokio::fs::create_dir_all(&media_dir).await {
-                yield Err(anyhow!(
-                    "Failed to create media directory {}: {}",
-                    media_dir.display(),
-                    e
-                ));
-                return;
-            }
-            let pdf_path = media_dir.join(&filename);
-            if let Err(e) = tokio::fs::write(&pdf_path, &data).await {
-                yield Err(anyhow!(
-                    "Failed to save PDF file {}: {}",
-                    pdf_path.display(),
-                    e
-                ));
-                return;
-            }
-
-            // Yield PDF content part
-            yield Ok(ContentPart::Media(MediaData::new(
-                filename,
-                "application/pdf".to_string(),
-            )));
-
-            // Yield text annotation
-            yield Ok(ContentPart::Text(format!(
-                "[PDF: {} (application/pdf)]",
-                path_display
-            )));
+            // Delegate to shared utility for validation + saving
+            let (media_data, annotation) = media_util::save_pdf_to_media(data, &path_display, &media_dir)
+                .await
+                .map_err(|e| anyhow!("Failed to process PDF file {}: {}", path.display(), e))?;
+            yield ContentPart::Media(media_data);
+            yield ContentPart::Text(annotation);
 
             return;
         }
@@ -609,19 +456,15 @@ pub fn read(
         // Binary content check via fill_buf (peeks without consuming)
         let mut reader = BufReader::new(file);
         {
-            let peek = match reader.fill_buf().await {
-                Ok(b) => b,
-                Err(e) => {
-                    yield Err(anyhow!("Failed to read file {}: {}", path.display(), e));
-                    return;
-                }
-            };
+            let peek = reader
+                .fill_buf()
+                .await
+                .map_err(|e| anyhow!("Failed to read file {}: {}", path.display(), e))?;
             if is_binary_content(peek) {
-                yield Err(anyhow!(
+                Err(anyhow!(
                     "Cannot read binary file: {}. The file contains too many non-printable characters.",
                     path.display()
-                ));
-                return;
+                ))?;
             }
         }
 
@@ -633,7 +476,7 @@ pub fn read(
         let path_display = path.to_string_lossy().into_owned();
 
         // Yield header
-        yield Ok(ContentPart::Text(format!("#| File: {}", path_display)));
+        yield ContentPart::Text(format!("#| File: {}", path_display));
 
         let mut current_line: u64 = 0;
         let mut lines_yielded: u64 = 0;
@@ -641,24 +484,18 @@ pub fn read(
         let mut chars_consumed: usize = 0;
         let mut was_truncated = false;
         let mut partial_line: Vec<u8> = Vec::new();
-        // Char count of partial_line buffer — capped at max_chars to bound memory usage
-        // on extremely long lines (e.g. minified JS). This is NOT the global output char cap.
         let mut partial_buf_chars: usize = 0;
         let mut partial_capped = false;
         let mut batch = String::new();
-        // Track the last truncated line info for the final "To read more" annotation
         let mut last_truncated_line: u64 = 0;
         let mut last_truncated_offset: u64 = 0;
         let mut first_emitted_line: u64 = 0;
 
         loop {
-            let buf = match reader.fill_buf().await {
-                Ok(b) => b,
-                Err(e) => {
-                    yield Err(anyhow!("Failed to read file {}: {}", path_display, e));
-                    return;
-                }
-            };
+            let buf = reader
+                .fill_buf()
+                .await
+                .map_err(|e| anyhow!("Failed to read file {}: {}", path_display, e))?;
             if buf.is_empty() {
                 // EOF — emit final partial line if any
                 if !partial_line.is_empty() && lines_yielded < lim && !was_truncated {
@@ -677,7 +514,6 @@ pub fn read(
             }
 
             let buf_len = buf.len();
-            // Copy before consuming — consume invalidates the borrow
             let buf_owned = buf.to_vec();
             reader.consume(buf_len);
 
@@ -694,16 +530,13 @@ pub fn read(
                             }
                             let line_str = String::from_utf8_lossy(&partial_line);
                             if let Some(chars_used) = emit_line(&line_str, current_line, flo_applied, flo, chars_consumed, max_chars, partial_capped, &mut batch, &mut was_truncated, &mut last_truncated_line, &mut last_truncated_offset) {
-                                chars_consumed += chars_used + 1; // +1 for \n
+                                chars_consumed += chars_used + 1;
                                 flo_applied = true;
                                 if first_emitted_line == 0 {
                                     first_emitted_line = current_line;
                                 }
                                 lines_yielded += 1;
                             } else if !flo_applied {
-                                // Line was skipped (e.g. offset beyond its length).
-                                // The first_line_offset was applied to this line — don't
-                                // re-apply it to subsequent lines.
                                 flo_applied = true;
                             }
                         }
@@ -713,8 +546,6 @@ pub fn read(
                         pos = line_end + 1;
                     }
                     None => {
-                        // No newline — accumulate into partial_line buffer.
-                        // Cap at max_chars characters to bound memory on very long lines.
                         if !partial_capped {
                             let remaining = &buf_owned[pos..buf_len];
                             let char_space = max_chars.saturating_sub(partial_buf_chars);
@@ -741,14 +572,11 @@ pub fn read(
             }
 
             if !batch.is_empty() {
-                yield Ok(ContentPart::Text(std::mem::take(&mut batch)));
+                yield ContentPart::Text(std::mem::take(&mut batch));
             }
 
             if lines_yielded >= lim || was_truncated {
-                // Fast-count remaining lines for total_lines metadata
                 let mut count_buf = [0u8; 8192];
-                // Tracks whether the file ends with a newline; initialized to 0
-                // so we don't falsely count an extra line if the loop body never runs.
                 let mut last_byte = 0u8;
                 loop {
                     match reader.read(&mut count_buf).await {
@@ -771,7 +599,7 @@ pub fn read(
         }
 
         if !batch.is_empty() {
-            yield Ok(ContentPart::Text(std::mem::take(&mut batch)));
+            yield ContentPart::Text(std::mem::take(&mut batch));
         }
 
         // Build footer
@@ -783,7 +611,6 @@ pub fn read(
         let total_lines = current_line;
         let mut closing = String::new();
 
-        // Offset beyond EOF or empty file
         if lines_yielded == 0 {
             if total_lines == 0 {
                 closing.push_str("\n#| File is empty.");
@@ -812,7 +639,7 @@ pub fn read(
             }
         }
 
-        yield Ok(ContentPart::Text(closing));
+        yield ContentPart::Text(closing);
     }
 }
 

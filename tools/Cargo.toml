@@ -32,3 +32,4 @@ lopdf = "0.40"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

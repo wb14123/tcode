@@ -4239,6 +4239,7 @@ dependencies = [
  "fs2",
  "grep",
  "ignore",
+ "image",
  "llm-rs",
  "llm-rs-macros",
  "lopdf",

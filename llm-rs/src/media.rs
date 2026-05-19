@@ -78,10 +78,8 @@ impl MediaData {
         let bytes = std::fs::read(&path)
             .with_context(|| format!("Failed to read media file: {}", path.display()))?;
 
-        self.cached_data
-            .set((media_dir.to_path_buf(), bytes))
-            .map_err(|_| anyhow::anyhow!("MediaData cached_data already set (race condition)"))?;
-
+        let _ = self.cached_data.set((media_dir.to_path_buf(), bytes));
+        // Either we won the race, or another thread did — data is cached either way.
         Ok(&self.cached_data.get().expect("just set").1)
     }
 
@@ -347,5 +345,12 @@ pub fn process_image(data: &[u8]) -> Result<(Vec<u8>, String, String)> {
     let encoder = JpegEncoder::new_with_quality(&mut buf, 40);
     img.write_with_encoder(encoder)
         .context("Failed to encode JPEG (fallback)")?;
+    if (buf.len() as u64) > MAX_FILE_SIZE {
+        tracing::warn!(
+            "Processed image still exceeds {} bytes after all shrink attempts (final size: {})",
+            MAX_FILE_SIZE,
+            buf.len()
+        );
+    }
     Ok((buf, "image/jpeg".to_string(), "jpg".to_string()))
 }
