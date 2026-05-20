@@ -76,8 +76,9 @@ async fn canonicalize_path(path: &Path) -> Result<(PathBuf, bool)> {
 
 /// Check whether the caller has permission to read `path`.
 ///
-/// Paths inside cwd are auto-allowed. For paths outside cwd, checks for a
-/// stored `file_read` permission or prompts the user.
+/// Checks for a stored `file_read` permission (hierarchical, walking ancestor
+/// directories) or prompts the user. The initial cwd read permission is granted
+/// at session start and appears in the permission tree so it can be revoked.
 pub async fn check_file_read_permission(
     permission: &ScopedPermissionManager,
     path: &Path,
@@ -86,16 +87,6 @@ pub async fn check_file_read_permission(
     let (canonical_path, exists) = canonicalize_path(path).await?;
     if !exists {
         return Err(anyhow!("Path does not exist: {}", path.display()));
-    }
-
-    // Inside cwd — no permission required
-    let cwd =
-        std::env::current_dir().map_err(|e| anyhow!("Failed to get current directory: {}", e))?;
-    let canonical_cwd = tokio::fs::canonicalize(&cwd)
-        .await
-        .map_err(|e| anyhow!("Failed to resolve cwd {}: {}", cwd.display(), e))?;
-    if canonical_path.starts_with(&canonical_cwd) {
-        return Ok(());
     }
 
     let permission_dir = permission_dir_for(&canonical_path, is_dir);

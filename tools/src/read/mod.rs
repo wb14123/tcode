@@ -350,7 +350,7 @@ pub fn read(
             .await
             .map_err(|e| anyhow!("Failed to access {}: {}", file_path, e))?;
 
-        // Permission check for paths outside current working directory
+        // Permission check (hierarchical ancestor walk for file_read grants)
         crate::file_permission::check_file_read_permission(
             &ctx.permission, path, metadata.is_dir(),
         ).await?;

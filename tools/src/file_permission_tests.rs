@@ -5,7 +5,8 @@ mod tests {
 
     use anyhow::Result;
     use llm_rs::permission::{
-        PermissionDecision, PermissionKey, PermissionManager, ScopedPermissionManager,
+        PermissionDecision, PermissionKey, PermissionManager, PermissionScope,
+        ScopedPermissionManager,
     };
 
     use crate::file_permission::check_file_read_permission;
@@ -34,12 +35,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn path_within_cwd_needs_no_permission() -> Result<()> {
+    async fn path_within_cwd_uses_session_permission() -> Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
+
+        // Cwd read is no longer auto-allowed — add the expected session permission.
+        let cwd = tokio::fs::canonicalize(std::env::current_dir()?).await?;
+        let key = PermissionKey {
+            tool: "file_read".to_string(),
+            key: "path".to_string(),
+            value: cwd.to_string_lossy().to_string(),
+        };
+        pm.add_permission(key, PermissionScope::Session)?;
+
         let scoped = make_scoped(pm);
 
-        let cwd = std::env::current_dir()?;
-        let result = check_file_read_permission(&scoped, &cwd, true).await;
+        let cwd_path = std::env::current_dir()?;
+        let result = check_file_read_permission(&scoped, &cwd_path, true).await;
         assert!(result.is_ok());
         Ok(())
     }
@@ -47,6 +58,16 @@ mod tests {
     #[tokio::test]
     async fn path_traversal_neutralized_by_canonicalization() -> Result<()> {
         let pm = Arc::new(PermissionManager::new(temp_path()));
+
+        // Cwd read needs explicit permission now — add it.
+        let cwd_canonical = tokio::fs::canonicalize(std::env::current_dir()?).await?;
+        let key = PermissionKey {
+            tool: "file_read".to_string(),
+            key: "path".to_string(),
+            value: cwd_canonical.to_string_lossy().to_string(),
+        };
+        pm.add_permission(key, PermissionScope::Session)?;
+
         let scoped = make_scoped(pm);
 
         let cwd = std::env::current_dir()?;

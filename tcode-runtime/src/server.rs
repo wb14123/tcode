@@ -14,6 +14,7 @@ use llm_rs::conversation::{
     create_continue_subagent_tool, create_subagent_tool, format_subagent_result,
 };
 use llm_rs::llm::{ChatOptions, LLM};
+use llm_rs::permission::{KEY_PATH, PermissionKey, PermissionScope, SCOPE_FILE_READ};
 use llm_rs::tool::{ContainerConfig, Tool};
 use sha2::Digest;
 use subtle::ConstantTimeEq;
@@ -629,6 +630,29 @@ impl Server {
             self.container_config.clone(),
             system_prompt_builder,
         );
+
+        // Grant session-scoped file_read permission for cwd so it appears
+        // in the permission tree and can be revoked by the user.
+        if let Some(ref cwd) = cwd {
+            match tokio::fs::canonicalize(cwd).await {
+                Ok(canonical_cwd) => {
+                    let key = PermissionKey {
+                        tool: SCOPE_FILE_READ.to_string(),
+                        key: KEY_PATH.to_string(),
+                        value: canonical_cwd.to_string_lossy().to_string(),
+                    };
+                    if let Err(e) = manager
+                        .permission_manager()
+                        .add_permission(key, PermissionScope::Session)
+                    {
+                        tracing::warn!("Failed to add cwd read permission: {e}");
+                    }
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to canonicalize cwd for permission grant: {e}");
+                }
+            }
+        }
 
         let model_infos = if self.subagent_model_selection {
             self.llm.available_models()
