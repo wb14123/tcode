@@ -25,7 +25,7 @@
 //!
 //! // Execute with JSON string
 //! use tokio_util::sync::CancellationToken;
-//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, media_dir: None, supports_media: false };
+//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, media_dir: None, supports_media: false, llm: None, model: None };
 //! let stream = tool.execute(ctx, r#"{"path": "/tmp/test.txt"}"#.to_string());
 //! ```
 
@@ -43,6 +43,7 @@ use serde::de::DeserializeOwned;
 use tokio::time::{Instant, Sleep};
 use tokio_stream::{Stream, StreamExt};
 
+use crate::llm::LLM;
 use crate::media::ContentPart;
 
 pub use tokio_util::sync::CancellationToken;
@@ -71,6 +72,10 @@ pub struct ToolContext {
     pub media_dir: Option<PathBuf>,
     /// Whether the current model supports visual/media input (images, PDFs).
     pub supports_media: bool,
+    /// Optional LLM instance for tools to call back for review.
+    pub llm: Option<Arc<dyn LLM>>,
+    /// The model identifier used by this LLM.
+    pub model: Option<String>,
 }
 
 /// Type alias for the boxed stream returned by tool execution.
@@ -265,7 +270,7 @@ impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send
 ///
 /// // Execute with JSON string
 /// use tokio_util::sync::CancellationToken;
-/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, media_dir: None, supports_media: false };
+/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, media_dir: None, supports_media: false, llm: None, model: None };
 /// let stream = tool.execute(ctx, r#"{"query": "foo"}"#.to_string());
 /// ```
 pub struct Tool {

@@ -357,6 +357,8 @@ mod e2e {
             container_config: None,
             media_dir: None,
             supports_media: false,
+            llm: None,
+            model: None,
         }
     }
 
@@ -383,6 +385,7 @@ mod e2e {
         let stream = crate::bash::bash(
             ctx(),
             "echo hi".to_string(),
+            false,
             None,
             None,
             None,
@@ -406,6 +409,7 @@ mod e2e {
         let stream = crate::bash::bash(
             ctx(),
             "echo hi".to_string(),
+            false,
             None,
             None,
             Some("[unclosed".to_string()),
@@ -430,6 +434,7 @@ mod e2e {
         let stream = crate::bash::bash(
             ctx(),
             "echo hi".to_string(),
+            false,
             None,
             None,
             None,
@@ -449,6 +454,7 @@ mod e2e {
         let stream = crate::bash::bash(
             ctx(),
             "echo hi".to_string(),
+            false,
             None,
             None,
             None,
@@ -468,6 +474,7 @@ mod e2e {
         let stream = crate::bash::bash(
             ctx(),
             "echo hi".to_string(),
+            false,
             None,
             None,
             None,
@@ -490,6 +497,7 @@ mod e2e {
         let stream = crate::bash::bash(
             ctx(),
             "echo hi".to_string(),
+            false,
             None,
             None,
             None,
@@ -515,6 +523,7 @@ mod e2e {
         let stream = crate::bash::bash(
             ctx(),
             "echo hello".to_string(),
+            false,
             None,
             None,
             None,
@@ -551,6 +560,7 @@ mod e2e {
         let stream = crate::bash::bash(
             ctx(),
             "echo out; echo err 1>&2".to_string(),
+            false,
             None,
             None,
             None,

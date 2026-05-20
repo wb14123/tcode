@@ -20,6 +20,8 @@ async fn main() {
         container_config: None,
         media_dir: None,
         supports_media: false,
+        llm: None,
+        model: None,
     };
     let json_params = serde_json::json!({ "query": query }).to_string();
     let mut stream = tool.execute(ctx, json_params);

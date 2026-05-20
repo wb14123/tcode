@@ -48,6 +48,8 @@ mod tests {
             container_config: None,
             media_dir: None,
             supports_media: false,
+            llm: None,
+            model: None,
         })
     }
 
@@ -125,6 +127,8 @@ mod tests {
             container_config: None,
             media_dir: None,
             supports_media: false,
+            llm: None,
+            model: None,
         };
         let stream =
             crate::write::write(ctx, "relative/path.txt".to_string(), "content".to_string());
@@ -153,6 +157,8 @@ mod tests {
             container_config: None,
             media_dir: None,
             supports_media: false,
+            llm: None,
+            model: None,
         };
         let stream = crate::write::write(
             ctx,

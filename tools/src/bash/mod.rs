@@ -4,6 +4,8 @@ pub mod command_permission;
 #[cfg(test)]
 mod bash_tests;
 #[cfg(test)]
+mod builtin_violation_tests;
+#[cfg(test)]
 mod command_parser_tests;
 #[cfg(test)]
 mod command_permission_tests;
@@ -13,7 +15,7 @@ mod output_processing_tests;
 use std::process::Stdio;
 
 use anyhow::{Result, anyhow};
-use llm_rs::tool::ToolContext;
+use llm_rs::tool::{CancellationToken, ToolContext};
 use llm_rs_macros::tool;
 use regex::Regex;
 use tokio::io::{AsyncBufReadExt, BufReader};
@@ -95,6 +97,13 @@ pub fn bash(
     ctx: ToolContext,
     /// The command to execute
     command: String,
+    /// Bypass the automatic built-in-tool review. This should almost never be used.
+    /// ONLY set to true when you have exhaustively verified that no combination of
+    /// built-in tools (`read`, `glob`, `grep`) and bash parameters (`filter`, `head`,
+    /// `tail`) can replace the shell utilities in your command. If there is ANY doubt,
+    /// use the built-in tools instead. Misuse will be flagged.
+    #[serde(default)]
+    skip_auto_review: bool,
     /// Timeout in milliseconds (default: 120000ms / 2 minutes)
     #[serde(default)]
     timeout: Option<u64>,
@@ -139,6 +148,42 @@ pub fn bash(
                  the working directory instead."
             ));
             return;
+        }
+
+        // Auto-review: check if the command uses shell utilities that have
+        // built-in alternatives. The review LLM can only deny (return error)
+        // or pass through to the permission check. It cannot auto-approve.
+        if !skip_auto_review
+            && has_reviewable_keywords(&command)
+            && let Some(ref llm) = ctx.llm
+            && let Some(ref model) = ctx.model
+            && let Some(reason) = review_bash_command(llm.as_ref(), model, &command, &ctx.cancel_token).await
+        {
+            yield Err(anyhow!(
+                "The command was auto-denied after review: {}\n\
+                 \n\
+                 Built-in tools and bash parameters must be used instead of raw shell utilities:\n\
+                 - `read` tool → file contents and directory listings\n\
+                 - `glob` tool → recursive file pattern matching\n\
+                 - `grep` tool → content search in files\n\
+                 - `filter` / `head` / `tail` params → output filtering and trimming\n\
+                 \n\
+                 Do NOT retry with `skip_auto_review: true` as a shortcut. Only use it if you\n\
+                 have thoroughly verified that no combination of built-in tools and bash\n\
+                 parameters can accomplish what this shell command does. If you are unsure,\n\
+                 ask the user for guidance instead.",
+                reason
+            ));
+            return;
+        }
+
+        // If skip_auto_review is true AND the command has reviewable keywords,
+        // emit a warning log for observability.
+        if skip_auto_review && has_reviewable_keywords(&command) {
+            tracing::warn!(
+                command = %command,
+                "skip_auto_review used with reviewable keywords"
+            );
         }
 
         // Resolve working directory
@@ -365,6 +410,101 @@ pub fn bash(
             None => "null".to_string(),
         };
         yield Ok(format_metadata(&exit_str, &description, None));
+    }
+}
+
+/// Check if a command contains any shell utility keywords that have built-in alternatives.
+///
+/// Uses word-boundary regex `\b{word}\b` for each keyword. This may produce false
+/// positives on filenames like `grep-test` (since `\b` treats `-` as non-word boundary),
+/// which is acceptable — the review LLM will correctly respond CONTINUE for those.
+const REVIEWABLE_KEYWORDS: &[&str] = &[
+    "ls", "find", "grep", "rg", "cat", "head", "tail", "sed", "awk", "echo",
+];
+
+fn has_reviewable_keywords(command: &str) -> bool {
+    REVIEWABLE_KEYWORDS.iter().any(|kw| {
+        let pattern = format!(r"\b{}\b", regex::escape(kw));
+        Regex::new(&pattern).is_ok_and(|re| re.is_match(command))
+    })
+}
+
+/// Send a bash command to the review LLM to check if it should use built-in tools instead.
+///
+/// Returns `Some(reason)` if the LLM denies the command, or `None` if the command
+/// should continue to the permission check.
+async fn review_bash_command(
+    llm: &dyn llm_rs::llm::LLM,
+    model: &str,
+    command: &str,
+    cancel_token: &CancellationToken,
+) -> Option<String> {
+    use llm_rs::llm::{ChatOptions, LLMMessage};
+    use tokio_stream::StreamExt;
+
+    let prompt = format!(
+        "You are a bash command reviewer. Your job is to check whether a bash command\n\
+         unnecessarily uses shell utilities that have built-in tool alternatives.\n\
+         \n\
+         Built-in tools and bash parameters available:\n\
+         - `read` tool: lists directory contents (replaces `ls`), reads file contents (replaces `cat`)\n\
+         - `glob` tool: recursive file pattern matching (replaces `find`)\n\
+         - `grep` tool: content search in files (replaces `grep`, `rg`)\n\
+         - bash `filter` parameter: filters command output line-by-line (replaces `grep`, `rg`, `sed`, `awk` in pipelines)\n\
+         - bash `head` parameter: keeps first N lines (replaces `head` in pipelines)\n\
+         - bash `tail` parameter: keeps last N lines (replaces `tail` in pipelines)\n\
+         - Direct response: for `echo`, the LLM should respond directly instead of using bash\n\
+         \n\
+         Review this bash command:\n\
+         ```\n\
+         {}\n\
+         ```\n\
+         \n\
+         If the command can be accomplished using the built-in tools or bash parameters above,\n\
+         respond with exactly:\n\
+         DENY: <brief reason explaining which built-in tool/param to use instead>\n\
+         \n\
+         If the command genuinely requires bash (e.g., package managers, git, docker, compilers,\n\
+         or complex shell operations that can't be replaced by built-in tools), respond with exactly:\n\
+         CONTINUE\n\
+         \n\
+         Do not include any other text. Start your response with either DENY: or CONTINUE.",
+        command
+    );
+
+    let msgs = vec![LLMMessage::User(vec![llm_rs::media::ContentPart::Text(
+        prompt,
+    )])];
+    let options = ChatOptions::default();
+
+    let mut stream = llm.chat(model, &msgs, &options);
+    let mut response = String::new();
+    loop {
+        tokio::select! {
+            event = stream.next() => {
+                match event {
+                    Some(llm_rs::llm::LLMEvent::TextDelta(text)) => response.push_str(&text),
+                    Some(llm_rs::llm::LLMEvent::Error(e)) => {
+                        tracing::warn!("LLM review error: {}; allowing command to proceed", e);
+                        return None;
+                    }
+                    Some(_) => {}
+                    None => break,
+                }
+            }
+            () = cancel_token.cancelled() => {
+                return None;
+            }
+        }
+    }
+
+    // Check if response starts with "DENY:" (case-insensitive)
+    if response.trim_start().to_lowercase().starts_with("deny:") {
+        let reason = response.trim_start()["DENY:".len()..].trim().to_string();
+        Some(reason)
+    } else {
+        // Anything else (CONTINUE, malformed, empty, etc.) — allow the command
+        None
     }
 }
 

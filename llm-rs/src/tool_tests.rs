@@ -13,6 +13,8 @@ mod tests {
             container_config: None,
             media_dir: None,
             supports_media: false,
+            llm: None,
+            model: None,
         }
     }
 
@@ -320,6 +322,8 @@ mod tests {
             container_config: None,
             media_dir: None,
             supports_media: false,
+            llm: None,
+            model: None,
         };
 
         let json_args = r#"{"message": "test"}"#.to_string();
@@ -404,6 +408,8 @@ mod tests {
                 container_config: None,
                 media_dir: None,
                 supports_media: false,
+                llm: None,
+                model: None,
             }
         }
 

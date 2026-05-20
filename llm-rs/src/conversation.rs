@@ -486,6 +486,10 @@ struct ConversationEnv {
     permission_manager: Arc<crate::permission::PermissionManager>,
     /// Optional container configuration for Docker/Podman sandbox mode.
     container_config: Option<Arc<ContainerConfig>>,
+    /// LLM instance for tools that need to call back for review.
+    llm: Option<Arc<dyn LLM>>,
+    /// Model identifier for the LLM.
+    model: String,
 }
 
 /// Create the `subagent` tool with a dynamic description listing available models.
@@ -663,6 +667,7 @@ impl ConversationManager {
         supports_media: bool,
     ) -> Result<(String, Arc<ConversationClient>)> {
         let now = now_millis();
+        let llm_clone = Arc::from(llm.clone_box());
         let (tools_map, input_rx, client) = prepare_conversation(
             &mut *llm,
             tools,
@@ -708,6 +713,8 @@ impl ConversationManager {
                 supports_media,
                 permission_manager: Arc::clone(&self.permission_manager),
                 container_config: self.container_config.clone(),
+                llm: Some(llm_clone),
+                model: model.to_string(),
             },
         };
         self.spawn_conversation(conversation)
@@ -806,13 +813,14 @@ impl ConversationManager {
         let description = summary.description.clone();
         let created_at = summary.created_at;
 
+        let llm_clone = Arc::from(llm.clone_box());
         let (tools_map, input_rx, client) =
             prepare_conversation(&mut *llm, tools, state.msg_id_counter, summary);
         let conv_id = state.id.clone();
         let conversation = Conversation {
             id: state.id.clone(),
             llm,
-            model: state.model,
+            model: state.model.clone(),
             llm_msgs: state.llm_msgs,
             input_channel_rx: input_rx,
             total_input_tokens: state.total_input_tokens,
@@ -842,6 +850,8 @@ impl ConversationManager {
                 supports_media,
                 permission_manager: Arc::clone(&self.permission_manager),
                 container_config: self.container_config.clone(),
+                llm: Some(llm_clone),
+                model: state.model.clone(),
             },
         };
         self.spawn_conversation(conversation)
@@ -2092,6 +2102,8 @@ async fn execute_regular_tool(
         container_config: env.container_config.clone(),
         media_dir: env.media_dir.clone(),
         supports_media: env.supports_media,
+        llm: env.llm.clone(),
+        model: Some(env.model.clone()),
     };
     let end_status = if let Some(tool) = tool_arc {
         tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");

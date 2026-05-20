@@ -109,6 +109,8 @@ async fn main() {
                                 container_config: None,
                                 media_dir: None,
                                 supports_media: false,
+                                llm: None,
+                                model: None,
                             };
                             let mut result_stream = tool.execute(ctx, tool_call.arguments.clone());
                             let mut result = String::new();
