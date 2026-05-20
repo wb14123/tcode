@@ -384,6 +384,9 @@ impl Session {
     // Media support
     // ------------------------------------------------------------------
 
+    /// Maximum upload size for media files (20 MB).
+    const MAX_UPLOAD_SIZE: usize = 20 * 1024 * 1024;
+
     /// Path to the `media/` subdirectory for this session.
     pub fn media_dir(&self) -> PathBuf {
         self.session_dir.join("media")
@@ -408,13 +411,11 @@ impl Session {
     /// Returns `(relative_filename, media_type)` — e.g.
     /// `("a1b2c3d4.png", "image/png")`.
     pub fn save_image_data(&self, data: &[u8]) -> Result<(String, String)> {
-        const MAX_UPLOAD_SIZE: usize = 20 * 1024 * 1024; // 20 MB
-
-        if data.len() > MAX_UPLOAD_SIZE {
+        if data.len() > Self::MAX_UPLOAD_SIZE {
             bail!(
                 "Media data too large: {} bytes (max {} MB)",
                 data.len(),
-                MAX_UPLOAD_SIZE / (1024 * 1024)
+                Self::MAX_UPLOAD_SIZE / (1024 * 1024)
             );
         }
 
@@ -429,6 +430,42 @@ impl Session {
             .with_context(|| format!("Failed to set permissions on {:?}", dest))?;
 
         Ok((filename, media_type))
+    }
+
+    /// Save raw media bytes into `media/`, auto-detecting PDF vs image.
+    ///
+    /// If the data starts with `%PDF-` magic bytes, it is validated via
+    /// [`llm_rs::media::validate_pdf`] and saved directly with a `.pdf`
+    /// extension.  Otherwise processing is delegated to [`save_image_data`].
+    ///
+    /// Returns `(relative_filename, media_type)`.
+    pub fn save_media_data(&self, data: &[u8]) -> Result<(String, String)> {
+        const PDF_MAGIC: &[u8] = b"%PDF-";
+
+        if data.len() > Self::MAX_UPLOAD_SIZE {
+            bail!(
+                "Media data too large: {} bytes (max {} MB)",
+                data.len(),
+                Self::MAX_UPLOAD_SIZE / (1024 * 1024)
+            );
+        }
+
+        if data.len() >= PDF_MAGIC.len() && &data[..PDF_MAGIC.len()] == PDF_MAGIC {
+            // PDF — validate then save raw bytes
+            llm_rs::media::validate_pdf(data)?;
+
+            let filename = format!("{}.pdf", uuid::Uuid::new_v4());
+            let dest = self.media_dir().join(&filename);
+
+            std::fs::write(&dest, data)
+                .with_context(|| format!("Failed to write media file: {}", dest.display()))?;
+            std::fs::set_permissions(&dest, Permissions::from_mode(0o600))
+                .with_context(|| format!("Failed to set permissions on {:?}", dest))?;
+
+            Ok((filename, "application/pdf".to_string()))
+        } else {
+            self.save_image_data(data)
+        }
     }
 
     /// Get the absolute path for a relative media filename (e.g. `"uuid.png"`).

@@ -544,7 +544,7 @@ class TcodeSubagentView extends LitElement {
               .cancelling=${this.cancelling}
               .placeholder=${'Message subagent…'}
               .resetToken=${this.composerResetToken}
-              .hideImageAttach=${true}
+              .hideMediaAttach=${true}
               .secondaryAction=${this.isGenerating()
                 ? nothing
                 : html`

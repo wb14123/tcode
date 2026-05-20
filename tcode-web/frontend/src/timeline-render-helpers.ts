@@ -1,5 +1,6 @@
 import { html, nothing, type TemplateResult } from 'lit';
 
+import { renderMediaAttachment } from './messages.ts';
 import type { AppRoute, SubagentTimelineItem, ToolTimelineItem } from './types.ts';
 import { isSpecialWebToolName, specialToolArgsPresentation } from './tool-args.ts';
 
@@ -360,13 +361,26 @@ export function subagentRowTitle(item: Pick<SubagentTimelineItem, 'input' | 'res
   return subagentInputPreview(item.input) || titleCandidate(item.response) || titleCandidate(item.description) || 'Waiting for subagent…';
 }
 
-export function renderExpandedToolBody(item: Pick<ToolTimelineItem, 'toolName' | 'toolArgs' | 'output'>): TemplateResult {
+export function renderExpandedToolBody(
+  item: Pick<ToolTimelineItem, 'toolName' | 'toolArgs' | 'output'> & { media?: { relative_path: string; media_type: string }[] },
+  sessionId?: string,
+): TemplateResult {
   const argsPresentation = specialToolArgsPresentation(item.toolName, item.toolArgs);
   return html`
     ${item.toolArgs ? renderExpandedDetailSection('Arguments', argsPresentation?.expandedText ?? item.toolArgs) : nothing}
     ${item.output
       ? renderExpandedDetailSection('Output', item.output)
       : renderExpandedDetailSection('Output', 'Waiting for tool output…', true)}
+    ${item.media && item.media.length > 0 && sessionId
+      ? html`
+        <section class="expanded-detail-section">
+          <div class="expanded-detail-label">Media</div>
+          <div class="message-media-row">
+            ${item.media.map(m => renderMediaAttachment(m, sessionId))}
+          </div>
+        </section>
+      `
+      : nothing}
   `;
 }
 

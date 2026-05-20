@@ -82,27 +82,7 @@ pub async fn save_pdf_to_media(
     source_label: &str,
     media_dir: &Path,
 ) -> Result<(MediaData, String)> {
-    // Validate PDF magic bytes
-    if !data.starts_with(b"%PDF-") {
-        bail!("PDF data does not appear to be a valid PDF (wrong magic bytes).");
-    }
-
-    // Client-side validation: parse with lopdf
-    match lopdf::Document::load_mem(&data) {
-        Ok(doc) => {
-            if doc.is_encrypted() {
-                bail!("PDF data is password-protected. Please decrypt it first.");
-            }
-            const MAX_PDF_PAGES: usize = 100;
-            let page_count = doc.get_pages().len();
-            if page_count > MAX_PDF_PAGES {
-                bail!("PDF data has {} pages (max {}).", page_count, MAX_PDF_PAGES);
-            }
-        }
-        Err(e) => {
-            bail!("PDF data is corrupted or invalid: {}", e);
-        }
-    }
+    llm_rs::media::validate_pdf(&data)?;
 
     tokio::fs::create_dir_all(media_dir)
         .await

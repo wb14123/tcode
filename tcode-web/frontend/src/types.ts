@@ -147,7 +147,7 @@ export interface UserTimelineItem extends TimelineItemBase {
   msgId: number | null;
   createdAt: number | null;
   content: string;
-  images: string[]; // relative image filenames within images/ dir
+  media: { relative_path: string; media_type: string }[];
 }
 
 export interface ToolTimelineItem extends TimelineItemBase {
@@ -162,6 +162,7 @@ export interface ToolTimelineItem extends TimelineItemBase {
   inputTokens: number | null;
   outputTokens: number | null;
   permissionState: 'waiting' | 'approved' | null;
+  media: { relative_path: string; media_type: string }[];
 }
 
 export interface SubagentTimelineItem extends TimelineItemBase {

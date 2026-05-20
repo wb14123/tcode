@@ -39,8 +39,8 @@ pub(crate) fn protected_routes(state: Arc<AppState>) -> axum::Router<Arc<AppStat
     let reads = axum::Router::<Arc<AppState>>::new()
         .route("/api/sessions", axum::routing::get(api::get_sessions))
         .route(
-            "/api/sessions/{session_id}/images/{filename}",
-            axum::routing::get(api::serve_image),
+            "/api/sessions/{session_id}/media/{filename}",
+            axum::routing::get(api::serve_media),
         )
         .route(
             "/api/sessions/{session_id}/session-meta.json",
@@ -110,8 +110,8 @@ pub(crate) fn protected_routes(state: Arc<AppState>) -> axum::Router<Arc<AppStat
     let writes = axum::Router::<Arc<AppState>>::new()
         .route("/api/sessions", axum::routing::post(api::post_sessions))
         .route(
-            "/api/sessions/{session_id}/images",
-            axum::routing::post(api::upload_images),
+            "/api/sessions/{session_id}/media",
+            axum::routing::post(api::upload_media),
         )
         .route(
             "/api/sessions/{session_id}/messages",

@@ -107,7 +107,7 @@ pub(crate) struct MessageRequest {
     text: String,
     /// Pre-uploaded media filenames relative to the session's media directory.
     #[serde(default)]
-    image_filenames: Vec<String>,
+    media_filenames: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -117,7 +117,7 @@ pub(crate) struct UploadedFile {
 }
 
 #[derive(Serialize)]
-pub(crate) struct UploadImagesResponse {
+pub(crate) struct UploadMediaResponse {
     files: Vec<UploadedFile>,
 }
 
@@ -457,7 +457,7 @@ pub(crate) async fn post_session_message(
 ) -> ApiResult<StatusCode> {
     existing_session_dir(&session_id)?;
     // Validate media filenames to prevent path traversal
-    for f in &body.image_filenames {
+    for f in &body.media_filenames {
         validate_basename(f)?;
     }
     send_runtime_message(
@@ -466,10 +466,10 @@ pub(crate) async fn post_session_message(
         ClientMessage::SendMessage {
             conversation_id: None,
             content: body.text,
-            media_filenames: if body.image_filenames.is_empty() {
+            media_filenames: if body.media_filenames.is_empty() {
                 None
             } else {
-                Some(body.image_filenames)
+                Some(body.media_filenames)
             },
         },
     )
@@ -485,7 +485,7 @@ pub(crate) async fn post_subagent_message(
     let session_dir = existing_session_dir(&session_id)?;
     find_subagent_dir(&session_dir, &subagent_id)?;
     // Validate media filenames to prevent path traversal
-    for f in &body.image_filenames {
+    for f in &body.media_filenames {
         validate_basename(f)?;
     }
     send_runtime_message(
@@ -494,10 +494,10 @@ pub(crate) async fn post_subagent_message(
         ClientMessage::SendMessage {
             conversation_id: Some(subagent_id),
             content: body.text,
-            media_filenames: if body.image_filenames.is_empty() {
+            media_filenames: if body.media_filenames.is_empty() {
                 None
             } else {
-                Some(body.image_filenames)
+                Some(body.media_filenames)
             },
         },
     )
@@ -505,10 +505,10 @@ pub(crate) async fn post_subagent_message(
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub(crate) async fn upload_images(
+pub(crate) async fn upload_media(
     AxumPath(session_id): AxumPath<String>,
     mut multipart: Multipart,
-) -> ApiResult<Json<UploadImagesResponse>> {
+) -> ApiResult<Json<UploadMediaResponse>> {
     let session_dir = existing_session_dir(&session_id)?;
     let session = Session::with_dir(session_dir);
     session
@@ -518,7 +518,7 @@ pub(crate) async fn upload_images(
     let mut files = Vec::new();
 
     while let Ok(Some(field)) = multipart.next_field().await {
-        let content_type = field.content_type().unwrap_or("image/png").to_string();
+        let content_type = field.content_type().unwrap_or("").to_string();
         let data = field
             .bytes()
             .await
@@ -528,19 +528,21 @@ pub(crate) async fn upload_images(
             continue;
         }
 
-        // Validate content type is a supported image format
+        // Validate content type is a supported format (empty = unknown, let
+        // save_media_data figure it out from magic bytes).
         match content_type.as_str() {
-            "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp" => {}
+            "" | "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp"
+            | "application/pdf" => {}
             other => {
                 return Err(ApiError::bad_request(format!(
-                    "unsupported image type: {other}"
+                    "unsupported media type: {other}"
                 )));
             }
         }
 
         let (filename, media_type) = session
-            .save_image_data(&data)
-            .map_err(|e| ApiError::bad_request(format!("failed to process image: {e}")))?;
+            .save_media_data(&data)
+            .map_err(|e| ApiError::bad_request(format!("failed to process media: {e}")))?;
 
         files.push(UploadedFile {
             filename,
@@ -549,17 +551,17 @@ pub(crate) async fn upload_images(
     }
 
     if files.is_empty() {
-        return Err(ApiError::bad_request("no valid image files in upload"));
+        return Err(ApiError::bad_request("no valid media files in upload"));
     }
 
-    Ok(Json(UploadImagesResponse { files }))
+    Ok(Json(UploadMediaResponse { files }))
 }
 
 fn validate_basename(name: &str) -> ApiResult<()> {
     llm_rs::media::validate_media_filename(name).map_err(|e| ApiError::bad_request(e.to_string()))
 }
 
-pub(crate) async fn serve_image(
+pub(crate) async fn serve_media(
     AxumPath((session_id, filename)): AxumPath<(String, String)>,
 ) -> ApiResult<Response<Body>> {
     validate_basename(&filename)?;
@@ -570,9 +572,9 @@ pub(crate) async fn serve_image(
 
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            ApiError::not_found("image not found")
+            ApiError::not_found("media not found")
         } else {
-            ApiError::internal(format!("failed to read image: {e}"))
+            ApiError::internal(format!("failed to read media: {e}"))
         }
     })?;
 
@@ -582,7 +584,7 @@ pub(crate) async fn serve_image(
         .header(header::CONTENT_TYPE, media_type)
         .header(header::CACHE_CONTROL, "private, max-age=3600")
         .body(Body::from(bytes))
-        .map_err(|e| ApiError::internal(format!("failed to build image response: {e}")))
+        .map_err(|e| ApiError::internal(format!("failed to build media response: {e}")))
 }
 
 pub(crate) async fn post_session_finish(

@@ -3,7 +3,7 @@ import { processImageFile } from '../image-processing';
 
 export interface MessageSubmitDetail {
   text: string;
-  imageFiles?: File[];
+  mediaFiles?: File[];
 }
 
 class TcodeComposer extends LitElement {
@@ -16,9 +16,9 @@ class TcodeComposer extends LitElement {
     placeholder: { type: String },
     resetToken: { type: Number },
     secondaryAction: { attribute: false },
-    hideImageAttach: { type: Boolean },
-    processingImages: { type: Boolean },
-    imageFiles: { type: Array, attribute: false },
+    hideMediaAttach: { type: Boolean },
+    processingMedia: { type: Boolean },
+    mediaFiles: { type: Array, attribute: false },
   };
 
   disabled = false;
@@ -27,13 +27,13 @@ class TcodeComposer extends LitElement {
   generating = false;
   cancelling = false;
   placeholder = 'Message…';
-  hideImageAttach = false;
-  processingImages = false;
+  hideMediaAttach = false;
+  processingMedia = false;
   resetToken = 0;
   secondaryAction: unknown = nothing;
   private text = '';
   private maxTextareaHeight: number | null = null;
-  declare imageFiles: File[];
+  declare mediaFiles: File[];
 
   createRenderRoot(): this {
     return this;
@@ -46,7 +46,7 @@ class TcodeComposer extends LitElement {
   protected willUpdate(changed: Map<string, unknown>): void {
     if (changed.has('resetToken')) {
       this.text = '';
-      this.clearImageFiles();
+      this.clearMediaFiles();
     }
   }
 
@@ -58,24 +58,24 @@ class TcodeComposer extends LitElement {
 
   connectedCallback(): void {
     super.connectedCallback();
-    if (this.imageFiles === undefined) {
-      this.imageFiles = [];
+    if (this.mediaFiles === undefined) {
+      this.mediaFiles = [];
     }
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
-    this.clearImageFiles();
+    this.clearMediaFiles();
   }
 
-  private imageFileUrls = new Map<File, string>();
+  private mediaFileUrls = new Map<File, string>();
 
-  private clearImageFiles(): void {
-    for (const url of this.imageFileUrls.values()) {
+  private clearMediaFiles(): void {
+    for (const url of this.mediaFileUrls.values()) {
       URL.revokeObjectURL(url);
     }
-    this.imageFileUrls.clear();
-    this.imageFiles = [];
+    this.mediaFileUrls.clear();
+    this.mediaFiles = [];
   }
 
   /** Dispatch a notification event so parent views can show a toast. */
@@ -97,8 +97,8 @@ class TcodeComposer extends LitElement {
   }
 
   private get canSubmit(): boolean {
-    return (Boolean(this.trimmedText) || this.imageFiles.length > 0)
-      && !this.inputDisabled && !this.sending && !this.generating && !this.processingImages;
+    return (Boolean(this.trimmedText) || this.mediaFiles.length > 0)
+      && !this.inputDisabled && !this.sending && !this.generating && !this.processingMedia;
   }
 
   private syncTextareaHeight(textarea?: HTMLTextAreaElement | null): void {
@@ -145,7 +145,7 @@ class TcodeComposer extends LitElement {
   }
 
   private openFilePicker(): void {
-    const picker = this.querySelector<HTMLInputElement>('[data-role="image-picker"]');
+    const picker = this.querySelector<HTMLInputElement>('[data-role="media-picker"]');
     picker?.click();
   }
 
@@ -156,16 +156,16 @@ class TcodeComposer extends LitElement {
       return;
     }
 
-    const imageFiles: File[] = [];
+    const mediaFiles: File[] = [];
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      if (file.type.startsWith('image/') || file.type === '') {
-        imageFiles.push(file);
+      if (file.type.startsWith('image/') || file.type === 'application/pdf' || file.type === '') {
+        mediaFiles.push(file);
       }
     }
 
-    if (imageFiles.length > 0) {
-      void this.addImageFiles(imageFiles);
+    if (mediaFiles.length > 0) {
+      void this.addMediaFiles(mediaFiles);
     }
 
     // Reset so the same file can be picked again
@@ -186,15 +186,15 @@ class TcodeComposer extends LitElement {
       return;
     }
 
-    const imageFiles: File[] = [];
+    const mediaFiles: File[] = [];
     for (let i = 0; i < files.length; i++) {
-      if (files[i].type.startsWith('image/') || files[i].type === '') {
-        imageFiles.push(files[i]);
+      if (files[i].type.startsWith('image/') || files[i].type === 'application/pdf' || files[i].type === '') {
+        mediaFiles.push(files[i]);
       }
     }
 
-    if (imageFiles.length > 0) {
-      void this.addImageFiles(imageFiles);
+    if (mediaFiles.length > 0) {
+      void this.addMediaFiles(mediaFiles);
     }
   };
 
@@ -204,56 +204,61 @@ class TcodeComposer extends LitElement {
       return;
     }
 
-    const imageFiles: File[] = [];
+    const mediaFiles: File[] = [];
     for (let i = 0; i < items.length; i++) {
-      if (items[i].type.startsWith('image/') || items[i].type === '') {
+      if (items[i].type.startsWith('image/') || items[i].type === 'application/pdf' || items[i].type === '') {
         const file = items[i].getAsFile();
         if (file) {
-          imageFiles.push(file);
+          mediaFiles.push(file);
         }
       }
     }
 
-    if (imageFiles.length > 0) {
+    if (mediaFiles.length > 0) {
       event.preventDefault();
-      void this.addImageFiles(imageFiles);
+      void this.addMediaFiles(mediaFiles);
     }
   };
 
-  private async addImageFiles(files: File[]): Promise<void> {
-    if (this.processingImages) {
-      this.notify('Still processing previous images, please wait.', 'info');
+  private async addMediaFiles(files: File[]): Promise<void> {
+    if (this.processingMedia) {
+      this.notify('Still processing previous files, please wait.', 'info');
       return;
     }
-    const MAX_FILE_SIZE = 10 * 1024 * 1024; // 10 MB
+    const MAX_FILE_SIZE = 20 * 1024 * 1024; // 20 MB
     const oversized = files.filter(f => f.size > MAX_FILE_SIZE);
     if (oversized.length > 0) {
       this.notify(
-        `Some files exceed 10 MB limit and were skipped: ${oversized.map(f => f.name).join(', ')}`,
+        `Some files exceed 20 MB limit and were skipped: ${oversized.map(f => f.name).join(', ')}`,
         'info',
       );
       files = files.filter(f => f.size <= MAX_FILE_SIZE);
     }
 
-    // Filter to image-like files (type starts with image/ or empty type for HEIC etc.)
-    files = files.filter(f => f.type.startsWith('image/') || f.type === '');
+    // Filter to supported types (image/*, application/pdf, or empty type)
+    files = files.filter(f => f.type.startsWith('image/') || f.type === 'application/pdf' || f.type === '');
     if (files.length === 0) return;
 
-    this.processingImages = true;
+    this.processingMedia = true;
     this.requestUpdate();
 
     const processed: File[] = [];
     const errors: string[] = [];
     for (const file of files) {
       try {
-        const result = await processImageFile(file);
-        processed.push(result);
+        if (file.type === 'application/pdf') {
+          // Skip image processing for PDFs — keep the file as-is
+          processed.push(file);
+        } else {
+          const result = await processImageFile(file);
+          processed.push(result);
+        }
       } catch (err) {
         errors.push(err instanceof Error ? err.message : `Failed to process ${file.name}`);
       }
     }
 
-    this.processingImages = false;
+    this.processingMedia = false;
 
     if (errors.length > 0) {
       this.notify(errors.join(' '), 'error');
@@ -265,20 +270,20 @@ class TcodeComposer extends LitElement {
     }
 
     for (const file of processed) {
-      this.imageFileUrls.set(file, URL.createObjectURL(file));
+      this.mediaFileUrls.set(file, URL.createObjectURL(file));
     }
-    this.imageFiles = [...this.imageFiles, ...processed];
+    this.mediaFiles = [...this.mediaFiles, ...processed];
     this.requestUpdate();
   }
 
-  private removeImage(index: number): void {
-    const file = this.imageFiles[index];
-    const url = this.imageFileUrls.get(file);
+  private removeMedia(index: number): void {
+    const file = this.mediaFiles[index];
+    const url = this.mediaFileUrls.get(file);
     if (url) {
       URL.revokeObjectURL(url);
-      this.imageFileUrls.delete(file);
+      this.mediaFileUrls.delete(file);
     }
-    this.imageFiles = this.imageFiles.filter((_, i) => i !== index);
+    this.mediaFiles = this.mediaFiles.filter((_, i) => i !== index);
     this.requestUpdate();
   }
 
@@ -289,7 +294,7 @@ class TcodeComposer extends LitElement {
 
     this.dispatchEvent(
       new CustomEvent<MessageSubmitDetail>('message-submit', {
-        detail: { text: this.trimmedText, imageFiles: this.imageFiles.length > 0 ? [...this.imageFiles] : undefined },
+        detail: { text: this.trimmedText, mediaFiles: this.mediaFiles.length > 0 ? [...this.mediaFiles] : undefined },
         bubbles: true,
         composed: true,
       }),
@@ -337,19 +342,31 @@ class TcodeComposer extends LitElement {
   render(): TemplateResult {
     return html`
       <form class="panel chat-composer" @submit=${this.onSubmit}>
-        ${this.processingImages ? html`
-          <div class="image-preview-row">
-            <span class="image-processing-text">Processing…</span>
+        ${this.processingMedia ? html`
+          <div class="media-preview-row">
+            <span class="media-processing-text">Processing…</span>
           </div>
         ` : nothing}
-        ${this.imageFiles.length > 0 ? html`
-          <div class="image-preview-row">
-            ${this.imageFiles.map((file, index) => html`
-              <div class="image-preview-item">
-                <img src=${this.imageFileUrls.get(file)} alt="Preview" class="image-preview-thumb">
-                <button class="image-preview-remove" type="button" @click=${() => this.removeImage(index)} aria-label="Remove image">×</button>
-              </div>
-            `)}
+        ${this.mediaFiles.length > 0 ? html`
+          <div class="media-preview-row">
+            ${this.mediaFiles.map((file, index) => {
+              const isPdf = file.type === 'application/pdf';
+              if (isPdf) {
+                return html`
+                  <div class="pdf-preview-item">
+                    <span class="pdf-preview-icon">📄</span>
+                    <span class="pdf-preview-name">${file.name}</span>
+                    <button class="media-preview-remove" type="button" @click=${() => this.removeMedia(index)} aria-label="Remove file">×</button>
+                  </div>
+                `;
+              }
+              return html`
+                <div class="media-preview-item">
+                  <img src=${this.mediaFileUrls.get(file)} alt="Preview" class="media-preview-thumb">
+                  <button class="media-preview-remove" type="button" @click=${() => this.removeMedia(index)} aria-label="Remove image">×</button>
+                </div>
+              `;
+            })}
           </div>
         ` : nothing}
         <div class="chat-composer-row">
@@ -367,9 +384,9 @@ class TcodeComposer extends LitElement {
           ></textarea>
           <div class="chat-composer-actions">
             ${this.secondaryAction}
-            ${this.hideImageAttach ? nothing : html`
+            ${this.hideMediaAttach ? nothing : html`
               <button class="button chat-composer-action" type="button" @click=${this.openFilePicker}
-                ?disabled=${this.inputDisabled} aria-label="Attach images" title="Attach images">
+                ?disabled=${this.inputDisabled} aria-label="Attach files" title="Attach files">
                 ${this.renderAttachIcon()}
               </button>
             `}
@@ -399,8 +416,8 @@ class TcodeComposer extends LitElement {
                 `}
           </div>
         </div>
-        ${this.hideImageAttach ? nothing : html`
-          <input type="file" accept="image/*" multiple hidden data-role="image-picker" @change=${this.onFilePicked}>
+        ${this.hideMediaAttach ? nothing : html`
+          <input type="file" accept="image/*,application/pdf,.pdf" multiple hidden data-role="media-picker" @change=${this.onFilePicked}>
         `}
       </form>
     `;

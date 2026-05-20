@@ -4,7 +4,7 @@ import { ApiError, api, openEventStream, sessionLeaseManager, type LeaseSnapshot
 import { navigate } from '../router';
 import { StreamEventBatcher } from '../stream-event-batcher';
 import { ConversationTimelineBuilder, extractSystemNotification, parseStreamLine, rawVariant } from '../messages';
-import { SUPPORTED_IMAGE_TYPES } from '../image-types';
+import { SUPPORTED_MEDIA_TYPES } from '../media-types';
 import { TimelineCacheManager } from '../timeline-cache-manager';
 import type { MessageSubmitDetail } from './composer';
 
@@ -55,7 +55,7 @@ class TcodeSessionView extends LitElement {
   private streamEventsReceived = 0;
   // Map<File, string> relies on JS Map reference equality for File keys.
   // The composer must preserve the same File objects across submits for
-  // retry deduplication to work (currently it does via [...this.imageFiles]).
+  // retry deduplication to work (currently it does via [...this.mediaFiles]).
   private pendingUploadMap: Map<File, string> | null = null;
   private draftSessionId: string | null = null;
   private uploadProgress: string | null = null;
@@ -430,8 +430,8 @@ class TcodeSessionView extends LitElement {
   }
 
   private async submitMessage(event: CustomEvent<MessageSubmitDetail>): Promise<void> {
-    const { text, imageFiles } = event.detail;
-    if (!text && (!imageFiles || imageFiles.length === 0)) {
+    const { text, mediaFiles } = event.detail;
+    if (!text && (!mediaFiles || mediaFiles.length === 0)) {
       return;
     }
     if (this.sending || this.isGenerating() || this.mutationDisabled()) {
@@ -449,12 +449,12 @@ class TcodeSessionView extends LitElement {
       if (this.draftMode && !this.sessionId) {
         isDraft = true;
         if (!this.draftSessionId) {
-          // Validate image types before creating session
-          if (imageFiles && imageFiles.length > 0) {
-            const unsupported = imageFiles.filter((f) => !SUPPORTED_IMAGE_TYPES.includes(f.type));
+          // Validate file types before creating session
+          if (mediaFiles && mediaFiles.length > 0) {
+            const unsupported = mediaFiles.filter((f) => !SUPPORTED_MEDIA_TYPES.includes(f.type));
             if (unsupported.length > 0) {
               this.showToast(
-                `Unsupported image type(s): ${unsupported.map((f) => `${f.name} (${f.type})`).join(', ')}. Supported formats: PNG, JPEG/JPG, GIF, WebP.`,
+                `Unsupported file type(s): ${unsupported.map((f) => `${f.name} (${f.type})`).join(', ')}. Supported formats: PNG, JPEG/JPG, GIF, WebP, PDF.`,
                 'error',
               );
               return;
@@ -474,23 +474,23 @@ class TcodeSessionView extends LitElement {
 
       let filenames: string[] = [];
 
-      if (imageFiles && imageFiles.length > 0) {
+      if (mediaFiles && mediaFiles.length > 0) {
         // Initialize pendingUploadMap on first submit
         if (!this.pendingUploadMap) {
           this.pendingUploadMap = new Map();
         }
 
-        // Cleanup stale entries for files no longer in imageFiles
-        // (user may have removed an image between retries)
+        // Cleanup stale entries for files no longer in mediaFiles
+        // (user may have removed a file between retries)
         for (const file of this.pendingUploadMap.keys()) {
-          if (!imageFiles.includes(file)) {
+          if (!mediaFiles.includes(file)) {
             this.pendingUploadMap.delete(file);
           }
         }
 
         // Separate into already-uploaded and need-upload
         const needUpload: File[] = [];
-        for (const file of imageFiles) {
+        for (const file of mediaFiles) {
           if (!this.pendingUploadMap.has(file)) {
             needUpload.push(file);
           }
@@ -498,16 +498,16 @@ class TcodeSessionView extends LitElement {
 
         // Upload each file sequentially, one at a time
         let failures = 0;
-        const alreadyCount = imageFiles.length - needUpload.length;
-        const totalCount = imageFiles.length;
+        const alreadyCount = mediaFiles.length - needUpload.length;
+        const totalCount = mediaFiles.length;
 
         for (let i = 0; i < needUpload.length; i++) {
           const file = needUpload[i];
-          this.uploadProgress = `Uploading images… [${alreadyCount + i + 1}/${totalCount}]`;
+          this.uploadProgress = `Uploading files… [${alreadyCount + i + 1}/${totalCount}]`;
           this.requestUpdate();
 
           try {
-            const result = await api.uploadSessionImages(effectiveSessionId, [file]);
+            const result = await api.uploadSessionMedia(effectiveSessionId, [file]);
             const filename = result.files[0]?.filename;
             if (filename) {
               this.pendingUploadMap.set(file, filename);
@@ -520,7 +520,7 @@ class TcodeSessionView extends LitElement {
         this.uploadProgress = null;
 
         // Collect all filenames from the map
-        for (const file of imageFiles) {
+        for (const file of mediaFiles) {
           const filename = this.pendingUploadMap.get(file);
           if (filename) {
             filenames.push(filename);
@@ -530,17 +530,17 @@ class TcodeSessionView extends LitElement {
         if (failures > 0) {
           // Partial failure: keep state for retry, don't send message
           this.showToast(
-            `${failures} of ${totalCount} image${totalCount !== 1 ? 's' : ''} failed to upload. Please retry.`,
+            `${failures} of ${totalCount} file${totalCount !== 1 ? 's' : ''} failed to upload. Please retry.`,
             'error',
           );
           return;
         }
       }
 
-      // All images uploaded successfully (or no images) — send the message
+      // All files uploaded successfully (or no files) — send the message
       if (isDraft) {
         if (filenames.length > 0) {
-          await api.sendSessionMessageWithImages(effectiveSessionId, text, filenames);
+          await api.sendSessionMessageWithMedia(effectiveSessionId, text, filenames);
         } else {
           await api.sendSessionMessage(effectiveSessionId, text);
         }
@@ -553,7 +553,7 @@ class TcodeSessionView extends LitElement {
       } else {
         const eventsBeforeSend = this.streamEventsReceived;
         if (filenames.length > 0) {
-          await api.sendSessionMessageWithImages(effectiveSessionId, text || '', filenames);
+          await api.sendSessionMessageWithMedia(effectiveSessionId, text || '', filenames);
         } else {
           await api.sendSessionMessage(effectiveSessionId, text);
         }

@@ -29,7 +29,7 @@ import {
   toolDetailRoute,
   toolRowTitle,
 } from '../timeline-render-helpers';
-import { BROKEN_IMAGE_SVG, openLightbox, renderAssistantImageBlock } from '../messages';
+import { renderAssistantImageBlock, renderMediaAttachment } from '../messages';
 import { formatTimestamp, prettyJson } from '../formatting';
 
 type TimelineRowTag = 'tcode-user-message' | 'tcode-assistant-message' | 'tcode-tool-row' | 'tcode-subagent-row' | 'tcode-raw-event-row';
@@ -405,16 +405,9 @@ class TcodeUserMessage extends TimelineRowElement {
       <article class="chat-bubble chat-bubble-user timeline-user">
         <div class="message-meta">You · ${formatTimestamp(item.createdAt)}</div>
         ${item.content ? html`<pre class="timeline-pre message-bubble-content">${item.content}</pre>` : nothing}
-        ${item.images && item.images.length > 0 ? html`
-          <div class="message-images-row">
-            ${item.images.map(filename => html`
-              <img src="/api/sessions/${this.sessionId}/images/${filename}"
-                   loading="lazy"
-                   class="message-inline-image"
-                   @click=${(e: Event) => openLightbox((e.target as HTMLImageElement).src)}
-                   @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
-                   alt="User attached image">
-            `)}
+        ${item.media && item.media.length > 0 ? html`
+          <div class="message-media-row">
+            ${item.media.map(m => renderMediaAttachment(m, this.sessionId))}
           </div>
         ` : nothing}
       </article>
@@ -581,7 +574,7 @@ class TcodeToolRow extends TimelineRowElement {
         'Open detail',
         hrefForRoute(toolDetailRoute(this.sessionId, item.toolCallId, this.currentSubagentId || undefined)),
       ),
-      body: renderExpandedToolBody(item),
+      body: renderExpandedToolBody(item, this.sessionId),
       footer: renderToolFooterContent(item),
     });
   }

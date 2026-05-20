@@ -1284,34 +1284,34 @@ tcode-timeline {
   fill: currentColor;
 }
 
-/* Image support — composer preview */
-.image-preview-row {
+/* Media support — composer preview */
+.media-preview-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
   padding: 4px 12px;
 }
 
-.image-processing-text {
+.media-processing-text {
   color: var(--text-muted);
   font-size: 0.85rem;
   padding: 4px 0;
 }
 
-.image-preview-item {
+.media-preview-item {
   position: relative;
   width: 64px;
   height: 64px;
 }
 
-.image-preview-thumb {
+.media-preview-thumb {
   width: 64px;
   height: 64px;
   object-fit: cover;
   border-radius: 6px;
 }
 
-.image-preview-remove {
+.media-preview-remove {
   position: absolute;
   top: -6px;
   right: -6px;
@@ -1329,8 +1329,34 @@ tcode-timeline {
   justify-content: center;
 }
 
-/* Image support — timeline messages */
-.message-images-row {
+/* PDF preview in composer */
+.pdf-preview-item {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--panel-soft);
+  border-radius: 6px;
+  max-width: 200px;
+  overflow: hidden;
+}
+
+.pdf-preview-icon {
+  font-size: 1.2rem;
+  flex-shrink: 0;
+}
+
+.pdf-preview-name {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Media support — timeline messages */
+.message-media-row {
   display: flex;
   flex-wrap: wrap;
   gap: 8px;
@@ -1349,6 +1375,26 @@ tcode-timeline {
   max-width: 100px;
   max-height: 100px;
   opacity: 0.5;
+}
+
+/* Media links (PDFs etc.) in timeline messages */
+.message-media-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 6px 12px;
+  border-radius: var(--radius-md);
+  font-size: 0.85rem;
+  text-decoration: none;
+  color: var(--text);
+  background: var(--panel-soft);
+  border: 1px solid var(--border);
+  transition: background 0.15s;
+}
+
+.message-media-link:hover {
+  background: var(--panel);
+  color: var(--text);
 }
 
 /* Lightbox */

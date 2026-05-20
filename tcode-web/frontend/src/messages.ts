@@ -141,6 +141,7 @@ function createTool(toolCallId: string): ToolTimelineItem {
     inputTokens: null,
     outputTokens: null,
     permissionState: null,
+    media: [],
   };
 }
 
@@ -310,7 +311,14 @@ export class ConversationTimelineBuilder {
       switch (variant) {
         case 'UserMessage': {
           const msgId = asNumber(payload.msg_id);
-          const images = Array.isArray(payload.images) ? (payload.images as string[]) : [];
+          const mediaFilenames: string[] = 
+            (Array.isArray(payload.media_filenames) ? payload.media_filenames : 
+             Array.isArray(payload.images) ? payload.images : 
+             []) as string[];
+          const media = mediaFilenames.map((filename: string) => ({
+            relative_path: filename,
+            media_type: mediaTypeFromFilename(filename),
+          }));
           const item: UserTimelineItem = {
             id: msgId !== null ? `user:${msgId}` : this.store.nextSequenceId('user'),
             revision: 0,
@@ -318,7 +326,7 @@ export class ConversationTimelineBuilder {
             msgId,
             createdAt: asNumber(payload.created_at),
             content: asString(payload.content) ?? '',
-            images,
+            media,
           };
           this.addItem(item);
           break;
@@ -431,7 +439,15 @@ export class ConversationTimelineBuilder {
           const id = this.getOrCreateToolId(toolCallId);
           this.updateTool(id, (item) => {
             item.toolName = asString(payload.tool_name) ?? item.toolName;
-            item.output += asString(payload.content) ?? '';
+            const content = payload.content;
+            if (typeof content === 'string') {
+              item.output += content;
+            } else if (typeof content === 'object' && content !== null && !Array.isArray(content)) {
+              const mediaObj = content as { relative_path?: string; media_type?: string };
+              if (mediaObj.relative_path && mediaObj.media_type) {
+                item.media = [...item.media, { relative_path: mediaObj.relative_path, media_type: mediaObj.media_type }];
+              }
+            }
           });
           break;
         }
@@ -1099,7 +1115,7 @@ export function renderAssistantImageBlock(
   if (!block.image) {
     return nothing;
   }
-  const imgSrc = `/api/sessions/${sessionId}/images/${block.image.relative_path}`;
+  const imgSrc = `/api/sessions/${sessionId}/media/${block.image.relative_path}`;
   return html`
     <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
          @click=${() => openLightbox(imgSrc)}
@@ -1108,21 +1124,49 @@ export function renderAssistantImageBlock(
   `;
 }
 
+export function renderMediaAttachment(
+  media: { relative_path: string; media_type: string },
+  sessionId: string,
+): TemplateResult | typeof nothing {
+  if (media.media_type.startsWith('image/')) {
+    return html`
+      <img src="/api/sessions/${sessionId}/media/${media.relative_path}"
+           loading="lazy" class="message-inline-image"
+           @click=${(e: Event) => openLightbox((e.target as HTMLImageElement).src)}
+           @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
+           alt="Media">
+    `;
+  }
+  if (media.media_type === 'application/pdf') {
+    return html`
+      <a href="/api/sessions/${sessionId}/media/${media.relative_path}"
+         target="_blank" rel="noopener noreferrer"
+         class="message-media-link">
+         📄 View PDF
+      </a>
+    `;
+  }
+  return nothing;
+}
+
+function mediaTypeFromFilename(filename: string): string {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.pdf')) return 'application/pdf';
+  if (lower.endsWith('.png')) return 'image/png';
+  if (lower.endsWith('.jpg') || lower.endsWith('.jpeg')) return 'image/jpeg';
+  if (lower.endsWith('.gif')) return 'image/gif';
+  if (lower.endsWith('.webp')) return 'image/webp';
+  return 'application/octet-stream';
+}
+
 function renderUser(item: UserTimelineItem, context: TimelineRenderContext): TemplateResult {
   return html`
     <article class="chat-bubble chat-bubble-user timeline-user">
       <div class="message-meta">You · ${formatTimestamp(item.createdAt)}</div>
       ${item.content ? html`<pre class="timeline-pre message-bubble-content">${item.content}</pre>` : nothing}
-      ${item.images && item.images.length > 0 ? html`
-        <div class="message-images-row">
-          ${item.images.map(filename => html`
-            <img src="/api/sessions/${context.sessionId}/images/${filename}"
-                 loading="lazy"
-                 class="message-inline-image"
-                 @click=${(e: Event) => openLightbox((e.target as HTMLImageElement).src)}
-                 @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
-                 alt="User attached image">
-          `)}
+      ${item.media && item.media.length > 0 ? html`
+        <div class="message-media-row">
+          ${item.media.map(m => renderMediaAttachment(m, context.sessionId))}
         </div>
       ` : nothing}
     </article>
@@ -1204,7 +1248,7 @@ function renderTool(item: ToolTimelineItem, context: TimelineRenderContext): Tem
         }
       : undefined,
     action: renderExpandedRowAction('Open detail', hrefForRoute(toolDetailRoute(context.sessionId, item.toolCallId, context.currentSubagentId))),
-    body: renderExpandedToolBody(item),
+    body: renderExpandedToolBody(item, context.sessionId),
     footer: renderToolFooterContent(item),
   });
 }

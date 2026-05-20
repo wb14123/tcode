@@ -236,6 +236,37 @@ pub fn media_type_from_extension(filename: &str) -> &'static str {
     }
 }
 
+/// Validate PDF data: checks magic bytes, parses with lopdf, rejects
+/// encrypted PDFs, and enforces a maximum page count (100 pages).
+///
+/// This function is shared between the tool layer (`save_pdf_to_media`)
+/// and the user-upload path (`save_media_data`) so that the same
+/// validation runs regardless of how a PDF enters the system.
+pub fn validate_pdf(data: &[u8]) -> Result<()> {
+    const MAX_PDF_PAGES: usize = 100;
+
+    if !data.starts_with(b"%PDF-") {
+        anyhow::bail!("PDF data does not appear to be a valid PDF (wrong magic bytes).");
+    }
+
+    match lopdf::Document::load_mem(data) {
+        Ok(doc) => {
+            if doc.is_encrypted() {
+                anyhow::bail!("PDF data is password-protected. Please decrypt it first.");
+            }
+            let page_count = doc.get_pages().len();
+            if page_count > MAX_PDF_PAGES {
+                anyhow::bail!("PDF data has {} pages (max {}).", page_count, MAX_PDF_PAGES);
+            }
+        }
+        Err(e) => {
+            anyhow::bail!("PDF data is corrupted or invalid: {}", e);
+        }
+    }
+
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------
 // Image processing pipeline
 // ---------------------------------------------------------------------------

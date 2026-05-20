@@ -482,7 +482,7 @@ export const api = {
     }).then(() => undefined);
   },
 
-  async uploadSessionImages(sessionId: string, files: File[]): Promise<{ files: { filename: string; media_type: string }[] }> {
+  async uploadSessionMedia(sessionId: string, files: File[]): Promise<{ files: { filename: string; media_type: string }[] }> {
     const formData = new FormData();
     for (const file of files) {
       formData.append('file', file);
@@ -490,7 +490,7 @@ export const api = {
     const controller = new AbortController();
     const timeoutId = setTimeout(() => controller.abort(), 30_000);
     try {
-      const response = await fetch(makeUrl(`api/sessions/${encodeURIComponent(sessionId)}/images`), {
+      const response = await fetch(makeUrl(`api/sessions/${encodeURIComponent(sessionId)}/media`), {
         method: 'POST',
         credentials: 'include',
         body: formData,
@@ -508,10 +508,10 @@ export const api = {
     }
   },
 
-  async sendSessionMessageWithImages(sessionId: string, text: string, imageFilenames: string[]): Promise<void> {
+  async sendSessionMessageWithMedia(sessionId: string, text: string, mediaFilenames: string[]): Promise<void> {
     return request(`api/sessions/${encodeURIComponent(sessionId)}/messages`, {
       method: 'POST',
-      body: jsonBody({ text, image_filenames: imageFilenames }),
+      body: jsonBody({ text, media_filenames: mediaFilenames }),
     }).then(() => undefined);
   },
 

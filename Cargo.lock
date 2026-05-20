@@ -2164,6 +2164,7 @@ dependencies = [
  "chrono",
  "image",
  "llm-rs-macros",
+ "lopdf",
  "parking_lot",
  "pin-project-lite",
  "regex",

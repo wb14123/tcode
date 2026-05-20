@@ -20,6 +20,7 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "jpeg", "gif", "webp", "bmp", "tiff"] }
 parking_lot = "0.12"
 regex = "1"
+lopdf = "0.40"
 tracing = "0.1"
 uuid = { version = "1.23.0", features = ["v4"] }
 
