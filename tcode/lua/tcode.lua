@@ -554,6 +554,9 @@ local function collapse_tool_call_args(buf, tool_call_id)
   local state = tool_call_gen_state[tool_call_id]
   if not state then return end
 
+  -- In the tool detail view, always show full input without collapsing.
+  if M.tc_full_input then return end
+
   local full_content = table.concat(state.content_parts)
   local content_lines = vim.split(full_content, '\n', { plain = true })
   local line_count = #content_lines
@@ -1827,6 +1830,7 @@ end
 function M.setup_tool_call_display(tool_call_file, status_file)
   M.tc_file = tool_call_file
   M.tc_status_file = status_file
+  M.tc_full_input = true  -- Never collapse tool input in the detail view
 
   vim.g.tcode_tc_status = 'Waiting...'
 
