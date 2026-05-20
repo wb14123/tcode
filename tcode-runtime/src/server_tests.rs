@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 
 use llm_rs::conversation::{Message, MessageEndStatus};
 use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo};
+use llm_rs::permission::{KEY_HOSTNAME, PermissionKey, SCOPE_WEB_FETCH, WILDCARD_VALUE};
 use llm_rs::tool::Tool;
 use tokio::net::UnixListener;
 use tokio_stream::Stream;
@@ -398,6 +399,22 @@ async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow:
         ]
     );
     assert!(!dir.join("lsp-hint.txt").exists());
+
+    // Verify the web_fetch wildcard permission was auto-granted
+    let response =
+        send_socket_message(socket_path.clone(), &ClientMessage::GetPermissionState).await?;
+    let Some(ServerMessage::PermissionState(state)) = response else {
+        anyhow::bail!("expected permission state response");
+    };
+    let web_fetch_wildcard = PermissionKey {
+        tool: SCOPE_WEB_FETCH.to_string(),
+        key: KEY_HOSTNAME.to_string(),
+        value: WILDCARD_VALUE.to_string(),
+    };
+    assert!(
+        state.session.contains(&web_fetch_wildcard),
+        "web-only session must auto-grant web_fetch > hostname > *"
+    );
 
     let response = send_socket_message(
         socket_path,

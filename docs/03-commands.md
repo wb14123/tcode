@@ -6,7 +6,7 @@
 
 Starts a new normal session. Launches the server and opens display, edit, tree, and permission panes in the current tmux session. A unique 8-character session ID is generated automatically. Session files persist in `~/.tcode/sessions/{id}/`.
 
-Use `--web-only` to create a new web-only session. Web-only sessions keep the same UI, but only web research, current time, and delegation tools are available; local filesystem tools, shell commands, LSP, skills, and project instructions are not loaded. The mode is stored with the session and is shown by `tcode sessions` and the interactive session picker.
+Use `--web-only` to create a new web-only session. Web-only sessions keep the same UI, but only web research, current time, and delegation tools are available; local filesystem tools, shell commands, LSP, skills, and project instructions are not loaded. `web_fetch` hostname permissions are auto-granted (a session-scoped wildcard visible in the permission tree and revocable). The mode is stored with the session and is shown by `tcode sessions` and the interactive session picker.
 
 If no config file exists at `~/.tcode/config.toml`, `tcode` automatically launches the `tcode config` wizard in interactive terminals, writes the file, and exits — run `tcode` again afterward to start a session. In non-interactive contexts (CI, piped stdin), tcode instead exits with a "config not found" error that tells you to run `tcode config`.
 

@@ -161,7 +161,7 @@ For web research without local project access, start:
 tcode --web-only
 ```
 
-A web-only session uses the same tmux/neovim UI, but only current time, web search/fetch, and delegation tools are available. It does not expose local file tools, shell commands, LSP, skills, or project instructions. Browser setup still matters because `web_search` and `web_fetch` use the shared browser-server profile.
+A web-only session uses the same tmux/neovim UI, but only current time, web search/fetch, and delegation tools are available. It does not expose local file tools, shell commands, LSP, skills, or project instructions. Browser setup still matters because `web_search` and `web_fetch` use the shared browser-server profile. `web_fetch` hostname permissions are auto-granted in web-only sessions (revocable from the permission pane).
 
 ### Remote web UI
 

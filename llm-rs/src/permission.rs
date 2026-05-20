@@ -24,8 +24,9 @@ pub const KEY_HOSTNAME: &str = "hostname";
 /// Tools must NEVER pass this as a literal value to `ask_permission*`.
 /// The permission manager treats a stored entry with this value as a
 /// wildcard that matches every value for the same (tool, key) pair.
-/// The wildcard can only enter the permission store via the user-initiated
-/// add-permission UI flow (`ClientMessage::AddPermission`).
+/// The wildcard can be created via the user-initiated add-permission UI
+/// flow (`ClientMessage::AddPermission`) or by direct calls to
+/// `add_permission` (e.g. the initial auto-grant at session start).
 pub const WILDCARD_VALUE: &str = "*";
 
 /// Registry of all known permission scopes and their associated key names.

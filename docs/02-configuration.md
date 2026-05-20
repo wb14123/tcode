@@ -54,6 +54,8 @@ Use `tcode --web-only` to create a web-only session for research that should not
 
 They do not register shell commands, local file tools (`read`, `write`, `edit`, `grep`, `glob`), LSP, or skills, and they do not load project-local `CLAUDE.md` instructions.
 
+`web_fetch` hostname permissions are auto-granted in web-only sessions (a session-scoped wildcard `web_fetch > hostname > *`). The grant appears in the permission tree and can be revoked.
+
 The mode is stored as session metadata. Existing sessions keep their original mode when attached or resumed; passing `--web-only` affects new session creation, not existing sessions.
 
 ## Full Config Reference

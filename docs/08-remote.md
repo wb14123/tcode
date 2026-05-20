@@ -166,6 +166,7 @@ In web-only mode:
   - `web_fetch`
   - `subagent`
   - `continue_subagent`
+- `web_fetch` hostname permissions are auto-granted (a session-scoped wildcard `web_fetch > hostname > *`). The grant appears in the permission tree and can be revoked at any time.
 
 This makes `--web-only` a better default for remotely exposed browser access. Normal remote sessions expose the same local/container capabilities as normal tcode sessions and should be treated as high trust.
 

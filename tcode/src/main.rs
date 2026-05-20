@@ -107,7 +107,7 @@ struct Cli {
     #[arg(long = "container-runtime", default_value = "docker", value_parser = ["docker", "podman"], requires = "container")]
     container_runtime: String,
 
-    /// Create new sessions in web-only mode
+    /// Create new sessions in web-only mode (auto-grants web_fetch permission for all hostnames)
     #[arg(long = "web-only", global = true)]
     web_only: bool,
 }

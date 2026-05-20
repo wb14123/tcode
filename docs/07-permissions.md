@@ -2,7 +2,7 @@
 
 tcode has a permission system that gives you control over what the agent can do — which files it reads and writes, which commands it runs, and which websites it fetches. This page explains how that system works.
 
-Most file and shell permission categories apply to normal sessions. In web-only sessions, local filesystem tools, shell commands, LSP, and skills are not registered, so file/bash permissions and the initial current-directory read grant do not apply.
+Most file and shell permission categories apply to normal sessions. In web-only sessions, local filesystem tools, shell commands, LSP, and skills are not registered, so file/bash permissions and the initial current-directory read grant do not apply. However, web-only sessions auto-grant a session-scoped `web_fetch > hostname > *` wildcard (all hostnames allowed). This grant is visible in the permission tree and can be revoked at any time.
 
 > **Best-effort guardrail, not a security boundary.** The permission system is designed to keep the agent in check during normal use — it helps you stay aware of what the agent is doing and catch mistakes before they happen. It is not a sandbox. If you need real security isolation (e.g., running untrusted code, protecting sensitive files outside the project), use proper OS-level tools like Docker containers, VMs, or dedicated user accounts.
 
@@ -71,6 +71,8 @@ Permissions are **hierarchical**:
 - **Initial read access to the current directory (normal sessions only):** When you start tcode, it automatically grants a *session-scoped* `file_read > path > <project directory>` permission. This lets the agent explore the project without you having to approve every file read. The grant appears in the permission tree, so you can **revoke** it at any time — subsequent cwd reads will then prompt. Writing still requires explicit permission. Web-only sessions do not register local file tools, so this initial grant does not apply.
 
   > **Be mindful of where you launch tcode.** If you run `tcode` from `/home/user`, the agent can read everything under your home directory. Always launch tcode from the specific project directory you want to work in.
+
+- **Initial web_fetch access (web-only sessions):** When you start a web-only session with `--web-only`, tcode automatically grants a *session-scoped* `web_fetch > hostname > *` wildcard permission. This lets the agent fetch any hostname without prompting. The grant appears in the permission tree, so you can **revoke** it at any time — subsequent `web_fetch` calls will then prompt for each new hostname.
 
 - **Bash commands and file paths — best-effort analysis, not a sandbox.** When the agent runs a bash command, the permission system parses it with tree-sitter-bash and walks the syntax tree to pull out file paths it can recognize: arguments to a small whitelist of read-only commands (`cat`, `head`, `tail`, `wc`, `stat`, …), arguments to constructive-write commands (`mkdir`, `touch`), and shell redirections (`<`, `>`, `>>`). Those extracted paths *are* matched against your `file_read`/`file_write` grants, so granting `file_read > path > /home/user/myproject` will silently cover `cat /home/user/myproject/README.md` without a new prompt.
 

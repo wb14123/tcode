@@ -14,7 +14,10 @@ use llm_rs::conversation::{
     create_continue_subagent_tool, create_subagent_tool, format_subagent_result,
 };
 use llm_rs::llm::{ChatOptions, LLM};
-use llm_rs::permission::{KEY_PATH, PermissionKey, PermissionScope, SCOPE_FILE_READ};
+use llm_rs::permission::{
+    KEY_HOSTNAME, KEY_PATH, PermissionKey, PermissionScope, SCOPE_FILE_READ, SCOPE_WEB_FETCH,
+    WILDCARD_VALUE,
+};
 use llm_rs::tool::{ContainerConfig, Tool};
 use sha2::Digest;
 use subtle::ConstantTimeEq;
@@ -634,24 +637,34 @@ impl Server {
         // Grant session-scoped file_read permission for cwd so it appears
         // in the permission tree and can be revoked by the user.
         if let Some(ref cwd) = cwd {
-            match tokio::fs::canonicalize(cwd).await {
-                Ok(canonical_cwd) => {
-                    let key = PermissionKey {
-                        tool: SCOPE_FILE_READ.to_string(),
-                        key: KEY_PATH.to_string(),
-                        value: canonical_cwd.to_string_lossy().to_string(),
-                    };
-                    if let Err(e) = manager
-                        .permission_manager()
-                        .add_permission(key, PermissionScope::Session)
-                    {
-                        tracing::warn!("Failed to add cwd read permission: {e}");
-                    }
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to canonicalize cwd for permission grant: {e}");
-                }
-            }
+            let canonical_cwd = tokio::fs::canonicalize(cwd)
+                .await
+                .context("Failed to canonicalize cwd for permission grant")?;
+            let key = PermissionKey {
+                tool: SCOPE_FILE_READ.to_string(),
+                key: KEY_PATH.to_string(),
+                value: canonical_cwd.to_string_lossy().to_string(),
+            };
+            manager
+                .permission_manager()
+                .add_permission(key, PermissionScope::Session)
+                .context("Failed to add cwd read permission")?;
+        }
+
+        // Grant session-scoped web_fetch wildcard permission for web-only
+        // sessions so the agent can fetch any hostname without prompting.
+        // Follows the same pattern as the cwd read grant above: session-level,
+        // visible in the permission tree, and revocable.
+        if session_mode.is_web_only() {
+            let key = PermissionKey {
+                tool: SCOPE_WEB_FETCH.to_string(),
+                key: KEY_HOSTNAME.to_string(),
+                value: WILDCARD_VALUE.to_string(),
+            };
+            manager
+                .permission_manager()
+                .add_permission(key, PermissionScope::Session)
+                .context("Failed to add web_fetch wildcard permission")?;
         }
 
         let model_infos = if self.subagent_model_selection {
