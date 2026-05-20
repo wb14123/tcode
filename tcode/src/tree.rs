@@ -756,7 +756,10 @@ impl TreeState {
         let is_active = match &node.kind {
             NodeType::Root { .. } => true,
             NodeType::ToolCall { status, .. } | NodeType::SubAgent { status, .. } => {
-                matches!(status, NodeStatus::Generating | NodeStatus::Running)
+                matches!(
+                    status,
+                    NodeStatus::Generating | NodeStatus::Running | NodeStatus::Permission
+                )
             }
         };
         if is_active {
