@@ -41,7 +41,9 @@ class TcodeApp extends LitElement {
   private route: AppRoute = parseRoute();
   private sessions: SessionSummary[] = [];
   private sessionsError = '';
-  private loginSecret = '';
+  private loginUsername = '';
+  private loginPassword = '';
+  private loginUsername_display: string | null = null;
   private loginError = '';
   private authUsesSecureCookie = true;
   private loginBusy = false;
@@ -158,6 +160,7 @@ class TcodeApp extends LitElement {
       const session = await api.getAuthSession();
       this.authUsesSecureCookie = session.secure_session_cookie;
       if (session.authenticated) {
+        this.loginUsername_display = session.username;
         this.authState = 'authenticated';
         if (this.route.kind === 'login') {
           navigate({ kind: 'home' }, true);
@@ -393,8 +396,13 @@ class TcodeApp extends LitElement {
     this.requestUpdate();
   };
 
-  private onLoginSecretInput = (event: Event): void => {
-    this.loginSecret = (event.target as HTMLInputElement).value;
+  private onLoginUsernameInput = (event: Event): void => {
+    this.loginUsername = (event.target as HTMLInputElement).value;
+    this.requestUpdate();
+  };
+
+  private onLoginPasswordInput = (event: Event): void => {
+    this.loginPassword = (event.target as HTMLInputElement).value;
     this.requestUpdate();
   };
 
@@ -456,7 +464,7 @@ class TcodeApp extends LitElement {
 
   private async submitLogin(event: Event): Promise<void> {
     event.preventDefault();
-    if (!this.loginSecret.trim() || this.loginBusy) {
+    if (!this.loginUsername.trim() || !this.loginPassword.trim() || this.loginBusy) {
       return;
     }
 
@@ -465,7 +473,7 @@ class TcodeApp extends LitElement {
     this.requestUpdate();
 
     try {
-      const status = await api.login(this.loginSecret);
+      const status = await api.login(this.loginUsername.trim(), this.loginPassword.trim());
       this.authUsesSecureCookie = status.secure_session_cookie;
       if (!status.authenticated) {
         this.loginError = 'Login failed.';
@@ -481,7 +489,8 @@ class TcodeApp extends LitElement {
       }
 
       this.authState = 'authenticated';
-      this.loginSecret = '';
+      this.loginUsername = '';
+      this.loginPassword = '';
       await this.refreshSessions();
       this.startSessionsPolling();
       navigate({ kind: 'home' }, true);
@@ -549,11 +558,15 @@ class TcodeApp extends LitElement {
             : nothing}
           ${this.loginError ? html`<div class="inline-alert error">${this.loginError}</div>` : nothing}
           <label>
-            <span class="muted">Shared secret</span>
-            <input type="password" .value=${this.loginSecret} @input=${this.onLoginSecretInput} />
+            <span class="muted">Username</span>
+            <input type="text" .value=${this.loginUsername} @input=${this.onLoginUsernameInput} autocomplete="username" />
+          </label>
+          <label>
+            <span class="muted">Password</span>
+            <input type="password" .value=${this.loginPassword} @input=${this.onLoginPasswordInput} autocomplete="current-password" />
           </label>
           <div class="modal-actions">
-            <button class="button" type="submit" ?disabled=${this.loginBusy || !this.loginSecret.trim()}>
+            <button class="button" type="submit" ?disabled=${this.loginBusy || !this.loginUsername.trim() || !this.loginPassword.trim()}>
               ${this.loginBusy ? 'Logging in…' : 'Log in'}
             </button>
           </div>
@@ -725,7 +738,12 @@ class TcodeApp extends LitElement {
             ☰
           </button>
         </span>
-        <span class="topbar-title">${isPermissionsPage ? 'Permissions' : 'TCode'}</span>
+        <span class="topbar-title">
+          ${isPermissionsPage ? 'Permissions' : 'TCode'}
+          ${this.loginUsername_display
+            ? html`<span class="topbar-user">· ${this.loginUsername_display}</span>`
+            : nothing}
+        </span>
         <span class="topbar-right">
           ${showPermissionsLink
             ? html`<a class="button ghost topbar-link" href="${hrefForRoute({ kind: 'permissions', sessionId })}">Permissions</a>`

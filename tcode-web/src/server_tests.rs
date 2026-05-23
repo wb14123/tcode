@@ -9,8 +9,9 @@ use tokio::net::TcpStream;
 
 use crate::config::RemoteConfig;
 use crate::routes::SESSION_COOKIE_NAME;
-use crate::routes::test_support::{HomeGuard, VALID_PASSWORD};
+use crate::routes::test_support::HomeGuard;
 use crate::state::AppState;
+use tcode_runtime::session::{SessionMode, ensure_session_mode_initialized};
 
 fn test_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/tcode-web-server")
@@ -49,14 +50,14 @@ fn assert_ok_response_head(head: &str) -> anyhow::Result<()> {
 /// Test B — real TCP bind via `bind_listener` + reachability smoke test.
 #[tokio::test]
 async fn bind_listener_binds_loopback_and_serves() -> anyhow::Result<()> {
-    let cfg = RemoteConfig::for_test(0, "valid-password-16chars!".into());
+    let cfg = RemoteConfig::for_test(0);
     let listener = crate::server::bind_listener(&cfg).await?;
     let addr = listener.local_addr()?;
     assert_eq!(addr.ip(), IpAddr::V4(Ipv4Addr::LOCALHOST));
 
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
-    let state = Arc::new(AppState::new("valid-password-16chars!".into()));
+    let state = Arc::new(AppState::new_with_test_user());
     let handle = tokio::spawn(async move {
         crate::server::serve(listener, state, async move {
             if let Err(e) = rx.await {
@@ -117,16 +118,24 @@ async fn serve_shutdown_does_not_wait_for_sse_client() -> anyhow::Result<()> {
     let _home_guard = HomeGuard::set(&home_dir);
 
     let session_id = "abc123xy";
-    let session_dir = tcode_runtime::session::base_path()?.join(session_id);
+    let user_session_dir = tcode_runtime::session::base_path()?;
+    let session_dir = user_session_dir.join(session_id);
     tokio::fs::create_dir_all(&session_dir).await?;
+    tokio::task::spawn_blocking({
+        let dir = session_dir.clone();
+        move || ensure_session_mode_initialized(&dir, SessionMode::WebOnly)
+    })
+    .await??;
 
-    let cfg = RemoteConfig::for_test(0, VALID_PASSWORD.into());
+    let cfg = RemoteConfig::for_test(0);
     let listener = crate::server::bind_listener(&cfg).await?;
     let addr = listener.local_addr()?;
     let (tx, rx) = tokio::sync::oneshot::channel::<()>();
 
-    let state = Arc::new(AppState::new(VALID_PASSWORD.into()));
-    let token = state.mint_session()?;
+    // The user's session_dir must match HOME so the auth middleware can
+    // find the session directory created above.
+    let state = Arc::new(AppState::new_with_custom_user_dir(user_session_dir));
+    let token = state.mint_session("test-user".into())?;
     let handle = tokio::spawn(async move {
         crate::server::serve(listener, state, async move {
             if let Err(e) = rx.await {
@@ -172,7 +181,7 @@ async fn serve_shutdown_does_not_wait_for_sse_client() -> anyhow::Result<()> {
 /// Test C — `RemoteConfig::try_new` default-address guard.
 #[test]
 fn remote_config_binds_to_loopback() -> anyhow::Result<()> {
-    let cfg = RemoteConfig::try_new(8765, "valid-password-16chars!".into(), false)?;
+    let cfg = RemoteConfig::try_new(8765)?;
     assert_eq!(cfg.bind_addr(), IpAddr::V4(Ipv4Addr::LOCALHOST));
     Ok(())
 }

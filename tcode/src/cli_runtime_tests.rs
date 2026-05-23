@@ -59,30 +59,13 @@ impl Drop for HomeGuard {
 }
 
 #[test]
-fn web_only_global_flag_is_accepted_after_remote_subcommand() {
-    let cli = crate::Cli::try_parse_from([
-        "tcode",
-        "remote",
-        "--port",
-        "1234",
-        "--password",
-        "super-secret-password",
-        "--web-only",
-    ])
-    .expect("remote --web-only should parse as global flag");
-
-    assert!(cli.web_only);
+fn remote_without_password_parses() {
+    let cli = crate::Cli::try_parse_from(["tcode", "remote", "--port", "1234"])
+        .expect("remote --port should parse");
     match cli.command {
-        Some(crate::Commands::Remote {
-            port,
-            host,
-            allow_insecure_http,
-            password,
-        }) => {
+        Some(crate::Commands::Remote { port, host, .. }) => {
             assert_eq!(port, 1234);
             assert_eq!(host, IpAddr::V4(Ipv4Addr::LOCALHOST));
-            assert!(!allow_insecure_http);
-            assert_eq!(password, "super-secret-password");
         }
         _ => panic!("expected remote command"),
     }
@@ -90,17 +73,9 @@ fn web_only_global_flag_is_accepted_after_remote_subcommand() {
 
 #[test]
 fn remote_host_flag_accepts_non_loopback_address() {
-    let cli = crate::Cli::try_parse_from([
-        "tcode",
-        "remote",
-        "--port",
-        "1234",
-        "--host",
-        "0.0.0.0",
-        "--password",
-        "super-secret-password",
-    ])
-    .expect("remote --host should parse as an IP address");
+    let cli =
+        crate::Cli::try_parse_from(["tcode", "remote", "--port", "1234", "--host", "0.0.0.0"])
+            .expect("remote --host should parse as an IP address");
 
     match cli.command {
         Some(crate::Commands::Remote { host, .. }) => {
@@ -112,16 +87,9 @@ fn remote_host_flag_accepts_non_loopback_address() {
 
 #[test]
 fn remote_allow_insecure_http_flag_is_accepted() {
-    let cli = crate::Cli::try_parse_from([
-        "tcode",
-        "remote",
-        "--port",
-        "1234",
-        "--allow-insecure-http",
-        "--password",
-        "super-secret-password",
-    ])
-    .expect("remote --allow-insecure-http should parse");
+    let cli =
+        crate::Cli::try_parse_from(["tcode", "remote", "--port", "1234", "--allow-insecure-http"])
+            .expect("remote --allow-insecure-http should parse");
 
     match cli.command {
         Some(crate::Commands::Remote {
@@ -132,12 +100,6 @@ fn remote_allow_insecure_http_flag_is_accepted() {
         }
         _ => panic!("expected remote command"),
     }
-}
-
-#[test]
-fn requested_session_mode_follows_web_only_flag() {
-    assert_eq!(crate::requested_session_mode(false), SessionMode::Normal);
-    assert_eq!(crate::requested_session_mode(true), SessionMode::WebOnly);
 }
 
 #[test]

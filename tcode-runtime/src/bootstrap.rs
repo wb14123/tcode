@@ -48,8 +48,35 @@ impl RuntimeSettings {
     }
 
     pub async fn start_runtime(&self, session_id: &str) -> Result<tokio::task::JoinHandle<()>> {
+        self.start_runtime_impl(session_id, None).await
+    }
+
+    /// Start a runtime for `session_id` under a specific `base_dir` instead of
+    /// the global `~/.tcode/sessions/`. Used by the multi-user web backend so
+    /// each user's runtime socket lives inside their own session directory.
+    pub async fn start_runtime_at(
+        &self,
+        session_id: &str,
+        base_dir: &std::path::Path,
+    ) -> Result<tokio::task::JoinHandle<()>> {
+        self.start_runtime_impl(session_id, Some(base_dir)).await
+    }
+
+    async fn start_runtime_impl(
+        &self,
+        session_id: &str,
+        base_dir: Option<&std::path::Path>,
+    ) -> Result<tokio::task::JoinHandle<()>> {
         let owner_kind = RuntimeOwnerKind::Web;
-        let session = Session::new(session_id.to_string())?;
+        let session = match base_dir {
+            Some(dir) => {
+                // Session directory already created by the web flow (e.g. via
+                // SessionRoot::create_session), so use with_dir instead of new_at
+                // to avoid double-nesting the session_id.
+                Session::with_dir(dir.to_path_buf())
+            }
+            None => Session::new(session_id.to_string())?,
+        };
         let socket_path = session.socket_path();
         let session_mode = read_session_mode(session.session_dir())?;
 

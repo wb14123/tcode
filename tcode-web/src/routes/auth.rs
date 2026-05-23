@@ -1,7 +1,9 @@
 use std::sync::Arc;
 
+use argon2::{Argon2, password_hash::PasswordVerifier};
 use axum::{Json, extract::State, http::StatusCode};
 use axum_extra::extract::cookie::{Cookie, CookieJar, SameSite};
+use password_hash::phc::PasswordHash;
 #[cfg(test)]
 use serde::Deserialize;
 use serde::Serialize;
@@ -10,7 +12,7 @@ use crate::state::{AppState, SESSION_TTL};
 
 /// Request body for `POST /api/auth/login`.
 ///
-/// The final deserialized `secret` buffer is zeroized on drop via
+/// The final deserialized `password` buffer is zeroized on drop via
 /// `zeroize::ZeroizeOnDrop`. Intermediate parser and transport buffers
 /// (serde_json unescape scratch, axum/hyper body bytes) are NOT covered
 /// and may linger in freed heap until reuse; that residue is out of
@@ -18,7 +20,8 @@ use crate::state::{AppState, SESSION_TTL};
 #[derive(serde::Deserialize, zeroize::Zeroize, zeroize::ZeroizeOnDrop)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct LoginRequest {
-    secret: String,
+    pub(crate) username: String,
+    password: String,
 }
 
 /// Response body for the auth endpoints.
@@ -31,13 +34,15 @@ pub(crate) struct LoginRequest {
 pub(crate) struct SessionStatus {
     pub(crate) authenticated: bool,
     pub(crate) secure_session_cookie: bool,
+    pub(crate) username: Option<String>,
 }
 
 impl SessionStatus {
-    pub(crate) fn new(authenticated: bool, state: &AppState) -> Self {
+    pub(crate) fn new(authenticated: bool, state: &AppState, username: Option<String>) -> Self {
         Self {
             authenticated,
             secure_session_cookie: state.secure_session_cookie(),
+            username,
         }
     }
 }
@@ -76,47 +81,66 @@ fn clear_cookie(secure: bool) -> Cookie<'static> {
 
 /// `POST /api/auth/login`
 ///
-/// Verifies `body.secret` against the configured shared secret in constant
-/// time. On success mints a fresh session token, stores it, and returns it
-/// to the client as a session cookie. On failure returns 401 without
-/// touching any existing session — a failed login (wrong password or a
-/// typo) must not log the user out.
+/// Verifies `body.password` against the stored argon2id hash for
+/// `body.username`. Uses constant-time argon2id verification. On success
+/// mints a fresh session token and returns it as a session cookie.
+/// On failure returns 401 without touching any existing session.
+///
+/// Username enumeration prevention: when the user is not found, the handler
+/// still runs a full argon2id verify against a dummy hash (the first user's
+/// hash) so timing is identical to a real attempt.
 pub(crate) async fn post_login(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
     Json(body): Json<LoginRequest>,
 ) -> (StatusCode, CookieJar, Json<SessionStatus>) {
-    if !state.password.verify(body.secret.as_bytes()) {
-        // Industry-standard behavior: wrong password → 401, do not touch any
-        // existing session. Revoking/clearing on failed login would create a
-        // CSRF-amplifier / DoS (a typo or a cross-origin POST could log the
-        // user out). Returning the jar unchanged means no `Set-Cookie` is
-        // emitted when no cookie was present, and the user's existing valid
-        // session survives a password typo.
+    let argon2 = Argon2::default();
+    let user = state.users.get(&body.username);
+    let dummy_hash = state
+        .users
+        .values()
+        .next()
+        .expect("users map must not be empty");
+
+    let hash_to_verify = user.map_or(&dummy_hash.password_hash, |u| &u.password_hash);
+
+    let parsed = match PasswordHash::new(hash_to_verify) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::error!(error = %e, "failed to parse stored password hash");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                jar,
+                Json(SessionStatus::new(false, &state, None)),
+            );
+        }
+    };
+
+    if argon2
+        .verify_password(body.password.as_bytes(), &parsed)
+        .is_err()
+        || user.is_none()
+    {
         return (
             StatusCode::UNAUTHORIZED,
             jar,
-            Json(SessionStatus::new(false, &state)),
+            Json(SessionStatus::new(false, &state, None)),
         );
     }
-    let token = match state.mint_session() {
+
+    let username = body.username.clone();
+    let token = match state.mint_session(username.clone()) {
         Ok(t) => t,
         Err(e) => {
-            // Log only the error code; never log derived buffers or the
-            // eventual token. `getrandom::Error` has a stable Display impl.
             tracing::error!(error = %e, "failed to mint session token");
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 jar,
-                Json(SessionStatus::new(false, &state)),
+                Json(SessionStatus::new(false, &state, None)),
             );
         }
     };
-    // `Max-Age` mirrors the server-side `SESSION_TTL` so the browser
-    // forgets the cookie in lockstep with server-side expiry. The
-    // server is the authority — `verify_session` enforces TTL even if
-    // a misbehaving client ignores `Max-Age`. The cast is safe because
-    // `SESSION_TTL` is a hardcoded const well below `i64::MAX` seconds.
+
     let max_age = time::Duration::seconds(SESSION_TTL.as_secs() as i64);
     let mut cookie = Cookie::build((SESSION_COOKIE_NAME, token))
         .path("/")
@@ -130,7 +154,7 @@ pub(crate) async fn post_login(
     (
         StatusCode::OK,
         jar.add(cookie),
-        Json(SessionStatus::new(true, &state)),
+        Json(SessionStatus::new(true, &state, Some(username))),
     )
 }
 
@@ -143,12 +167,6 @@ pub(crate) async fn post_logout(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> (StatusCode, CookieJar) {
-    // We need the cookie value anyway in order to revoke the server-side
-    // token, so the guard is load-bearing for that. Emitting (or not) a
-    // clearing `Set-Cookie` when there was no incoming cookie is a
-    // behavioral detail of `CookieJar::remove` (no-op when the original
-    // jar is empty); the explicit if-let keeps the "no incoming cookie →
-    // 200 with no `Set-Cookie`" contract readable.
     if let Some(c) = jar.get(SESSION_COOKIE_NAME) {
         state.revoke_session(c.value());
         return (
@@ -168,9 +186,10 @@ pub(crate) async fn get_session(
     State(state): State<Arc<AppState>>,
     jar: CookieJar,
 ) -> Json<SessionStatus> {
-    let authenticated = jar
+    let (authenticated, username) = jar
         .get(SESSION_COOKIE_NAME)
-        .map(|c| state.verify_session(c.value()))
-        .unwrap_or(false);
-    Json(SessionStatus::new(authenticated, &state))
+        .and_then(|c| state.verify_session(c.value()))
+        .map(|username| (true, Some(username)))
+        .unwrap_or((false, None));
+    Json(SessionStatus::new(authenticated, &state, username))
 }

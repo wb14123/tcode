@@ -17,7 +17,7 @@ use crate::state::{AppState, SESSION_TOKEN_B64_LEN};
 /// gets an isolated `AppState`, mirroring the `auth_tests.rs` `fresh_app`
 /// pattern.
 fn fresh_app() -> axum::Router {
-    let state = Arc::new(AppState::new(VALID_PASSWORD.into()));
+    let state = Arc::new(AppState::new_with_test_user());
     build_router_with_protected_probes(state)
 }
 
@@ -32,7 +32,7 @@ async fn login_and_take_cookie_pair(app: &axum::Router) -> anyhow::Result<String
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -76,6 +76,7 @@ async fn protected_json_without_cookie_returns_401() -> anyhow::Result<()> {
         SessionStatus {
             authenticated: false,
             secure_session_cookie: true,
+            username: None,
         }
     );
     Ok(())
@@ -136,6 +137,7 @@ async fn protected_sse_without_cookie_returns_401() -> anyhow::Result<()> {
         SessionStatus {
             authenticated: false,
             secure_session_cookie: true,
+            username: None,
         }
     );
     Ok(())
@@ -407,7 +409,7 @@ async fn public_login_endpoint_is_not_gated_by_require_auth() -> anyhow::Result<
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
 
@@ -452,6 +454,7 @@ async fn public_session_endpoint_is_not_gated_by_require_auth() -> anyhow::Resul
         SessionStatus {
             authenticated: false,
             secure_session_cookie: true,
+            username: None,
         }
     );
     Ok(())
@@ -534,7 +537,7 @@ async fn unmatched_path_without_cookie_returns_404_not_401() -> anyhow::Result<(
 /// Production `protected_routes()` now contains the real authenticated API surface.
 #[tokio::test]
 async fn protected_routes_register_real_endpoints() {
-    let state = Arc::new(AppState::new(VALID_PASSWORD.into()));
+    let state = Arc::new(AppState::new_with_test_user());
     let router = super::protected_routes(state);
     assert!(
         router.has_routes(),

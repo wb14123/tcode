@@ -420,10 +420,10 @@ export const api = {
     return jsonRequest<AuthSessionStatus>('api/auth/session', { headers: {} });
   },
 
-  login(secret: string): Promise<AuthSessionStatus> {
+  login(username: string, password: string): Promise<AuthSessionStatus> {
     return jsonRequest<AuthSessionStatus>('api/auth/login', {
       method: 'POST',
-      body: jsonBody({ secret }),
+      body: jsonBody({ username, password }),
     });
   },
 

@@ -106,10 +106,6 @@ struct Cli {
     /// Container runtime CLI to use (default: docker)
     #[arg(long = "container-runtime", default_value = "docker", value_parser = ["docker", "podman"], requires = "container")]
     container_runtime: String,
-
-    /// Create new sessions in web-only mode (auto-grants web_fetch permission for all hostnames)
-    #[arg(long = "web-only", global = true)]
-    web_only: bool,
 }
 
 #[derive(Subcommand)]
@@ -137,6 +133,14 @@ enum Commands {
     OpenaiAuth,
     /// Interactively create a new config file
     Config,
+    /// Add a web user for tcode remote multi-user access
+    AddWebUser {
+        /// Username for the new web user
+        username: String,
+        /// Overwrite existing user if present
+        #[arg(long)]
+        force: bool,
+    },
     /// Attach to an existing session and resume the conversation
     Attach,
     /// Cancel a running tool call
@@ -226,12 +230,6 @@ enum Commands {
         /// session cookie to anyone who can observe the network path.
         #[arg(long)]
         allow_insecure_http: bool,
-
-        /// Shared secret used for the single-user login flow.
-        /// Prefer passing via env (TCODE_REMOTE_PASSWORD).
-        // NOTE: if `Cli`/`Commands` ever derives `Debug`/`Display`, wrap `password` in a redacted newtype — Secret in tcode-web does not extend to this CLI-layer struct.
-        #[arg(long, env = "TCODE_REMOTE_PASSWORD")]
-        password: String,
     },
 }
 
@@ -342,14 +340,6 @@ fn run_shell_cmd(cmd: &str, context_msg: &str) -> Result<()> {
     Ok(())
 }
 
-fn requested_session_mode(web_only: bool) -> SessionMode {
-    if web_only {
-        SessionMode::WebOnly
-    } else {
-        SessionMode::Normal
-    }
-}
-
 fn initialize_new_session_mode(
     session: &Session,
     requested_mode: SessionMode,
@@ -389,9 +379,7 @@ async fn main() -> Result<()> {
         profile,
         container,
         container_runtime,
-        web_only,
     } = cli;
-    let requested_session_mode = requested_session_mode(web_only);
 
     // Helper to require --session flag for subcommands
     let require_session = |opt: Option<String>| -> Result<String> {
@@ -432,7 +420,7 @@ async fn main() -> Result<()> {
                 config,
                 profile.as_deref(),
                 container_config,
-                requested_session_mode,
+                SessionMode::Normal,
             )
             .await
         }
@@ -463,7 +451,7 @@ async fn main() -> Result<()> {
                     );
                 }
                 RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {
-                    session_mode_for_serve(&sess, requested_session_mode)?
+                    session_mode_for_serve(&sess, SessionMode::Normal)?
                 }
             };
             let config = load_cfg()?;
@@ -729,11 +717,13 @@ async fn main() -> Result<()> {
         Some(Commands::ClaudeAuth) => claude_auth::run(profile.as_deref()).await,
         Some(Commands::OpenaiAuth) => openai_auth::run(profile.as_deref()).await,
         Some(Commands::Config) => config_wizard::run(profile.as_deref(), false),
+        Some(Commands::AddWebUser { username, force }) => {
+            tcode_web::add_web_user::run(username, force)
+        }
         Some(Commands::Remote {
             port,
             host,
             allow_insecure_http,
-            password,
         }) => {
             // Ordering is load-bearing: init_remote_tracing() MUST run before
             // try_new() so the warnings/advisories emitted inside try_new()
@@ -741,30 +731,13 @@ async fn main() -> Result<()> {
             init_remote_tracing();
 
             let container_config = resolve_container_config(&container, &container_runtime).await?;
-            let password_on_argv = password_on_argv();
-            let remote_mode_policy = if web_only {
-                tcode_web::RemoteModePolicy::WebOnlyOnly
-            } else {
-                tcode_web::RemoteModePolicy::All
-            };
-            let cfg = tcode_web::RemoteConfig::try_new(port, password, password_on_argv)?
+            let cfg = tcode_web::RemoteConfig::try_new(port)?
                 .with_bind_addr(host)
                 .with_allow_insecure_http(allow_insecure_http)
-                .with_runtime_options(profile.clone(), container_config)
-                .with_remote_mode_policy(remote_mode_policy);
+                .with_runtime_options(profile.clone(), container_config);
             tcode_web::run(cfg).await
         }
     }
-}
-
-/// Scan argv for `--password` / `--password=...` without parsing. Used to
-/// emit an argv-leak warning; the actual password value is resolved by clap
-/// (including `TCODE_REMOTE_PASSWORD`).
-fn password_on_argv() -> bool {
-    std::env::args_os().any(|arg| {
-        let bytes = arg.as_encoded_bytes();
-        bytes == b"--password" || bytes.starts_with(b"--password=")
-    })
 }
 
 /// Initialize a stderr-writing tracing subscriber for the `tcode remote`

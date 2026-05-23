@@ -14,12 +14,12 @@ use crate::state::{AppState, SESSION_TOKEN_B64_LEN};
 /// Build a fresh router for each test. `Arc::new` + `build_router` avoids
 /// cross-test state bleed; each call gets an isolated `AppState`.
 fn fresh_app() -> axum::Router {
-    let state = Arc::new(AppState::new(VALID_PASSWORD.into()));
+    let state = Arc::new(AppState::new_with_test_user());
     build_router(state)
 }
 
 fn fresh_insecure_http_app() -> axum::Router {
-    let state = Arc::new(AppState::new_with_insecure_http(VALID_PASSWORD.into()));
+    let state = Arc::new(AppState::new_with_insecure_http());
     build_router(state)
 }
 
@@ -51,14 +51,14 @@ async fn get_session_returns_unauthenticated() -> anyhow::Result<()> {
         SessionStatus {
             authenticated: false,
             secure_session_cookie: true,
+            username: None,
         }
     );
-
     Ok(())
 }
 
 #[tokio::test]
-async fn insecure_http_get_session_reports_insecure_cookie_mode() -> anyhow::Result<()> {
+async fn get_session_returns_unauthenticated_with_insecure() -> anyhow::Result<()> {
     let app = fresh_insecure_http_app();
 
     let request = Request::builder()
@@ -74,9 +74,9 @@ async fn insecure_http_get_session_reports_insecure_cookie_mode() -> anyhow::Res
         SessionStatus {
             authenticated: false,
             secure_session_cookie: false,
+            username: None,
         }
     );
-
     Ok(())
 }
 
@@ -90,7 +90,7 @@ async fn login_with_correct_password_succeeds() -> anyhow::Result<()> {
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
 
@@ -140,6 +140,7 @@ async fn login_with_correct_password_succeeds() -> anyhow::Result<()> {
         SessionStatus {
             authenticated: true,
             secure_session_cookie: true,
+            username: Some("test-user".into()),
         }
     );
 
@@ -156,7 +157,7 @@ async fn insecure_http_login_cookie_omits_secure_attribute() -> anyhow::Result<(
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
 
@@ -174,6 +175,7 @@ async fn insecure_http_login_cookie_omits_secure_attribute() -> anyhow::Result<(
         SessionStatus {
             authenticated: true,
             secure_session_cookie: false,
+            username: Some("test-user".into()),
         }
     );
 
@@ -190,7 +192,10 @@ async fn login_with_wrong_password_returns_401_and_no_set_cookie() -> anyhow::Re
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body("wrong-password-totally")))?,
+                .body(Body::from(login_body(
+                    "test-user",
+                    "wrong-password-totally",
+                )))?,
         )
         .await?;
 
@@ -206,6 +211,7 @@ async fn login_with_wrong_password_returns_401_and_no_set_cookie() -> anyhow::Re
         SessionStatus {
             authenticated: false,
             secure_session_cookie: true,
+            username: None,
         }
     );
 
@@ -224,7 +230,7 @@ async fn login_with_wrong_password_preserves_existing_session() -> anyhow::Resul
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
     assert_eq!(ok.status(), StatusCode::OK);
@@ -242,7 +248,10 @@ async fn login_with_wrong_password_preserves_existing_session() -> anyhow::Resul
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
                 .header("cookie", &pair)
-                .body(Body::from(login_body("wrong-password-totally")))?,
+                .body(Body::from(login_body(
+                    "test-user",
+                    "wrong-password-totally",
+                )))?,
         )
         .await?;
     assert_eq!(bad.status(), StatusCode::UNAUTHORIZED);
@@ -290,7 +299,7 @@ async fn login_with_malformed_json_returns_400() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
-async fn login_with_missing_secret_field_returns_422() -> anyhow::Result<()> {
+async fn login_with_missing_username_field_returns_422() -> anyhow::Result<()> {
     let app = fresh_app();
 
     let resp = app
@@ -312,11 +321,13 @@ async fn login_with_unknown_fields_returns_422() -> anyhow::Result<()> {
     let app = fresh_app();
 
     // `#[serde(deny_unknown_fields)]` rejects extra keys like `extra`. This
-    // prevents silently ignoring typos (e.g. `{"secrret": "..."}`) that would
-    // otherwise deserialize into a missing `secret` and yield an identical
+    // prevents silently ignoring typos (e.g. `{"usrname": "..."}`) that would
+    // otherwise deserialize into a missing `username` and yield an identical
     // 422, but without signaling the mistake. The rejection surfaces through
     // axum's `Json` extractor as a deserialization error -> 422.
-    let payload = serde_json::json!({ "secret": VALID_PASSWORD, "extra": "x" }).to_string();
+    let payload =
+        serde_json::json!({ "username": "test-user", "password": VALID_PASSWORD, "extra": "x" })
+            .to_string();
     let resp = app
         .oneshot(
             Request::builder()
@@ -361,7 +372,7 @@ async fn session_with_valid_cookie_returns_authenticated() -> anyhow::Result<()>
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
     assert_eq!(login.status(), StatusCode::OK);
@@ -442,7 +453,7 @@ async fn logout_clears_cookie_and_revokes_session() -> anyhow::Result<()> {
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
     assert_eq!(login.status(), StatusCode::OK);
@@ -515,7 +526,7 @@ async fn insecure_http_logout_clear_cookie_omits_secure_attribute() -> anyhow::R
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
     assert_eq!(login.status(), StatusCode::OK);
@@ -575,7 +586,7 @@ async fn multi_tab_login_is_independent() -> anyhow::Result<()> {
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
     assert_eq!(login_a.status(), StatusCode::OK);
@@ -589,7 +600,7 @@ async fn multi_tab_login_is_independent() -> anyhow::Result<()> {
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
     assert_eq!(login_b.status(), StatusCode::OK);
@@ -646,6 +657,86 @@ async fn multi_tab_login_is_independent() -> anyhow::Result<()> {
     assert_eq!(probe_b.status(), StatusCode::OK);
     let body_b = parse_session_body(probe_b).await?;
     assert!(body_b.authenticated, "cookie B must survive A's logout");
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn login_with_unknown_user_returns_401_same_as_wrong_password() -> anyhow::Result<()> {
+    let app = fresh_app();
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(login_body(
+                    "nonexistent-user",
+                    "some-password-here",
+                )))?,
+        )
+        .await?;
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert!(
+        find_session_cookie(&resp)?.is_none(),
+        "failed login must not emit a Set-Cookie"
+    );
+
+    let body = parse_session_body(resp).await?;
+    assert_eq!(
+        body,
+        SessionStatus {
+            authenticated: false,
+            secure_session_cookie: true,
+            username: None,
+        }
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn session_carries_username_after_login() -> anyhow::Result<()> {
+    let app = fresh_app();
+
+    let login = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/api/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
+        )
+        .await?;
+    assert_eq!(login.status(), StatusCode::OK);
+
+    let cookie = find_session_cookie(&login)?
+        .ok_or_else(|| anyhow::anyhow!("Set-Cookie missing after login"))?;
+    let pair = format!("{}={}", cookie.name(), cookie.value());
+
+    let resp = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/api/auth/session")
+                .header("cookie", &pair)
+                .body(Body::empty())?,
+        )
+        .await?;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    let body = parse_session_body(resp).await?;
+    assert_eq!(
+        body,
+        SessionStatus {
+            authenticated: true,
+            secure_session_cookie: true,
+            username: Some("test-user".into()),
+        }
+    );
 
     Ok(())
 }

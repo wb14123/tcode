@@ -86,12 +86,13 @@ This keeps routes simple while still preserving the true nesting structure.
 
 Most API endpoints and all protected SSE endpoints require authentication. The public exceptions are `POST /api/auth/login`, `POST /api/auth/logout`, and `GET /api/auth/session`.
 
-The remote server uses a single-user shared-secret login flow:
+The remote server uses per-user accounts with argon2id-hashed passwords stored in `~/.tcode/web-users.toml`:
 
-1. the server starts with a configured shared secret (`TCODE_REMOTE_PASSWORD` or `--password`)
-2. the client logs in by sending that secret
-3. the server returns an authenticated session cookie
-4. the browser uses that cookie for normal API requests and SSE connections
+1. users are created before server startup with `tcode add-web-user <username>`
+2. the client logs in by sending a username and password
+3. the server verifies the password against the stored argon2id hash
+4. the server returns an authenticated session cookie
+5. the browser uses that cookie for normal API requests and SSE connections
 
 Security requirements:
 
@@ -120,13 +121,14 @@ The API has four groups:
 
 ### `POST /api/auth/login`
 
-Authenticate using the configured shared secret.
+Authenticate using a username and password.
 
 Request body:
 
 ```json
 {
-  "secret": "..."
+  "username": "alice",
+  "password": "..."
 }
 ```
 
@@ -148,7 +150,8 @@ Example response:
 ```json
 {
   "authenticated": true,
-  "secure_session_cookie": true
+  "secure_session_cookie": true,
+  "username": "alice"
 }
 ```
 
@@ -215,7 +218,7 @@ Notes:
 - `title` is not required for the PoC
 - working directory override is not supported
 - server/profile defaults are controlled by the backend startup environment
-- session mode is selected by the remote server policy: normal by default, web-only when `tcode remote` was started with `--web-only`
+- session mode is always web-only for sessions created through the web API
 
 ### `POST /api/sessions/:sessionId/leases`
 
@@ -522,7 +525,6 @@ Do not include the following for now:
 - log endpoints for `debug.log`, `stdout.log`, or `stderr.log`
 - file diff preview endpoints under `tool-file-preview/`
 - tree-view-specific APIs
-- multi-user auth or user management APIs
 
 ---
 

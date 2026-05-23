@@ -237,6 +237,25 @@ pub fn list_sessions() -> io::Result<Vec<String>> {
     Ok(sessions)
 }
 
+/// List valid session IDs from an arbitrary base directory.
+/// Returns an empty vec if the directory does not exist.
+pub fn list_sessions_at(base: &Path) -> io::Result<Vec<String>> {
+    if !base.exists() {
+        return Ok(vec![]);
+    }
+    let mut sessions = vec![];
+    for entry in fs::read_dir(base)? {
+        let entry = entry?;
+        if entry.file_type()?.is_dir()
+            && let Some(name) = entry.file_name().to_str()
+            && is_valid_session_id(name)
+        {
+            sessions.push(name.to_string());
+        }
+    }
+    Ok(sessions)
+}
+
 /// Manages session-specific directories and files under ~/.tcode/sessions/<session_id>/
 /// Files are created with restricted permissions (0600) in a directory with 0700 permissions.
 pub struct Session {
@@ -265,6 +284,22 @@ impl Session {
         fs::set_permissions(&base_dir, Permissions::from_mode(0o700))?;
 
         // Create session directory with restricted permissions
+        fs::create_dir_all(&session_dir)
+            .with_context(|| format!("Failed to create session directory {:?}", session_dir))?;
+        fs::set_permissions(&session_dir, Permissions::from_mode(0o700))?;
+
+        Self::migrate_legacy_media_dir(&session_dir);
+
+        Ok(Self { session_dir })
+    }
+
+    /// Create a new session under the given base directory (for per-user isolation).
+    /// Same logic as [`Session::new`] but uses `base_dir` instead of calling
+    /// [`base_path`].
+    pub fn new_at(base_dir: PathBuf, session_id: String) -> Result<Self> {
+        validate_session_path(&session_id)?;
+        let session_dir = base_dir.join(&session_id);
+
         fs::create_dir_all(&session_dir)
             .with_context(|| format!("Failed to create session directory {:?}", session_dir))?;
         fs::set_permissions(&session_dir, Permissions::from_mode(0o700))?;

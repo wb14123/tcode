@@ -8,9 +8,15 @@ use tower::ServiceExt;
 
 use super::test_support::{HomeGuard, VALID_PASSWORD, find_session_cookie, login_body};
 use crate::state::AppState;
+use tcode_runtime::session::{SessionMode, ensure_session_mode_initialized};
 
 fn fresh_app() -> axum::Router {
-    let state = Arc::new(AppState::new(VALID_PASSWORD.into()));
+    let state = Arc::new(AppState::new_with_test_user());
+    super::build_router(state)
+}
+
+fn fresh_app_with_session_dir(session_dir: PathBuf) -> axum::Router {
+    let state = Arc::new(AppState::new_with_custom_user_dir(session_dir));
     super::build_router(state)
 }
 
@@ -22,7 +28,7 @@ async fn login_and_take_cookie_pair(app: &axum::Router) -> anyhow::Result<String
                 .method("POST")
                 .uri("/api/auth/login")
                 .header("content-type", "application/json")
-                .body(Body::from(login_body(VALID_PASSWORD)))?,
+                .body(Body::from(login_body("test-user", VALID_PASSWORD)))?,
         )
         .await?;
     assert_eq!(resp.status(), StatusCode::OK);
@@ -44,6 +50,7 @@ fn temp_dir() -> PathBuf {
 fn create_session_dir(session_id: &str) -> anyhow::Result<PathBuf> {
     let session_dir = tcode_runtime::session::base_path()?.join(session_id);
     std::fs::create_dir_all(&session_dir)?;
+    ensure_session_mode_initialized(&session_dir, SessionMode::WebOnly)?;
     Ok(session_dir)
 }
 
@@ -144,9 +151,10 @@ async fn subagent_write_routes_require_same_origin() -> anyhow::Result<()> {
 async fn subagent_write_routes_validate_subagent_existence() -> anyhow::Result<()> {
     let home_dir = temp_dir();
     let _home_guard = HomeGuard::set(&home_dir);
+    let session_dir = tcode_runtime::session::base_path()?;
     create_session_dir("abc123xy")?;
 
-    let app = fresh_app();
+    let app = fresh_app_with_session_dir(session_dir);
     let pair = login_and_take_cookie_pair(&app).await?;
 
     for (uri, body) in subagent_write_endpoints("abc123xy", "missing-child") {
@@ -178,7 +186,7 @@ async fn nested_subagent_reads_still_work() -> anyhow::Result<()> {
     std::fs::create_dir_all(&nested_subagent_dir)?;
     std::fs::write(nested_subagent_dir.join("status.txt"), "nested ok")?;
 
-    let app = fresh_app();
+    let app = fresh_app_with_session_dir(tcode_runtime::session::base_path()?);
     let pair = login_and_take_cookie_pair(&app).await?;
 
     let resp = app

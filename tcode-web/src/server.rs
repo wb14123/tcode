@@ -4,15 +4,11 @@ use std::sync::Arc;
 use anyhow::Context;
 use tokio::net::TcpListener;
 
-use crate::config::RemoteConfig;
+use crate::config::{self, RemoteConfig};
 use crate::routes::build_router;
 use crate::state::AppState;
 
 /// Bind a TCP listener using the address configured in `RemoteConfig`.
-///
-/// This is the single code path that turns a `RemoteConfig` into a bound
-/// TCP socket; both [`run`] and tests go through it so a regression in the
-/// bind address is caught by Test B.
 pub(crate) async fn bind_listener(config: &RemoteConfig) -> anyhow::Result<TcpListener> {
     let addr = SocketAddr::new(config.bind_addr(), config.port);
     TcpListener::bind(addr)
@@ -21,12 +17,7 @@ pub(crate) async fn bind_listener(config: &RemoteConfig) -> anyhow::Result<TcpLi
 }
 
 /// Run the axum router on an already-bound listener until the shutdown
-/// future resolves. Tests pass a `oneshot::Receiver`-backed future so they
-/// can stop the server deterministically.
-///
-/// Shutdown intentionally drops the server future instead of using axum's
-/// graceful shutdown path. tcode-web has long-lived SSE clients; waiting for
-/// those clients to disconnect would let a browser tab block process shutdown.
+/// future resolves.
 pub(crate) async fn serve(
     listener: TcpListener,
     state: Arc<AppState>,
@@ -46,12 +37,15 @@ pub(crate) async fn serve(
 
 /// Public entry point used by `tcode remote`.
 ///
-/// 1. Bind a TCP listener via [`bind_listener`].
-/// 2. Capture the local address before moving the listener.
-/// 3. Move the plaintext password into an `AppState`.
-/// 4. Log the startup URL and any exposure warning.
-/// 5. Call [`serve`] with a Ctrl-C-driven shutdown future.
+/// 1. Load users from `web-users.toml`.
+/// 2. Load runtime settings.
+/// 3. Bind a TCP listener via [`bind_listener`].
+/// 4. Construct `AppState` with users and runtime.
+/// 5. Log the startup URL and any exposure warning.
+/// 6. Call [`serve`] with a Ctrl-C-driven shutdown future.
 pub async fn run(config: RemoteConfig) -> anyhow::Result<()> {
+    let users = config::load_web_users()?;
+
     let runtime_settings = tcode_runtime::bootstrap::RuntimeSettings::load(
         config.profile.clone(),
         config.container_config.clone(),
@@ -63,20 +57,17 @@ pub async fn run(config: RemoteConfig) -> anyhow::Result<()> {
         .local_addr()
         .context("failed to read local_addr after bind")?;
 
-    // Move the `Secret` out of `config` exactly once; subsequent access
-    // to the password goes through `AppState::password`. The `Secret`
-    // keeps its zeroize-on-drop guarantee across this move.
-    let remote_mode_policy = config.remote_mode_policy;
     let secure_session_cookie = !config.allow_insecure_http;
-    let RemoteConfig { password, .. } = config;
-    let state = Arc::new(AppState::from_secret_and_runtime(
-        password,
+    let state = Arc::new(AppState::from_users_and_runtime(
+        users,
         runtime_settings,
-        remote_mode_policy,
         secure_session_cookie,
     ));
 
     tracing::info!("tcode remote listening on http://{local}");
+    tracing::info!(
+        "all web users share a single Chrome browser profile at ~/.tcode/chrome/; per-user browser profiles are not yet implemented"
+    );
     if !local.ip().is_loopback() {
         tracing::warn!(
             "tcode remote is listening on a non-loopback address over HTTP; use a strong password and prefer HTTPS/tunnel exposure"

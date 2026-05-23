@@ -1,98 +1,90 @@
 use std::net::{IpAddr, Ipv4Addr};
 
-use crate::config::{RemoteConfig, RemoteModePolicy};
-use tcode_runtime::session::SessionMode;
-
-/// Test D — empty string rejects and the error mentions
-/// `TCODE_REMOTE_PASSWORD` so the operator can self-correct.
-#[test]
-fn try_new_rejects_empty_password() {
-    let err = match RemoteConfig::try_new(8765, "".into(), false) {
-        Ok(_) => panic!("expected empty password to be rejected"),
-        Err(e) => e,
-    };
-    assert!(
-        err.to_string().contains("TCODE_REMOTE_PASSWORD"),
-        "error message did not mention TCODE_REMOTE_PASSWORD: {err}"
-    );
-}
-
-/// All-whitespace passwords are also rejected (trim-then-check).
-#[test]
-fn try_new_rejects_whitespace_password() {
-    assert!(RemoteConfig::try_new(8765, "   ".into(), false).is_err());
-}
-
-/// Short passwords succeed — the warning is a side effect, not an error.
-#[test]
-fn try_new_accepts_short_password() {
-    assert!(RemoteConfig::try_new(8765, "short".into(), false).is_ok());
-}
-
-/// Long (>= 16 char) passwords succeed cleanly.
-#[test]
-fn try_new_accepts_long_password() {
-    assert!(RemoteConfig::try_new(8765, "a-long-enough-password-123".into(), false).is_ok());
-}
-
-/// Exercise the argv-sourced password branch. The warn! is a side effect
-/// we don't assert on.
-#[test]
-fn try_new_accepts_argv_sourced_password() {
-    assert!(RemoteConfig::try_new(8765, "a-long-enough-password-123".into(), true).is_ok());
-}
+use crate::config::RemoteConfig;
 
 #[test]
 fn with_bind_addr_allows_non_loopback_address() -> anyhow::Result<()> {
-    let cfg = RemoteConfig::try_new(8765, "valid-password-16chars!".into(), false)?
-        .with_bind_addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
+    let cfg = RemoteConfig::try_new(8765)?.with_bind_addr(IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     assert_eq!(cfg.bind_addr(), IpAddr::V4(Ipv4Addr::UNSPECIFIED));
     Ok(())
 }
 
 #[test]
 fn with_allow_insecure_http_enables_plain_http_cookie_mode() -> anyhow::Result<()> {
-    let cfg = RemoteConfig::try_new(8765, "valid-password-16chars!".into(), false)?
-        .with_allow_insecure_http(true);
+    let cfg = RemoteConfig::try_new(8765)?.with_allow_insecure_http(true);
     assert!(cfg.allow_insecure_http);
     Ok(())
 }
 
+// ── WebUsersFile parsing tests ───────────────────────────────────────
+
 #[test]
-fn remote_mode_policy_defaults_to_all_and_creates_normal_sessions() {
-    let cfg = RemoteConfig::try_new(8765, "a-long-enough-password-123".into(), false)
-        .expect("valid remote config");
-    assert_eq!(cfg.remote_mode_policy, RemoteModePolicy::All);
-    assert_eq!(
-        cfg.remote_mode_policy.new_session_mode(),
-        SessionMode::Normal
-    );
-    assert!(
-        cfg.remote_mode_policy
-            .allows_session_mode(SessionMode::Normal)
-    );
-    assert!(
-        cfg.remote_mode_policy
-            .allows_session_mode(SessionMode::WebOnly)
-    );
+fn web_users_file_deny_unknown_top_level_fields() {
+    let toml_str = r#"
+unknown_field = "x"
+
+[users.alice]
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGVzdGhhc2g="
+session_dir = "/tmp/alice-sessions"
+"#;
+    let result: Result<crate::config::WebUsersFile, _> = toml::from_str(toml_str);
+    assert!(result.is_err());
 }
 
 #[test]
-fn remote_mode_policy_web_only_only_creates_and_allows_only_web_only_sessions() {
-    let cfg = RemoteConfig::try_new(8765, "a-long-enough-password-123".into(), false)
-        .expect("valid remote config")
-        .with_remote_mode_policy(RemoteModePolicy::WebOnlyOnly);
-    assert_eq!(cfg.remote_mode_policy, RemoteModePolicy::WebOnlyOnly);
+fn web_users_file_deny_unknown_user_fields() {
+    let toml_str = r#"
+[users.alice]
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGVzdGhhc2g="
+session_dir = "/tmp/alice-sessions"
+unknown_user_field = "x"
+"#;
+    let result: Result<crate::config::WebUsersFile, _> = toml::from_str(toml_str);
+    assert!(result.is_err());
+}
+
+#[test]
+fn web_users_file_valid_toml_parses() -> anyhow::Result<()> {
+    let toml_str = r#"
+[users.alice]
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGVzdGhhc2g="
+session_dir = "/tmp/alice-sessions"
+
+[users.bob]
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$b2ZmZ2hhc2g="
+session_dir = "/tmp/bob-sessions"
+"#;
+    let file: crate::config::WebUsersFile = toml::from_str(toml_str)?;
+    assert_eq!(file.users.len(), 2);
+    assert!(file.users.contains_key("alice"));
+    assert!(file.users.contains_key("bob"));
     assert_eq!(
-        cfg.remote_mode_policy.new_session_mode(),
-        SessionMode::WebOnly
+        file.users["alice"].password_hash,
+        "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGVzdGhhc2g="
     );
-    assert!(
-        !cfg.remote_mode_policy
-            .allows_session_mode(SessionMode::Normal)
+    assert_eq!(
+        file.users["alice"].session_dir,
+        std::path::PathBuf::from("/tmp/alice-sessions")
     );
-    assert!(
-        cfg.remote_mode_policy
-            .allows_session_mode(SessionMode::WebOnly)
-    );
+    Ok(())
+}
+
+#[test]
+fn web_users_file_missing_password_hash_is_rejected() {
+    let toml_str = r#"
+[users.alice]
+session_dir = "/tmp/alice-sessions"
+"#;
+    let result: Result<crate::config::WebUsersFile, _> = toml::from_str(toml_str);
+    assert!(result.is_err());
+}
+
+#[test]
+fn web_users_file_missing_session_dir_is_rejected() {
+    let toml_str = r#"
+[users.alice]
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGVzdGhhc2g="
+"#;
+    let result: Result<crate::config::WebUsersFile, _> = toml::from_str(toml_str);
+    assert!(result.is_err());
 }

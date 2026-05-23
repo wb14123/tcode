@@ -6,10 +6,18 @@ Use it when you want to access tcode from a browser instead of the tmux/neovim U
 
 ## Quick start on localhost
 
-Start the server with a shared login secret:
+First, create a web user:
 
 ```sh
-TCODE_REMOTE_PASSWORD='choose-a-strong-password' tcode remote --port 8080
+tcode add-web-user alice
+```
+
+You'll be prompted for a password. The user and a hashed password are stored in `~/.tcode/web-users.toml`.
+
+Then start the server:
+
+```sh
+tcode remote --port 8080
 ```
 
 Open:
@@ -18,9 +26,11 @@ Open:
 http://127.0.0.1:8080/
 ```
 
-Log in with the value of `TCODE_REMOTE_PASSWORD`.
+Log in with the username and password you chose.
 
 The default bind address is `127.0.0.1`, so this command is intended for same-machine browser access or use through a trusted tunnel. The examples use `127.0.0.1`; if you choose another loopback hostname such as `localhost`, use that hostname consistently in the browser because cookies and same-origin checks are origin-specific.
+
+The server requires `~/.tcode/web-users.toml` to exist with at least one user. If the file is missing or empty, the server exits with an error.
 
 ## Command reference
 
@@ -32,16 +42,13 @@ Common examples:
 
 ```sh
 # Localhost only
-TCODE_REMOTE_PASSWORD='...' tcode remote --port 8080
+tcode remote --port 8080
 
 # Use a config profile
-TCODE_REMOTE_PASSWORD='...' tcode -p work remote --port 8080
-
-# Web-only remote server
-TCODE_REMOTE_PASSWORD='...' tcode --web-only remote --port 8080
+tcode -p work remote --port 8080
 
 # Bind on all interfaces, for use behind a reverse proxy or trusted network boundary
-TCODE_REMOTE_PASSWORD='...' tcode remote --host 0.0.0.0 --port 8080
+tcode remote --host 0.0.0.0 --port 8080
 ```
 
 Remote-specific flags:
@@ -50,7 +57,6 @@ Remote-specific flags:
 |------|-------------|
 | `--port <port>` | TCP port to bind. Required. `0` is rejected; choose a concrete port. |
 | `--host <ip>` | IP address to bind. Defaults to `127.0.0.1`. Use `0.0.0.0` or `::` only when intentionally exposing the server beyond localhost. |
-| `--password <secret>` | Shared secret for browser login. Prefer `TCODE_REMOTE_PASSWORD` instead. |
 | `--allow-insecure-http` | Omit the `Secure` cookie attribute for direct plain-HTTP access. Use only for trusted local/private setups. |
 
 Relevant global flags:
@@ -58,35 +64,43 @@ Relevant global flags:
 | Flag | Description |
 |------|-------------|
 | `-p <profile>` | Load `~/.tcode/config-<profile>.toml` instead of the default config. |
-| `--web-only` | Create and expose only web-only sessions from this remote server. This is a global flag; it is accepted before or after `remote`, but examples in this guide put it before the subcommand except where showing the Docker image's default command. |
-| `-c <container>` / `--container <container>` | In normal remote sessions, run bash commands inside an existing Docker/Podman container. File tools still operate on the host. See [Configuration: Container Mode](02-configuration.md#container-mode). |
+| `-c <container>` / `--container <container>` | In remote sessions, run bash commands inside an existing Docker/Podman container. File tools still operate on the host. See [Configuration: Container Mode](02-configuration.md#container-mode). |
 | `--container-runtime <runtime>` | Container runtime CLI for `-c/--container`: `docker` (default) or `podman`. Requires `-c/--container`. |
 
 `--session <id>` is a global flag for terminal/tmux session commands. It is not used by `tcode remote`: the web server lists and creates sessions through the browser UI instead of attaching to one startup session.
 
-## Password and login sessions
+## Users and login sessions
 
-`tcode remote` uses a single shared secret, not per-user accounts.
+`tcode remote` uses per-user accounts with argon2id-hashed passwords stored in `~/.tcode/web-users.toml`.
 
-Prefer the environment variable:
+Create users before starting the server:
 
 ```sh
-TCODE_REMOTE_PASSWORD='choose-a-strong-password' tcode remote --port 8080
+tcode add-web-user alice
 ```
 
-Passing the secret on argv works, but is less safe because command arguments can appear in shell history or process listings:
+You'll be prompted for a password interactively. The password is never echoed and never stored in shell history. Run the command again to add more users:
 
 ```sh
-tcode remote --port 8080 --password 'choose-a-strong-password'
+tcode add-web-user bob
+```
+
+The resulting file looks like this:
+
+```toml
+# ~/.tcode/web-users.toml
+[users.alice]
+hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+
+[users.bob]
+hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
 ```
 
 Notes:
 
-- Empty or all-whitespace passwords are rejected.
-- Passwords shorter than 16 characters produce a warning.
-- Leading/trailing whitespace is significant at login.
-- If both `TCODE_REMOTE_PASSWORD` and `--password` are supplied, the explicit `--password` command-line value is used.
-- Login creates an HTTP-only `tcode_session` cookie with a 7-day max age.
+- Passwords shorter than 8 characters are rejected by `tcode add-web-user`.
+- Login sends `POST /api/auth/login` with `{"username": "...", "password": "..."}`.
+- Successful login returns an HTTP-only `tcode_session` cookie with a 7-day max age.
 - Server-side login sessions are in memory. Restarting `tcode remote` invalidates existing browser logins.
 
 ## Security model
@@ -102,10 +116,9 @@ Safe defaults:
 
 When exposing beyond localhost:
 
-1. Use a strong password.
+1. Use strong passwords for all web users.
 2. Prefer HTTPS through a reverse proxy, SSH tunnel, or other trusted tunnel/proxy.
 3. Bind intentionally, for example `--host 0.0.0.0`, only when the network path is protected.
-4. Consider `--web-only` unless you specifically need normal sessions with local file/shell tools.
 
 For HTTPS reverse proxies, preserve the original `Host` header and set either `X-Forwarded-Proto: https` or `Forwarded: proto=https`. tcode uses these headers when checking request origins for login/logout and other write routes. Proxy paths unchanged so `/api/...` and browser routes stay on the same origin.
 
@@ -116,8 +129,7 @@ For default loopback access such as `http://127.0.0.1:8080/`, browsers generally
 For direct non-loopback plain HTTP, login may fail because the browser can discard `Secure` cookies. If you intentionally run on trusted plain HTTP, opt in explicitly:
 
 ```sh
-TCODE_REMOTE_PASSWORD='...' \
-  tcode remote --host 0.0.0.0 --port 8080 --allow-insecure-http
+tcode remote --host 0.0.0.0 --port 8080 --allow-insecure-http
 ```
 
 This sends the password and session cookie over cleartext HTTP. Do not use it on untrusted networks.
@@ -139,24 +151,13 @@ Normal remote sessions have the same local/container capabilities as terminal tc
 
 The backend API is documented in [`tcode-web/api.md`](../tcode-web/api.md). It includes auth endpoints, session lifecycle endpoints, file-shaped read/stream endpoints, subagent and tool-call endpoints, conversation/tool cancellation, and permission APIs.
 
-## Web-only remote mode
+## Web session mode
 
-For a safer research-oriented remote server, run:
-
-```sh
-TCODE_REMOTE_PASSWORD='...' tcode --web-only remote --port 8080
-```
-
-or, inside Docker, the image defaults to the equivalent of:
-
-```sh
-tcode remote --web-only --host 0.0.0.0 --port 8080
-```
+All sessions created through the web UI are web-only sessions — no flag is needed. The browser remote server does not create or expose normal (filesystem/shell) sessions.
 
 In web-only mode:
 
 - New sessions are created as web-only sessions.
-- Existing non-web-only sessions are hidden from this remote server.
 - Project-local instructions such as `CLAUDE.md` are not loaded.
 - No current working directory is captured.
 - Local filesystem, shell, edit, grep/glob, LSP, and skill tools are not registered.
@@ -168,7 +169,7 @@ In web-only mode:
   - `continue_subagent`
 - `web_fetch` hostname permissions are auto-granted (a session-scoped wildcard `web_fetch > hostname > *`). The grant appears in the permission tree and can be revoked at any time.
 
-This makes `--web-only` a better default for remotely exposed browser access. Normal remote sessions expose the same local/container capabilities as normal tcode sessions and should be treated as high trust.
+This makes the web remote server safe for remotely exposed browser access. Normal sessions with local/container capabilities are available only through the terminal/tmux UI.
 
 ## Configuration and data paths
 
@@ -178,6 +179,7 @@ This makes `--web-only` a better default for remotely exposed browser access. No
 |------|----------|
 | Default config | `~/.tcode/config.toml` |
 | Profile config | `~/.tcode/config-<profile>.toml` |
+| Web users | `~/.tcode/web-users.toml` |
 | OAuth tokens | `~/.tcode/auth/` |
 | Sessions | `~/.tcode/sessions/` |
 | Browser-server socket | `~/.tcode/browser-server.sock` |
@@ -250,7 +252,7 @@ The repository includes a Dockerfile for running the remote server in web-only m
 The default container command is:
 
 ```sh
-tcode remote --web-only --host 0.0.0.0 --port 8080
+tcode remote --host 0.0.0.0 --port 8080
 ```
 
 ### Build the image
@@ -280,7 +282,7 @@ For HTTPS/reverse-proxy use:
 docker run --rm \
   --security-opt seccomp=unconfined \
   -p 8080:8080 \
-  -e TCODE_REMOTE_PASSWORD='choose-a-strong-password' \
+  -v "$HOME/.tcode/web-users.toml:/home/tcode/.tcode/web-users.toml:ro" \
   "$IMAGE_TAG"
 ```
 
@@ -294,7 +296,7 @@ For non-loopback direct plain-HTTP testing, add `--allow-insecure-http` by passi
 docker run --rm \
   --security-opt seccomp=unconfined \
   -p 8080:8080 \
-  -e TCODE_REMOTE_PASSWORD='choose-a-strong-password' \
+  -v "$HOME/.tcode/web-users.toml:/home/tcode/.tcode/web-users.toml:ro" \
   "$IMAGE_TAG" \
   --host 0.0.0.0 --port 8080 --allow-insecure-http
 ```
@@ -315,7 +317,6 @@ mkdir -p "$HOME/tcode-docker-data"
 docker run --rm \
   --security-opt seccomp=unconfined \
   -p 8080:8080 \
-  -e TCODE_REMOTE_PASSWORD='choose-a-strong-password' \
   -v "$HOME/tcode-docker-data:/home/tcode/.tcode:rw" \
   "$IMAGE_TAG"
 ```
@@ -325,6 +326,7 @@ Recommended practice is to copy only the data you want into this dedicated direc
 ```sh
 mkdir -p "$HOME/tcode-docker-data"
 cp ~/.tcode/config.toml "$HOME/tcode-docker-data/"
+cp ~/.tcode/web-users.toml "$HOME/tcode-docker-data/"
 # Optional, only if needed:
 # cp -a ~/.tcode/auth "$HOME/tcode-docker-data/"
 # cp -a ~/.tcode/chrome "$HOME/tcode-docker-data/"
@@ -336,7 +338,6 @@ Mounting your real `~/.tcode` is possible, but it exposes all local tcode config
 docker run --rm \
   --security-opt seccomp=unconfined \
   -p 8080:8080 \
-  -e TCODE_REMOTE_PASSWORD='choose-a-strong-password' \
   -v "$HOME/.tcode:/home/tcode/.tcode:rw" \
   "$IMAGE_TAG"
 ```

@@ -1,10 +1,11 @@
 use std::convert::Infallible;
 use std::io::SeekFrom;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Duration;
 
 use axum::{
-    Json,
+    Extension, Json,
     body::Body,
     extract::{Multipart, Path as AxumPath, Query, State},
     http::{StatusCode, header},
@@ -22,58 +23,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tcode_runtime::{
     protocol::{ClientMessage, DEFAULT_LEASE_TIMEOUT_SECONDS, ServerMessage, SessionRuntimeInfo},
-    session::{
-        Session, SessionMeta, SessionMode, base_path, ensure_session_mode_initialized,
-        generate_session_id, list_sessions, read_session_mode, validate_session_id,
-    },
+    session::{SessionMeta, SessionMode, ensure_session_mode_initialized, read_session_mode},
 };
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio_stream::{Stream, wrappers::ReceiverStream};
 
+use super::session_path::{ApiError, ApiResult, SessionDir, SessionRoot};
 use crate::state::{AppState, SessionRuntimeStatus};
-
-#[derive(Debug)]
-pub(crate) struct ApiError {
-    status: StatusCode,
-    message: String,
-}
-
-impl ApiError {
-    fn new(status: StatusCode, message: impl Into<String>) -> Self {
-        Self {
-            status,
-            message: message.into(),
-        }
-    }
-
-    fn bad_request(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::BAD_REQUEST, message)
-    }
-
-    fn not_found(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::NOT_FOUND, message)
-    }
-
-    fn conflict(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::CONFLICT, message)
-    }
-
-    fn internal(message: impl Into<String>) -> Self {
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, message)
-    }
-}
-
-impl IntoResponse for ApiError {
-    fn into_response(self) -> Response {
-        (
-            self.status,
-            Json(serde_json::json!({ "error": self.message })),
-        )
-            .into_response()
-    }
-}
-
-type ApiResult<T> = Result<T, ApiError>;
 
 #[derive(Serialize)]
 pub(crate) struct SessionsResponse {
@@ -179,18 +135,23 @@ struct ParentContext {
 }
 
 pub(crate) async fn get_sessions(
-    State(state): State<std::sync::Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
 ) -> ApiResult<Json<SessionsResponse>> {
     let mut sessions = Vec::new();
-    for session_id in list_sessions().map_err(|e| ApiError::internal(e.to_string()))? {
-        let session_dir = session_dir_for(&session_id)?;
-        let meta =
-            read_json_optional::<SessionMeta>(&session_dir.join("session-meta.json")).await?;
+    for session_id in root.list_sessions()?.into_iter() {
+        let session = match root.open_session(&session_id) {
+            Ok(s) => s,
+            Err(_) => continue,
+        };
+        let meta = session
+            .read_optional_json::<SessionMeta>("session-meta.json")
+            .await?;
         let mode = meta.as_ref().map(|m| m.mode).unwrap_or_default();
-        if !state.allows_session_mode(mode) {
+        if !mode.is_web_only() {
             continue;
         }
-        let status = read_optional_text_file(&session_dir.join("status.txt"))
+        let status = session
+            .read_optional_text("status.txt")
             .await?
             .unwrap_or_default();
         sessions.push(SessionSummary {
@@ -211,21 +172,18 @@ pub(crate) async fn get_sessions(
 }
 
 pub(crate) async fn post_sessions(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     Json(body): Json<CreateSessionRequest>,
 ) -> ApiResult<Json<CreateSessionResponse>> {
-    let session_id = create_unique_session_id().map_err(|e| ApiError::internal(e.to_string()))?;
-    let session =
-        Session::new(session_id.clone()).map_err(|e| ApiError::internal(e.to_string()))?;
-    ensure_session_mode_initialized(session.session_dir(), state.new_session_mode())
+    let session_id = root.create_unique_session_id()?;
+    let session = root.create_session(&session_id)?;
+    ensure_session_mode_initialized(session.session_dir(), SessionMode::WebOnly)
         .map_err(|e| ApiError::internal(e.to_string()))?;
     state
-        .ensure_runtime(&session_id)
+        .ensure_runtime(&session_id, session.session_dir())
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?;
-    // Only send the initial prompt if it's non-empty; empty prompts are used
-    // when the caller wants to create a session first (e.g. to upload images)
-    // and send the real message later.
     if !body.initial_prompt.is_empty() {
         send_runtime_message(
             &state,
@@ -235,6 +193,7 @@ pub(crate) async fn post_sessions(
                 content: body.initial_prompt,
                 media_filenames: None,
             },
+            session.session_dir(),
         )
         .await?;
     }
@@ -243,43 +202,45 @@ pub(crate) async fn post_sessions(
 }
 
 pub(crate) async fn get_session_meta(
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<Json<Value>> {
-    let session_dir = existing_session_dir(&session_id)?;
-    Ok(Json(
-        read_json_value(&session_dir.join("session-meta.json")).await?,
-    ))
+    let session = root.open_session(&session_id)?;
+    Ok(Json(session.read_json_value("session-meta.json").await?))
 }
 
 pub(crate) async fn get_conversation_state(
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<Json<Value>> {
-    let session_dir = existing_session_dir(&session_id)?;
+    let session = root.open_session(&session_id)?;
     Ok(Json(
-        read_json_value(&session_dir.join("conversation-state.json")).await?,
+        session.read_json_value("conversation-state.json").await?,
     ))
 }
 
 pub(crate) async fn get_session_status(
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let session_dir = existing_session_dir(&session_id)?;
+    let session = root.open_session(&session_id)?;
     Ok(text_response(
-        read_optional_text_file(&session_dir.join("status.txt")).await?,
+        session.read_optional_text("status.txt").await?,
     ))
 }
 
 pub(crate) async fn post_session_lease(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
     Json(body): Json<RegisterLeaseRequest>,
 ) -> ApiResult<Json<LeaseResponse>> {
-    let session_dir = existing_session_dir(&session_id)?;
+    let session = root.open_session(&session_id)?;
     if body.resume {
-        ensure_session_resumable(&session_dir).await?;
+        ensure_session_resumable(session.dir()).await?;
     }
     let lease = state
-        .register_web_client_lease(&session_id, body.client_label, body.resume)
+        .register_web_client_lease(&session_id, session.dir(), body.client_label, body.resume)
         .await
         .map_err(|e| ApiError::conflict(e.to_string()))?;
 
@@ -294,7 +255,7 @@ pub(crate) async fn post_session_lease(
         }));
     }
 
-    let runtime_info = inactive_runtime_info_for(&session_dir)?;
+    let runtime_info = inactive_runtime_info_for(session.dir())?;
     Ok(Json(LeaseResponse {
         active: false,
         client_id: None,
@@ -305,160 +266,172 @@ pub(crate) async fn post_session_lease(
 }
 
 pub(crate) async fn post_session_lease_heartbeat(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, client_id)): AxumPath<(String, String)>,
 ) -> ApiResult<Json<RuntimeInfoResponse>> {
-    let session_dir = existing_session_dir(&session_id)?;
+    let session = root.open_session(&session_id)?;
     let mut runtime_info = state
-        .heartbeat_client_lease(&session_id, client_id)
+        .heartbeat_client_lease(&session_id, session.dir(), client_id)
         .await
         .map_err(|e| ApiError::conflict(e.to_string()))?;
     if !runtime_info.active {
         runtime_info.session_mode =
-            read_session_mode(&session_dir).map_err(|e| ApiError::internal(e.to_string()))?;
+            read_session_mode(session.dir()).map_err(|e| ApiError::internal(e.to_string()))?;
     }
     Ok(Json(RuntimeInfoResponse { runtime_info }))
 }
 
 pub(crate) async fn delete_session_lease(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, client_id)): AxumPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
-    existing_session_dir(&session_id)?;
-    state.detach_client_lease(&session_id, client_id).await;
+    let session = root.open_session(&session_id)?;
+    state
+        .detach_client_lease(&session_id, session.dir(), client_id)
+        .await;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn get_session_usage(
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let session_dir = existing_session_dir(&session_id)?;
+    let session = root.open_session(&session_id)?;
     Ok(text_response(
-        read_optional_text_file(&session_dir.join("usage.txt")).await?,
+        session.read_optional_text("usage.txt").await?,
     ))
 }
 
 pub(crate) async fn get_session_token_usage(
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<impl IntoResponse> {
-    let session_dir = existing_session_dir(&session_id)?;
+    let session = root.open_session(&session_id)?;
     Ok(text_response(
-        read_optional_text_file(&session_dir.join("token_usage.txt")).await?,
+        session.read_optional_text("token_usage.txt").await?,
     ))
 }
 
 pub(crate) async fn stream_session_display(
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
     Query(query): Query<SseQuery>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let path = session_dir.join("display.jsonl");
+    let session = root.open_session(&session_id)?;
+    let path = session.dir().join("display.jsonl");
     let initial_offset = query.byte_offset.unwrap_or(0);
     let initial_line_number = query.start_line_number.unwrap_or(0);
     sse_jsonl(path, true, initial_offset, initial_line_number)
 }
 
 pub(crate) async fn stream_session_tool_call(
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, tool_call_file)): AxumPath<(String, String)>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
-    let session_dir = existing_session_dir(&session_id)?;
+    let session = root.open_session(&session_id)?;
     let tool_call_id = decode_jsonl_file_id(&tool_call_file)?;
-    let path = session_dir.join(format!("tool-call-{tool_call_id}.jsonl"));
+    let path = session.safe_path(&format!("tool-call-{tool_call_id}.jsonl"))?;
     sse_jsonl(path, false, 0, 0)
 }
 
 pub(crate) async fn get_session_tool_call_status(
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, tool_call_id)): AxumPath<(String, String)>,
 ) -> ApiResult<impl IntoResponse> {
-    let session_dir = existing_session_dir(&session_id)?;
-    Ok(text_response(Some(
-        read_required_text_file(&session_dir.join(format!("tool-call-{tool_call_id}-status.txt")))
-            .await?,
-    )))
+    let session = root.open_session(&session_id)?;
+    let status_text = session
+        .read_optional_text(&format!("tool-call-{tool_call_id}-status.txt"))
+        .await?;
+    Ok(text_response(status_text))
 }
 
 pub(crate) async fn get_subagent_meta(
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
 ) -> ApiResult<Json<SubagentMetaResponse>> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
-    let meta = read_json_value(&subagent_dir.join("session-meta.json")).await?;
-    let parent = subagent_parent_context(&session_dir, &subagent_dir, &subagent_id).await?;
+    let session = root.open_session(&session_id)?;
+    let sub = session.subagent_dir(&subagent_id)?;
+    let meta = sub.read_json_value("session-meta.json").await?;
+    let parent = subagent_parent_context(session.dir(), sub.dir(), &subagent_id).await?;
     Ok(Json(SubagentMetaResponse { meta, parent }))
 }
 
 pub(crate) async fn get_subagent_conversation_state(
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
 ) -> ApiResult<Json<Value>> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
-    Ok(Json(
-        read_json_value(&subagent_dir.join("conversation-state.json")).await?,
-    ))
+    let session = root.open_session(&session_id)?;
+    let sub = session.subagent_dir(&subagent_id)?;
+    Ok(Json(sub.read_json_value("conversation-state.json").await?))
 }
 
 pub(crate) async fn get_subagent_status(
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
 ) -> ApiResult<impl IntoResponse> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
-    Ok(text_response(
-        read_optional_text_file(&subagent_dir.join("status.txt")).await?,
-    ))
+    let session = root.open_session(&session_id)?;
+    let sub = session.subagent_dir(&subagent_id)?;
+    Ok(text_response(sub.read_optional_text("status.txt").await?))
 }
 
 pub(crate) async fn get_subagent_token_usage(
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
 ) -> ApiResult<impl IntoResponse> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
+    let session = root.open_session(&session_id)?;
+    let sub = session.subagent_dir(&subagent_id)?;
     Ok(text_response(
-        read_optional_text_file(&subagent_dir.join("token_usage.txt")).await?,
+        sub.read_optional_text("token_usage.txt").await?,
     ))
 }
 
 pub(crate) async fn stream_subagent_display(
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
     Query(query): Query<SseQuery>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
-    let path = subagent_dir.join("display.jsonl");
+    let session = root.open_session(&session_id)?;
+    let sub = session.subagent_dir(&subagent_id)?;
+    let path = sub.dir().join("display.jsonl");
     let initial_offset = query.byte_offset.unwrap_or(0);
     let initial_line_number = query.start_line_number.unwrap_or(0);
     sse_jsonl(path, true, initial_offset, initial_line_number)
 }
 
 pub(crate) async fn stream_subagent_tool_call(
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id, tool_call_file)): AxumPath<(String, String, String)>,
 ) -> ApiResult<Sse<impl Stream<Item = Result<Event, Infallible>>>> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
+    let session = root.open_session(&session_id)?;
+    let sub = session.subagent_dir(&subagent_id)?;
     let tool_call_id = decode_jsonl_file_id(&tool_call_file)?;
-    let path = subagent_dir.join(format!("tool-call-{tool_call_id}.jsonl"));
+    let path = sub.safe_path(&format!("tool-call-{tool_call_id}.jsonl"))?;
     sse_jsonl(path, false, 0, 0)
 }
 
 pub(crate) async fn get_subagent_tool_call_status(
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id, tool_call_id)): AxumPath<(String, String, String)>,
 ) -> ApiResult<impl IntoResponse> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
-    Ok(text_response(Some(
-        read_required_text_file(&subagent_dir.join(format!("tool-call-{tool_call_id}-status.txt")))
-            .await?,
-    )))
+    let session = root.open_session(&session_id)?;
+    let sub = session.subagent_dir(&subagent_id)?;
+    let status_text = sub
+        .read_optional_text(&format!("tool-call-{tool_call_id}-status.txt"))
+        .await?;
+    Ok(text_response(status_text))
 }
 
 pub(crate) async fn post_session_message(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
     Json(body): Json<MessageRequest>,
 ) -> ApiResult<StatusCode> {
-    existing_session_dir(&session_id)?;
-    // Validate media filenames to prevent path traversal
+    let session = root.open_session(&session_id)?;
     for f in &body.media_filenames {
-        validate_basename(f)?;
+        SessionDir::validate_media_filename(f)?;
     }
     send_runtime_message(
         &state,
@@ -472,21 +445,22 @@ pub(crate) async fn post_session_message(
                 Some(body.media_filenames)
             },
         },
+        session.dir(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn post_subagent_message(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
     Json(body): Json<MessageRequest>,
 ) -> ApiResult<StatusCode> {
-    let session_dir = existing_session_dir(&session_id)?;
-    find_subagent_dir(&session_dir, &subagent_id)?;
-    // Validate media filenames to prevent path traversal
+    let session = root.open_session(&session_id)?;
+    session.subagent_dir(&subagent_id)?;
     for f in &body.media_filenames {
-        validate_basename(f)?;
+        SessionDir::validate_media_filename(f)?;
     }
     send_runtime_message(
         &state,
@@ -500,20 +474,19 @@ pub(crate) async fn post_subagent_message(
                 Some(body.media_filenames)
             },
         },
+        session.dir(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn upload_media(
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
     mut multipart: Multipart,
 ) -> ApiResult<Json<UploadMediaResponse>> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let session = Session::with_dir(session_dir);
-    session
-        .create_media_dir()
-        .map_err(|e| ApiError::internal(e.to_string()))?;
+    let session = root.open_session(&session_id)?;
+    session.create_media_dir()?;
 
     let mut files = Vec::new();
 
@@ -528,8 +501,6 @@ pub(crate) async fn upload_media(
             continue;
         }
 
-        // Validate content type is a supported format (empty = unknown, let
-        // save_media_data figure it out from magic bytes).
         match content_type.as_str() {
             "" | "image/png" | "image/jpeg" | "image/jpg" | "image/gif" | "image/webp"
             | "application/pdf" => {}
@@ -540,9 +511,7 @@ pub(crate) async fn upload_media(
             }
         }
 
-        let (filename, media_type) = session
-            .save_media_data(&data)
-            .map_err(|e| ApiError::bad_request(format!("failed to process media: {e}")))?;
+        let (filename, media_type) = session.save_media_data(&data)?;
 
         files.push(UploadedFile {
             filename,
@@ -557,18 +526,12 @@ pub(crate) async fn upload_media(
     Ok(Json(UploadMediaResponse { files }))
 }
 
-fn validate_basename(name: &str) -> ApiResult<()> {
-    llm_rs::media::validate_media_filename(name).map_err(|e| ApiError::bad_request(e.to_string()))
-}
-
 pub(crate) async fn serve_media(
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, filename)): AxumPath<(String, String)>,
 ) -> ApiResult<Response<Body>> {
-    validate_basename(&filename)?;
-    let session_dir = existing_session_dir(&session_id)?;
-    let session = Session::with_dir(session_dir);
-    let path = llm_rs::media::resolve_media_path(&session.media_dir(), &filename)
-        .map_err(|e| ApiError::bad_request(e.to_string()))?;
+    let session = root.open_session(&session_id)?;
+    let path = session.media_path(&filename)?;
 
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -588,79 +551,88 @@ pub(crate) async fn serve_media(
 }
 
 pub(crate) async fn post_session_finish(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<StatusCode> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let root_id = root_conversation_id(&session_dir).await?;
+    let session = root.open_session(&session_id)?;
+    let root_id = root_conversation_id(session.dir()).await?;
     send_runtime_message(
         &state,
         &session_id,
         ClientMessage::UserRequestEnd {
             conversation_id: root_id,
         },
+        session.dir(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn post_subagent_finish(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
-    let session_dir = existing_session_dir(&session_id)?;
-    find_subagent_dir(&session_dir, &subagent_id)?;
+    let session = root.open_session(&session_id)?;
+    session.subagent_dir(&subagent_id)?;
     send_runtime_message(
         &state,
         &session_id,
         ClientMessage::UserRequestEnd {
             conversation_id: subagent_id,
         },
+        session.dir(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn post_session_cancel(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<StatusCode> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let root_id = root_conversation_id(&session_dir).await?;
+    let session = root.open_session(&session_id)?;
+    let root_id = root_conversation_id(session.dir()).await?;
     send_runtime_message(
         &state,
         &session_id,
         ClientMessage::CancelConversation {
             conversation_id: root_id,
         },
+        session.dir(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn post_subagent_cancel(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id)): AxumPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
-    let session_dir = existing_session_dir(&session_id)?;
-    find_subagent_dir(&session_dir, &subagent_id)?;
+    let session = root.open_session(&session_id)?;
+    session.subagent_dir(&subagent_id)?;
     send_runtime_message(
         &state,
         &session_id,
         ClientMessage::CancelConversation {
             conversation_id: subagent_id,
         },
+        session.dir(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn post_session_tool_call_cancel(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, tool_call_id)): AxumPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let tool_path = session_dir.join(format!("tool-call-{tool_call_id}.jsonl"));
+    let session = root.open_session(&session_id)?;
+    let tool_path = session.safe_path(&format!("tool-call-{tool_call_id}.jsonl"))?;
     if !tool_path.is_file() {
         return Err(ApiError::not_found("tool call not found"));
     }
@@ -668,18 +640,20 @@ pub(crate) async fn post_session_tool_call_cancel(
         &state,
         &session_id,
         ClientMessage::CancelTool { tool_call_id },
+        session.dir(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn post_subagent_tool_call_cancel(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, subagent_id, tool_call_id)): AxumPath<(String, String, String)>,
 ) -> ApiResult<StatusCode> {
-    let session_dir = existing_session_dir(&session_id)?;
-    let subagent_dir = find_subagent_dir(&session_dir, &subagent_id)?;
-    let tool_path = subagent_dir.join(format!("tool-call-{tool_call_id}.jsonl"));
+    let session = root.open_session(&session_id)?;
+    let sub = session.subagent_dir(&subagent_id)?;
+    let tool_path = sub.safe_path(&format!("tool-call-{tool_call_id}.jsonl"))?;
     if !tool_path.is_file() {
         return Err(ApiError::not_found("subagent tool call not found"));
     }
@@ -687,19 +661,25 @@ pub(crate) async fn post_subagent_tool_call_cancel(
         &state,
         &session_id,
         ClientMessage::CancelTool { tool_call_id },
+        session.dir(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn get_permissions(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
 ) -> ApiResult<Json<PermissionState>> {
-    existing_session_dir(&session_id)?;
-    let response =
-        send_runtime_message_if_active(&state, &session_id, ClientMessage::GetPermissionState)
-            .await?;
+    let session = root.open_session(&session_id)?;
+    let response = send_runtime_message_if_active(
+        &state,
+        &session_id,
+        ClientMessage::GetPermissionState,
+        session.dir(),
+    )
+    .await?;
     match response {
         Some(ServerMessage::PermissionState(state)) => Ok(Json(state)),
         Some(ServerMessage::Ack) => Err(ApiError::internal("unexpected ack from permission query")),
@@ -713,11 +693,12 @@ pub(crate) async fn get_permissions(
 }
 
 pub(crate) async fn post_permissions_resolve(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
     Json(body): Json<ResolvePermissionRequest>,
 ) -> ApiResult<StatusCode> {
-    existing_session_dir(&session_id)?;
+    let session = root.open_session(&session_id)?;
     send_runtime_message(
         &state,
         &session_id,
@@ -726,17 +707,19 @@ pub(crate) async fn post_permissions_resolve(
             decision: body.decision,
             request_id: body.request_id,
         },
+        session.dir(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn post_permissions_add(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath(session_id): AxumPath<String>,
     Json(body): Json<AddPermissionRequest>,
 ) -> ApiResult<StatusCode> {
-    existing_session_dir(&session_id)?;
+    let session = root.open_session(&session_id)?;
     send_runtime_message(
         &state,
         &session_id,
@@ -744,18 +727,26 @@ pub(crate) async fn post_permissions_add(
             key: body.key,
             scope: body.scope,
         },
+        session.dir(),
     )
     .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
 pub(crate) async fn delete_permission(
-    State(state): State<std::sync::Arc<AppState>>,
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
     AxumPath((session_id, permission_id)): AxumPath<(String, String)>,
 ) -> ApiResult<StatusCode> {
-    existing_session_dir(&session_id)?;
+    let session = root.open_session(&session_id)?;
     let key = decode_permission_id(&permission_id)?;
-    send_runtime_message(&state, &session_id, ClientMessage::RevokePermission { key }).await?;
+    send_runtime_message(
+        &state,
+        &session_id,
+        ClientMessage::RevokePermission { key },
+        session.dir(),
+    )
+    .await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -763,9 +754,10 @@ async fn send_runtime_message(
     state: &AppState,
     session_id: &str,
     message: ClientMessage,
+    user_session_dir: &Path,
 ) -> ApiResult<ServerMessage> {
     match state
-        .runtime_status(session_id)
+        .runtime_status(session_id, user_session_dir)
         .await
         .map_err(|e| ApiError::internal(e.to_string()))?
     {
@@ -783,7 +775,7 @@ async fn send_runtime_message(
     }
 
     let response = state
-        .send_socket_message(session_id, message)
+        .send_socket_message(session_id, message, user_session_dir)
         .await
         .map_err(|e| ApiError::conflict(format!("session runtime is unavailable: {e}")))?;
     if let ServerMessage::Error { message } = &response {
@@ -796,9 +788,10 @@ async fn send_runtime_message_if_active(
     state: &AppState,
     session_id: &str,
     message: ClientMessage,
+    user_session_dir: &Path,
 ) -> ApiResult<Option<ServerMessage>> {
     let Some(response) = state
-        .send_runtime_message_if_active(session_id, message)
+        .send_runtime_message_if_active(session_id, user_session_dir, message)
         .await
         .map_err(|e| ApiError::conflict(e.to_string()))?
     else {
@@ -838,34 +831,6 @@ fn map_runtime_error(message: String) -> ApiError {
     }
 }
 
-fn create_unique_session_id() -> std::io::Result<String> {
-    let base = base_path().map_err(std::io::Error::other)?;
-    for _ in 0..64 {
-        let session_id = generate_session_id();
-        if !base.join(&session_id).exists() {
-            return Ok(session_id);
-        }
-    }
-    Err(std::io::Error::other(
-        "failed to generate a unique session id",
-    ))
-}
-
-pub(crate) fn session_dir_for(session_id: &str) -> ApiResult<PathBuf> {
-    validate_session_id(session_id).map_err(|e| ApiError::bad_request(e.to_string()))?;
-    Ok(base_path()
-        .map_err(|e| ApiError::internal(e.to_string()))?
-        .join(session_id))
-}
-
-fn existing_session_dir(session_id: &str) -> ApiResult<PathBuf> {
-    let session_dir = session_dir_for(session_id)?;
-    if !session_dir.is_dir() {
-        return Err(ApiError::not_found("session not found"));
-    }
-    Ok(session_dir)
-}
-
 pub(crate) async fn ensure_session_resumable(session_dir: &Path) -> ApiResult<()> {
     let path = session_dir.join("conversation-state.json");
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
@@ -891,45 +856,6 @@ pub(crate) async fn ensure_session_resumable(session_dir: &Path) -> ApiResult<()
         ));
     }
     Ok(())
-}
-
-async fn read_json_value(path: &Path) -> ApiResult<Value> {
-    let bytes = tokio::fs::read(path).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            ApiError::not_found(format!("resource {:?} not found", path.file_name()))
-        } else {
-            ApiError::internal(e.to_string())
-        }
-    })?;
-    serde_json::from_slice(&bytes).map_err(|e| ApiError::internal(e.to_string()))
-}
-
-async fn read_json_optional<T: serde::de::DeserializeOwned>(path: &Path) -> ApiResult<Option<T>> {
-    match tokio::fs::read(path).await {
-        Ok(bytes) => serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|e| ApiError::internal(e.to_string())),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(ApiError::internal(e.to_string())),
-    }
-}
-
-async fn read_required_text_file(path: &Path) -> ApiResult<String> {
-    tokio::fs::read_to_string(path).await.map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            ApiError::not_found(format!("resource {:?} not found", path.file_name()))
-        } else {
-            ApiError::internal(e.to_string())
-        }
-    })
-}
-
-async fn read_optional_text_file(path: &Path) -> ApiResult<Option<String>> {
-    match tokio::fs::read_to_string(path).await {
-        Ok(text) => Ok(Some(text)),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
-        Err(e) => Err(ApiError::internal(e.to_string())),
-    }
 }
 
 fn text_response(text: Option<String>) -> Response {
@@ -1107,32 +1033,6 @@ fn trim_trailing_cr(mut bytes: &[u8]) -> &[u8] {
     bytes
 }
 
-fn find_subagent_dir(session_dir: &Path, subagent_id: &str) -> ApiResult<PathBuf> {
-    find_subagent_dir_inner(session_dir, subagent_id)
-        .ok_or_else(|| ApiError::not_found("subagent not found"))
-}
-
-fn find_subagent_dir_inner(dir: &Path, subagent_id: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if name == format!("subagent-{subagent_id}") {
-            return Some(path);
-        }
-        if name.starts_with("subagent-")
-            && let Some(found) = find_subagent_dir_inner(&path, subagent_id)
-        {
-            return Some(found);
-        }
-    }
-    None
-}
-
 async fn subagent_parent_context(
     session_dir: &Path,
     subagent_dir: &Path,
@@ -1166,9 +1066,23 @@ async fn subagent_parent_context(
 }
 
 async fn root_conversation_id(session_dir: &Path) -> ApiResult<String> {
-    let state: ConversationState = read_json_optional(&session_dir.join("conversation-state.json"))
-        .await?
-        .ok_or_else(|| ApiError::conflict("conversation state is not available yet"))?;
+    // Read conversation-state.json directly using tokio to avoid circular dep
+    // on SessionDir (since this is called with session.dir() which is &Path)
+    let path = session_dir.join("conversation-state.json");
+    let bytes = match tokio::fs::read(&path).await {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(ApiError::conflict(
+                "conversation state is not available yet",
+            ));
+        }
+        Err(e) => return Err(ApiError::internal(e.to_string())),
+    };
+    let state: ConversationState = serde_json::from_slice(&bytes)
+        .map_err(|_| ApiError::conflict("conversation state is invalid"))?;
+    if state.id.trim().is_empty() {
+        return Err(ApiError::conflict("conversation state has no id"));
+    }
     Ok(state.id)
 }
 

@@ -83,8 +83,8 @@ pub(crate) async fn parse_session_body(resp: Response) -> anyhow::Result<Session
     Ok(serde_json::from_slice::<SessionStatus>(&bytes)?)
 }
 
-pub(crate) fn login_body(secret: &str) -> String {
-    serde_json::json!({ "secret": secret }).to_string()
+pub(crate) fn login_body(username: &str, password: &str) -> String {
+    serde_json::json!({ "username": username, "password": password }).to_string()
 }
 
 /// Build a router that mirrors production sequencing (route registration

@@ -1,3 +1,4 @@
+pub mod add_web_user;
 mod config;
 mod routes;
 mod server;
@@ -10,5 +11,5 @@ mod server_tests;
 #[cfg(test)]
 mod state_tests;
 
-pub use config::{RemoteConfig, RemoteModePolicy};
+pub use config::RemoteConfig;
 pub use server::run;

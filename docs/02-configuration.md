@@ -22,7 +22,6 @@ See [03-commands.md](03-commands.md#tcode-config) for the full `tcode config` co
 
 ```
 tcode                          # start with default config
-tcode --web-only               # start a web-only session
 tcode -p work                  # start with ~/.tcode/config-work.toml
 tcode --session <id> attach    # attach to existing session
 tcode -c my-container          # run bash commands inside a Docker container
@@ -33,7 +32,6 @@ tcode -c my-container --container-runtime podman  # same, using Podman
 |------|-------------|
 | `-p <profile>` | Load a specific config profile |
 | `--session <id>` | Target a specific session |
-| `--web-only` | Create new sessions in web-only mode. This is a CLI/session mode, not a config-file setting. |
 | `-V`, `--version` | Print version and git commit |
 | `-c <name>`, `--container <name>` | Run bash commands inside a running container (see [Container Mode](#container-mode)) |
 | `--container-runtime <runtime>` | Container runtime CLI: `docker` (default) or `podman`. Requires `-c`. |
@@ -42,9 +40,9 @@ All other settings live in the config file.
 
 ## Session Modes
 
-Normal sessions are the default. They load project context, register the local filesystem and shell tools, and honor project instructions such as `CLAUDE.md`.
+Normal sessions are the default for the terminal/tmux UI. They load project context, register the local filesystem and shell tools, and honor project instructions such as `CLAUDE.md`.
 
-Use `tcode --web-only` to create a web-only session for research that should not expose local project context. Web-only sessions register only these tools:
+Web sessions are always web-only. The `tcode remote` web server creates only web-only sessions — no flag is needed. Web-only sessions register only these tools:
 
 - `current_time`
 - `web_search`
@@ -56,7 +54,7 @@ They do not register shell commands, local file tools (`read`, `write`, `edit`, 
 
 `web_fetch` hostname permissions are auto-granted in web-only sessions (a session-scoped wildcard `web_fetch > hostname > *`). The grant appears in the permission tree and can be revoked.
 
-The mode is stored as session metadata. Existing sessions keep their original mode when attached or resumed; passing `--web-only` affects new session creation, not existing sessions.
+The mode is stored as session metadata. Existing sessions keep their original mode when attached or resumed.
 
 ## Full Config Reference
 

@@ -41,14 +41,12 @@ pub(crate) async fn require_same_origin(request: Request, next: Next) -> Respons
 }
 
 fn expected_origin(headers: &HeaderMap) -> Result<String, String> {
-    let scheme = forwarded_proto(headers)
-        .or_else(|| {
-            header_str(
-                headers,
-                axum::http::header::HeaderName::from_static("x-forwarded-proto"),
-            )
-        })
-        .unwrap_or("http");
+    let scheme = header_str(
+        headers,
+        axum::http::header::HeaderName::from_static("x-forwarded-proto"),
+    )
+    .or_else(|| forwarded_proto(headers))
+    .unwrap_or("http");
     let host =
         header_str(headers, header::HOST).ok_or_else(|| "missing Host header".to_string())?;
     Ok(format!("{scheme}://{host}"))
