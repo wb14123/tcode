@@ -98,6 +98,12 @@ fn detects_keywords_in_compound_commands() {
 }
 
 #[test]
+fn detects_2_gt_amp_1() {
+    assert!(has_reviewable_keywords("cargo build 2>&1"));
+    assert!(has_reviewable_keywords("cargo test 2>&1 | tail -n 30"));
+}
+
+#[test]
 fn ignores_non_keyword_commands() {
     assert!(!has_reviewable_keywords("cargo build"));
     assert!(!has_reviewable_keywords("cargo test"));

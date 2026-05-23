@@ -419,7 +419,7 @@ pub fn bash(
 /// positives on filenames like `grep-test` (since `\b` treats `-` as non-word boundary),
 /// which is acceptable — the review LLM will correctly respond CONTINUE for those.
 const REVIEWABLE_KEYWORDS: &[&str] = &[
-    "ls", "find", "grep", "rg", "cat", "head", "tail", "sed", "awk", "echo",
+    "ls", "find", "grep", "rg", "cat", "head", "tail", "sed", "awk", "echo", "2>&1",
 ];
 
 fn has_reviewable_keywords(command: &str) -> bool {
@@ -454,6 +454,11 @@ async fn review_bash_command(
          - bash `head` parameter: keeps first N lines (replaces `head` in pipelines)\n\
          - bash `tail` parameter: keeps last N lines (replaces `tail` in pipelines)\n\
          - Direct response: for `echo`, the LLM should respond directly instead of using bash\n\
+         - `2>&1` is NEVER needed — the bash tool automatically captures and merges both\n\
+           stdout and stderr (each line is tagged `stdout| ` or `stderr| `). If the command\n\
+           uses `2>&1` solely to merge stderr into stdout, respond with DENY. The only\n\
+           exception is when `2>&1` is part of a complex shell pipeline that cannot be\n\
+           expressed using `filter`/`head`/`tail` alone (e.g., `sort | uniq -c`).\n\
          \n\
          Review this bash command:\n\
          ```\n\

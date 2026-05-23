@@ -49,6 +49,8 @@ fn build_tcodediff_preview(
 /// - FAIL if `old_string` not found in the file.
 /// - FAIL if `old_string` not unique — provide more context or use `replace_all`.
 /// - Use `replace_all` for replacing/renaming across the file.
+/// - NEVER issue parallel edits for the same file — they will conflict and only
+///   one will succeed.
 #[tool]
 pub fn edit(
     ctx: ToolContext,
