@@ -3,6 +3,7 @@
 //! This module contains the core LLM trait definition and implementations
 //! for various providers (OpenAI, Claude, Gemini, etc.).
 
+mod bedrock;
 mod claude;
 mod openai;
 mod openai_common;
@@ -10,11 +11,15 @@ mod openrouter;
 mod sse;
 
 #[cfg(test)]
+mod bedrock_tests;
+
+#[cfg(test)]
 mod openai_tests;
 
 #[cfg(test)]
 mod openrouter_tests;
 
+pub use bedrock::Bedrock;
 pub use claude::Claude;
 pub use openai::OpenAI;
 pub use openrouter::OpenRouter;

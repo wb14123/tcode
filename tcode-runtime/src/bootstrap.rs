@@ -5,7 +5,7 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use futures::SinkExt;
-use llm_rs::llm::{ChatOptions, Claude, LLM, OpenAI, OpenRouter, ReasoningEffort};
+use llm_rs::llm::{Bedrock, ChatOptions, Claude, LLM, OpenAI, OpenRouter, ReasoningEffort};
 use llm_rs::tool::ContainerConfig;
 use tokio::net::UnixStream;
 use tokio_stream::StreamExt;
@@ -99,7 +99,7 @@ impl RuntimeSettings {
             RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {}
         }
 
-        let (llm, model, token_manager) = create_llm(&self.config, self.profile.as_deref())?;
+        let (llm, model, token_manager) = create_llm(&self.config, self.profile.as_deref()).await?;
         let server = Server::new_with_runtime_options(
             socket_path.clone(),
             session.display_file(),
@@ -348,6 +348,7 @@ enum Provider {
     OpenAi,
     OpenAiOauth,
     OpenRouter,
+    Bedrock,
 }
 
 impl Provider {
@@ -357,6 +358,7 @@ impl Provider {
             Provider::OpenAi => "gpt-5-nano",
             Provider::OpenAiOauth => "gpt-5.4",
             Provider::OpenRouter => "deepseek/deepseek-r1",
+            Provider::Bedrock => "us.anthropic.claude-opus-4-6-v1",
         }
     }
 
@@ -366,6 +368,7 @@ impl Provider {
             Provider::OpenAi => "https://api.openai.com/v1",
             Provider::OpenAiOauth => "https://chatgpt.com/backend-api/codex",
             Provider::OpenRouter => "https://openrouter.ai/api/v1",
+            Provider::Bedrock => unreachable!("default_base_url called for Bedrock provider"),
         }
     }
 
@@ -374,8 +377,8 @@ impl Provider {
             Provider::Claude => "ANTHROPIC_API_KEY",
             Provider::OpenAi => "OPENAI_API_KEY",
             Provider::OpenRouter => "OPENROUTER_API_KEY",
-            Provider::ClaudeOauth | Provider::OpenAiOauth => {
-                unreachable!("env_var_name called on an OAuth provider variant")
+            Provider::ClaudeOauth | Provider::OpenAiOauth | Provider::Bedrock => {
+                unreachable!("env_var_name called on provider without API-key env var")
             }
         }
     }
@@ -408,13 +411,13 @@ type CreateLlmResult = (
     Option<Arc<dyn auth::OAuthTokenManager>>,
 );
 
-pub fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<CreateLlmResult> {
+pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<CreateLlmResult> {
     let provider_str = config.provider.as_deref().ok_or_else(|| {
         let path = config::config_path_for(profile)
             .map(|p| p.display().to_string())
             .unwrap_or_else(|_| "<unknown>".to_string());
         anyhow!(
-            "provider is required in {}. Expected one of: claude | claude-oauth | open-ai | open-ai-oauth | open-router.",
+            "provider is required in {}. Expected one of: claude | claude-oauth | open-ai | open-ai-oauth | open-router | bedrock.",
             path
         )
     })?;
@@ -423,18 +426,22 @@ pub fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<CreateL
         .model
         .clone()
         .unwrap_or_else(|| provider.default_model().to_string());
-    let base_url = config
-        .base_url
-        .clone()
-        .unwrap_or_else(|| provider.default_base_url().to_string());
 
     let (llm, token_manager): (Box<dyn LLM>, Option<Arc<dyn auth::OAuthTokenManager>>) =
         match provider {
             Provider::Claude => {
+                let base_url = config
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| provider.default_base_url().to_string());
                 let api_key = get_api_key(config, provider);
                 (Box::new(Claude::with_base_url(&api_key, &base_url)), None)
             }
             Provider::ClaudeOauth => {
+                let base_url = config
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| provider.default_base_url().to_string());
                 let manager = auth::claude::TokenManager::load(profile).ok_or_else(|| {
                     let auth_command = auth_command_for_profile(profile, "claude-auth");
                     let storage_path = auth::claude::TokenManager::storage_path(profile);
@@ -451,10 +458,18 @@ pub fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<CreateL
                 )
             }
             Provider::OpenAi => {
+                let base_url = config
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| provider.default_base_url().to_string());
                 let api_key = get_api_key(config, provider);
                 (Box::new(OpenAI::with_base_url(&api_key, &base_url)), None)
             }
             Provider::OpenAiOauth => {
+                let base_url = config
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| provider.default_base_url().to_string());
                 let manager = auth::openai::TokenManager::load(profile).ok_or_else(|| {
                     let auth_command = auth_command_for_profile(profile, "openai-auth");
                     let storage_path = auth::openai::TokenManager::storage_path(profile);
@@ -479,15 +494,44 @@ pub fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<CreateL
                 )
             }
             Provider::OpenRouter => {
+                let base_url = config
+                    .base_url
+                    .clone()
+                    .unwrap_or_else(|| provider.default_base_url().to_string());
                 let api_key = get_api_key(config, provider);
                 (
                     Box::new(OpenRouter::with_base_url(&api_key, &base_url)),
                     None,
                 )
             }
+            Provider::Bedrock => {
+                let region = resolve_aws_region(config);
+                let llm =
+                    Box::new(Bedrock::new(&region, &model, config.bedrock_endpoint.clone()).await?);
+                (llm, None)
+            }
         };
 
     Ok((llm, model, token_manager))
+}
+
+fn resolve_aws_region(config: &TcodeConfig) -> String {
+    config
+        .aws_region
+        .as_ref()
+        .filter(|region| !region.is_empty())
+        .cloned()
+        .or_else(|| {
+            std::env::var("AWS_REGION")
+                .ok()
+                .filter(|region| !region.is_empty())
+        })
+        .or_else(|| {
+            std::env::var("AWS_DEFAULT_REGION")
+                .ok()
+                .filter(|region| !region.is_empty())
+        })
+        .unwrap_or_default()
 }
 
 fn parse_provider(s: &str) -> Result<Provider> {
@@ -497,8 +541,9 @@ fn parse_provider(s: &str) -> Result<Provider> {
         "open-ai" | "openai" => Ok(Provider::OpenAi),
         "open-ai-oauth" | "openai-oauth" => Ok(Provider::OpenAiOauth),
         "open-router" | "openrouter" => Ok(Provider::OpenRouter),
+        "bedrock" => Ok(Provider::Bedrock),
         other => bail!(
-            "unknown provider \"{other}\" in config file, expected: claude, claude-oauth, open-ai, open-ai-oauth, open-router"
+            "unknown provider \"{other}\" in config file, expected: claude, claude-oauth, open-ai, open-ai-oauth, open-router, bedrock"
         ),
     }
 }

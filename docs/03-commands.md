@@ -32,7 +32,7 @@ tcode -c <container-name> --container-runtime podman
 
 ### `tcode config`
 
-Interactively creates a new tcode config file at `~/.tcode/config.toml` (or `~/.tcode/config-<profile>.toml` with `-p`). Prompts for `provider`, `base_url`, and `api_key` and writes the result with all other options (`model`, layout, shortcuts, subagent limits, browser server, search engine) left as commented-out lines for you to uncomment later.
+Interactively creates a new tcode config file at `~/.tcode/config.toml` (or `~/.tcode/config-<profile>.toml` with `-p`). Prompts for `provider` and then the credentials/endpoint fields relevant to that provider, and writes all other options (`model`, layout, shortcuts, subagent limits, browser server, search engine) as commented-out lines for you to uncomment later.
 
 ```
 tcode config
@@ -47,7 +47,7 @@ tcode -p <profile> config
 
 **Behavior:**
 
-- **Provider choices.** The wizard menu offers five options: `claude` (Anthropic API key), `claude-oauth` (Claude Pro/Max subscription via OAuth), `open-ai` (OpenAI API key), `open-ai-oauth` (OpenAI Codex/ChatGPT Pro subscription via OAuth), and `open-router` (OpenRouter API key). The two OAuth providers (`claude-oauth`, `open-ai-oauth`) are distinct provider values: the wizard skips both the base URL and API-key prompts, writes the corresponding `provider = "..."` to the config file, and tells you to run the matching auth command (`tcode claude-auth` or `tcode openai-auth`, with `-p <profile>` as needed) afterward. At runtime, OAuth providers load tokens from disk using the selected profile and ignore both `api_key` in the config and the provider's environment variable.
+- **Provider choices.** The wizard menu offers six options: `claude` (Anthropic API key), `claude-oauth` (Claude Pro/Max subscription via OAuth), `open-ai` (OpenAI API key), `open-ai-oauth` (OpenAI Codex/ChatGPT Pro subscription via OAuth), `open-router` (OpenRouter API key), and `bedrock` (AWS Bedrock Claude via AWS credentials). The two OAuth providers (`claude-oauth`, `open-ai-oauth`) are distinct provider values: the wizard skips both the base URL and API-key prompts, writes the corresponding `provider = "..."` to the config file, and tells you to run the matching auth command (`tcode claude-auth` or `tcode openai-auth`, with `-p <profile>` as needed) afterward. At runtime, OAuth providers load tokens from disk using the selected profile and ignore both `api_key` in the config and the provider's environment variable. The Bedrock provider also skips base URL and API-key prompts; it uses AWS credential and region resolution, with optional `aws_region` and `bedrock_endpoint` fields available in the generated config.
 - **Refuses to overwrite.** If the target file already exists, the wizard errors with ``Config already exists at <path>. Edit it directly, or delete it first and re-run `tcode config`.`` To regenerate, delete the file first and re-run the wizard.
 - **File permissions.** On Unix the file is written with `0600` permissions via a temp-file + rename dance, so a crash or Ctrl-C mid-wizard does not leave a partial file at the real path.
 - **Next-steps output.** After writing, the wizard prints the config file's absolute path and points at [02-configuration.md](02-configuration.md) for the full reference. For `claude-oauth`, it also prints a reminder to run the matching `claude-auth` command for the selected profile; for `open-ai-oauth`, a reminder to run the matching `openai-auth` command for the selected profile.

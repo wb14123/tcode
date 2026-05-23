@@ -101,21 +101,21 @@ impl Drop for HomeGuard {
     }
 }
 
-#[test]
-fn claude_runtime_uses_profile_specific_tokens_without_fallback() -> Result<()> {
+#[tokio::test]
+async fn claude_runtime_uses_profile_specific_tokens_without_fallback() -> Result<()> {
     let home_dir = temp_dir();
     let _home_guard = HomeGuard::set(&home_dir);
     let default_path = claude_auth::token_storage_path(None);
 
     write_tokens(&default_path, &token_fixture("default-claude-token"))?;
 
-    let (_, _, token_manager) = create_llm(&oauth_config("claude-oauth"), None)?;
+    let (_, _, token_manager) = create_llm(&oauth_config("claude-oauth"), None).await?;
     assert!(
         token_manager.is_some(),
         "default profile should still load tokens"
     );
 
-    let err = match create_llm(&oauth_config("claude-oauth"), Some("work")) {
+    let err = match create_llm(&oauth_config("claude-oauth"), Some("work")).await {
         Ok(_) => {
             anyhow::bail!("profile runtime should not fall back to default Claude OAuth tokens")
         }
@@ -134,21 +134,21 @@ fn claude_runtime_uses_profile_specific_tokens_without_fallback() -> Result<()> 
     Ok(())
 }
 
-#[test]
-fn openai_runtime_uses_profile_specific_tokens_when_profile_is_selected() -> Result<()> {
+#[tokio::test]
+async fn openai_runtime_uses_profile_specific_tokens_when_profile_is_selected() -> Result<()> {
     let home_dir = temp_dir();
     let _home_guard = HomeGuard::set(&home_dir);
     let profile_path = openai_auth::token_storage_path(Some("work"));
 
     write_tokens(&profile_path, &token_fixture("work-openai-token"))?;
 
-    let (_, _, token_manager) = create_llm(&oauth_config("open-ai-oauth"), Some("work"))?;
+    let (_, _, token_manager) = create_llm(&oauth_config("open-ai-oauth"), Some("work")).await?;
     assert!(
         token_manager.is_some(),
         "selected profile should load its OpenAI OAuth tokens",
     );
 
-    let err = match create_llm(&oauth_config("open-ai-oauth"), None) {
+    let err = match create_llm(&oauth_config("open-ai-oauth"), None).await {
         Ok(_) => anyhow::bail!("default runtime should not load profile-suffixed OpenAI tokens"),
         Err(err) => err,
     };
@@ -209,10 +209,10 @@ fn profile_auth_command_strings_are_rendered_correctly() {
     );
 }
 
-#[test]
-fn api_key_providers_remain_unchanged() -> Result<()> {
+#[tokio::test]
+async fn api_key_providers_remain_unchanged() -> Result<()> {
     for provider in ["claude", "open-ai", "open-router"] {
-        let (_, _, token_manager) = create_llm(&api_key_config(provider), Some("work"))?;
+        let (_, _, token_manager) = create_llm(&api_key_config(provider), Some("work")).await?;
         assert!(
             token_manager.is_none(),
             "API-key provider {provider} should not create an OAuth token manager",

@@ -11,6 +11,8 @@ pub struct TcodeConfig {
     pub api_key: Option<String>,
     pub model: Option<String>,
     pub base_url: Option<String>,
+    pub aws_region: Option<String>,
+    pub bedrock_endpoint: Option<String>,
     pub max_subagent_depth: Option<usize>,
     pub subagent_model_selection: Option<bool>,
     pub browser_server_url: Option<String>,
@@ -30,6 +32,8 @@ impl Default for TcodeConfig {
             api_key: None,
             model: None,
             base_url: None,
+            aws_region: None,
+            bedrock_endpoint: None,
             max_subagent_depth: None,
             subagent_model_selection: None,
             browser_server_url: None,
@@ -283,16 +287,18 @@ fn default_shortcuts() -> HashMap<String, String> {
 pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # Uncomment and modify values as needed.
 
-# provider = "claude"              # REQUIRED. one of: claude | claude-oauth | open-ai | open-router
-# api_key = ""                     # optional. Empty and omitted behave the same: both fall back to the provider env var, then to "" (no auth) if it is unset. Ignored when provider = "claude-oauth".
+# provider = "claude"              # REQUIRED. one of: claude | claude-oauth | open-ai | open-ai-oauth | open-router | bedrock
+# api_key = ""                     # optional. Empty and omitted behave the same: both fall back to the provider env var, then to "" (no auth) if it is unset. Ignored when provider = "claude-oauth", "open-ai-oauth", or "bedrock".
 # model = "claude-opus-4-6"        # defaults per provider
-# base_url = ""                    # defaults per provider
+# base_url = ""                    # defaults per provider; ignored by bedrock
+# aws_region = ""                  # optional for bedrock. Defaults to AWS config/env, then us-east-1
+# bedrock_endpoint = ""            # optional custom Bedrock Runtime endpoint
 # max_subagent_depth = 10
 # subagent_model_selection = false
 # browser_server_url = ""
 # browser_server_token = ""
 # search_engine = "google"         # kagi | google
-# supports_media = false         # set to true if your model supports visual/media input (images, PDFs)
+# supports_media = false         # set to true if your model supports visual/media input (images, PDFs); bedrock Claude supports media
 
 [shortcuts]
 brainstorm = """\

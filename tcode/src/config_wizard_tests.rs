@@ -159,6 +159,18 @@ fn test_substitute_empty_api_key_round_trips_as_some_empty() -> anyhow::Result<(
     Ok(())
 }
 
+#[test]
+fn test_substitute_bedrock_provider_skips_api_key_and_base_url() -> anyhow::Result<()> {
+    let out = substitute_template(DEFAULT_CONFIG_TEMPLATE, "bedrock", None, None);
+    let config: TcodeConfig = toml::from_str(&out)?;
+    assert_eq!(config.provider.as_deref(), Some("bedrock"));
+    assert!(config.api_key.is_none());
+    assert!(config.base_url.is_none());
+    assert!(config.aws_region.is_none());
+    assert!(config.bedrock_endpoint.is_none());
+    Ok(())
+}
+
 /// The `claude-oauth` wizard choice writes `provider = "claude-oauth"`
 /// and skips both the base URL and API key prompts — the rendered config
 /// contains neither an uncommented `base_url` nor `api_key` line.

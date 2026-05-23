@@ -463,7 +463,7 @@ async fn main() -> Result<()> {
             let search_engine = parse_search_engine(config.search_engine_str())?;
             tools::set_search_engine(search_engine);
             let container_config = resolve_container_config(&container, &container_runtime).await?;
-            let (llm, model, token_manager) = create_llm(&config, profile.as_deref())?;
+            let (llm, model, token_manager) = create_llm(&config, profile.as_deref()).await?;
             let chat_options = build_chat_options();
             let server = Server::new_with_runtime_options(
                 socket_path,
@@ -565,7 +565,8 @@ async fn main() -> Result<()> {
                     );
                 }
                 RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {
-                    let (llm, model, token_manager) = create_llm(&config, profile.as_deref())?;
+                    let (llm, model, token_manager) =
+                        create_llm(&config, profile.as_deref()).await?;
                     let chat_options = build_chat_options();
                     let container_config =
                         resolve_container_config(&container, &container_runtime).await?;
@@ -855,7 +856,7 @@ async fn run_unified(
     let session_id = session::generate_session_id();
     let session = Session::new(session_id.clone())?;
     initialize_new_session_mode(&session, requested_mode)?;
-    let (llm, model, token_manager) = create_llm(&config, profile)?;
+    let (llm, model, token_manager) = create_llm(&config, profile).await?;
     let chat_options = build_chat_options();
     let runtime_deps = Some(RuntimeDependencies {
         llm,

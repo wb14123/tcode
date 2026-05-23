@@ -1,7 +1,7 @@
 //! Interactive wizard for creating a new tcode config file.
 //!
-//! Prompts the user for `provider`, `base_url`, and `api_key`, then writes
-//! a config file based on [`crate::config::DEFAULT_CONFIG_TEMPLATE`]. All
+//! Prompts the user for a provider and any provider-specific setup fields,
+//! then writes a config file based on [`crate::config::DEFAULT_CONFIG_TEMPLATE`]. All
 //! other options remain as commented-out hints in the generated file.
 
 use std::fs::OpenOptions;
@@ -17,8 +17,8 @@ use rustyline::history::MemHistory;
 /// in `main.rs::Provider::default_base_url` so the wizard stays decoupled
 /// from the `Provider` enum (which is private to `main.rs`).
 ///
-/// Only called for the three API-key providers: `ClaudeOauth` skips the
-/// base URL prompt entirely, so `"claude-oauth"` is never passed here.
+/// Only called for API-key providers; OAuth providers and Bedrock skip the
+/// base URL prompt entirely.
 fn default_base_url_for(provider: &str) -> &'static str {
     match provider {
         "claude" => "https://api.anthropic.com",
@@ -51,6 +51,8 @@ fn validate_no_control_chars(field: &str, value: &str) -> anyhow::Result<()> {
 /// base URL and API-key prompts; at runtime tcode loads OAuth tokens via
 /// `tcode claude-auth` and ignores `api_key` / `$ANTHROPIC_API_KEY`.
 /// `OpenAiOauth` is analogous, writing `provider = "open-ai-oauth"`.
+/// `Bedrock` writes `provider = "bedrock"` and relies on AWS credential
+/// and region resolution instead of prompting for an API key or base URL.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum WizardChoice {
     Claude,
@@ -58,6 +60,7 @@ enum WizardChoice {
     OpenAi,
     OpenAiOauth,
     OpenRouter,
+    Bedrock,
 }
 
 impl WizardChoice {
@@ -68,6 +71,7 @@ impl WizardChoice {
             WizardChoice::OpenAi => "open-ai",
             WizardChoice::OpenAiOauth => "open-ai-oauth",
             WizardChoice::OpenRouter => "open-router",
+            WizardChoice::Bedrock => "bedrock",
         }
     }
 
@@ -81,8 +85,8 @@ impl WizardChoice {
             WizardChoice::Claude => "ANTHROPIC_API_KEY",
             WizardChoice::OpenAi => "OPENAI_API_KEY",
             WizardChoice::OpenRouter => "OPENROUTER_API_KEY",
-            WizardChoice::ClaudeOauth | WizardChoice::OpenAiOauth => {
-                unreachable!("env_var_name called on an OAuth WizardChoice variant")
+            WizardChoice::ClaudeOauth | WizardChoice::OpenAiOauth | WizardChoice::Bedrock => {
+                unreachable!("env_var_name called on WizardChoice without API key")
             }
         }
     }
@@ -117,8 +121,9 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
     println!("  3) open-ai          — OpenAI API key");
     println!("  4) open-ai-oauth    — OpenAI with Codex subscription (OAuth login)");
     println!("  5) open-router      — OpenRouter API key");
+    println!("  6) bedrock          — AWS Bedrock Claude via AWS credentials");
     let choice = loop {
-        let line = match rl.readline("Enter a number [1-5]: ") {
+        let line = match rl.readline("Enter a number [1-6]: ") {
             Ok(s) => s,
             Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
                 bail!("wizard cancelled");
@@ -133,8 +138,9 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
             "3" => break WizardChoice::OpenAi,
             "4" => break WizardChoice::OpenAiOauth,
             "5" => break WizardChoice::OpenRouter,
+            "6" => break WizardChoice::Bedrock,
             other => {
-                println!("Invalid choice {other:?}; please enter 1, 2, 3, 4, or 5.");
+                println!("Invalid choice {other:?}; please enter 1, 2, 3, 4, 5, or 6.");
             }
         }
     };
@@ -143,6 +149,7 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
     // --- Base URL input (skipped for OAuth providers) ---------------------
     let base_url_override: Option<String> = if choice == WizardChoice::ClaudeOauth
         || choice == WizardChoice::OpenAiOauth
+        || choice == WizardChoice::Bedrock
     {
         None
     } else {
@@ -175,29 +182,31 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
     // runtime, an empty `api_key` in the config falls back to the env var
     // if set, or passes "" through to the LLM client (for self-hosted
     // unauthenticated endpoints).
-    let api_key_override: Option<String> =
-        if choice == WizardChoice::ClaudeOauth || choice == WizardChoice::OpenAiOauth {
-            None
-        } else {
-            let prompt = format!(
-                "API key (empty means no auth or use ${}): ",
-                choice.env_var_name()
-            );
-            let raw = match rl.readline(&prompt) {
-                Ok(s) => s,
-                Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
-                    bail!("wizard cancelled");
-                }
-                Err(e) => {
-                    return Err(anyhow::Error::new(e).context("API key input failed"));
-                }
-            };
-            let trimmed = raw.trim();
-            if !trimmed.is_empty() {
-                validate_no_control_chars("API key", trimmed)?;
+    let api_key_override: Option<String> = if choice == WizardChoice::ClaudeOauth
+        || choice == WizardChoice::OpenAiOauth
+        || choice == WizardChoice::Bedrock
+    {
+        None
+    } else {
+        let prompt = format!(
+            "API key (empty means no auth or use ${}): ",
+            choice.env_var_name()
+        );
+        let raw = match rl.readline(&prompt) {
+            Ok(s) => s,
+            Err(ReadlineError::Interrupted) | Err(ReadlineError::Eof) => {
+                bail!("wizard cancelled");
             }
-            Some(trimmed.to_string())
+            Err(e) => {
+                return Err(anyhow::Error::new(e).context("API key input failed"));
+            }
         };
+        let trimmed = raw.trim();
+        if !trimmed.is_empty() {
+            validate_no_control_chars("API key", trimmed)?;
+        }
+        Some(trimmed.to_string())
+    };
 
     // --- Render file contents ---------------------------------------------
     let contents = substitute_template(
@@ -235,6 +244,12 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
             crate::auth_command_for_profile(profile, "openai-auth")
         );
         println!("Codex subscription.");
+    }
+
+    if choice == WizardChoice::Bedrock {
+        println!();
+        println!("Next: ensure your AWS credentials and region are configured.");
+        println!("You can use AWS_PROFILE/AWS_REGION or edit aws_region in the config file.");
     }
 
     if first_run {
