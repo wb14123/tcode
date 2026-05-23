@@ -73,8 +73,13 @@ local tc_label_marks = {}  -- tool_call_id -> { extmark_id, ns, tool_name }
 -- Maps extmark ID -> conversation_id so we can find which subagent a cursor line belongs to.
 local sa_ns = vim.api.nvim_create_namespace('tcode_sa_id')
 local sa_extmark_ids = {}  -- extmark_id -> conversation_id
-local sa_label_marks = {}  -- conversation_id -> { extmark_id, ns, description }
+-- conversation_id -> { { extmark_id, ns, description, is_continue }, ... }
+-- Last entry is the active one (updated by TurnEnd, Permission handlers).
+-- SubAgentEnd updates ALL entries.
+local sa_label_marks = {}
 local sa_input_marks = {}  -- tool_call_id -> { extmark_id, ns, tool_name }
+local sa_active_conv = nil -- conversation_id of the subagent currently streaming output
+local tc_full_input = false  -- true in detail view: never collapse tool input
 
 -- Namespace for tool-call / subagent generation-state anchor extmarks.
 -- These extmarks track where content for an in-progress tool call / subagent
@@ -363,29 +368,43 @@ end
 
 -- Find and update the range extmark for a conversation_id to extend to end_row
 local function extend_sa_extmark(buf, conversation_id, end_row)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, {})
+  local marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, { details = true })
+  local best_mark = nil
+  local best_end = -1
   for _, mark in ipairs(marks) do
     if sa_extmark_ids[mark[1]] == conversation_id then
-      vim.api.nvim_buf_set_extmark(buf, sa_ns, mark[2], mark[3], {
-        id = mark[1],
-        end_row = end_row,
-        end_col = 0,
-      })
-      break
+      local details = mark[4]
+      local this_end = details and details.end_row or mark[2]
+      if this_end > best_end then
+        best_end = this_end
+        best_mark = mark
+      end
     end
+  end
+  if best_mark then
+    vim.api.nvim_buf_set_extmark(buf, sa_ns, best_mark[2], best_mark[3], {
+      id = best_mark[1],
+      end_row = end_row,
+      end_col = 0,
+    })
   end
 end
 
 --- Get the end_row of a subagent's range extmark. Returns nil if not found.
 local function get_sa_extmark_end_row(buf, conversation_id)
   local marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, { details = true })
+  local best_end = -1
   for _, mark in ipairs(marks) do
     if sa_extmark_ids[mark[1]] == conversation_id then
       local details = mark[4]
-      if details and details.end_row then
-        return details.end_row
+      local this_end = details and details.end_row
+      if this_end ~= nil and this_end > best_end then
+        best_end = this_end
       end
     end
+  end
+  if best_end >= 0 then
+    return best_end
   end
   return nil
 end
@@ -555,7 +574,7 @@ local function collapse_tool_call_args(buf, tool_call_id)
   if not state then return end
 
   -- In the tool detail view, always show full input without collapsing.
-  if M.tc_full_input then return end
+  if tc_full_input then return end
 
   local full_content = table.concat(state.content_parts)
   local content_lines = vim.split(full_content, '\n', { plain = true })
@@ -752,6 +771,10 @@ local function render_event(buf, ns, event)
       collapse_thinking(buf, ns)
     end
     append_text(buf, data.content)
+    -- Extend the active subagent's sa_ns range extmark as content streams
+    if sa_active_conv then
+      extend_sa_extmark(buf, sa_active_conv, vim.api.nvim_buf_line_count(buf) - 1)
+    end
 
   elseif variant == 'AssistantMessageEnd' then
     -- Close the args fence on any still-generating tool calls. Uses per-entry
@@ -1113,7 +1136,17 @@ local function render_event(buf, ns, event)
       end
 
       -- Transfer to sa_label_marks for future updates (SubAgentTurnEnd, SubAgentEnd, etc.)
-      sa_label_marks[conv_id] = { extmark_id = pending.extmark_id, ns = pending.ns, description = description }
+      if conv_id then
+        if not sa_label_marks[conv_id] then
+          sa_label_marks[conv_id] = {}
+        end
+        table.insert(sa_label_marks[conv_id], {
+          extmark_id = pending.extmark_id,
+          ns = pending.ns,
+          description = description,
+          is_continue = false,
+        })
+      end
       sa_input_marks[tool_call_id] = nil
 
       -- Insert a blank line for subagent output content. Subagent content
@@ -1139,55 +1172,80 @@ local function render_event(buf, ns, event)
           end_row = blank_row, end_col = 0,
         })
         sa_extmark_ids[mark_id] = conv_id
+        sa_active_conv = conv_id
       end
     else
       -- No pending input (e.g., resumed session) — create label from scratch (existing logic)
       local label_line, label_extmark = render_label(buf, ns, '► SUBAGENT', '>>> SUB-AGENT: [running] ' .. description, 'TCodeTool', data)
       append_lines(buf, { '' })
       if conv_id then
-        sa_label_marks[conv_id] = { extmark_id = label_extmark, ns = ns, description = description }
+        if not sa_label_marks[conv_id] then
+          sa_label_marks[conv_id] = {}
+        end
+        table.insert(sa_label_marks[conv_id], {
+          extmark_id = label_extmark,
+          ns = ns,
+          description = description,
+          is_continue = false,
+        })
         local last_line = vim.api.nvim_buf_line_count(buf) - 1
         local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_line, 0, {
           end_row = last_line, end_col = 0,
         })
         sa_extmark_ids[mark_id] = conv_id
+        sa_active_conv = conv_id
       end
     end
 
   elseif variant == 'SubAgentEnd' then
-    -- Update the start label in-place to show completion
-    if data.conversation_id and sa_label_marks[data.conversation_id] then
-      local info = sa_label_marks[data.conversation_id]
+    -- Capture sa_end_row before cleaning up extmarks (for error rendering below)
+    local sa_end_row = data.conversation_id and get_sa_extmark_end_row(buf, data.conversation_id)
+
+    -- Update all subagent labels in-place to show completion
+    local entries = data.conversation_id and sa_label_marks[data.conversation_id]
+    if entries then
       local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'done'
       local status_hl = (data.end_status and data.end_status ~= 'Succeeded') and 'TCodeError' or 'TCodeSuccess'
-      local virt = {
-        { '>>> SUB-AGENT: ', 'TCodeTool' },
-        { '[' .. status_text .. ']', status_hl },
-      }
-      local ts = format_time(data.created_at)
-      if ts then
-        table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
-      end
-      if data.input_tokens and data.output_tokens then
-        table.insert(virt, {
-          string.format('  [%d in / %d out]', data.input_tokens, data.output_tokens),
-          'TCodeTokens',
-        })
-      end
-      table.insert(virt, { ' ' .. info.description, 'TCodeTool' })
-      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
-      if mark_pos and mark_pos[1] then
-        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
-          id = info.extmark_id,
-          virt_text = virt,
-          virt_text_pos = 'overlay',
-        })
+      for _, info in ipairs(entries) do
+        local virt = {
+          { '>>> SUB-AGENT: ', 'TCodeTool' },
+          { '[' .. status_text .. ']', status_hl },
+        }
+        local ts = format_time(data.created_at)
+        if ts then
+          table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
+        end
+        if data.input_tokens and data.output_tokens then
+          table.insert(virt, {
+            string.format('  [%d in / %d out]', data.input_tokens, data.output_tokens),
+            'TCodeTokens',
+          })
+        end
+        table.insert(virt, { ' ' .. info.description, 'TCodeTool' })
+        local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
+        if mark_pos and mark_pos[1] then
+          vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
+            id = info.extmark_id,
+            virt_text = virt,
+            virt_text_pos = 'overlay',
+          })
+        end
       end
       sa_label_marks[data.conversation_id] = nil
+      -- Clean up sa_ns range extmarks and their ID mappings for this conversation
+      for mark_id, conv_id in pairs(sa_extmark_ids) do
+        if conv_id == data.conversation_id then
+          vim.api.nvim_buf_del_extmark(buf, sa_ns, mark_id)
+          sa_extmark_ids[mark_id] = nil
+        end
+      end
+    end
+    -- Clear active subagent tracking if this is the currently streaming one
+    if sa_active_conv == data.conversation_id then
+      sa_active_conv = nil
     end
     -- Render error as real text if present (needs to be visible/copyable)
     if type(data.error) == 'string' and data.error ~= '' then
-      local sa_end_row = data.conversation_id and get_sa_extmark_end_row(buf, data.conversation_id)
       if sa_end_row then
         insert_lines_at(buf, sa_end_row, { '' })
         local error_start_line = sa_end_row
@@ -1196,7 +1254,6 @@ local function render_event(buf, ns, event)
         for i = 0, #error_lines - 1 do
           vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeError', error_start_line + i, 0, -1)
         end
-        extend_sa_extmark(buf, data.conversation_id, error_start_line + #error_lines)
       else
         append_lines(buf, { '' })
         local error_start_line = vim.api.nvim_buf_line_count(buf) - 1
@@ -1209,11 +1266,12 @@ local function render_event(buf, ns, event)
     end
 
   elseif variant == 'SubAgentTurnEnd' then
-    -- Update the start label in-place to show idle status (do NOT clear from sa_label_marks)
-    if data.conversation_id and sa_label_marks[data.conversation_id] then
-      local info = sa_label_marks[data.conversation_id]
+    -- Update the active (last) label to show turn ended status
+    local entries = data.conversation_id and sa_label_marks[data.conversation_id]
+    if entries and #entries > 0 then
+      local info = entries[#entries]
       local status_hl = (data.end_status and data.end_status ~= 'Succeeded') and 'TCodeError' or 'TCodeTokens'
-      local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'idle'
+      local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'turn ended'
       local virt = {
         { '>>> SUB-AGENT: ', 'TCodeTool' },
         { '[' .. status_text .. ']', status_hl },
@@ -1234,41 +1292,98 @@ local function render_event(buf, ns, event)
         })
       end
     end
+    if sa_active_conv == data.conversation_id then
+      sa_active_conv = nil
+    end
 
   elseif variant == 'SubAgentContinue' then
     local tool_call_id = data.tool_call_id
+    local description = data.description
+    -- Fall back to existing stored description if server omits or sends empty
+    if not description or description == '' then
+      local existing = sa_label_marks[data.conversation_id]
+      if existing and #existing > 0 then
+        description = existing[#existing].description
+      end
+    end
+    description = description or ''
 
-    -- Clean up any pending input state from SubAgentInputStart
     if tool_call_id and sa_input_marks[tool_call_id] then
-      -- Close/collapse the args fence via extmark-anchored close (idempotent).
+      -- Close the args fence
       if tool_call_gen_state[tool_call_id] then
         close_args_fence(buf, tool_call_id)
-        tool_call_gen_state[tool_call_id] = nil
       end
-      sa_input_marks[tool_call_id] = nil
-    end
 
-    -- Update existing label to show running again
-    if data.conversation_id and sa_label_marks[data.conversation_id] then
-      local info = sa_label_marks[data.conversation_id]
-      local virt = {
-        { '>>> SUB-AGENT: ', 'TCodeTool' },
-        { '[running]', 'TCodeTool' },
-        { ' ' .. info.description, 'TCodeTool' },
-      }
-      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
-      if mark_pos and mark_pos[1] then
-        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
-          id = info.extmark_id,
-          virt_text = virt,
-          virt_text_pos = 'overlay',
-        })
+      -- Transfer to sa_label_marks as a new continue entry (only if conversation_id and label_row are valid)
+      if data.conversation_id then
+        local pending = sa_input_marks[tool_call_id]
+        local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, pending.ns, pending.extmark_id, {})
+        local label_row = mark_pos and mark_pos[1]
+        if label_row then
+          -- Update the pending label from [generating] to [continuing]
+          local virt = {
+            { '>>> SUB-AGENT: ', 'TCodeTool' },
+            { '[continuing]', 'TCodeTool' },
+            { ' ' .. description, 'TCodeTool' },
+          }
+          vim.api.nvim_buf_set_extmark(buf, pending.ns, label_row, mark_pos[2], {
+            id = pending.extmark_id,
+            virt_text = virt,
+            virt_text_pos = 'overlay',
+          })
+
+          if not sa_label_marks[data.conversation_id] then
+            sa_label_marks[data.conversation_id] = {}
+          end
+          table.insert(sa_label_marks[data.conversation_id], {
+            extmark_id = pending.extmark_id,
+            ns = pending.ns,
+            description = description,
+            is_continue = true,
+          })
+          -- Set up sa_ns range extmark from label row to current buffer end
+          local current_last_line = vim.api.nvim_buf_line_count(buf) - 1
+          local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_row, 0, {
+            end_row = current_last_line, end_col = 0,
+          })
+          sa_extmark_ids[mark_id] = data.conversation_id
+          sa_active_conv = data.conversation_id
+        end
+      end
+
+      -- Clean up pending input state. tool_call_gen_state may already be nil if
+      -- the args fence was closed earlier by AssistantMessageEnd.
+      sa_input_marks[tool_call_id] = nil
+      tool_call_gen_state[tool_call_id] = nil
+    else
+      local entries = data.conversation_id and sa_label_marks[data.conversation_id]
+      if entries and #entries > 0 then
+        local info = entries[#entries]
+        info.is_continue = true
+        if data.description and data.description ~= '' then
+          info.description = data.description
+        end
+        local virt = {
+          { '>>> SUB-AGENT: ', 'TCodeTool' },
+          { '[continuing]', 'TCodeTool' },
+          { ' ' .. (info.description or ''), 'TCodeTool' },
+        }
+        local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
+        if mark_pos and mark_pos[1] then
+          vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
+            id = info.extmark_id,
+            virt_text = virt,
+            virt_text_pos = 'overlay',
+          })
+        end
+        sa_active_conv = data.conversation_id
       end
     end
 
   elseif variant == 'SubAgentWaitingPermission' then
-    if data.conversation_id and sa_label_marks[data.conversation_id] then
-      local info = sa_label_marks[data.conversation_id]
+    local entries = data.conversation_id and sa_label_marks[data.conversation_id]
+    if entries and #entries > 0 then
+      local info = entries[#entries]
       local virt = {
         { '>>> SUB-AGENT: ', 'TCodeTool' },
         { '[permission]', 'TCodePermission' },
@@ -1284,14 +1399,16 @@ local function render_event(buf, ns, event)
       end
     end
 
-  -- Both Approved and Denied resolve a pending permission request and put
-  -- the subagent label back into the [running] state.
+  -- Both Approved and Denied resolve a pending permission request and restore
+  -- the subagent label to its previous state ([running] or [continuing]).
   elseif variant == 'SubAgentPermissionApproved' or variant == 'SubAgentPermissionDenied' then
-    if data.conversation_id and sa_label_marks[data.conversation_id] then
-      local info = sa_label_marks[data.conversation_id]
+    local entries = data.conversation_id and sa_label_marks[data.conversation_id]
+    if entries and #entries > 0 then
+      local info = entries[#entries]
+      local status_text = info.is_continue and 'continuing' or 'running'
       local virt = {
         { '>>> SUB-AGENT: ', 'TCodeTool' },
-        { '[running]', 'TCodeTool' },
+        { '[' .. status_text .. ']', 'TCodeTool' },
         { ' ' .. info.description, 'TCodeTool' },
       }
       local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
@@ -1743,11 +1860,12 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
       local end_row = details.end_row or start_row
       if cursor_line >= start_row and cursor_line <= end_row and sa_extmark_ids[mark[1]] then
         local conv_id = sa_extmark_ids[mark[1]]
-        if not sa_label_marks[conv_id] then
+        local sa_entries = sa_label_marks[conv_id]
+        if not sa_entries or #sa_entries == 0 then
           vim.notify('Subagent already finished', vim.log.levels.INFO)
           return
         end
-        local desc = sa_label_marks[conv_id].description or conv_id
+        local desc = sa_entries[#sa_entries].description or conv_id
         confirm_popup("Cancel subagent '" .. desc .. "'? (y/n)", function()
           local cmd = string.format('%s --session=%s cancel-conversation %s', M.exe_path, M.session_id, conv_id)
           local result = vim.fn.system(cmd)
@@ -1830,7 +1948,7 @@ end
 function M.setup_tool_call_display(tool_call_file, status_file)
   M.tc_file = tool_call_file
   M.tc_status_file = status_file
-  M.tc_full_input = true  -- Never collapse tool input in the detail view
+  tc_full_input = true  -- Never collapse tool input in the detail view
 
   vim.g.tcode_tc_status = 'Waiting...'
 
@@ -1864,6 +1982,7 @@ function M.setup_tool_call_display(tool_call_file, status_file)
     callback = function()
       if M.tc_watcher then M.tc_watcher.stop(); M.tc_watcher = nil end
       if M.tc_status_watcher then M.tc_status_watcher.stop(); M.tc_status_watcher = nil end
+      tc_full_input = false
     end,
   })
 
