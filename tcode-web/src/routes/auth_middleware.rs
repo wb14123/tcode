@@ -81,7 +81,10 @@ pub(crate) async fn require_auth(
                 }
             }
         };
-        let root = SessionRoot { path };
+        let root = SessionRoot {
+            path,
+            trash_dir: user.trash_dir.clone(),
+        };
         request.extensions_mut().insert(root);
         return next.run(request).await;
     }

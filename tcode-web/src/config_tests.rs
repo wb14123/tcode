@@ -26,6 +26,7 @@ unknown_field = "x"
 [users.alice]
 password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGVzdGhhc2g="
 session_dir = "/tmp/alice-sessions"
+trash_dir = "/tmp/alice-trash"
 "#;
     let result: Result<crate::config::WebUsersFile, _> = toml::from_str(toml_str);
     assert!(result.is_err());
@@ -37,6 +38,7 @@ fn web_users_file_deny_unknown_user_fields() {
 [users.alice]
 password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGVzdGhhc2g="
 session_dir = "/tmp/alice-sessions"
+trash_dir = "/tmp/alice-trash"
 unknown_user_field = "x"
 "#;
     let result: Result<crate::config::WebUsersFile, _> = toml::from_str(toml_str);
@@ -49,10 +51,12 @@ fn web_users_file_valid_toml_parses() -> anyhow::Result<()> {
 [users.alice]
 password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGVzdGhhc2g="
 session_dir = "/tmp/alice-sessions"
+trash_dir = "/tmp/alice-trash"
 
 [users.bob]
 password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$b2ZmZ2hhc2g="
 session_dir = "/tmp/bob-sessions"
+trash_dir = "/tmp/bob-trash"
 "#;
     let file: crate::config::WebUsersFile = toml::from_str(toml_str)?;
     assert_eq!(file.users.len(), 2);
@@ -74,6 +78,7 @@ fn web_users_file_missing_password_hash_is_rejected() {
     let toml_str = r#"
 [users.alice]
 session_dir = "/tmp/alice-sessions"
+trash_dir = "/tmp/alice-trash"
 "#;
     let result: Result<crate::config::WebUsersFile, _> = toml::from_str(toml_str);
     assert!(result.is_err());
@@ -84,6 +89,18 @@ fn web_users_file_missing_session_dir_is_rejected() {
     let toml_str = r#"
 [users.alice]
 password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGVzdGhhc2g="
+trash_dir = "/tmp/alice-trash"
+"#;
+    let result: Result<crate::config::WebUsersFile, _> = toml::from_str(toml_str);
+    assert!(result.is_err());
+}
+
+#[test]
+fn web_users_file_missing_trash_dir_is_rejected() {
+    let toml_str = r#"
+[users.alice]
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdA$dGVzdGhhc2g="
+session_dir = "/tmp/alice-sessions"
 "#;
     let result: Result<crate::config::WebUsersFile, _> = toml::from_str(toml_str);
     assert!(result.is_err());

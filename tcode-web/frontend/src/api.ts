@@ -435,6 +435,12 @@ export const api = {
     return jsonRequest<SessionsResponse>('api/sessions', { headers: {} });
   },
 
+  deleteSession(sessionId: string): Promise<void> {
+    return request(`api/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+    }).then(() => undefined);
+  },
+
   createSession(initialPrompt: string): Promise<CreateSessionResponse> {
     return jsonRequest<CreateSessionResponse>('api/sessions', {
       method: 'POST',

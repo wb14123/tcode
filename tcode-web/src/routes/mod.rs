@@ -101,6 +101,10 @@ pub(crate) fn protected_routes(state: Arc<AppState>) -> axum::Router<Arc<AppStat
     let writes = axum::Router::<Arc<AppState>>::new()
         .route("/api/sessions", axum::routing::post(api::post_sessions))
         .route(
+            "/api/sessions/{session_id}",
+            axum::routing::delete(api::delete_session),
+        )
+        .route(
             "/api/sessions/{session_id}/media",
             axum::routing::post(api::upload_media),
         )

@@ -82,6 +82,7 @@ export type PermissionDecisionPayload =
 export type AppRoute =
   | { kind: 'login' }
   | { kind: 'home' }
+  | { kind: 'manage' }
   | { kind: 'session'; sessionId: string }
   | { kind: 'tool'; sessionId: string; toolCallId: string }
   | { kind: 'subagent'; sessionId: string; subagentId: string }

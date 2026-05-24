@@ -25,6 +25,8 @@ export function hrefForRoute(route: AppRoute): string {
       return joinRoute('login');
     case 'home':
       return joinRoute('');
+    case 'manage':
+      return joinRoute('manage');
     case 'session':
       return joinRoute(`sessions/${encodeURIComponent(route.sessionId)}`);
     case 'tool':
@@ -54,6 +56,10 @@ export function parseRoute(pathname = window.location.pathname): AppRoute {
 
   if (segments.length === 1 && segments[0] === 'login') {
     return { kind: 'login' };
+  }
+
+  if (segments.length === 1 && segments[0] === 'manage') {
+    return { kind: 'manage' };
   }
 
   if (segments[0] === 'sessions' && segments[1]) {

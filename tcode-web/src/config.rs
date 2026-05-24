@@ -82,6 +82,7 @@ pub(crate) struct WebUsersFile {
 pub(crate) struct WebUser {
     pub(crate) password_hash: String,
     pub(crate) session_dir: PathBuf,
+    pub(crate) trash_dir: PathBuf,
 }
 
 pub(crate) fn load_web_users() -> anyhow::Result<HashMap<String, WebUser>> {
@@ -130,6 +131,41 @@ pub(crate) fn load_web_users() -> anyhow::Result<HashMap<String, WebUser>> {
                 user.session_dir.display(),
                 username,
                 e
+            );
+        }
+
+        // Validate trash_dir
+        if !user.trash_dir.is_absolute() {
+            anyhow::bail!(
+                "trash_dir '{}' for user '{}' is not an absolute path",
+                user.trash_dir.display(),
+                username
+            );
+        }
+        let trash_meta = match std::fs::metadata(&user.trash_dir) {
+            Ok(m) => m,
+            Err(e) => {
+                anyhow::bail!(
+                    "trash_dir '{}' for user '{}' is not accessible: {}",
+                    user.trash_dir.display(),
+                    username,
+                    e
+                );
+            }
+        };
+        if !trash_meta.is_dir() {
+            anyhow::bail!(
+                "trash_dir '{}' for user '{}' is not a directory",
+                user.trash_dir.display(),
+                username
+            );
+        }
+        // Check writability via metadata permissions
+        if trash_meta.permissions().readonly() {
+            anyhow::bail!(
+                "trash_dir '{}' for user '{}' is not writable (read-only filesystem or permissions)",
+                user.trash_dir.display(),
+                username
             );
         }
     }

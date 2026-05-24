@@ -853,7 +853,10 @@ async fn run_unified(
         );
     }
 
-    let session_id = session::generate_session_id();
+    let session_id = session::generate_unique_session_id(
+        &session::base_path()?,
+        None, // CLI has no visibility into web's trash folder
+    )?;
     let session = Session::new(session_id.clone())?;
     initialize_new_session_mode(&session, requested_mode)?;
     let (llm, model, token_manager) = create_llm(&config, profile).await?;

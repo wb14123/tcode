@@ -1134,3 +1134,97 @@ fn decode_permission_id(permission_id: &str) -> ApiResult<PermissionKey> {
     serde_json::from_slice(&bytes)
         .map_err(|e| ApiError::bad_request(format!("invalid permission id payload: {e}")))
 }
+
+pub(crate) async fn delete_session(
+    State(state): State<Arc<AppState>>,
+    Extension(root): Extension<SessionRoot>,
+    AxumPath(session_id): AxumPath<String>,
+) -> ApiResult<StatusCode> {
+    let session = root.open_session(&session_id)?;
+
+    // Try to cancel the root conversation if the runtime is active.
+    // Ignore errors — the runtime might not have a conversation yet,
+    // and the session is being deleted regardless.
+    if let Ok(root_id) = root_conversation_id(session.dir()).await
+        && let Err(e) = send_runtime_message_if_active(
+            &state,
+            &session_id,
+            ClientMessage::CancelConversation {
+                conversation_id: root_id,
+            },
+            session.dir(),
+        )
+        .await
+    {
+        tracing::debug!(
+            "cancel before trash for {} failed (session may be inactive): {:?}",
+            session_id,
+            e
+        );
+    }
+
+    let source = session.dir().to_path_buf();
+    let mut dest = root.trash_dir.join(&session_id);
+
+    // Try the plain ID first. If the destination already exists (e.g. a
+    // CLI-created session used the same ID), fall back to a timestamp
+    // suffix. This is atomic at the filesystem level — no TOCTOU window.
+    if tokio::fs::rename(&source, &dest).await.is_err() {
+        let timestamp = format_timestamp_now();
+        dest = root.trash_dir.join(format!("{session_id}-{timestamp}"));
+        tokio::fs::rename(&source, &dest)
+            .await
+            .map_err(|e| ApiError::internal(format!("failed to move session to trash: {e}")))?;
+    }
+
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn format_timestamp_now() -> String {
+    let dur = match std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "system clock is before Unix epoch; using fallback timestamp");
+            std::time::Duration::ZERO
+        }
+    };
+    let secs = dur.as_secs();
+
+    let days = secs / 86400;
+    let time_in_day = secs % 86400;
+    let hour = time_in_day / 3600;
+    let min = (time_in_day % 3600) / 60;
+    let sec = time_in_day % 60;
+
+    // Convert days since 1970-01-01 to year/month/day.
+    let mut year: i32 = 1970;
+    let mut remaining: i64 = days as i64;
+    loop {
+        let days_in_year = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+            366
+        } else {
+            365
+        };
+        if remaining < days_in_year {
+            break;
+        }
+        remaining -= days_in_year;
+        year += 1;
+    }
+    let month_days: [i64; 12] = if (year % 4 == 0 && year % 100 != 0) || year % 400 == 0 {
+        [31, 29, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    } else {
+        [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+    };
+    let mut month: u32 = 1;
+    for &md in &month_days {
+        if remaining < md {
+            break;
+        }
+        remaining -= md;
+        month += 1;
+    }
+    let day = remaining + 1;
+
+    format!("{year:04}{month:02}{day:02}T{hour:02}{min:02}{sec:02}")
+}

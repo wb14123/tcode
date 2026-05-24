@@ -6,6 +6,7 @@ import { activeSessionId, hrefForRoute, navigate, parseRoute } from '../router';
 import type { AppRoute, PendingPermissionInfo, PermissionDecisionPayload, PermissionKey, PermissionState, SessionMode, SessionSummary } from '../types';
 
 import './add-permission-form';
+import './manage-conversations';
 import './permission-tree';
 import './session-view';
 import './subagent-view';
@@ -646,6 +647,16 @@ class TcodeApp extends LitElement {
         `;
       case 'login':
         return this.renderLogin();
+      case 'manage':
+        return html`
+          <tcode-manage-conversations
+            .sessions=${this.sessions}
+            @sessions-refresh-requested=${() => {
+              void this.refreshSessions();
+            }}
+            @system-notification=${this.handleSystemNotification}
+          ></tcode-manage-conversations>
+        `;
       case 'permissions':
         return html`
           <tcode-permission-tree
@@ -667,11 +678,13 @@ class TcodeApp extends LitElement {
             <a class="brand-title" href="${hrefForRoute({ kind: 'home' })}" @click=${this.closeSidebar}>TCode</a>
           </div>
           <div class="sidebar-actions">
-            <button class="button" @click=${this.startNewConversation}>New conversation</button>
+            <a class="action-item" href="${hrefForRoute({ kind: 'home' })}" @click=${this.startNewConversation}>New conversation</a>
+            <a class="action-item" href="${hrefForRoute({ kind: 'manage' })}" @click=${this.closeSidebar}>Manage conversations</a>
           </div>
           ${this.sessionsError ? html`<div class="inline-alert error">${this.sessionsError}</div>` : nothing}
         </section>
 
+        <div class="sidebar-section-header">Conversations</div>
         <section class="session-list">
           ${this.sessions.length
             ? this.sessions.map(

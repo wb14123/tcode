@@ -12,7 +12,7 @@ First, create a web user:
 tcode add-web-user alice
 ```
 
-You'll be prompted for a password. The user and a hashed password are stored in `~/.tcode/web-users.toml`.
+You'll be prompted for a password and a trash directory. The user, a hashed password, and the trash path are stored in `~/.tcode/web-users.toml`.
 
 Then start the server:
 
@@ -90,10 +90,14 @@ The resulting file looks like this:
 ```toml
 # ~/.tcode/web-users.toml
 [users.alice]
-hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$..."
+session_dir = "/home/alice/.tcode/sessions"
+trash_dir = "/home/alice/.tcode/trash"
 
 [users.bob]
-hash = "$argon2id$v=19$m=19456,t=2,p=1$..."
+password_hash = "$argon2id$v=19$m=65536,t=3,p=4$..."
+session_dir = "/home/bob/.tcode/sessions"
+trash_dir = "/home/bob/.tcode/trash"
 ```
 
 Notes:
@@ -102,6 +106,7 @@ Notes:
 - Login sends `POST /api/auth/login` with `{"username": "...", "password": "..."}`.
 - Successful login returns an HTTP-only `tcode_session` cookie with a 7-day max age.
 - Server-side login sessions are in memory. Restarting `tcode remote` invalidates existing browser logins.
+- Each user has a `trash_dir` for deleted sessions. The server validates it exists and is writable at startup.
 
 ## Security model
 
@@ -146,6 +151,7 @@ After login, the browser UI can:
 - cancel active conversations, subagents, and tool calls
 - mark a subagent as done when it has completed its reply
 - review pending permission requests and allow or deny them from the permission modal
+- move sessions to trash from the Manage Conversations page
 
 Normal remote sessions have the same local/container capabilities as terminal tcode sessions, so permission prompts and grants have the same security meaning. The current browser UI focuses on resolving pending permission requests; the backend API also exposes permission add/revoke endpoints for clients and integrations.
 
@@ -182,6 +188,7 @@ This makes the web remote server safe for remotely exposed browser access. Norma
 | Web users | `~/.tcode/web-users.toml` |
 | OAuth tokens | `~/.tcode/auth/` |
 | Sessions | `~/.tcode/sessions/` |
+| Trash | `~/.tcode/trash/` (per-user, configured in `web-users.toml`) |
 | Browser-server socket | `~/.tcode/browser-server.sock` |
 | Browser profile | `~/.tcode/chrome/` |
 
@@ -331,6 +338,8 @@ cp ~/.tcode/web-users.toml "$HOME/tcode-docker-data/"
 # cp -a ~/.tcode/auth "$HOME/tcode-docker-data/"
 # cp -a ~/.tcode/chrome "$HOME/tcode-docker-data/"
 ```
+
+If your `web-users.toml` specifies a `trash_dir` outside the data directory (e.g. `/home/alice/.tcode/trash`), ensure that path is accessible from the container — either mount it explicitly or place it inside the mounted data directory so the server can write deleted sessions there.
 
 Mounting your real `~/.tcode` is possible, but it exposes all local tcode config, auth, sessions, and browser data to the container:
 

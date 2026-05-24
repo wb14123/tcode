@@ -239,6 +239,20 @@ Refresh a previously registered browser client lease and return current runtime 
 
 Release a browser client lease. The response is `204 No Content` on success.
 
+### `DELETE /api/sessions/:sessionId`
+
+Move a session to the authenticated user's trash directory.
+
+Active sessions are cancelled before moving. The session directory is moved to `<trash_dir>/<session_id>`. If a name collision occurs in the trash (for example because a CLI-created session used the same ID), a `YYYYMMDDTHHMMSS` timestamp suffix is appended.
+
+The response is `204 No Content` on success.
+
+Status codes:
+- `204 No Content` — session moved to trash successfully
+- `401 Unauthorized` — missing or invalid authentication
+- `404 Not Found` — session does not exist or is not a web-only session
+- `500 Internal Server Error` — filesystem error during the move
+
 ---
 
 ## 3. File-shaped read and stream endpoints
@@ -543,6 +557,7 @@ Do not include the following for now:
 - `POST /api/sessions/:sessionId/leases`
 - `POST /api/sessions/:sessionId/leases/:clientId/heartbeat`
 - `DELETE /api/sessions/:sessionId/leases/:clientId`
+- `DELETE /api/sessions/:sessionId`
 
 ### Session file endpoints
 

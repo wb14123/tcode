@@ -8,7 +8,7 @@ use axum::response::{IntoResponse, Response};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tcode_runtime::session::{
-    Session, generate_session_id, list_sessions_at, read_session_mode, validate_session_id,
+    Session, generate_unique_session_id, list_sessions_at, read_session_mode, validate_session_id,
 };
 
 #[derive(Debug)]
@@ -60,6 +60,7 @@ pub(crate) type ApiResult<T> = Result<T, ApiError>;
 #[derive(Clone)]
 pub(crate) struct SessionRoot {
     pub(crate) path: PathBuf,
+    pub(crate) trash_dir: PathBuf,
 }
 
 impl SessionRoot {
@@ -99,13 +100,8 @@ impl SessionRoot {
     }
 
     pub(crate) fn create_unique_session_id(&self) -> ApiResult<String> {
-        for _ in 0..64 {
-            let id = generate_session_id();
-            if !self.path.join(&id).exists() {
-                return Ok(id);
-            }
-        }
-        Err(ApiError::internal("failed to generate a unique session id"))
+        generate_unique_session_id(&self.path, Some(&self.trash_dir))
+            .map_err(|e| ApiError::internal(e.to_string()))
     }
 }
 

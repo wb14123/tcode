@@ -74,6 +74,44 @@ pub fn run(username: String, force: bool) -> anyhow::Result<()> {
         .canonicalize()
         .context("failed to canonicalize session directory path")?;
 
+    // Prompt for trash directory
+    let default_trash_dir = dirs::home_dir()
+        .ok_or_else(|| anyhow::anyhow!("Could not find home directory"))?
+        .join(".tcode")
+        .join("trash");
+    eprint!("Trash directory [{}]: ", default_trash_dir.display());
+    io::stderr().flush().context("failed to flush stderr")?;
+
+    let mut trash_dir_input = String::new();
+    io::stdin()
+        .read_line(&mut trash_dir_input)
+        .context("failed to read trash directory")?;
+    let trash_dir_str = trash_dir_input.trim();
+
+    let trash_dir = if trash_dir_str.is_empty() {
+        default_trash_dir
+    } else {
+        PathBuf::from(trash_dir_str)
+    };
+
+    // Create trash directory if it doesn't exist
+    if !trash_dir.exists() {
+        fs::create_dir_all(&trash_dir).with_context(|| {
+            format!("failed to create trash directory: {}", trash_dir.display())
+        })?;
+    }
+    fs::set_permissions(&trash_dir, fs::Permissions::from_mode(0o700)).with_context(|| {
+        format!(
+            "failed to set 0700 permissions on {}; you may need to run: chmod 700 {}",
+            trash_dir.display(),
+            trash_dir.display()
+        )
+    })?;
+
+    let trash_dir = trash_dir
+        .canonicalize()
+        .context("failed to canonicalize trash directory path")?;
+
     // Generate argon2id hash
     let params = Params::new(65536, 3, 4, None).expect("hardcoded params are valid");
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
@@ -122,6 +160,7 @@ pub fn run(username: String, force: bool) -> anyhow::Result<()> {
         WebUser {
             password_hash: hash,
             session_dir,
+            trash_dir,
         },
     );
 

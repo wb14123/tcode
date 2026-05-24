@@ -84,11 +84,15 @@ impl AppState {
         let mut users = HashMap::new();
         let session_dir = std::path::PathBuf::from("/tmp/test-user-sessions");
         std::fs::create_dir_all(&session_dir).ok();
+        let trash_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/test-tmp/test-user-trash");
+        std::fs::create_dir_all(&trash_dir).ok();
         users.insert(
             "test-user".to_string(),
             WebUser {
                 password_hash: "$argon2id$v=19$m=65536,t=3,p=4$dGVzdHNhbHQxMjM0NTY3OA$Qb/h6/Mzserubz9fRZL7WhsOHwa0mU/KPavVjxWLsdY".to_string(),
                 session_dir: std::path::PathBuf::from("/tmp/test-user-sessions"),
+                trash_dir,
             },
         );
         Self {
@@ -109,12 +113,16 @@ impl AppState {
     #[cfg(test)]
     pub(crate) fn new_with_custom_user_dir(session_dir: std::path::PathBuf) -> Self {
         let mut users = HashMap::new();
+        let trash_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../target/test-tmp/test-user-trash");
+        std::fs::create_dir_all(&trash_dir).ok();
         users.insert(
             "test-user".to_string(),
             WebUser {
                 password_hash:
                     "$argon2id$v=19$m=65536,t=3,p=4$dGVzdHNhbHQxMjM0NTY3OA$Qb/h6/Mzserubz9fRZL7WhsOHwa0mU/KPavVjxWLsdY".to_string(),
                 session_dir,
+                trash_dir,
             },
         );
         Self {
