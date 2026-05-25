@@ -3,7 +3,8 @@ import { LitElement, html, nothing } from 'lit';
 import { ApiError, api, sessionLeaseManager } from '../api';
 import { runtimeConfig } from '../config';
 import { activeSessionId, hrefForRoute, navigate, parseRoute } from '../router';
-import type { AppRoute, PendingPermissionInfo, PermissionDecisionPayload, PermissionKey, PermissionState, SessionMode, SessionSummary } from '../types';
+import { formatTimestamp } from '../formatting';
+import type { AppRoute, PendingPermissionInfo, PermissionDecisionPayload, PermissionKey, PermissionState, SessionSummary } from '../types';
 
 import './add-permission-form';
 import './manage-conversations';
@@ -22,10 +23,6 @@ interface SystemNotificationDetail {
   createdAt: number | null;
   level: string | null;
   message: string;
-}
-
-function formatSessionMode(mode: SessionMode): string {
-  return mode === 'web_only' ? 'web-only' : 'normal';
 }
 
 function isLocalHttpHost(hostname: string): boolean {
@@ -695,7 +692,7 @@ class TcodeApp extends LitElement {
                     @click=${this.closeSidebar}
                   >
                     <div class="session-link-title">${session.description || 'Untitled conversation'}</div>
-                    <div class="session-link-meta">${formatSessionMode(session.mode)} · ${session.status || 'inactive'}</div>
+                    <div class="session-link-meta">${formatTimestamp(session.last_active_at || session.created_at)}</div>
                   </a>
                 `,
               )

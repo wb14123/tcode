@@ -186,13 +186,7 @@ class TcodeManageConversations extends LitElement {
                     />
                     <div class="manage-session-info">
                       <div class="manage-session-desc">${session.description || 'Untitled conversation'}</div>
-                      <div class="manage-session-meta">
-                        ${session.mode === 'web_only' ? 'web-only' : 'normal'}
-                        &middot;
-                        ${session.status || 'inactive'}
-                        ${session.last_active_at ? html`&middot; ${formatTimestamp(session.last_active_at)}` : nothing}
-                        ${!session.last_active_at && session.created_at ? html`&middot; ${formatTimestamp(session.created_at)}` : nothing}
-                      </div>
+                      <div class="manage-session-meta">${formatTimestamp(session.last_active_at || session.created_at)}</div>
                     </div>
                   </label>
                 `,
