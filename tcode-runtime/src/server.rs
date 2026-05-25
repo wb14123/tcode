@@ -743,12 +743,6 @@ impl Server {
                                 lsp_config,
                                 cwd.clone(),
                             ));
-                            // Pre-warm: detect project languages and start servers in background
-                            let manager_clone = manager.clone();
-                            let project_dir = cwd.clone();
-                            let _pre_warm = tokio::spawn(async move {
-                                manager_clone.pre_warm(&project_dir).await;
-                            });
                             tools_list.push(Arc::new(tools::lsp_tool(manager.clone())));
                             Some(manager)
                         } else {

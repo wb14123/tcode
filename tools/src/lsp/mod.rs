@@ -43,7 +43,9 @@ workspaceSymbol requires either:
 
 The 'language' parameter is ONLY valid for workspaceSymbol. Do not pass it for other operations.
 
-Note: LSP servers are configured from your Neovim LSP setup. If no server is available for a file type, an error will be returned."#;
+Note: LSP servers are configured from your Neovim LSP setup. If no server is available for a file type, an error will be returned.
+
+Note: On first use for a language, the LSP server starts in the background and may still be indexing. If the result includes a WARNING about work in progress, the output may be incomplete. You can use the bash tool to sleep (e.g. `sleep 5`) then retry the LSP call — subsequent calls return immediately without re-indexing."#;
 
 #[derive(serde::Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "camelCase")]

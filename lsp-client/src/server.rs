@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::time::Duration;
 
 use anyhow::{Context, Result};
 use lsp_types::{
@@ -167,6 +168,12 @@ impl LspServer {
     /// Get the progress tracker for this server.
     pub fn progress(&self) -> &ProgressTracker {
         self.transport.progress()
+    }
+
+    /// Wait until the server appears idle (no active progress items), or
+    /// `deadline` expires. Delegates to the transport's progress tracker.
+    pub async fn wait_until_ready(&self, deadline: Duration) {
+        self.transport.progress().wait_idle(deadline).await;
     }
 }
 

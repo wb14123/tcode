@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::{Result, bail};
 
@@ -44,8 +45,6 @@ impl LspManager {
 
     /// Get or start the LSP server for the given filetype.
     pub async fn get_or_start_server(&self, filetype: &str) -> Result<Arc<LspServer>> {
-        let mut servers = self.servers.lock().await;
-
         // Find which server config handles this filetype
         let server_config = self
             .config
@@ -57,12 +56,15 @@ impl LspManager {
             bail!("no LSP server configured for {filetype} files");
         };
 
-        // Check if already running
-        if let Some(server) = servers.get(&server_config.name) {
-            return Ok(Arc::clone(server));
+        // Fast path: check if already running under lock
+        {
+            let servers = self.servers.lock().await;
+            if let Some(server) = servers.get(&server_config.name) {
+                return Ok(Arc::clone(server));
+            }
         }
 
-        // Determine root directory by walking up looking for root markers
+        // Slow path: start server outside lock
         let root_dir = find_root_dir(&self.root_dir, &server_config.root_markers);
 
         tracing::info!(
@@ -72,52 +74,24 @@ impl LspManager {
         );
 
         let server = LspServer::start(server_config, &root_dir).await?;
+        server.wait_until_ready(Duration::from_secs(10)).await;
+
+        // Re-acquire lock for insert-or-dedup
+        let mut servers = self.servers.lock().await;
+        if let Some(existing) = servers.get(&server_config.name) {
+            // Lost the race — shutdown our duplicate, return the one that won
+            if let Err(e) = server.shutdown().await {
+                tracing::warn!(
+                    "Failed to shutdown duplicate LSP server '{}': {e}",
+                    server_config.name
+                );
+            }
+            return Ok(Arc::clone(existing));
+        }
+
         let server = Arc::new(server);
         servers.insert(server_config.name.clone(), Arc::clone(&server));
-
         Ok(server)
-    }
-
-    /// Pre-warm LSP servers based on project files detected in the directory.
-    pub async fn pre_warm(&self, project_dir: &Path) {
-        let mut filetypes_to_start = Vec::new();
-
-        let markers: &[(&str, &[&str])] = &[
-            ("Cargo.toml", &["rust"]),
-            ("go.mod", &["go"]),
-            ("package.json", &["typescript", "javascript"]),
-            ("pyproject.toml", &["python"]),
-            ("setup.py", &["python"]),
-            ("tsconfig.json", &["typescript"]),
-            ("build.zig", &["zig"]),
-            ("Gemfile", &["ruby"]),
-            ("mix.exs", &["elixir"]),
-            ("build.gradle", &["java", "kotlin"]),
-            ("pom.xml", &["java"]),
-        ];
-
-        for (marker, filetypes) in markers {
-            if project_dir.join(marker).exists() {
-                for ft in *filetypes {
-                    // Only add if we have a server configured for this filetype
-                    let has_server = self
-                        .config
-                        .servers
-                        .iter()
-                        .any(|s| s.filetypes.contains(&ft.to_string()));
-                    if has_server && !filetypes_to_start.contains(&ft.to_string()) {
-                        filetypes_to_start.push(ft.to_string());
-                    }
-                }
-            }
-        }
-
-        for ft in &filetypes_to_start {
-            match self.get_or_start_server(ft).await {
-                Ok(_) => tracing::info!("Pre-warmed LSP server for {ft}"),
-                Err(e) => tracing::warn!("Failed to pre-warm LSP server for {ft}: {e}"),
-            }
-        }
     }
 
     /// Shut down all running LSP servers.

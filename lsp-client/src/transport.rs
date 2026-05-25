@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, Ordering};
+use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
 use parking_lot::Mutex;
@@ -32,6 +33,40 @@ impl ProgressTracker {
     /// Snapshot of all currently active progress items.
     pub fn active_items(&self) -> Vec<ProgressItem> {
         self.items.lock().values().cloned().collect()
+    }
+
+    /// Wait until the server appears idle (no active progress items), or
+    /// `deadline` expires. Polls immediately on entry, then with exponential
+    /// backoff (50ms → 500ms cap). Returns after 3 consecutive empty polls.
+    pub async fn wait_idle(&self, deadline: Duration) {
+        let deadline = tokio::time::Instant::now() + deadline;
+        let mut interval_ms = 0u64;
+        let mut consecutive_empty = 0u32;
+
+        loop {
+            if interval_ms > 0 {
+                tokio::time::sleep(Duration::from_millis(interval_ms)).await;
+            }
+
+            if self.active_items().is_empty() {
+                consecutive_empty += 1;
+                if consecutive_empty >= 3 {
+                    return;
+                }
+            } else {
+                consecutive_empty = 0;
+            }
+
+            if tokio::time::Instant::now() >= deadline {
+                return;
+            }
+
+            if interval_ms == 0 {
+                interval_ms = 50;
+            } else {
+                interval_ms = (interval_ms * 2).min(500);
+            }
+        }
     }
 
     fn begin(
