@@ -730,11 +730,11 @@ export class ConversationTimelineBuilder {
         case 'SubAgentTokenRollup':
           this.addItem(createSignal(this.store, 'Subagent token rollup recorded'), false);
           break;
-        case 'AssistantImageGenerating': {
+        case 'AssistantMediaGenerating': {
           const id = this.ensureActiveAssistantId();
           this.updateAssistant(id, (item) => {
             item.msgId ??= asNumber(payload.msg_id);
-            const imageId = asString(payload.image_id);
+            const imageId = asString(payload.media_id);
             item.contentBlocks.push({
               kind: 'image',
               imageId,
@@ -745,10 +745,10 @@ export class ConversationTimelineBuilder {
           break;
         }
 
-        case 'AssistantImageOutput': {
+        case 'AssistantMediaOutput': {
           const id = this.ensureActiveAssistantId();
-          const imageId = asString(payload.image_id);
-          const imgData = payload.image as { relative_path: string; media_type: string } | undefined;
+          const imageId = asString(payload.media_id);
+          const imgData = payload.media as { relative_path: string; media_type: string } | undefined;
           if (imgData) {
             this.updateAssistant(id, (item) => {
               item.msgId ??= asNumber(payload.msg_id);

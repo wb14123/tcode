@@ -1421,18 +1421,18 @@ local function render_event(buf, ns, event)
       end
     end
 
-  elseif variant == 'AssistantImageGenerating' then
+  elseif variant == 'AssistantMediaGenerating' then
     -- Status bar updated by server-side status file; nothing to render in buffer.
 
-  elseif variant == 'AssistantImageOutput' then
-    -- Render image as clickable markdown: ![img](file:///absolute/path)
+  elseif variant == 'AssistantMediaOutput' then
+    -- Render media as clickable markdown: ![img](file:///absolute/path)
     if not M.display_file then
       return
     end
     local session_dir = vim.fn.fnamemodify(M.display_file, ':h')
-    local rel_path = data.image and data.image.relative_path
+    local rel_path = data.media and data.media.relative_path
     if rel_path then
-      local abs_path = session_dir .. '/images/' .. rel_path
+      local abs_path = session_dir .. '/media/' .. rel_path
       local encoded = vim.uri_encode(abs_path)
       append_lines(buf, { '', '![img](file://' .. encoded .. ')' })
     end
