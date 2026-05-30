@@ -91,6 +91,19 @@ const WEB_ONLY_SUBAGENT_RULES: &str = "
 - Give focused tasks and clear acceptance criteria
 - State the desired deliverable: summary, answer, or both";
 
+const OUTPUT_STYLE_RULES: &str = "
+## Output Style
+
+- Never use emoji in responses unless the user explicitly asks for them.
+- Avoid bold (**...**) markdown. Use it sparingly and only when it genuinely \
+improves readability — it should be the exception, not the norm.
+- Prefer bullet points for presenting information. Only use a table when it \
+has a clear advantage over a list (e.g., comparing multiple items across \
+several dimensions).
+- Use plain ASCII for structural punctuation (hyphens `-`, pipes `|`, arrows \
+`->`, quotes `\"`). Avoid Unicode substitutes like en-dash, em-dash, smart \
+quotes, or special arrow characters — these break search and pattern matching.";
+
 pub(crate) fn tcode_system_prompt_builder(
     session_mode: SessionMode,
     container_config: Option<ContainerConfig>,
@@ -128,7 +141,7 @@ fn build_normal_system_prompt(
             "unknown".to_string()
         });
     let start_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z");
-    let rules = format!("{COMMON_SUBAGENT_RULES}{NORMAL_SUBAGENT_RULES}");
+    let rules = format!("{COMMON_SUBAGENT_RULES}{NORMAL_SUBAGENT_RULES}{OUTPUT_STYLE_RULES}");
     let mut prompt = format!(
         "{role}\n\n{rules}\n\nCurrent directory: {cwd}\n\
          This conversation started at: {start_time}. Note that time may have passed since then; \
@@ -169,7 +182,7 @@ fn build_normal_system_prompt(
 
 fn build_web_only_system_prompt(context: SystemPromptContext) -> String {
     let role = system_prompt_role(context.subagent_depth);
-    let rules = format!("{COMMON_SUBAGENT_RULES}{WEB_ONLY_SUBAGENT_RULES}");
+    let rules = format!("{COMMON_SUBAGENT_RULES}{WEB_ONLY_SUBAGENT_RULES}{OUTPUT_STYLE_RULES}");
     let start_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z");
     format!(
         "{role}\n\n{rules}\n\n## Available Tools\n\n\

@@ -23,6 +23,7 @@ mod tests {
         assert!(prompt.contains("Subagent Rules"));
         assert!(prompt.contains("Tool Usage"));
         assert!(prompt.contains("`read`/`write`/`edit`"));
+        assert!(prompt.contains("Output Style"));
     }
 
     #[test]
@@ -74,6 +75,7 @@ mod tests {
         ] {
             assert!(prompt.contains(tool_name), "prompt omits {tool_name}");
         }
+        assert!(prompt.contains("Output Style"));
     }
 
     #[test]
