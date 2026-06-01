@@ -33,7 +33,7 @@ use crate::protocol::{
     ClientKind, ClientLeaseInfo, ClientMessage, RuntimeOwnerKind, ServerMessage,
     SessionRuntimeInfo, lease_timeout_duration,
 };
-use crate::session::{SessionMode, update_session_meta_from_summary};
+use crate::session::{SessionMode, is_root_session_name, update_session_meta_from_summary};
 use crate::system_prompt::tcode_system_prompt_builder;
 
 /// Shared map from tool_call_id -> ConversationClient that owns the tool.
@@ -55,6 +55,7 @@ struct SubAgentState {
 }
 
 const PREVIEW_MAX_CHARS: usize = 200;
+const FTS_INDEX_RATE_LIMIT: Duration = Duration::from_secs(10);
 const LEASE_PRUNE_INTERVAL: Duration = Duration::from_secs(5);
 const SOCKET_START_LOCK_RETRY_DELAY: Duration = Duration::from_millis(50);
 
@@ -1137,6 +1138,30 @@ fn should_update_session_meta(event: &Message) -> bool {
     )
 }
 
+fn fts_index_target(session_dir: &Path) -> Option<(PathBuf, String)> {
+    let session_id = session_dir.file_name()?.to_str()?;
+    if !is_root_session_name(session_id) {
+        return None;
+    }
+    let base = session_dir.parent()?.to_path_buf();
+    Some((base, session_id.to_string()))
+}
+
+fn spawn_conversation_saved_index(base: PathBuf, session_id: String, msg_id: i32) {
+    let handle = tokio::task::spawn_blocking(move || {
+        if let Err(e) = crate::fts::index_session(&base, &session_id) {
+            tracing::warn!(
+                session_id = %session_id,
+                base = %base.display(),
+                msg_id,
+                error = %e,
+                "failed to update search index after conversation save"
+            );
+        }
+    });
+    std::mem::drop(handle);
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_event_writer(
     mut events: EventStream,
@@ -1157,6 +1182,7 @@ fn run_event_writer(
         let mut tool_call_index_map: HashMap<usize, String> = HashMap::new();
         let mut is_thinking = false;
         let mut media_gen_count: usize = 0;
+        let mut last_fts_index_trigger: Option<Instant> = None;
         let mut activity_guard = EventWriterActivityGuard::new(Arc::clone(&work_activity));
 
         tracing::info!("event_writer started");
@@ -1169,6 +1195,20 @@ fn run_event_writer(
                     continue;
                 }
             };
+
+            if let Message::ConversationSaved { msg_id } = &*event {
+                let now = Instant::now();
+                if last_fts_index_trigger
+                    .is_some_and(|last| now.duration_since(last) < FTS_INDEX_RATE_LIMIT)
+                {
+                    continue;
+                }
+                if let Some((base, session_id)) = fts_index_target(&session_dir) {
+                    last_fts_index_trigger = Some(now);
+                    spawn_conversation_saved_index(base, session_id, *msg_id);
+                }
+                continue;
+            }
 
             // Status file updates for assistant messages
             if let Message::AssistantMessageStart { .. } = &*event {

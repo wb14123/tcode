@@ -22,6 +22,7 @@ use llm_rs::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tcode_runtime::{
+    fts,
     protocol::{ClientMessage, DEFAULT_LEASE_TIMEOUT_SECONDS, ServerMessage, SessionRuntimeInfo},
     session::{SessionMeta, SessionMode, ensure_session_mode_initialized, read_session_mode},
 };
@@ -1164,6 +1165,13 @@ pub(crate) async fn delete_session(
     }
 
     let source = session.dir().to_path_buf();
+    let fts_base = root.path.clone();
+    let fts_session_id = session_id.clone();
+    tokio::task::spawn_blocking(move || fts::remove_session(&fts_base, &fts_session_id))
+        .await
+        .map_err(|e| ApiError::internal(format!("failed to join search index cleanup: {e}")))?
+        .map_err(|e| ApiError::internal(format!("failed to clean up search index: {e}")))?;
+
     let mut dest = root.trash_dir.join(&session_id);
 
     // Try the plain ID first. If the destination already exists (e.g. a

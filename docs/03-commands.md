@@ -60,6 +60,8 @@ See [02-configuration.md](02-configuration.md#config-file-location) for the wiza
 
 Attaches to an existing session and resumes the conversation in the current tmux session. Must be run inside tmux. If `--session` is omitted, an interactive picker is shown. Existing sessions always use their stored mode; passing `--web-only` does not convert a normal session to web-only or a web-only session to normal.
 
+The interactive picker lists sessions by last activity time. Press `/` to search conversation history across sessions. Search runs in the background and shows ranked snippet results with highlighted matches; the search index is checked in the background when the picker opens, so early results may be partial until that check finishes.
+
 ```
 tcode attach
 tcode --session <id> attach

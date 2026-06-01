@@ -8,6 +8,7 @@ bundled-frontend = ["tcode-web/bundled-frontend"]
 
 [dependencies]
 browser-server = { path = "../browser-server" }
+chrono = "0.4"
 tcode-web = { path = "../tcode-web" }
 tcode-runtime = { path = "../tcode-runtime" }
 dirs = "6"

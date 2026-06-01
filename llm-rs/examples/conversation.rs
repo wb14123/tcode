@@ -140,6 +140,7 @@ fn print_message(msg: &Message) {
             // Already printed by the main loop
             let _ = content;
         }
+        Message::ConversationSaved { .. } => {}
         Message::AssistantMessageStart { .. } => {
             print!("\n<<< Assistant: ");
             io::stdout().flush().ok();

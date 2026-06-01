@@ -57,6 +57,8 @@ All session data lives in `~/.tcode/sessions/{session_id}/`. Sessions persist af
 | `permissions.json` | Project-level tool permissions (persisted across sessions) |
 | `debug.log` | Debug logging output |
 
+The attach-time session picker also maintains a derived full-text search index at `~/.tcode/sessions/fts.db`. The JSON session files remain the source of truth; the index can be rebuilt from `conversation-state.json` files and is not stored inside individual session directories.
+
 ## Subagent Display
 
 When the LLM spawns a subagent, the server creates a sub-session directory at `{session_dir}/subagent-{conv_id}/` with the same file structure as the parent session (`display.jsonl`, `status.txt`, per-tool-call files). A nested event writer subscribes to the subagent's conversation events and writes them independently.

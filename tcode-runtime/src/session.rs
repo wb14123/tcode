@@ -202,6 +202,11 @@ pub fn is_valid_session_id(session_id: &str) -> bool {
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit())
 }
 
+/// Return true when `name` is a root session directory name.
+pub fn is_root_session_name(name: &str) -> bool {
+    is_valid_session_id(name)
+}
+
 pub fn validate_session_id(session_id: &str) -> Result<()> {
     if !is_valid_session_id(session_id) {
         bail!("invalid session id: expected 8 lowercase alphanumeric characters");

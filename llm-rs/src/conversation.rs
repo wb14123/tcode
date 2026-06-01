@@ -223,6 +223,10 @@ pub enum Message {
         media_filenames: Vec<String>,
     },
 
+    ConversationSaved {
+        msg_id: MessageID,
+    },
+
     AssistantMessageStart {
         msg_id: MessageID,
         created_at: u64,
@@ -1474,6 +1478,11 @@ impl Conversation {
             let target = dir.join("conversation-state.json");
             std::fs::write(&tmp, &json)?;
             std::fs::rename(&tmp, &target)?;
+            if let Err(e) = self.broadcast_msg(Message::ConversationSaved {
+                msg_id: self.next_msg_id(),
+            }) {
+                tracing::warn!(error = %e, "failed to broadcast conversation saved notification");
+            }
         }
         Ok(summary)
     }

@@ -47,6 +47,22 @@ The tree view shows a hierarchical tree of subagents and tool calls.
 | `f` | Toggle filter (running only / all) |
 | `q` | Quit |
 
+## Session Picker
+
+The session picker appears when a command such as `tcode attach` needs a session and `--session <id>` was not provided. The default view is sorted by last activity time. Press `/` to search conversation history; search results show session metadata plus a highlighted snippet from the best matching message.
+
+| Key | Context | Action |
+|-----|---------|--------|
+| `j` / `Down` | Default/search | Move down |
+| `k` / `Up` | Default/search | Move up |
+| `/` | Default | Start search |
+| Printable chars | Search | Append to search query |
+| `Backspace` | Search | Delete the last query character |
+| `Enter` | Default/search | Select highlighted session |
+| `Esc` | Search | Clear search and return to default view |
+| `q` / `Esc` | Default | Cancel picker |
+| `Ctrl-C` | Default/search | Cancel picker |
+
 ## Permission View
 
 The permission view shows tool permissions organized by key, with their current status (pending, granted).
