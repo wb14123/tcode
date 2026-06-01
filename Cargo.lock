@@ -197,7 +197,7 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "auth"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -830,7 +830,7 @@ dependencies = [
 
 [[package]]
 name = "browser-server"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -2854,7 +2854,7 @@ checksum = "11d3d7f243d5c5a8b9bb5d6dd2b1602c0cb0b9db1621bafc7ed66e35ff9fe092"
 
 [[package]]
 name = "llm-rs"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-stream",
@@ -2883,7 +2883,7 @@ dependencies = [
 
 [[package]]
 name = "llm-rs-macros"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "convert_case 0.11.0",
  "proc-macro-crate",
@@ -2956,7 +2956,7 @@ checksum = "112b39cec0b298b6c1999fee3e31427f74f676e4cb9879ed1a121b43661a4154"
 
 [[package]]
 name = "lsp-client"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "lsp-types",
@@ -4724,7 +4724,7 @@ dependencies = [
 
 [[package]]
 name = "tcode"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "auth",
@@ -4763,7 +4763,7 @@ dependencies = [
 
 [[package]]
 name = "tcode-runtime"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "auth",
@@ -4795,7 +4795,7 @@ dependencies = [
 
 [[package]]
 name = "tcode-web"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "argon2",
@@ -5156,7 +5156,7 @@ checksum = "756daf9b1013ebe47a8776667b466417e2d4c5679d441c26230efd9ef78692db"
 
 [[package]]
 name = "tools"
-version = "0.2.1"
+version = "0.2.2"
 dependencies = [
  "anyhow",
  "async-stream",
