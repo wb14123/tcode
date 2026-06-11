@@ -17,7 +17,7 @@ use tokio_stream::{Stream, StreamExt};
 use super::sse;
 use super::{
     ChatOptions, GetTokenFn, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason,
-    TokenProvider, ToolCall,
+    TokenProvider, ToolCall, is_manual_only_model,
 };
 use crate::tool::Tool;
 
@@ -128,6 +128,8 @@ struct MessagesRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<ThinkingConfig>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    output_config: Option<OutputConfig>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     cache_control: Option<CacheControl>,
 }
 
@@ -151,8 +153,16 @@ struct ClaudeToolDefinition {
 #[derive(Serialize)]
 struct ThinkingConfig {
     #[serde(rename = "type")]
-    thinking_type: &'static str,
-    budget_tokens: u32,
+    thinking_type: &'static str, // "enabled" or "adaptive"
+    #[serde(skip_serializing_if = "Option::is_none")]
+    budget_tokens: Option<u32>, // None for adaptive models
+    display: &'static str, // always "summarized"
+}
+
+/// Output configuration for adaptive thinking models.
+#[derive(Serialize)]
+struct OutputConfig {
+    effort: &'static str, // "low", "medium", "high", "xhigh", "max"
 }
 
 /// Tool name prefix required for OAuth authentication.
@@ -594,6 +604,22 @@ impl LLM for Claude {
     fn available_models(&self) -> Vec<ModelInfo> {
         vec![
             ModelInfo {
+                id: "claude-fable-5".into(),
+                description: "Anthropic's most capable widely released model".into(),
+            },
+            ModelInfo {
+                id: "claude-mythos-5".into(),
+                description: "Shares Fable 5's capabilities, limited release".into(),
+            },
+            ModelInfo {
+                id: "claude-opus-4-8".into(),
+                description: "Most capable, adaptive thinking only".into(),
+            },
+            ModelInfo {
+                id: "claude-opus-4-7".into(),
+                description: "Most capable, adaptive thinking only".into(),
+            },
+            ModelInfo {
                 id: "claude-opus-4-6".into(),
                 description: "Most capable, best for complex tasks".into(),
             },
@@ -636,29 +662,36 @@ impl LLM for Claude {
         // Capture max_tokens option
         let max_tokens_option = options.max_tokens;
 
-        // Map ChatOptions to Claude thinking config
-        // If reasoning_budget is set, use it directly
-        // Otherwise, map reasoning_effort to a default budget
-        let thinking = if let Some(budget) = options.reasoning_budget {
-            Some(ThinkingConfig {
-                thinking_type: "enabled",
-                budget_tokens: budget,
-            })
-        } else if let Some(ref effort) = options.reasoning_effort {
-            // Map reasoning effort to budget tokens for Claude
-            let budget = match effort {
-                ReasoningEffort::Minimal => 4000,
-                ReasoningEffort::Low => 8000,
-                ReasoningEffort::Medium => 16000,
-                ReasoningEffort::High => 24000,
-                ReasoningEffort::XHigh => 31999, // Max allowed
-            };
-            Some(ThinkingConfig {
-                thinking_type: "enabled",
-                budget_tokens: budget,
-            })
+        // Determine effort (default to XHigh) and whether the model supports adaptive mode
+        let effort = options
+            .reasoning_effort
+            .as_ref()
+            .unwrap_or(&ReasoningEffort::XHigh);
+        let is_manual = is_manual_only_model(&model);
+
+        // Build thinking config and output config based on model capabilities
+        let (thinking, output_config) = if !is_manual {
+            // Adaptive mode: type="adaptive", no budget_tokens, output_config present
+            let thinking = Some(ThinkingConfig {
+                thinking_type: "adaptive",
+                budget_tokens: None,
+                display: "summarized",
+            });
+            let output_config = Some(OutputConfig {
+                effort: effort.as_str(),
+            });
+            (thinking, output_config)
         } else {
-            None
+            // Manual mode: type="enabled" with budget_tokens
+            let budget = options
+                .reasoning_budget
+                .unwrap_or_else(|| effort.as_claude_budget());
+            let thinking = Some(ThinkingConfig {
+                thinking_type: "enabled",
+                budget_tokens: Some(budget),
+                display: "summarized",
+            });
+            (thinking, None)
         };
 
         Box::pin(stream! {
@@ -674,13 +707,15 @@ impl LLM for Claude {
             // Calculate max_tokens: must be greater than thinking.budget_tokens if thinking is enabled
             // Use provided max_tokens option, otherwise use defaults
             const DEFAULT_OUTPUT_TOKENS: u32 = 8192;
-            let max_tokens = match (&thinking, max_tokens_option) {
-                // User provided explicit max_tokens
-                (_, Some(user_max)) => user_max,
-                // Thinking enabled: budget + default output buffer
-                (Some(config), None) => config.budget_tokens + DEFAULT_OUTPUT_TOKENS,
-                // No thinking, no user override: use default
-                (None, None) => DEFAULT_OUTPUT_TOKENS,
+            const DEFAULT_ADAPTIVE_OUTPUT_TOKENS: u32 = 16000;
+            let max_tokens = if let Some(user_max) = max_tokens_option {
+                user_max
+            } else if let Some(ref config) = thinking
+                && let Some(budget) = config.budget_tokens
+            {
+                budget + DEFAULT_OUTPUT_TOKENS
+            } else {
+                DEFAULT_ADAPTIVE_OUTPUT_TOKENS
             };
 
             let request_body = MessagesRequest {
@@ -691,6 +726,7 @@ impl LLM for Claude {
                 stream: true,
                 tools: tool_defs,
                 thinking,
+                output_config,
                 cache_control: Some(CacheControl { cache_type: "ephemeral" }),
             };
 

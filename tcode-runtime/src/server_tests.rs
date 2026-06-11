@@ -77,6 +77,7 @@ fn test_server(socket_path: PathBuf, session_dir: PathBuf, owner_token: &str) ->
         session_dir.join("display.jsonl"),
         session_dir.join("status.txt"),
         session_dir.join("usage.txt"),
+        session_dir.join("effort.txt"),
         session_dir.clone(),
         session_dir.join("conversation.json"),
         Box::new(MockLlm::new()),
@@ -358,6 +359,7 @@ async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow:
         dir.join("display.jsonl"),
         dir.join("status.txt"),
         dir.join("usage.txt"),
+        dir.join("effort.txt"),
         dir.clone(),
         dir.join("conversation.json"),
         Box::new(MockLlm::with_registered_tools(Arc::clone(

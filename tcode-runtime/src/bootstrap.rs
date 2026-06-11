@@ -100,16 +100,21 @@ impl RuntimeSettings {
         }
 
         let (llm, model, token_manager) = create_llm(&self.config, self.profile.as_deref()).await?;
+        let mut chat_options = build_chat_options();
+        if let Some(ref effort) = self.config.reasoning_effort {
+            chat_options.reasoning_effort = Some(effort.clone());
+        }
         let server = Server::new_with_runtime_options(
             socket_path.clone(),
             session.display_file(),
             session.status_file(),
             session.usage_file(),
+            session.effort_file(),
             session.session_dir().clone(),
             session.conversation_state_file(),
             llm,
             model,
-            build_chat_options(),
+            chat_options,
             self.config.max_subagent_depth.unwrap_or(10),
             self.config.subagent_model_selection.unwrap_or(false),
             token_manager,
@@ -400,7 +405,7 @@ fn get_api_key(config: &TcodeConfig, provider: Provider) -> String {
 
 pub fn build_chat_options() -> ChatOptions {
     ChatOptions {
-        reasoning_effort: Some(ReasoningEffort::High),
+        reasoning_effort: Some(ReasoningEffort::XHigh),
         ..Default::default()
     }
 }

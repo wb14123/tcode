@@ -60,6 +60,7 @@ impl DisplayClient {
         let status_file = self.session.status_file();
         let usage_file = self.session.usage_file();
         let token_usage_file = self.session.token_usage_file();
+        let effort_file = self.session.effort_file();
         let exe_path =
             std::env::current_exe().context("Failed to determine current executable path")?;
         let parser_path = parser_lib_path(&exe_path);
@@ -68,7 +69,7 @@ impl DisplayClient {
         // attach immediately instead of retrying. Without this, the watchers give up
         // after ~20 seconds of retries, so if the first assistant response takes longer
         // (or usage fetch fails with e.g. 429), the status bar never updates.
-        for path in [&usage_file, &token_usage_file] {
+        for path in [&usage_file, &token_usage_file, &effort_file] {
             if !path.exists() {
                 tokio::fs::write(path, "")
                     .await
@@ -97,6 +98,7 @@ impl DisplayClient {
             &exe_path,
             &parser_path,
             &self.runtime_dir,
+            &effort_file,
         ) {
             Ok(nvim) => nvim,
             Err(e) => {
@@ -131,9 +133,10 @@ fn spawn_nvim(
     exe_path: &Path,
     parser_path: &Path,
     runtime_dir: &Path,
+    effort_file: &Path,
 ) -> Result<Child> {
     let lua_cmd = format!(
-        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
+        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
         lua_escape(&lua_dir.display().to_string()),
         lua_escape(&display_file.display().to_string()),
         lua_escape(&status_file.display().to_string()),
@@ -143,6 +146,7 @@ fn spawn_nvim(
         lua_escape(&exe_path.display().to_string()),
         lua_escape(&parser_path.display().to_string()),
         lua_escape(&runtime_dir.display().to_string()),
+        lua_escape(&effort_file.display().to_string()),
     );
 
     let (stdin, stdout, stderr) = tty_stdio::get_tty_stdio();

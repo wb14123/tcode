@@ -84,6 +84,11 @@ browser_server_url = ""          # remote browser-server URL (TCP mode)
 browser_server_token = ""        # bearer token for remote browser-server
 search_engine = "google"         # kagi | google
 supports_media = false            # set to true if your model supports visual/media input (images, PDFs)
+reasoning_effort = "xhigh"      # optional. minimal | low | medium | high | xhigh | max. Defaults to "xhigh".
+                                 # Controls how much effort the model spends on reasoning/thinking.
+                                 # Not all values are supported by all providers — unsupported values
+                                 # produce an API error so you can adjust.
+                                 # Omit the key entirely for the default.
 
 [shortcuts]                      # see Shortcut Templates section below
 brainstorm = "..."

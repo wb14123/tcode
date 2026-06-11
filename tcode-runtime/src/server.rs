@@ -455,6 +455,7 @@ pub struct Server {
     display_file: PathBuf,
     status_file: PathBuf,
     usage_file: PathBuf,
+    effort_file: PathBuf,
     session_dir: PathBuf,
     conversation_state_file: PathBuf,
     llm: Box<dyn LLM>,
@@ -490,6 +491,7 @@ impl Server {
             display_file,
             status_file,
             usage_file,
+            session_dir.join("effort.txt"),
             session_dir,
             conversation_state_file,
             llm,
@@ -510,6 +512,7 @@ impl Server {
         display_file: PathBuf,
         status_file: PathBuf,
         usage_file: PathBuf,
+        effort_file: PathBuf,
         session_dir: PathBuf,
         conversation_state_file: PathBuf,
         llm: Box<dyn LLM>,
@@ -527,6 +530,7 @@ impl Server {
             display_file,
             status_file,
             usage_file,
+            effort_file,
             session_dir,
             conversation_state_file,
             llm,
@@ -734,6 +738,18 @@ impl Server {
                     format!("Failed to initialize status file {:?}", self.status_file)
                 })?;
         }
+
+        // Write the reasoning effort to effort file for status line display.
+        // Always written (not gated by resuming) since the config may change between runs.
+        let effort_str = self
+            .chat_options
+            .reasoning_effort
+            .as_ref()
+            .map(|e| e.as_str())
+            .unwrap_or("xhigh");
+        tokio::fs::write(&self.effort_file, effort_str)
+            .await
+            .with_context(|| format!("Failed to write effort file {:?}", self.effort_file))?;
 
         let lsp_manager = if let Some(lsp_config_task) = lsp_config_task {
             match lsp_config_task.await {

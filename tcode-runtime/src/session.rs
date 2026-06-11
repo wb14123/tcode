@@ -380,6 +380,11 @@ impl Session {
         self.session_dir.join("token_usage.txt")
     }
 
+    /// Path for the reasoning effort file (written by server, read by nvim)
+    pub fn effort_file(&self) -> PathBuf {
+        self.session_dir.join("effort.txt")
+    }
+
     /// Path for the socket file
     pub fn socket_path(&self) -> PathBuf {
         self.session_dir.join("server.sock")

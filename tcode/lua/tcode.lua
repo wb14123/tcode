@@ -1653,11 +1653,12 @@ end
 -- @param exe_path: Path to tcode executable
 -- @param parser_path: Path to libtree_sitter_tcode.so/.dylib (optional, for treesitter isolation)
 -- @param runtime_dir: Root directory containing queries/tcode/*.scm (optional, prepended to runtimepath)
-function M.setup_display(display_file, status_file, usage_file, token_usage_file, session_id, exe_path, parser_path, runtime_dir)
+function M.setup_display(display_file, status_file, usage_file, token_usage_file, session_id, exe_path, parser_path, runtime_dir, effort_file)
   M.display_file = display_file or '/tmp/tcode-display.jsonl'
   M.status_file = status_file or '/tmp/tcode-status.txt'
   M.usage_file = usage_file
   M.token_usage_file = token_usage_file
+  M.effort_file = effort_file
   M.session_id = session_id
   M.exe_path = exe_path
 
@@ -1665,6 +1666,7 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   vim.g.tcode_usage = ''
   vim.g.tcode_token_usage = ''
   vim.g.tcode_combined_usage = ''
+  vim.g.tcode_effort = ''
 
   local function update_combined_usage()
     local parts = {}
@@ -1676,7 +1678,7 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   setup_highlights('#98c379', 114)
   disable_conflicting_plugins()
   local buf = create_display_buffer('tcode',
-    '%#TCodeStatusLine# TCode: %{g:tcode_status}%=%{g:tcode_combined_usage} ')
+    '%#TCodeStatusLine# TCode: %{g:tcode_status} | Reasoning effort: %{g:tcode_effort}%=%{g:tcode_combined_usage} ')
   local ns = vim.api.nvim_create_namespace('tcode')
 
   -- Mark the buffer as tcode so our custom tree-sitter grammar handles separator
@@ -1773,6 +1775,19 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     end)
   end
 
+  -- Watch effort file for reasoning effort updates.
+  if M.effort_file then
+    M.effort_watcher = create_status_watcher(M.effort_file, function(effort)
+      if effort and effort ~= '' then
+        vim.g.tcode_effort = effort
+      else
+        vim.g.tcode_effort = ''
+      end
+      update_combined_usage()
+      vim.cmd('redrawstatus')
+    end)
+  end
+
   -- Clean up watchers when buffer is deleted or wiped
   vim.api.nvim_create_autocmd({'BufDelete', 'BufWipeout'}, {
     buffer = buf,
@@ -1781,6 +1796,7 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
       if M.status_watcher then M.status_watcher.stop(); M.status_watcher = nil end
       if M.usage_watcher then M.usage_watcher.stop(); M.usage_watcher = nil end
       if M.token_usage_watcher then M.token_usage_watcher.stop(); M.token_usage_watcher = nil end
+      if M.effort_watcher then M.effort_watcher.stop(); M.effort_watcher = nil end
     end,
   })
 

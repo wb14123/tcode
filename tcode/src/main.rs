@@ -464,12 +464,16 @@ async fn main() -> Result<()> {
             tools::set_search_engine(search_engine);
             let container_config = resolve_container_config(&container, &container_runtime).await?;
             let (llm, model, token_manager) = create_llm(&config, profile.as_deref()).await?;
-            let chat_options = build_chat_options();
+            let mut chat_options = build_chat_options();
+            if let Some(ref effort) = config.reasoning_effort {
+                chat_options.reasoning_effort = Some(effort.clone());
+            }
             let server = Server::new_with_runtime_options(
                 socket_path,
                 sess.display_file(),
                 sess.status_file(),
                 sess.usage_file(),
+                sess.effort_file(),
                 sess.session_dir().clone(),
                 sess.conversation_state_file(),
                 llm,
@@ -567,7 +571,10 @@ async fn main() -> Result<()> {
                 RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {
                     let (llm, model, token_manager) =
                         create_llm(&config, profile.as_deref()).await?;
-                    let chat_options = build_chat_options();
+                    let mut chat_options = build_chat_options();
+                    if let Some(ref effort) = config.reasoning_effort {
+                        chat_options.reasoning_effort = Some(effort.clone());
+                    }
                     let container_config =
                         resolve_container_config(&container, &container_runtime).await?;
                     Some(RuntimeDependencies {
@@ -860,7 +867,10 @@ async fn run_unified(
     let session = Session::new(session_id.clone())?;
     initialize_new_session_mode(&session, requested_mode)?;
     let (llm, model, token_manager) = create_llm(&config, profile).await?;
-    let chat_options = build_chat_options();
+    let mut chat_options = build_chat_options();
+    if let Some(ref effort) = config.reasoning_effort {
+        chat_options.reasoning_effort = Some(effort.clone());
+    }
     let runtime_deps = Some(RuntimeDependencies {
         llm,
         model,
@@ -1211,6 +1221,7 @@ async fn run_unified_with_session(
                 session.display_file(),
                 session.status_file(),
                 session.usage_file(),
+                session.effort_file(),
                 session.session_dir().clone(),
                 session.conversation_state_file(),
                 llm,

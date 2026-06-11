@@ -56,12 +56,53 @@ pub trait TokenProvider: Send + Sync {
 
 /// Reasoning effort level for thinking models.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
+    Max,
     XHigh,
     High,
     Medium,
     Low,
     Minimal,
+}
+
+impl ReasoningEffort {
+    /// Canonical string representation (used for OpenAI / OpenRouter / status display).
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            ReasoningEffort::Max => "max",
+            ReasoningEffort::XHigh => "xhigh",
+            ReasoningEffort::High => "high",
+            ReasoningEffort::Medium => "medium",
+            ReasoningEffort::Low => "low",
+            ReasoningEffort::Minimal => "minimal",
+        }
+    }
+
+    /// Claude/Bedrock manual-mode thinking token budget.
+    pub fn as_claude_budget(&self) -> u32 {
+        match self {
+            ReasoningEffort::Minimal => 4000,
+            ReasoningEffort::Low => 8000,
+            ReasoningEffort::Medium => 16000,
+            ReasoningEffort::High => 24000,
+            ReasoningEffort::XHigh => 31999,
+            ReasoningEffort::Max => 32000,
+        }
+    }
+}
+
+/// Returns true when `model` is an older Claude generation that does not
+/// support adaptive thinking and must use manual mode (enabled + budget_tokens).
+/// Uses substring matching so it works for both direct API model names
+/// (`claude-opus-4-5`) and Bedrock ARN-format model IDs
+/// (`us.anthropic.claude-opus-4-5-v1`).
+///
+/// All unrecognised / future models default to adaptive.
+pub(crate) fn is_manual_only_model(model: &str) -> bool {
+    model.contains("claude-opus-4-5")
+        || model.contains("claude-sonnet-4-5")
+        || model.contains("claude-haiku-4-5")
 }
 
 /// Information about an available model.

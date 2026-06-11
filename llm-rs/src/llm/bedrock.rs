@@ -23,6 +23,7 @@ use tokio_stream::Stream;
 
 use super::{
     ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall,
+    is_manual_only_model,
 };
 use crate::media::ContentPart;
 use crate::tool::{self, Tool};
@@ -133,13 +134,7 @@ fn thinking_budget(options: &ChatOptions) -> Option<u32> {
         options
             .reasoning_effort
             .as_ref()
-            .map(|effort| match effort {
-                ReasoningEffort::Minimal => 4000,
-                ReasoningEffort::Low => 8000,
-                ReasoningEffort::Medium => 16000,
-                ReasoningEffort::High => 24000,
-                ReasoningEffort::XHigh => 31999,
-            })
+            .map(|effort| effort.as_claude_budget())
     }
 }
 
@@ -152,8 +147,35 @@ pub(super) fn build_thinking_document(budget: u32) -> Document {
                 "budget_tokens".to_string(),
                 Document::Number(Number::PosInt(u64::from(budget))),
             ),
+            (
+                "display".to_string(),
+                Document::String("summarized".to_string()),
+            ),
         ])),
     )]))
+}
+
+/// Build the additionalModelRequestFields document for adaptive thinking models.
+fn build_adaptive_thinking_document(effort_str: &str) -> Document {
+    Document::Object(HashMap::from([
+        (
+            "thinking".to_string(),
+            Document::Object(HashMap::from([
+                ("type".to_string(), Document::String("adaptive".to_string())),
+                (
+                    "display".to_string(),
+                    Document::String("summarized".to_string()),
+                ),
+            ])),
+        ),
+        (
+            "output_config".to_string(),
+            Document::Object(HashMap::from([(
+                "effort".to_string(),
+                Document::String(effort_str.to_string()),
+            )])),
+        ),
+    ]))
 }
 
 pub(super) fn build_tool_config(tools: &[Arc<Tool>]) -> Result<Option<ToolConfiguration>> {
@@ -804,13 +826,26 @@ impl LLM for Bedrock {
             }
         };
 
-        let budget = thinking_budget(options);
-        let max_tokens = match (budget, options.max_tokens) {
-            (_, Some(user_max)) => user_max,
-            (Some(budget), None) => budget + DEFAULT_OUTPUT_TOKENS,
-            (None, None) => DEFAULT_OUTPUT_TOKENS,
+        let is_manual = is_manual_only_model(model.as_str());
+        let (additional_fields, max_tokens) = if !is_manual {
+            let effort = options
+                .reasoning_effort
+                .as_ref()
+                .unwrap_or(&ReasoningEffort::XHigh);
+            let mt = options.max_tokens.unwrap_or(16000);
+            (
+                Some(build_adaptive_thinking_document(effort.as_str())),
+                mt,
+            )
+        } else {
+            let budget = thinking_budget(options);
+            let mt = match (budget, options.max_tokens) {
+                (_, Some(user_max)) => user_max,
+                (Some(b), None) => b + DEFAULT_OUTPUT_TOKENS,
+                (None, None) => DEFAULT_OUTPUT_TOKENS,
+            };
+            (budget.map(build_thinking_document), mt)
         };
-        let additional_fields = budget.map(build_thinking_document);
         let inference_config = InferenceConfiguration::builder()
             .max_tokens(i32::try_from(max_tokens).unwrap_or(i32::MAX))
             .build();
@@ -883,6 +918,22 @@ impl LLM for Bedrock {
 
     fn available_models(&self) -> Vec<ModelInfo> {
         vec![
+            ModelInfo {
+                id: "us.anthropic.claude-fable-5-v1".into(),
+                description: "Most capable widely released model via Bedrock".into(),
+            },
+            ModelInfo {
+                id: "us.anthropic.claude-mythos-5-v1".into(),
+                description: "Shares Fable 5's capabilities, limited release via Bedrock".into(),
+            },
+            ModelInfo {
+                id: "us.anthropic.claude-opus-4-8-v1".into(),
+                description: "Most capable, adaptive thinking only via Bedrock".into(),
+            },
+            ModelInfo {
+                id: "us.anthropic.claude-opus-4-7-v1".into(),
+                description: "Most capable, adaptive thinking only via Bedrock".into(),
+            },
             ModelInfo {
                 id: "us.anthropic.claude-opus-4-6-v1".into(),
                 description: "Most capable Claude model via Bedrock".into(),

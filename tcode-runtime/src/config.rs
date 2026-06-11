@@ -1,4 +1,5 @@
 use anyhow::{Result, bail};
+use llm_rs::llm::ReasoningEffort;
 use serde::Deserialize;
 use std::collections::HashMap;
 use std::fmt;
@@ -18,6 +19,7 @@ pub struct TcodeConfig {
     pub browser_server_url: Option<String>,
     pub browser_server_token: Option<String>,
     pub search_engine: Option<String>,
+    pub reasoning_effort: Option<ReasoningEffort>,
     #[serde(default = "default_shortcuts")]
     pub shortcuts: HashMap<String, String>,
     pub layout: Option<LayoutNode>,
@@ -39,6 +41,7 @@ impl Default for TcodeConfig {
             browser_server_url: None,
             browser_server_token: None,
             search_engine: None,
+            reasoning_effort: None,
             shortcuts: default_shortcuts(),
             layout: None,
             supports_media: false,
@@ -299,6 +302,7 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # browser_server_token = ""
 # search_engine = "google"         # kagi | google
 # supports_media = false         # set to true if your model supports visual/media input (images, PDFs); bedrock Claude supports media
+# reasoning_effort = "xhigh"    # optional. minimal | low | medium | high | xhigh | max. Defaults to "xhigh". Omit for default.
 
 [shortcuts]
 brainstorm = """\

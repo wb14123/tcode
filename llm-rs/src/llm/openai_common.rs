@@ -29,13 +29,7 @@ pub(crate) struct FunctionDefinition {
 
 /// Convert `ReasoningEffort` enum to the API string representation.
 pub(crate) fn effort_to_str(effort: &ReasoningEffort) -> &'static str {
-    match effort {
-        ReasoningEffort::XHigh => "xhigh",
-        ReasoningEffort::High => "high",
-        ReasoningEffort::Medium => "medium",
-        ReasoningEffort::Low => "low",
-        ReasoningEffort::Minimal => "minimal",
-    }
+    effort.as_str()
 }
 
 /// Build tool definitions from registered tools (Chat Completions format).

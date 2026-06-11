@@ -137,6 +137,7 @@ mod tests {
     #[test]
     fn reasoning_effort_serde_all_variants() -> anyhow::Result<()> {
         for effort in [
+            ReasoningEffort::Max,
             ReasoningEffort::XHigh,
             ReasoningEffort::High,
             ReasoningEffort::Medium,
@@ -148,6 +149,52 @@ mod tests {
             assert_eq!(deserialized, effort);
         }
         Ok(())
+    }
+
+    #[test]
+    fn reasoning_effort_as_str() {
+        assert_eq!(ReasoningEffort::Max.as_str(), "max");
+        assert_eq!(ReasoningEffort::XHigh.as_str(), "xhigh");
+        assert_eq!(ReasoningEffort::High.as_str(), "high");
+        assert_eq!(ReasoningEffort::Medium.as_str(), "medium");
+        assert_eq!(ReasoningEffort::Low.as_str(), "low");
+        assert_eq!(ReasoningEffort::Minimal.as_str(), "minimal");
+    }
+
+    #[test]
+    fn reasoning_effort_as_claude_budget() {
+        assert_eq!(ReasoningEffort::Max.as_claude_budget(), 32000);
+        assert_eq!(ReasoningEffort::XHigh.as_claude_budget(), 31999);
+        assert_eq!(ReasoningEffort::High.as_claude_budget(), 24000);
+        assert_eq!(ReasoningEffort::Medium.as_claude_budget(), 16000);
+        assert_eq!(ReasoningEffort::Low.as_claude_budget(), 8000);
+        assert_eq!(ReasoningEffort::Minimal.as_claude_budget(), 4000);
+    }
+
+    #[test]
+    fn is_manual_only_model_detects_old_models() {
+        use crate::llm::is_manual_only_model;
+        // Direct API names
+        assert!(is_manual_only_model("claude-opus-4-5"));
+        assert!(is_manual_only_model("claude-sonnet-4-5"));
+        assert!(is_manual_only_model("claude-haiku-4-5"));
+        // Bedrock ARN-format IDs
+        assert!(is_manual_only_model("us.anthropic.claude-opus-4-5-v1"));
+        assert!(is_manual_only_model("us.anthropic.claude-sonnet-4-5-v1"));
+        assert!(is_manual_only_model("us.anthropic.claude-haiku-4-5-v1"));
+    }
+
+    #[test]
+    fn is_manual_only_model_rejects_new_models() {
+        use crate::llm::is_manual_only_model;
+        assert!(!is_manual_only_model("claude-opus-4-6"));
+        assert!(!is_manual_only_model("claude-sonnet-4-6"));
+        assert!(!is_manual_only_model("claude-fable-5"));
+        assert!(!is_manual_only_model("claude-mythos-5"));
+        assert!(!is_manual_only_model("claude-opus-4-8"));
+        assert!(!is_manual_only_model("claude-opus-4-7"));
+        assert!(!is_manual_only_model(""));
+        assert!(!is_manual_only_model("gpt-5"));
     }
 
     // ======== ToolCall serde ========
