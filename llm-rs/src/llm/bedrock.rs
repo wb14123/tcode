@@ -833,10 +833,7 @@ impl LLM for Bedrock {
                 .as_ref()
                 .unwrap_or(&ReasoningEffort::XHigh);
             let mt = options.max_tokens.unwrap_or(16000);
-            (
-                Some(build_adaptive_thinking_document(effort.as_str())),
-                mt,
-            )
+            (Some(build_adaptive_thinking_document(effort.as_str())), mt)
         } else {
             let budget = thinking_budget(options);
             let mt = match (budget, options.max_tokens) {

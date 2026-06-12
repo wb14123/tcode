@@ -152,6 +152,24 @@ mod tests {
     }
 
     #[test]
+    fn reasoning_effort_backward_compat_pascal_case() -> anyhow::Result<()> {
+        let old_cases = [
+            ("\"Max\"", ReasoningEffort::Max),
+            ("\"XHigh\"", ReasoningEffort::XHigh),
+            ("\"High\"", ReasoningEffort::High),
+            ("\"Medium\"", ReasoningEffort::Medium),
+            ("\"Low\"", ReasoningEffort::Low),
+            ("\"Minimal\"", ReasoningEffort::Minimal),
+        ];
+        for (json, expected) in old_cases {
+            let deserialized: ReasoningEffort =
+                serde_json::from_str(json).expect("failed to deserialize old PascalCase format");
+            assert_eq!(deserialized, expected, "mismatch for {}", json);
+        }
+        Ok(())
+    }
+
+    #[test]
     fn reasoning_effort_as_str() {
         assert_eq!(ReasoningEffort::Max.as_str(), "max");
         assert_eq!(ReasoningEffort::XHigh.as_str(), "xhigh");

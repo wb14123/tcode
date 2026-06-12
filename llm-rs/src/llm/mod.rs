@@ -56,13 +56,18 @@ pub trait TokenProvider: Send + Sync {
 
 /// Reasoning effort level for thinking models.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
 pub enum ReasoningEffort {
+    #[serde(rename = "max", alias = "Max")]
     Max,
+    #[serde(rename = "xhigh", alias = "XHigh")]
     XHigh,
+    #[serde(rename = "high", alias = "High")]
     High,
+    #[serde(rename = "medium", alias = "Medium")]
     Medium,
+    #[serde(rename = "low", alias = "Low")]
     Low,
+    #[serde(rename = "minimal", alias = "Minimal")]
     Minimal,
 }
 
