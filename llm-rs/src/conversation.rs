@@ -559,7 +559,12 @@ fn prepare_conversation(
     llm.register_tools(tools.clone());
     let tools_map = tools.into_iter().map(|t| (t.name.clone(), t)).collect();
     let (input_tx, input_rx) = mpsc::channel(100);
-    let (notify_tx, _) = broadcast::channel(100);
+    // Temporary mitigation for high-volume streamed tool output (notably bash):
+    // event writers subscribe through this broadcast channel and persist tool
+    // detail files from it. Broadcast is still lossy if a receiver lags beyond
+    // this capacity, so strict detail-file completeness would require a
+    // non-lossy/backpressured persistence path.
+    let (notify_tx, _) = broadcast::channel(10_000);
     let client = Arc::new(ConversationClient {
         msg_id_counter: AtomicI32::new(msg_id_start),
         msgs: parking_lot::RwLock::new(Vec::new()),
@@ -2878,7 +2883,9 @@ impl ConversationClient {
     #[cfg(test)]
     pub(crate) fn new_for_test() -> Self {
         let (input_tx, _input_rx) = mpsc::channel(10);
-        let (notify_tx, _) = broadcast::channel(100);
+        // Keep this in sync with the production broadcast capacity above so
+        // tests exercise the same lag tolerance for streamed tool output.
+        let (notify_tx, _) = broadcast::channel(10_000);
         ConversationClient {
             msg_id_counter: AtomicI32::new(0),
             msgs: parking_lot::RwLock::new(Vec::new()),

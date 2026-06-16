@@ -12,18 +12,25 @@ mod command_permission_tests;
 #[cfg(test)]
 mod output_processing_tests;
 
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::process::Stdio;
+use std::sync::Arc;
 
 use anyhow::{Result, anyhow};
-use llm_rs::tool::{CancellationToken, ToolContext};
+use llm_rs::llm::{ChatOptions, LLMMessage};
+use llm_rs::tool::{CancellationToken, ContainerConfig, ToolContext};
 use llm_rs_macros::tool;
 use regex::Regex;
 use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
+use tokio::sync::mpsc;
+use tokio_stream::StreamExt;
 
 use command_permission::check_bash_permission;
 
 const DEFAULT_TIMEOUT_MS: u64 = 120_000;
+const POST_KILL_DRAIN_TIMEOUT_MS: u64 = 200;
 
 /// Maximum characters of post-processed output returned per command. Hidden
 /// from the LLM as a parameter — the LLM reacts to a hit by narrowing
@@ -75,14 +82,15 @@ const STDERR_TAG: &str = "stderr| ";
 /// Whenever post-processing drops content, an inline marker is emitted so you
 /// know to react (narrower `filter`, smaller `head` / `tail`):
 ///
-/// - `[... N earlier lines omitted by tail=K ...]` — top of output
-/// - `[... N later lines omitted by head=K ...]` — bottom of output
-/// - `[... output truncated: N more chars omitted by chars_limit=C ...]` — bottom
+/// - `[... earlier lines omitted by tail=K ...]` — top of output
+/// - `[... later lines omitted by head=K ...]` — bottom of output
+/// - `[... output truncated by chars_limit=C ...]` — bottom
 /// - `[filter kept K/T lines]` — bottom (only when filter dropped some)
 /// - `[filter matched 0/T lines — command produced output but none matched]`
 ///
-/// Counts are real numbers, not "...more". Markers do not count toward the char
-/// cap, so a tight cap still shows actual content.
+/// Marker counts are intentionally simple; filter counts are exact, while
+/// head/tail/char-cap markers only report that truncation happened. Markers do
+/// not count toward the char cap, so a tight cap still shows actual content.
 ///
 /// ## Other rules
 ///
@@ -91,7 +99,7 @@ const STDERR_TAG: &str = "stderr| ";
 /// - Use `workdir` instead of `cd <dir> && <command>`.
 /// - Never use bash for `ls`, `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, `echo` — use `read` for files/directories, `glob` for recursive patterns, `grep` for content search.
 /// - Multiple commands: parallel tool calls for independent; `&&` for sequential dependent; `;` for sequential independent.
-#[tool]
+#[tool(self_managed_cancellation = true)]
 #[allow(clippy::too_many_arguments)]
 pub fn bash(
     ctx: ToolContext,
@@ -119,13 +127,13 @@ pub fn bash(
     #[serde(default)]
     filter: Option<String>,
     /// Keep only the first N output lines (applied AFTER `filter`). Mutually
-    /// exclusive with `tail`. Must be > 0. A bottom marker reports how many
-    /// later lines were dropped.
+    /// exclusive with `tail`. Must be > 0. A bottom marker reports that later
+    /// lines were dropped.
     #[serde(default)]
     head: Option<u64>,
     /// Keep only the last N output lines (applied AFTER `filter`). Mutually
-    /// exclusive with `head`. Must be > 0. A top marker reports how many
-    /// earlier lines were dropped.
+    /// exclusive with `head`. Must be > 0. A top marker reports that earlier
+    /// lines were dropped.
     #[serde(default)]
     tail: Option<u64>,
     /// Human-readable 5-10 word description of what this command does
@@ -147,6 +155,11 @@ pub fn bash(
                  so `cd` has no lasting effect. Use the `workdir` parameter to set \
                  the working directory instead."
             ));
+            return;
+        }
+
+        if ctx.cancel_token.is_cancelled() {
+            yield Err(anyhow!("Command cancelled"));
             return;
         }
 
@@ -174,6 +187,11 @@ pub fn bash(
                  ask the user for guidance instead.",
                 reason
             ));
+            return;
+        }
+
+        if ctx.cancel_token.is_cancelled() {
+            yield Err(anyhow!("Command cancelled"));
             return;
         }
 
@@ -205,6 +223,7 @@ pub fn bash(
         // Normalize optional parameters: some models (notably OpenAI) always fill
         // in every schema field, sending `0` for unused integer options and `""` for
         // unused string options instead of omitting them.  Treat these as `None`.
+        let timeout = timeout.filter(|&v| v > 0);
         let head = head.filter(|&v| v > 0);
         let tail = tail.filter(|&v| v > 0);
         let filter = filter.filter(|s| !s.is_empty());
@@ -232,185 +251,338 @@ pub fn bash(
             return;
         }
 
-        let timeout_ms = timeout.unwrap_or(DEFAULT_TIMEOUT_MS);
-        let timeout_duration = std::time::Duration::from_millis(timeout_ms);
-
-        // Spawn the command — either directly via `bash -c` or via
-        // `<runtime> exec ... bash -c` when container mode is active.
-        let mut cmd_builder = if let Some(ref config) = container_config {
-            // Container mode: run inside the container via `docker exec` / `podman exec`
-            let mut cmd = Command::new(&config.runtime);
-            cmd.arg("exec")
-                .arg("--user")
-                .arg(format!("{}:{}", config.uid, config.gid))
-                .arg("-e")
-                .arg(format!("HOME={}", config.home))
-                .arg("-w");
-
-            // Use explicit workdir if provided, otherwise fall back to the
-            // current working directory on the host (which should be mounted
-            // at the same path inside the container).
-            if let Some(ref dir) = work_dir {
-                cmd.arg(dir.as_os_str());
-            } else {
-                match std::env::current_dir() {
-                    Ok(dir) => cmd.arg(dir),
-                    Err(e) => {
-                        yield Err(anyhow!("Failed to determine current directory for container workdir: {}", e));
-                        return;
-                    }
-                };
-            }
-
-            cmd.arg(&config.name)
-                .arg("bash")
-                .arg("-c")
-                .arg(&command)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::null())
-                .process_group(0);
-            cmd
-        } else {
-            // Host mode: direct bash execution
-            let mut cmd = Command::new("bash");
-            cmd.arg("-c")
-                .arg(&command)
-                .stdout(Stdio::piped())
-                .stderr(Stdio::piped())
-                .stdin(Stdio::null())
-                .process_group(0);
-
-            if let Some(ref dir) = work_dir {
-                cmd.current_dir(dir);
-            }
-            cmd
-        };
-
-        let mut child = match cmd_builder.spawn() {
-            Ok(c) => c,
-            Err(e) => {
-                if container_config.is_some() {
-                    yield Err(anyhow!("Failed to spawn container exec: {}", e));
-                } else {
-                    yield Err(anyhow!("Failed to spawn bash: {}", e));
-                }
-                return;
-            }
-        };
-
-        let pid = child.id();
-
-        let stdout = child.stdout.take();
-        let stderr = child.stderr.take();
-
-        // Merge tagged stdout and stderr lines into a single Vec<String>.
-        let mut output: Vec<String> = Vec::new();
-
-        let cancel_token = ctx.cancel_token.clone();
-
-        // Read stdout and stderr concurrently with timeout
-        let read_result = tokio::select! {
-            result = async {
-                read_process_output(stdout, stderr, &mut output).await
-            } => result,
-            () = tokio::time::sleep(timeout_duration) => {
-                // Timeout — kill the process group
-                kill_process_group(pid).await;
-                Err(anyhow!("Command timed out after {}ms", timeout_ms))
-            }
-            () = cancel_token.cancelled() => {
-                // Cancellation — kill the process group
-                kill_process_group(pid).await;
-                Err(anyhow!("Command cancelled"))
-            }
-        };
-
-        let exit_code = match read_result {
-            Ok(()) => {
-                // Wait for the child to finish
-                match child.wait().await {
-                    Ok(status) => status.code(),
-                    Err(e) => {
-                        tracing::warn!("Failed to wait for child process: {}", e);
-                        None
-                    }
-                }
-            }
-            Err(e) => {
-                // Try to wait briefly for the child to clean up
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_secs(2),
-                    child.wait()
-                ).await;
-
-                let processed = post_process(
-                    output,
-                    compiled_filter.as_ref(),
-                    head,
-                    tail,
-                    DEFAULT_MAX_OUTPUT_CHARS,
-                );
-                if !processed.is_empty() {
-                    yield Ok(processed);
-                }
-
-                yield Ok(format_metadata("null", &description, Some(&e)));
-                return;
-            }
-        };
-
-        // Container-stopped detection: if in container mode and the exit code
-        // is non-zero, check stderr for patterns indicating the container is
-        // no longer running.
-        if let Some(ref config) = container_config {
-            let is_nonzero = matches!(exit_code, Some(c) if c != 0) || exit_code.is_none();
-            if is_nonzero {
-                let stderr_lines: Vec<&str> = output
-                    .iter()
-                    .filter(|l| l.starts_with(STDERR_TAG))
-                    .map(|l| &l[STDERR_TAG.len()..])
-                    .collect();
-                // Only check the last few lines — Docker/Podman emit their
-                // error at the very end, not mixed in with command output.
-                let tail_stderr: String = stderr_lines
-                    .iter()
-                    .rev()
-                    .take(5)
-                    .rev()
-                    .copied()
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if is_container_stopped_error(&tail_stderr) {
-                    yield Err(anyhow!(
-                        "Error: Container '{}' is no longer running. \
-                         Ask the user to restart the container before continuing.",
-                        config.name
-                    ));
-                    return;
-                }
-            }
+        if ctx.cancel_token.is_cancelled() {
+            yield Err(anyhow!("Command cancelled"));
+            return;
         }
 
-        // Run the post-processing pipeline before yielding the output.
-        let processed = post_process(
-            output,
-            compiled_filter.as_ref(),
+        let request = BashRequest {
+            command,
+            description,
+            timeout_ms: timeout.unwrap_or(DEFAULT_TIMEOUT_MS),
+            work_dir,
+            filter: compiled_filter,
             head,
             tail,
-            DEFAULT_MAX_OUTPUT_CHARS,
-        );
-        if !processed.is_empty() {
-            yield Ok(processed);
+            container_config,
+            cancel_token: ctx.cancel_token.clone(),
+        };
+
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let _supervisor_task = tokio::spawn(run_bash_supervisor(request, tx));
+
+        while let Some(item) = rx.recv().await {
+            yield item;
+        }
+    }
+}
+
+type TaggedLineStream = std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<String>> + Send>>;
+
+struct BashRequest {
+    command: String,
+    description: String,
+    timeout_ms: u64,
+    work_dir: Option<PathBuf>,
+    filter: Option<Regex>,
+    head: Option<u64>,
+    tail: Option<u64>,
+    container_config: Option<Arc<ContainerConfig>>,
+    cancel_token: CancellationToken,
+}
+
+fn build_command(request: &BashRequest) -> Result<Command> {
+    if let Some(ref config) = request.container_config {
+        let mut cmd = Command::new(&config.runtime);
+        cmd.arg("exec")
+            .arg("--user")
+            .arg(format!("{}:{}", config.uid, config.gid))
+            .arg("-e")
+            .arg(format!("HOME={}", config.home))
+            .arg("-w");
+
+        if let Some(ref dir) = request.work_dir {
+            cmd.arg(dir.as_os_str());
+        } else {
+            let dir = std::env::current_dir().map_err(|e| {
+                anyhow!("Failed to determine current directory for container workdir: {e}")
+            })?;
+            cmd.arg(dir);
         }
 
-        // Yield metadata
-        let exit_str = match exit_code {
-            Some(code) => code.to_string(),
-            None => "null".to_string(),
-        };
-        yield Ok(format_metadata(&exit_str, &description, None));
+        cmd.arg(&config.name)
+            .arg("bash")
+            .arg("-c")
+            .arg(&request.command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .process_group(0);
+        Ok(cmd)
+    } else {
+        let mut cmd = Command::new("bash");
+        cmd.arg("-c")
+            .arg(&request.command)
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .stdin(Stdio::null())
+            .process_group(0);
+
+        if let Some(ref dir) = request.work_dir {
+            cmd.current_dir(dir);
+        }
+        Ok(cmd)
     }
+}
+
+struct OutputSink {
+    tx: mpsc::UnboundedSender<Result<String>>,
+    open: bool,
+}
+
+impl OutputSink {
+    fn new(tx: mpsc::UnboundedSender<Result<String>>) -> Self {
+        Self { tx, open: true }
+    }
+
+    fn send(&mut self, item: Result<String>) {
+        if !self.open {
+            return;
+        }
+        match self.tx.send(item) {
+            Ok(()) => {}
+            Err(_closed) => {
+                self.open = false;
+            }
+        }
+    }
+}
+
+async fn drain_remaining_output(
+    line_stream: &mut TaggedLineStream,
+    reducer: &mut OutputReducer,
+    output: &mut OutputSink,
+) -> Result<()> {
+    while let Some(line) = line_stream.next().await {
+        let line = line?;
+        if let Some(chunk) = reducer.feed(line) {
+            output.send(Ok(chunk));
+        }
+    }
+    Ok(())
+}
+
+async fn drain_remaining_output_with_timeout(
+    line_stream_done: &mut bool,
+    line_stream: &mut TaggedLineStream,
+    reducer: &mut OutputReducer,
+    output: &mut OutputSink,
+) {
+    if *line_stream_done {
+        return;
+    }
+
+    let drain_timeout = std::time::Duration::from_millis(POST_KILL_DRAIN_TIMEOUT_MS);
+    match tokio::time::timeout(
+        drain_timeout,
+        drain_remaining_output(line_stream, reducer, output),
+    )
+    .await
+    {
+        Ok(Ok(())) => {
+            *line_stream_done = true;
+        }
+        Ok(Err(e)) => {
+            tracing::warn!("Failed to drain process output after termination: {}", e);
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                "Timed out draining process output after {}ms",
+                POST_KILL_DRAIN_TIMEOUT_MS
+            );
+        }
+    }
+}
+
+async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Result<String>>) {
+    let mut output = OutputSink::new(tx);
+    if request.cancel_token.is_cancelled() {
+        output.send(Err(anyhow!("Command cancelled")));
+        return;
+    }
+
+    let container_mode = request.container_config.is_some();
+    let mut cmd_builder = match build_command(&request) {
+        Ok(cmd) => cmd,
+        Err(e) => {
+            output.send(Err(e));
+            return;
+        }
+    };
+
+    if request.cancel_token.is_cancelled() {
+        output.send(Err(anyhow!("Command cancelled")));
+        return;
+    }
+
+    let mut child = match cmd_builder.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            if container_mode {
+                output.send(Err(anyhow!("Failed to spawn container exec: {e}")));
+            } else {
+                output.send(Err(anyhow!("Failed to spawn bash: {e}")));
+            }
+            return;
+        }
+    };
+
+    let pid = child.id();
+    let mut guard = ChildGuard::new(pid);
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let mut line_stream = process_line_stream(stdout, stderr);
+    let mut wait_fut = Box::pin(child.wait());
+
+    let description = request.description;
+    let timeout_ms = request.timeout_ms;
+    let timeout_duration = std::time::Duration::from_millis(timeout_ms);
+    let deadline = tokio::time::Instant::now() + timeout_duration;
+    let container_config = request.container_config;
+    let cancel_token = request.cancel_token;
+    let mut reducer = OutputReducer::new(
+        request.filter,
+        request.head,
+        request.tail,
+        DEFAULT_MAX_OUTPUT_CHARS,
+    );
+
+    let mut line_stream_done = false;
+    let mut child_done = false;
+    let mut exit_code: Option<i32> = None;
+    let mut stream_error: Option<anyhow::Error> = None;
+
+    loop {
+        if line_stream_done && child_done {
+            break;
+        }
+
+        let timeout = tokio::time::sleep_until(deadline);
+        tokio::pin!(timeout);
+
+        tokio::select! {
+            line = line_stream.next(), if !line_stream_done => {
+                match line {
+                    Some(Ok(line)) => {
+                        if let Some(chunk) = reducer.feed(line) {
+                            output.send(Ok(chunk));
+                        }
+                    }
+                    Some(Err(e)) => {
+                        if stream_error.is_none() {
+                            stream_error = Some(e);
+                        }
+                    }
+                    None => {
+                        line_stream_done = true;
+                    }
+                }
+            }
+            status = &mut wait_fut, if !child_done => {
+                child_done = true;
+                guard.disarm();
+                match status {
+                    Ok(status) => {
+                        exit_code = status.code();
+                    }
+                    Err(e) => {
+                        tracing::warn!("Failed to wait for child process: {}", e);
+                    }
+                }
+            }
+            () = &mut timeout => {
+                let err = anyhow!("Command timed out after {}ms", timeout_ms);
+                terminate_child_process_group(
+                    pid,
+                    &mut child_done,
+                    &mut wait_fut,
+                    &mut guard,
+                    "timeout",
+                )
+                .await;
+                drain_remaining_output_with_timeout(
+                    &mut line_stream_done,
+                    &mut line_stream,
+                    &mut reducer,
+                    &mut output,
+                )
+                .await;
+                if let Some(final_output) = reducer.final_output() {
+                    output.send(Ok(final_output));
+                }
+                output.send(Ok(format_metadata("null", &description, Some(&err))));
+                return;
+            }
+            () = cancel_token.cancelled() => {
+                let err = anyhow!("Command cancelled");
+                terminate_child_process_group(
+                    pid,
+                    &mut child_done,
+                    &mut wait_fut,
+                    &mut guard,
+                    "cancellation",
+                )
+                .await;
+                drain_remaining_output_with_timeout(
+                    &mut line_stream_done,
+                    &mut line_stream,
+                    &mut reducer,
+                    &mut output,
+                )
+                .await;
+                if let Some(final_output) = reducer.final_output() {
+                    output.send(Ok(final_output));
+                }
+                output.send(Err(err));
+                return;
+            }
+        }
+    }
+
+    if let Some(e) = stream_error {
+        output.send(Err(e));
+        return;
+    }
+
+    if let Some(ref config) = container_config {
+        let is_nonzero = matches!(exit_code, Some(code) if code != 0) || exit_code.is_none();
+        if is_nonzero {
+            let tail_stderr = reducer
+                .stderr_lines()
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join("\n");
+            if is_container_stopped_error(&tail_stderr) {
+                output.send(Err(anyhow!(
+                    "Error: Container '{}' is no longer running. \
+                     Ask the user to restart the container before continuing.",
+                    config.name
+                )));
+                return;
+            }
+        }
+    }
+
+    if let Some(final_output) = reducer.final_output() {
+        output.send(Ok(final_output));
+    }
+
+    let exit_str = match exit_code {
+        Some(code) => code.to_string(),
+        None => "null".to_string(),
+    };
+    output.send(Ok(format_metadata(&exit_str, &description, None)));
 }
 
 /// Check if a command contains any shell utility keywords that have built-in alternatives.
@@ -439,9 +611,6 @@ async fn review_bash_command(
     command: &str,
     cancel_token: &CancellationToken,
 ) -> Option<String> {
-    use llm_rs::llm::{ChatOptions, LLMMessage};
-    use tokio_stream::StreamExt;
-
     let prompt = format!(
         "You are a bash command reviewer. Your job is to check whether a bash command\n\
          unnecessarily uses shell utilities that have built-in tool alternatives.\n\
@@ -513,53 +682,281 @@ async fn review_bash_command(
     }
 }
 
-/// Read stdout and stderr from a child process, tagging each line with
-/// `stdout| ` / `stderr| ` and merging into a single `Vec<String>` (one
-/// entry per line) in arrival order.
-async fn read_process_output(
+enum OutputMode {
+    Stream {
+        emitted_lines: u64,
+        emitted_chars: usize,
+        cap_hit: bool,
+    },
+    Tail {
+        limit: u64,
+        lines: VecDeque<String>,
+        tail_hit: bool,
+    },
+}
+
+/// Pure output reducer shared by live streaming and buffered tail output.
+struct OutputReducer {
+    filter: Option<Regex>,
+    head: Option<u64>,
+    max_chars: usize,
+    raw_total: u64,
+    kept_total: u64,
+    last_stderr: VecDeque<String>,
+    mode: OutputMode,
+}
+
+impl OutputReducer {
+    fn new(filter: Option<Regex>, head: Option<u64>, tail: Option<u64>, max_chars: usize) -> Self {
+        let mode = if let Some(limit) = tail {
+            OutputMode::Tail {
+                limit,
+                lines: VecDeque::new(),
+                tail_hit: false,
+            }
+        } else {
+            OutputMode::Stream {
+                emitted_lines: 0,
+                emitted_chars: 0,
+                cap_hit: false,
+            }
+        };
+
+        Self {
+            filter,
+            head,
+            max_chars,
+            raw_total: 0,
+            kept_total: 0,
+            last_stderr: VecDeque::with_capacity(5),
+            mode,
+        }
+    }
+
+    fn feed(&mut self, line: String) -> Option<String> {
+        self.raw_total += 1;
+        if let Some(s) = line.strip_prefix(STDERR_TAG) {
+            if self.last_stderr.len() == 5 {
+                self.last_stderr.pop_front();
+            }
+            self.last_stderr.push_back(s.to_string());
+        }
+
+        if let Some(ref re) = self.filter
+            && !re.is_match(&line)
+        {
+            return None;
+        }
+
+        self.kept_total += 1;
+        match &mut self.mode {
+            OutputMode::Tail {
+                limit,
+                lines,
+                tail_hit,
+            } => {
+                lines.push_back(line);
+                if u64::try_from(lines.len()).unwrap_or(u64::MAX) > *limit {
+                    lines.pop_front();
+                    *tail_hit = true;
+                }
+                None
+            }
+            OutputMode::Stream {
+                emitted_lines,
+                emitted_chars,
+                cap_hit,
+            } => {
+                if let Some(head) = self.head
+                    && self.kept_total > head
+                {
+                    return None;
+                }
+
+                if *cap_hit {
+                    return None;
+                }
+
+                let line_chars = line.chars().count();
+                let added_chars = if *emitted_lines == 0 {
+                    line_chars
+                } else {
+                    line_chars.saturating_add(1)
+                };
+                if emitted_chars.saturating_add(added_chars) > self.max_chars {
+                    *cap_hit = true;
+                    return None;
+                }
+
+                let output = if *emitted_lines == 0 {
+                    line
+                } else {
+                    format!("\n{line}")
+                };
+                *emitted_lines += 1;
+                *emitted_chars += added_chars;
+                Some(output)
+            }
+        }
+    }
+
+    fn final_output(&mut self) -> Option<String> {
+        enum FinalMode {
+            Stream {
+                emitted_any: bool,
+                cap_hit: bool,
+            },
+            Tail {
+                top_marker: Option<String>,
+                content: String,
+                cap_hit: bool,
+            },
+        }
+
+        let final_mode = match &mut self.mode {
+            OutputMode::Stream {
+                emitted_lines,
+                cap_hit,
+                ..
+            } => FinalMode::Stream {
+                emitted_any: *emitted_lines > 0,
+                cap_hit: *cap_hit,
+            },
+            OutputMode::Tail {
+                limit,
+                lines,
+                tail_hit,
+            } => {
+                let (content, cap_hit) =
+                    apply_char_cap_from_end(lines.iter().cloned().collect(), self.max_chars);
+                let top_marker = if *tail_hit {
+                    Some(format!("[... earlier lines omitted by tail={} ...]", limit))
+                } else {
+                    None
+                };
+                FinalMode::Tail {
+                    top_marker,
+                    content,
+                    cap_hit,
+                }
+            }
+        };
+
+        match final_mode {
+            FinalMode::Stream {
+                emitted_any,
+                cap_hit,
+            } => {
+                let markers = self.bottom_markers(cap_hit);
+                if markers.is_empty() {
+                    None
+                } else {
+                    let joined = markers.join("\n");
+                    Some(if emitted_any {
+                        format!("\n{joined}")
+                    } else {
+                        joined
+                    })
+                }
+            }
+            FinalMode::Tail {
+                top_marker,
+                content,
+                cap_hit,
+            } => {
+                let mut output = String::new();
+                if let Some(marker) = top_marker {
+                    output.push_str(&marker);
+                }
+                if !content.is_empty() {
+                    if !output.is_empty() {
+                        output.push('\n');
+                    }
+                    output.push_str(&content);
+                }
+                for marker in self.bottom_markers(cap_hit) {
+                    if !output.is_empty() && !output.ends_with('\n') {
+                        output.push('\n');
+                    }
+                    output.push_str(&marker);
+                }
+                if output.is_empty() {
+                    None
+                } else {
+                    Some(output)
+                }
+            }
+        }
+    }
+
+    fn bottom_markers(&self, cap_hit: bool) -> Vec<String> {
+        let mut markers = Vec::new();
+        if let Some(head) = self.head
+            && self.kept_total > head
+        {
+            markers.push(format!("[... later lines omitted by head={} ...]", head));
+        }
+        if cap_hit {
+            markers.push(format!(
+                "[... output truncated by chars_limit={} ...]",
+                self.max_chars
+            ));
+        }
+        if self.filter.is_some() {
+            if self.kept_total == 0 && self.raw_total > 0 {
+                markers.push(format!(
+                    "[filter matched 0/{} lines — command produced output but none matched]",
+                    self.raw_total
+                ));
+            } else if self.kept_total < self.raw_total {
+                markers.push(format!(
+                    "[filter kept {}/{} lines]",
+                    self.kept_total, self.raw_total
+                ));
+            }
+        }
+        markers
+    }
+
+    fn stderr_lines(&self) -> &VecDeque<String> {
+        &self.last_stderr
+    }
+}
+
+/// Merge tagged stdout and stderr lines into a single stream.
+/// Yields each tagged line as it arrives from the process.
+fn process_line_stream(
     stdout: Option<tokio::process::ChildStdout>,
     stderr: Option<tokio::process::ChildStderr>,
-    output: &mut Vec<String>,
-) -> Result<()> {
-    use tokio_stream::StreamExt;
-
-    fn lines_stream<R: tokio::io::AsyncBufRead + Unpin + Send>(
+) -> TaggedLineStream {
+    fn lines_stream<R: tokio::io::AsyncBufRead + Unpin + Send + 'static>(
         reader: R,
         tag: &'static str,
-    ) -> impl tokio_stream::Stream<Item = Result<String>> + Send {
-        tokio_stream::wrappers::LinesStream::new(reader.lines()).map(move |l| {
-            l.map(|line| format!("{}{}", tag, line))
-                .map_err(anyhow::Error::from)
-        })
+    ) -> TaggedLineStream {
+        Box::pin(
+            tokio_stream::wrappers::LinesStream::new(reader.lines()).map(move |l| {
+                l.map(|line| format!("{}{}", tag, line))
+                    .map_err(anyhow::Error::from)
+            }),
+        )
     }
 
     let stdout_stream = stdout.map(|s| lines_stream(BufReader::new(s), STDOUT_TAG));
     let stderr_stream = stderr.map(|s| lines_stream(BufReader::new(s), STDERR_TAG));
 
-    // Build a merged stream from whichever of stdout/stderr are available.
-    let combined: Option<
-        std::pin::Pin<Box<dyn tokio_stream::Stream<Item = Result<String>> + Send + '_>>,
-    > = match (stdout_stream, stderr_stream) {
-        (Some(out), Some(err)) => Some(Box::pin(StreamExt::merge(out, err))),
-        (Some(s), None) => Some(Box::pin(s)),
-        (None, Some(s)) => Some(Box::pin(s)),
-        (None, None) => None,
-    };
-
-    if let Some(mut stream) = combined {
-        while let Some(line) = stream.next().await {
-            output.push(line?);
-        }
+    match (stdout_stream, stderr_stream) {
+        (Some(out), Some(err)) => Box::pin(StreamExt::merge(out, err)),
+        (Some(s), None) => s,
+        (None, Some(s)) => s,
+        (None, None) => Box::pin(tokio_stream::empty()),
     }
-
-    Ok(())
 }
 
-/// Apply the post-processing pipeline to the collected, tagged output lines:
-/// `filter` → `tail` / `head` → char cap → markers.
+/// Apply the post-processing pipeline to collected, tagged output lines.
 ///
 /// Pure (no I/O) so it can be unit-tested exhaustively without spawning a
-/// process. Marker rules follow plan.md "Truncation markers".
+/// process. This uses the same reducer as live command output.
+#[cfg(test)]
 pub(crate) fn post_process(
     lines: Vec<String>,
     filter: Option<&Regex>,
@@ -567,160 +964,158 @@ pub(crate) fn post_process(
     tail: Option<u64>,
     max_chars: usize,
 ) -> String {
-    let total = lines.len();
-
-    // Step 5: filter (line-by-line, drop non-matches).
-    let (filtered, kept_count): (Vec<String>, usize) = if let Some(re) = filter {
-        let kept: Vec<String> = lines.into_iter().filter(|line| re.is_match(line)).collect();
-        let n = kept.len();
-        (kept, n)
-    } else {
-        let n = lines.len();
-        (lines, n)
-    };
-
-    // Step 6: tail or head (mutually exclusive — validation rejects both).
-    let (windowed, dropped_top, dropped_bottom) = if let Some(n) = tail {
-        let n = n as usize;
-        if filtered.len() > n {
-            let dropped = filtered.len() - n;
-            let kept: Vec<String> = filtered.into_iter().skip(dropped).collect();
-            (kept, dropped, 0usize)
-        } else {
-            (filtered, 0usize, 0usize)
-        }
-    } else if let Some(n) = head {
-        let n = n as usize;
-        if filtered.len() > n {
-            let dropped = filtered.len() - n;
-            let kept: Vec<String> = filtered.into_iter().take(n).collect();
-            (kept, 0usize, dropped)
-        } else {
-            (filtered, 0usize, 0usize)
-        }
-    } else {
-        (filtered, 0usize, 0usize)
-    };
-
-    // Steps 7–8: join, then char-cap at the last newline boundary <= cap.
-    let (content, dropped_chars) = apply_char_cap(windowed, max_chars);
-
-    // Step 9: assemble markers. Tail marker on top; head / chars-limit /
-    // filter markers at the bottom in that order. Markers are NOT counted
-    // toward `max_chars`.
+    let mut reducer = OutputReducer::new(filter.cloned(), head, tail, max_chars);
     let mut output = String::new();
-    if dropped_top > 0 {
-        let n = tail.unwrap_or(0);
-        output.push_str(&format!(
-            "[... {} earlier lines omitted by tail={} ...]",
-            dropped_top, n
-        ));
-        output.push('\n');
-    }
-    output.push_str(&content);
-
-    let mut bottom: Vec<String> = Vec::new();
-    if dropped_bottom > 0 {
-        let n = head.unwrap_or(0);
-        bottom.push(format!(
-            "[... {} later lines omitted by head={} ...]",
-            dropped_bottom, n
-        ));
-    }
-    if dropped_chars > 0 {
-        bottom.push(format!(
-            "[... output truncated: {} more chars omitted by chars_limit={} ...]",
-            dropped_chars, max_chars
-        ));
-    }
-    if filter.is_some() {
-        if kept_count == 0 && total > 0 {
-            bottom.push(format!(
-                "[filter matched 0/{} lines — command produced output but none matched]",
-                total
-            ));
-        } else if kept_count < total {
-            bottom.push(format!("[filter kept {}/{} lines]", kept_count, total));
+    for line in lines {
+        if let Some(chunk) = reducer.feed(line) {
+            output.push_str(&chunk);
         }
     }
-    for marker in bottom {
-        if !output.is_empty() && !output.ends_with('\n') {
-            output.push('\n');
-        }
-        output.push_str(&marker);
+    if let Some(final_output) = reducer.final_output() {
+        output.push_str(&final_output);
     }
-
-    // Strip a trailing newline that may have been left by the top marker
-    // when content is empty (e.g. tail dropped everything because the cap
-    // ate the last lines).
-    while output.ends_with('\n') {
-        output.pop();
-    }
-
     output
 }
 
-/// Truncate `lines` so the joined content fits in `max_chars` characters,
-/// cutting at the last newline boundary <= cap. Returns the kept content and
-/// the number of characters dropped (0 when no truncation was needed).
-fn apply_char_cap(lines: Vec<String>, max_chars: usize) -> (String, usize) {
-    // Total chars of `lines.join("\n")`: sum of line char counts plus
-    // (lines.len() - 1) separator newlines.
-    let line_chars: Vec<usize> = lines.iter().map(|l| l.chars().count()).collect();
-    let total_chars: usize = line_chars.iter().sum::<usize>() + lines.len().saturating_sub(1);
+/// Truncate `lines` from the front so the joined content fits in `max_chars`,
+/// preserving the newest lines. Used by `tail` so a char cap does not defeat
+/// the caller's request for the last lines.
+fn apply_char_cap_from_end(lines: Vec<String>, max_chars: usize) -> (String, bool) {
+    let line_chars: Vec<usize> = lines.iter().map(|line| line.chars().count()).collect();
+    let total_chars = line_chars
+        .iter()
+        .fold(lines.len().saturating_sub(1), |acc, len| {
+            acc.saturating_add(*len)
+        });
 
     if total_chars <= max_chars {
-        return (lines.join("\n"), 0);
+        return (lines.join("\n"), false);
     }
 
-    // Walk lines, accumulating until adding the next line would exceed cap.
-    // This naturally cuts at the last newline boundary because we keep whole
-    // lines only.
-    let mut acc_chars: usize = 0;
-    let mut kept: Vec<String> = Vec::with_capacity(lines.len());
-    for (idx, line) in lines.into_iter().enumerate() {
+    let mut acc_chars = 0usize;
+    let mut kept = Vec::new();
+    for (idx, line) in lines.into_iter().enumerate().rev() {
         let added = if kept.is_empty() {
             line_chars[idx]
         } else {
-            line_chars[idx] + 1 // +1 for the joining newline
+            line_chars[idx].saturating_add(1)
         };
-        if acc_chars + added > max_chars {
+        if acc_chars.saturating_add(added) > max_chars {
             break;
         }
-        acc_chars += added;
+        acc_chars = acc_chars.saturating_add(added);
         kept.push(line);
     }
+    kept.reverse();
 
-    let content = kept.join("\n");
-    let dropped = total_chars - acc_chars;
-    (content, dropped)
+    (kept.join("\n"), true)
 }
 
-/// Send SIGTERM to a process group, then SIGKILL after a 2-second grace period
-/// if the process group is still alive.
-async fn kill_process_group(pid: Option<u32>) {
-    let Some(pid) = pid else { return };
+fn process_group_id(pid: Option<u32>) -> Option<nix::unistd::Pid> {
+    let pid = pid?;
     let pid_i32 = match i32::try_from(pid) {
         Ok(v) => v,
         Err(_) => {
-            tracing::warn!("PID {} overflows i32; cannot kill process group", pid);
-            return;
+            tracing::warn!("PID {} overflows i32; cannot signal process group", pid);
+            return None;
         }
     };
-    let pgid = nix::unistd::Pid::from_raw(pid_i32);
+    Some(nix::unistd::Pid::from_raw(pid_i32))
+}
 
-    // First attempt: graceful shutdown via SIGTERM
-    if let Err(e) = nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGTERM) {
-        tracing::warn!("Failed to SIGTERM process group {}: {}", pid, e);
-        return;
+fn send_process_group_signal(pid: Option<u32>, signal: nix::sys::signal::Signal) -> bool {
+    let Some(pgid) = process_group_id(pid) else {
+        return false;
+    };
+
+    match nix::sys::signal::killpg(pgid, signal) {
+        Ok(()) | Err(nix::errno::Errno::ESRCH) => true,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to send {:?} to process group {:?}: {}",
+                signal,
+                pid,
+                e
+            );
+            false
+        }
+    }
+}
+
+async fn terminate_child_process_group<F>(
+    pid: Option<u32>,
+    child_done: &mut bool,
+    wait_fut: &mut F,
+    guard: &mut ChildGuard,
+    reason: &str,
+) where
+    F: std::future::Future<Output = std::io::Result<std::process::ExitStatus>> + Unpin,
+{
+    send_process_group_signal(pid, nix::sys::signal::Signal::SIGTERM);
+
+    if !*child_done {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), &mut *wait_fut).await {
+            Ok(Ok(_status)) => {
+                *child_done = true;
+                guard.disarm();
+                return;
+            }
+            Ok(Err(e)) => {
+                tracing::warn!("Failed to wait for child process after {}: {}", reason, e);
+                *child_done = true;
+                guard.disarm();
+                return;
+            }
+            Err(_elapsed) => {}
+        }
     }
 
-    // Poll every 50ms for up to 2 seconds for the process group to exit on its own
+    if send_process_group_signal(pid, nix::sys::signal::Signal::SIGKILL) {
+        tracing::warn!(
+            "Process group {:?} did not exit after SIGTERM for {}; sent SIGKILL",
+            pid,
+            reason
+        );
+    }
+
+    if !*child_done {
+        match tokio::time::timeout(std::time::Duration::from_secs(2), &mut *wait_fut).await {
+            Ok(Ok(_status)) => {
+                *child_done = true;
+                guard.disarm();
+            }
+            Ok(Err(e)) => {
+                tracing::warn!(
+                    "Failed to wait for child process after SIGKILL for {}: {}",
+                    reason,
+                    e
+                );
+                *child_done = true;
+                guard.disarm();
+            }
+            Err(_elapsed) => {
+                tracing::warn!(
+                    "Timed out waiting for child process after SIGKILL for {}",
+                    reason
+                );
+            }
+        }
+    }
+}
+
+/// Send SIGTERM to a process group, then SIGKILL after a 2-second grace period
+/// if the process group is still alive. Used as a best-effort guard cleanup
+/// when the supervisor is dropped unexpectedly.
+async fn kill_process_group(pid: Option<u32>) {
+    let Some(pgid) = process_group_id(pid) else {
+        return;
+    };
+
+    send_process_group_signal(pid, nix::sys::signal::Signal::SIGTERM);
+
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-        // killpg with signal=None probes whether the process group still exists;
-        // ESRCH means it is gone — no need to escalate.
         if let Err(nix::errno::Errno::ESRCH) = nix::sys::signal::killpg(pgid, None) {
             return;
         }
@@ -729,19 +1124,40 @@ async fn kill_process_group(pid: Option<u32>) {
         }
     }
 
-    // Escalate to SIGKILL if still alive (ESRCH means it already exited)
-    match nix::sys::signal::killpg(pgid, nix::sys::signal::Signal::SIGKILL) {
-        Ok(()) => {
+    if send_process_group_signal(pid, nix::sys::signal::Signal::SIGKILL) {
+        tracing::warn!(
+            "Process group {:?} did not exit after SIGTERM; sent SIGKILL",
+            pid
+        );
+    }
+}
+
+/// Kills the child process group when the supervisor is dropped unexpectedly.
+struct ChildGuard(Option<u32>);
+
+impl ChildGuard {
+    fn new(pid: Option<u32>) -> Self {
+        Self(pid)
+    }
+
+    fn disarm(&mut self) {
+        self.0 = None;
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            handle.spawn(async move {
+                kill_process_group(Some(pid)).await;
+            });
+        } else if self.0.is_some() {
             tracing::warn!(
-                "Process group {} did not exit after SIGTERM; sent SIGKILL",
-                pid
+                pid = ?self.0,
+                "ChildGuard dropped without a tokio runtime; child process may leak"
             );
-        }
-        Err(nix::errno::Errno::ESRCH) => {
-            // Process group already exited during the grace period — nothing to do
-        }
-        Err(e) => {
-            tracing::warn!("Failed to SIGKILL process group {}: {}", pid, e);
         }
     }
 }

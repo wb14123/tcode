@@ -17,11 +17,14 @@ use syn::{
 struct ToolAttrs {
     /// Optional timeout in milliseconds.
     timeout_ms: Option<u64>,
+    /// Whether the tool handles cancellation internally via ToolContext.
+    self_managed_cancellation: bool,
 }
 
 impl Parse for ToolAttrs {
     fn parse(input: ParseStream) -> syn::Result<Self> {
         let mut timeout_ms = None;
+        let mut self_managed_cancellation = false;
 
         while !input.is_empty() {
             let ident: syn::Ident = input.parse()?;
@@ -42,6 +45,20 @@ impl Parse for ToolAttrs {
                         }
                     }
                 }
+                "self_managed_cancellation" => {
+                    let lit: Lit = input.parse()?;
+                    match lit {
+                        Lit::Bool(lit_bool) => {
+                            self_managed_cancellation = lit_bool.value;
+                        }
+                        _ => {
+                            return Err(syn::Error::new(
+                                lit.span(),
+                                "self_managed_cancellation must be a boolean",
+                            ));
+                        }
+                    }
+                }
                 other => {
                     return Err(syn::Error::new(
                         ident.span(),
@@ -56,7 +73,10 @@ impl Parse for ToolAttrs {
             }
         }
 
-        Ok(ToolAttrs { timeout_ms })
+        Ok(ToolAttrs {
+            timeout_ms,
+            self_managed_cancellation,
+        })
     }
 }
 
@@ -141,6 +161,21 @@ fn is_tool_context_type(ty: &Type) -> bool {
 /// }
 /// ```
 ///
+/// # Self-managed cancellation
+///
+/// Tools that own external resources can opt out of the generic cancellation
+/// wrapper and observe `ToolContext.cancel_token` themselves:
+///
+/// ```ignore
+/// #[tool(self_managed_cancellation = true)]
+/// fn process_tool(ctx: ToolContext) -> impl Stream<Item = Result<String, String>> {
+///     // The tool must watch ctx.cancel_token and clean up its resources.
+/// }
+/// ```
+///
+/// This cannot be combined with `timeout_ms`, because the generic timeout
+/// wrapper would still be able to drop the stream before the tool cleans up.
+///
 /// # Async Streams
 ///
 /// For async operations, return an async stream using `async_stream::stream!`:
@@ -160,13 +195,25 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Parse the attribute for timeout
     let attrs = if attr.is_empty() {
-        ToolAttrs { timeout_ms: None }
+        ToolAttrs {
+            timeout_ms: None,
+            self_managed_cancellation: false,
+        }
     } else {
         match syn::parse::<ToolAttrs>(attr) {
             Ok(attrs) => attrs,
             Err(e) => return e.to_compile_error().into(),
         }
     };
+
+    if attrs.self_managed_cancellation && attrs.timeout_ms.is_some() {
+        return syn::Error::new(
+            input_fn.sig.ident.span(),
+            "self_managed_cancellation cannot be combined with timeout_ms",
+        )
+        .to_compile_error()
+        .into();
+    }
 
     // Auto-detect crate path
     let crate_path = get_crate_path();
@@ -333,13 +380,25 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { None }
     };
 
-    let tool_creation = quote! {
-        #crate_path::tool::Tool::new(
-            #fn_name_str,
-            #description,
-            #timeout_expr,
-            #handler_body,
-        )
+    let tool_creation = if attrs.self_managed_cancellation {
+        quote! {
+            #crate_path::tool::Tool::new(
+                #fn_name_str,
+                #description,
+                #timeout_expr,
+                #handler_body,
+            )
+            .with_self_managed_cancellation()
+        }
+    } else {
+        quote! {
+            #crate_path::tool::Tool::new(
+                #fn_name_str,
+                #description,
+                #timeout_expr,
+                #handler_body,
+            )
+        }
     };
 
     let output = quote! {

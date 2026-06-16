@@ -172,7 +172,10 @@ fn build_normal_system_prompt(
             File tools (read, write, edit, grep, glob) operate on the host filesystem outside the container. \
             The project directory is mounted at the same absolute path inside the container, \
             so file paths are consistent between bash and file tools. \
-            Some tools or commands available on the host may not be available inside the container.",
+            Some tools or commands available on the host may not be available inside the container. \
+            Limitation: cancelling or timing out a bash command terminates the local Docker/Podman exec client, \
+            but may not reliably kill processes that have already started inside the container; do not rely on \
+            timeout/cancellation as a hard kill boundary for side-effecting in-container commands.",
             config.name, config.runtime
         ));
     }

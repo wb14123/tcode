@@ -44,8 +44,8 @@ type ToolClientMap = Arc<parking_lot::Mutex<HashMap<String, Arc<ConversationClie
 struct ToolCallState {
     file_path: PathBuf,
     status_file_path: PathBuf,
-    tool_name: String,
-    accumulated_preview: String,
+    display_preview_chars: usize,
+    display_preview_finished: bool,
 }
 
 /// Per-subagent tracking state used by the event writer.
@@ -1207,6 +1207,11 @@ fn run_event_writer(
             let event = match item {
                 Ok(event) => event,
                 Err(BroadcastStreamRecvError::Lagged(n)) => {
+                    // Known limitation: conversation broadcasts are lossy. The
+                    // 10k sender buffer makes this unlikely for normal streamed
+                    // tool output, but if this happens display previews and
+                    // per-tool detail files may miss chunks. A strict guarantee
+                    // would need a non-lossy persistence path.
                     tracing::warn!(skipped = n, "broadcast lagged");
                     continue;
                 }
@@ -1278,8 +1283,8 @@ fn run_event_writer(
                         ToolCallState {
                             file_path: tc_file.clone(),
                             status_file_path: tc_status,
-                            tool_name: tool_name.clone(),
-                            accumulated_preview: String::new(),
+                            display_preview_chars: 0,
+                            display_preview_finished: false,
                         },
                     );
                     tool_call_index_map.insert(*tool_call_index, tool_call_id.clone());
@@ -1343,8 +1348,8 @@ fn run_event_writer(
                             ToolCallState {
                                 file_path: tc_file.clone(),
                                 status_file_path: tc_status,
-                                tool_name: tool_name.clone(),
-                                accumulated_preview: String::new(),
+                                display_preview_chars: 0,
+                                display_preview_finished: false,
                             },
                         );
                     } else if let Some(state) = tool_calls.get(tool_call_id) {
@@ -1367,7 +1372,9 @@ fn run_event_writer(
                 }
 
                 Message::ToolOutputChunk {
+                    msg_id,
                     tool_call_id,
+                    tool_name,
                     content,
                     ..
                 } => {
@@ -1383,17 +1390,19 @@ fn run_event_writer(
                         "ToolOutputChunk received"
                     );
                     if let Some(state) = tool_calls.get_mut(tool_call_id) {
-                        // Write to per-tool-call file only (NOT main display)
+                        append_display_preview_chunk(
+                            &display_file,
+                            *msg_id,
+                            tool_call_id,
+                            tool_name,
+                            content_text,
+                            state,
+                        )
+                        .await
+                        .context("Failed to append tool call preview chunk to display")?;
                         append_event(&state.file_path, &event)
                             .await
                             .context("Failed to append tool call chunk")?;
-
-                        // Accumulate first N chars for preview
-                        if state.accumulated_preview.len() < PREVIEW_MAX_CHARS {
-                            let remaining = PREVIEW_MAX_CHARS - state.accumulated_preview.len();
-                            let chunk: String = content_text.chars().take(remaining).collect();
-                            state.accumulated_preview.push_str(&chunk);
-                        }
                     } else {
                         tracing::warn!(
                             tool_call_id,
@@ -1415,23 +1424,6 @@ fn run_event_writer(
                     tracing::info!(tool_call_id, ?end_status, "ToolMessageEnd received");
                     tool_clients.lock().remove(tool_call_id.as_str());
                     if let Some(state) = tool_calls.remove(tool_call_id) {
-                        // Write truncated preview to main display as a single ToolOutputChunk
-                        if !state.accumulated_preview.is_empty() {
-                            let mut preview = state.accumulated_preview;
-                            if preview.len() >= PREVIEW_MAX_CHARS {
-                                preview.push_str("...");
-                            }
-                            let preview_event = Message::ToolOutputChunk {
-                                msg_id: 0,
-                                tool_call_id: tool_call_id.clone(),
-                                tool_name: state.tool_name,
-                                content: Arc::new(llm_rs::media::ContentPart::Text(preview)),
-                            };
-                            append_event(&display_file, &preview_event)
-                                .await
-                                .context("Failed to append tool call preview")?;
-                        }
-
                         // Write ToolMessageEnd to both files
                         append_event(&display_file, &event)
                             .await
@@ -2128,6 +2120,62 @@ where
     let json = serde_json::to_vec(msg)?;
     sink.send(Bytes::from(json)).await?;
     Ok(())
+}
+
+pub(crate) fn next_tool_display_preview_chunk(
+    content_text: &str,
+    display_preview_chars: usize,
+    display_preview_finished: bool,
+) -> (Option<String>, usize, bool) {
+    if display_preview_finished || content_text.is_empty() {
+        return (None, display_preview_chars, display_preview_finished);
+    }
+
+    let remaining = PREVIEW_MAX_CHARS.saturating_sub(display_preview_chars);
+    if remaining == 0 {
+        return (None, display_preview_chars, true);
+    }
+
+    let content_chars = content_text.chars().count();
+    let preview: String = content_text.chars().take(remaining).collect();
+    let new_preview_chars = display_preview_chars.saturating_add(preview.chars().count());
+    let finished = content_chars >= remaining;
+
+    if preview.is_empty() {
+        (None, new_preview_chars, finished)
+    } else {
+        (Some(preview), new_preview_chars, finished)
+    }
+}
+
+async fn append_display_preview_chunk(
+    display_file: &PathBuf,
+    msg_id: i32,
+    tool_call_id: &str,
+    tool_name: &str,
+    content_text: &str,
+    state: &mut ToolCallState,
+) -> Result<()> {
+    let (preview, display_preview_chars, display_preview_finished) =
+        next_tool_display_preview_chunk(
+            content_text,
+            state.display_preview_chars,
+            state.display_preview_finished,
+        );
+    state.display_preview_chars = display_preview_chars;
+    state.display_preview_finished = display_preview_finished;
+
+    let Some(preview) = preview else {
+        return Ok(());
+    };
+
+    let preview_event = Message::ToolOutputChunk {
+        msg_id,
+        tool_call_id: tool_call_id.to_string(),
+        tool_name: tool_name.to_string(),
+        content: Arc::new(llm_rs::media::ContentPart::Text(preview)),
+    };
+    append_event(display_file, &preview_event).await
 }
 
 async fn append_event(file: &PathBuf, event: &Message) -> Result<()> {

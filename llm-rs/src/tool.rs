@@ -283,6 +283,7 @@ pub struct Tool {
     /// Optional timeout for tool execution.
     pub timeout: Option<Duration>,
     handler: Box<dyn Fn(ToolContext, String) -> ToolOutputStream + Send + Sync>,
+    self_managed_cancellation: bool,
 }
 
 impl Tool {
@@ -342,6 +343,7 @@ impl Tool {
                     }
                 }
             }),
+            self_managed_cancellation: false,
         }
     }
 
@@ -365,14 +367,28 @@ impl Tool {
                     "Error: This tool's execution is handled internally".to_string(),
                 )))
             }),
+            self_managed_cancellation: false,
         }
+    }
+
+    /// Let this tool observe `ctx.cancel_token` itself instead of using the
+    /// generic cancellation wrapper. Use this for tools that own external
+    /// resources and must perform cleanup when cancelled.
+    pub fn with_self_managed_cancellation(mut self) -> Self {
+        assert!(
+            self.timeout.is_none(),
+            "self-managed cancellation cannot be combined with generic Tool timeout"
+        );
+        self.self_managed_cancellation = true;
+        self
     }
 
     /// Execute the tool with a JSON string argument.
     ///
     /// Returns a stream of `ContentPart` outputs that can be consumed incrementally.
-    /// The stream is always wrapped with `CancellableStream` so cancellation
-    /// stops output. If a timeout is set, `TimeoutStream` is also applied.
+    /// The stream is wrapped with `CancellableStream` so cancellation stops output,
+    /// unless the tool opts into self-managed cancellation. If a timeout is set,
+    /// `TimeoutStream` is also applied.
     pub fn execute(&self, ctx: ToolContext, arguments: String) -> ToolOutputStream {
         let cancel_token = ctx.cancel_token.clone();
         let approval_pending = ctx.permission.approval_pending();
@@ -391,11 +407,14 @@ impl Tool {
             None => stream,
         };
 
-        // Always wrap with CancellableStream
-        Box::pin(CancellableStream {
-            inner: stream,
-            cancel_token,
-            cancelled: false,
-        })
+        if self.self_managed_cancellation {
+            stream
+        } else {
+            Box::pin(CancellableStream {
+                inner: stream,
+                cancel_token,
+                cancelled: false,
+            })
+        }
     }
 }

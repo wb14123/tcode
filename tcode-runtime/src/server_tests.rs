@@ -15,7 +15,7 @@ use crate::protocol::{ClientKind, ClientMessage, RuntimeOwnerKind, ServerMessage
 use crate::server::{
     ClientLeaseTracker, EventWriterActivityGuard, Server, ServerRuntimeOptions,
     WebIdleShutdownPolicy, WorkActivityTracker, assistant_activity_key, close_stale_running_items,
-    tool_activity_key, validate_owner_shutdown_token,
+    next_tool_display_preview_chunk, tool_activity_key, validate_owner_shutdown_token,
 };
 use crate::session::SessionMode;
 
@@ -129,6 +129,43 @@ fn client_lease_register_heartbeat_detach_and_prune() {
     assert!(!tracker.detach(&cli_id));
     assert_eq!(tracker.active_count(prune_at), 0);
     assert!(!tracker.detach(&web_id));
+}
+
+#[test]
+fn tool_display_preview_streams_until_char_cap() {
+    let first_input = "a".repeat(150);
+    let first_expected = "a".repeat(150);
+    let (chunk, chars, finished) = next_tool_display_preview_chunk(&first_input, 0, false);
+    assert_eq!(chunk.as_deref(), Some(first_expected.as_str()));
+    assert_eq!(chars, 150);
+    assert!(!finished);
+
+    let second_input = "b".repeat(100);
+    let second_expected = "b".repeat(50);
+    let (chunk, chars, finished) = next_tool_display_preview_chunk(&second_input, chars, finished);
+    assert_eq!(chunk.as_deref(), Some(second_expected.as_str()));
+    assert_eq!(chars, 200);
+    assert!(finished);
+
+    let (chunk, chars, finished) = next_tool_display_preview_chunk("c", chars, finished);
+    assert!(chunk.is_none());
+    assert_eq!(chars, 200);
+    assert!(finished);
+}
+
+#[test]
+fn tool_display_preview_exact_cap_stops_future_chunks() {
+    let input = "x".repeat(200);
+    let expected = "x".repeat(200);
+    let (chunk, chars, finished) = next_tool_display_preview_chunk(&input, 0, false);
+    assert_eq!(chunk.as_deref(), Some(expected.as_str()));
+    assert_eq!(chars, 200);
+    assert!(finished);
+
+    let (chunk, chars, finished) = next_tool_display_preview_chunk("y", chars, finished);
+    assert!(chunk.is_none());
+    assert_eq!(chars, 200);
+    assert!(finished);
 }
 
 #[test]

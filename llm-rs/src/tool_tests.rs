@@ -352,6 +352,58 @@ mod tests {
         assert!(stream.next().await.is_none());
     }
 
+    #[tokio::test]
+    async fn test_tool_self_managed_cancellation() {
+        let tool = Tool::new(
+            "self_managed",
+            "A self-managed cancellation tool",
+            None,
+            |ctx: ToolContext, _: TestParams| {
+                async_stream::stream! {
+                    yield Ok::<_, String>("first".to_string());
+                    ctx.cancel_token.cancelled().await;
+                    yield Ok::<_, String>("cleaned".to_string());
+                }
+            },
+        )
+        .with_self_managed_cancellation();
+
+        let cancel_token = CancellationToken::new();
+        let ctx = ToolContext {
+            cancel_token: cancel_token.clone(),
+            permission: crate::permission::ScopedPermissionManager::always_allow("test"),
+            container_config: None,
+            media_dir: None,
+            supports_media: false,
+            llm: None,
+            model: None,
+        };
+
+        let mut stream = tool.execute(ctx, r#"{"message": "test"}"#.to_string());
+        let first = stream.next().await.expect("stream should yield first item");
+        assert_eq!(first, "first");
+
+        cancel_token.cancel();
+        let cleaned = stream
+            .next()
+            .await
+            .expect("self-managed tool should observe cancellation");
+        assert_eq!(cleaned, "cleaned");
+        assert!(stream.next().await.is_none());
+    }
+
+    #[test]
+    #[should_panic(expected = "self-managed cancellation cannot be combined")]
+    fn test_tool_self_managed_cancellation_rejects_generic_timeout() {
+        let _tool = Tool::new(
+            "self_managed_timeout",
+            "Invalid self-managed timeout tool",
+            Some(Duration::from_millis(100)),
+            |_ctx: ToolContext, _: TestParams| tokio_stream::empty::<Result<String, String>>(),
+        )
+        .with_self_managed_cancellation();
+    }
+
     /// Verifies that time spent waiting for user permission approval does not
     /// count against the tool timeout. Simulates a 200ms approval wait with a
     /// 100ms timeout — the tool should still succeed because the deadline is
@@ -494,6 +546,46 @@ mod tests {
 
             // Default limit is 10
             assert_eq!(results.len(), 10);
+        }
+
+        /// A self-managed cancellation macro tool
+        #[tool(self_managed_cancellation = true)]
+        fn self_managed_macro_tool(
+            ctx: ToolContext,
+            /// Message to emit
+            message: String,
+        ) -> impl tokio_stream::Stream<Item = Result<String, String>> {
+            async_stream::stream! {
+                yield Ok::<_, String>(message);
+                ctx.cancel_token.cancelled().await;
+                yield Ok::<_, String>("cleaned".to_string());
+            }
+        }
+
+        #[tokio::test]
+        async fn test_tool_macro_self_managed_cancellation() {
+            let tool = self_managed_macro_tool_tool();
+            let cancel_token = CancellationToken::new();
+            let ctx = ToolContext {
+                cancel_token: cancel_token.clone(),
+                permission: crate::permission::ScopedPermissionManager::always_allow("test"),
+                container_config: None,
+                media_dir: None,
+                supports_media: false,
+                llm: None,
+                model: None,
+            };
+            let mut stream = tool.execute(ctx, r#"{"message": "first"}"#.to_string());
+
+            let first = stream.next().await.expect("stream should yield first item");
+            assert_eq!(first, "first");
+            cancel_token.cancel();
+            let cleaned = stream
+                .next()
+                .await
+                .expect("macro self-managed tool should observe cancellation");
+            assert_eq!(cleaned, "cleaned");
+            assert!(stream.next().await.is_none());
         }
 
         /// A slow operation

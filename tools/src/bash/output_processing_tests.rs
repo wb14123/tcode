@@ -108,8 +108,8 @@ fn head_keeps_first_n_and_emits_bottom_marker() {
     let out = post_process(input, None, Some(2), None, DEFAULT_MAX_OUTPUT_CHARS);
     assert!(out.starts_with("stdout| 1\nstdout| 2"), "got: {out}");
     assert!(
-        out.contains("[... 3 later lines omitted by head=2 ...]"),
-        "bottom marker must report dropped count: {out}"
+        out.contains("[... later lines omitted by head=2 ...]"),
+        "bottom marker must report head truncation: {out}"
     );
     // No tail marker.
     assert!(!out.contains("earlier lines omitted"));
@@ -134,7 +134,7 @@ fn tail_keeps_last_n_and_emits_top_marker() {
         "stdout| 5",
     ]);
     let out = post_process(input, None, None, Some(2), DEFAULT_MAX_OUTPUT_CHARS);
-    let expected_top = "[... 3 earlier lines omitted by tail=2 ...]";
+    let expected_top = "[... earlier lines omitted by tail=2 ...]";
     assert!(out.starts_with(expected_top), "got: {out}");
     assert!(out.ends_with("stdout| 4\nstdout| 5"), "got: {out}");
     // No head marker.
@@ -187,9 +187,9 @@ fn filter_then_tail_only_sees_matching_lines() {
         !out.contains("stderr| error 3"),
         "tail must drop earlier matches: {out}"
     );
-    // Top marker reports 3 dropped from the 5 matching lines (not the 10 raw).
+    // Top marker reports that earlier matching lines were dropped.
     assert!(
-        out.contains("[... 3 earlier lines omitted by tail=2 ...]"),
+        out.contains("[... earlier lines omitted by tail=2 ...]"),
         "top marker counts post-filter drops: {out}"
     );
     // Filter marker says 5/10 (real total).
@@ -203,9 +203,8 @@ fn filter_then_tail_only_sees_matching_lines() {
 
 #[test]
 fn char_cap_cuts_at_last_newline_and_appends_marker() {
-    // 10 lines × 5 chars + 9 newlines = 59 chars total. Cap at 12 → keep
-    // first 2 lines (5 + 1 + 5 = 11), drop the rest. Marker reports the
-    // dropped char count.
+    // 10 lines x 5 chars + 9 newlines = 59 chars total. Cap at 12 keeps
+    // first 2 lines (5 + 1 + 5 = 11), then appends a simple truncation marker.
     let input = lines([
         "abcde", "fghij", "klmno", "pqrst", "uvwxy", "zabcd", "efghi", "jklmn", "opqrs", "tuvwx",
     ]);
@@ -214,10 +213,9 @@ fn char_cap_cuts_at_last_newline_and_appends_marker() {
         out.starts_with("abcde\nfghij"),
         "kept lines must come first: {out}"
     );
-    // 59 - 11 = 48 chars dropped.
     assert!(
-        out.contains("[... output truncated: 48 more chars omitted by chars_limit=12 ...]"),
-        "chars-limit marker must report real dropped count: {out}"
+        out.contains("[... output truncated by chars_limit=12 ...]"),
+        "chars-limit marker must report truncation: {out}"
     );
     // The cut must land on a newline boundary — no partial line in the
     // content portion.
@@ -257,13 +255,13 @@ fn markers_excluded_from_char_cap_so_content_still_shows() {
         "first content line must survive: {out}"
     );
     assert!(
-        out.contains("[... output truncated:"),
+        out.contains("[... output truncated by chars_limit="),
         "marker must still be appended: {out}"
     );
     // Marker on its own line — content portion (before marker) must end at
     // a newline boundary.
     let pre_marker = out
-        .split("\n[... output truncated:")
+        .split("\n[... output truncated by chars_limit=")
         .next()
         .expect("split must yield content");
     assert!(!pre_marker.is_empty(), "content portion must not be empty");
@@ -320,9 +318,9 @@ fn composed_filter_tail_and_char_cap_emits_all_relevant_markers() {
         "stderr| err four",  // 15 chars
     ]);
     let out = post_process(input, Some(&re("^stderr")), None, Some(3), 18);
-    // Top marker: 1 earlier line dropped by tail.
+    // Top marker: earlier matching line dropped by tail.
     assert!(
-        out.contains("[... 1 earlier lines omitted by tail=3 ...]"),
+        out.contains("[... earlier lines omitted by tail=3 ...]"),
         "top marker missing: {out}"
     );
     // Filter marker: 4 kept of 6 total.
@@ -334,6 +332,34 @@ fn composed_filter_tail_and_char_cap_emits_all_relevant_markers() {
     assert!(
         out.contains("chars_limit=18"),
         "chars-limit marker missing: {out}"
+    );
+}
+
+#[test]
+fn tail_char_cap_preserves_newest_lines() {
+    let input = lines([
+        "stdout| old one",
+        "stdout| old two",
+        "stdout| middle three",
+        "stdout| almost last",
+        "stdout| final",
+    ]);
+    let out = post_process(input, None, None, Some(4), 14);
+    assert!(
+        out.contains("stdout| final"),
+        "tail plus char cap must preserve newest line: {out}"
+    );
+    assert!(
+        !out.contains("stdout| middle three"),
+        "older retained tail lines should be dropped first by char cap: {out}"
+    );
+    assert!(
+        out.contains("[... earlier lines omitted by tail=4 ...]"),
+        "tail marker missing: {out}"
+    );
+    assert!(
+        out.contains("[... output truncated by chars_limit=14 ...]"),
+        "char cap marker missing: {out}"
     );
 }
 
@@ -468,7 +494,38 @@ mod e2e {
         Ok(())
     }
 
-    // 7c. head=0 + tail=0 both normalize to None, so no mutual-exclusion error.
+    // 7c. timeout = 0 is normalized to None (not an immediate timeout).
+    #[tokio::test]
+    async fn timeout_zero_is_treated_as_none() -> Result<()> {
+        let stream = crate::bash::bash(
+            ctx(),
+            "echo hi".to_string(),
+            false,
+            Some(0),
+            None,
+            None,
+            None,
+            None,
+            "test".to_string(),
+        );
+        let (chunks, err) = collect(Box::pin(stream)).await;
+        assert!(
+            err.is_none(),
+            "timeout=0 should not be an error, got: {err:?}"
+        );
+        let joined = chunks.join("");
+        assert!(
+            joined.contains("stdout| hi"),
+            "should produce output: {joined}"
+        );
+        assert!(
+            joined.contains("exit_code: 0"),
+            "should finish normally: {joined}"
+        );
+        Ok(())
+    }
+
+    // 7d. head=0 + tail=0 both normalize to None, so no mutual-exclusion error.
     #[tokio::test]
     async fn head_zero_tail_zero_is_treated_as_none() -> Result<()> {
         let stream = crate::bash::bash(
@@ -491,7 +548,7 @@ mod e2e {
         Ok(())
     }
 
-    // 7d. head=N + tail=0 normalizes to just head=N (no mutual-exclusion error).
+    // 7e. head=N + tail=0 normalizes to just head=N (no mutual-exclusion error).
     #[tokio::test]
     async fn head_nonzero_tail_zero_is_treated_as_head_only() -> Result<()> {
         let stream = crate::bash::bash(
