@@ -225,8 +225,6 @@ tcode -c my-dev-container --container-runtime podman
 - The system prompt tells the agent that bash commands execute inside the container and file tools operate on the host.
 - The permission UI annotates tool names: `bash (in container X)` for the bash tool and `(outside container)` for all other tools.
 
-**Known limitation:** Bash command timeout/cancellation in container mode terminates the local Docker/Podman exec client, but Docker/Podman may leave the already-started command running inside the container. Do not rely on tcode bash timeout/cancellation as a hard kill boundary for long-running or side-effecting in-container commands.
-
 ## CLAUDE.md
 
 Place a `CLAUDE.md` file in your project root to inject custom instructions into every normal-mode conversation. Its content is appended to the system prompt automatically. Web-only sessions do not load `CLAUDE.md`.

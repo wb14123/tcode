@@ -26,6 +26,7 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_stream::StreamExt;
+use uuid::Uuid;
 
 use command_permission::check_bash_permission;
 
@@ -291,8 +292,14 @@ struct BashRequest {
     cancel_token: CancellationToken,
 }
 
-fn build_command(request: &BashRequest) -> Result<Command> {
+fn build_command(request: &BashRequest, job_id: Option<&str>) -> Result<Command> {
     if let Some(ref config) = request.container_config {
+        let command = if let Some(job_id) = job_id {
+            format!("( {} \n) # TCODE_JOB={}", request.command, job_id)
+        } else {
+            request.command.clone()
+        };
+
         let mut cmd = Command::new(&config.runtime);
         cmd.arg("exec")
             .arg("--user")
@@ -313,7 +320,7 @@ fn build_command(request: &BashRequest) -> Result<Command> {
         cmd.arg(&config.name)
             .arg("bash")
             .arg("-c")
-            .arg(&request.command)
+            .arg(&command)
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .stdin(Stdio::null())
@@ -412,7 +419,12 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
     }
 
     let container_mode = request.container_config.is_some();
-    let mut cmd_builder = match build_command(&request) {
+    let job_id = if container_mode {
+        Some(Uuid::new_v4().to_string())
+    } else {
+        None
+    };
+    let mut cmd_builder = match build_command(&request, job_id.as_deref()) {
         Ok(cmd) => cmd,
         Err(e) => {
             output.send(Err(e));
@@ -438,7 +450,7 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
     };
 
     let pid = child.id();
-    let mut guard = ChildGuard::new(pid);
+    let mut guard = ChildGuard::new(pid, request.container_config.clone(), job_id.clone());
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let mut line_stream = process_line_stream(stdout, stderr);
@@ -508,6 +520,8 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
                     &mut wait_fut,
                     &mut guard,
                     "timeout",
+                    container_config.as_deref(),
+                    job_id.as_deref(),
                 )
                 .await;
                 drain_remaining_output_with_timeout(
@@ -531,6 +545,8 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
                     &mut wait_fut,
                     &mut guard,
                     "cancellation",
+                    container_config.as_deref(),
+                    job_id.as_deref(),
                 )
                 .await;
                 drain_remaining_output_with_timeout(
@@ -1048,37 +1064,39 @@ async fn terminate_child_process_group<F>(
     wait_fut: &mut F,
     guard: &mut ChildGuard,
     reason: &str,
+    container_config: Option<&ContainerConfig>,
+    job_id: Option<&str>,
 ) where
     F: std::future::Future<Output = std::io::Result<std::process::ExitStatus>> + Unpin,
 {
     send_process_group_signal(pid, nix::sys::signal::Signal::SIGTERM);
 
+    let mut escalated = false;
     if !*child_done {
         match tokio::time::timeout(std::time::Duration::from_secs(2), &mut *wait_fut).await {
             Ok(Ok(_status)) => {
                 *child_done = true;
                 guard.disarm();
-                return;
             }
             Ok(Err(e)) => {
                 tracing::warn!("Failed to wait for child process after {}: {}", reason, e);
                 *child_done = true;
                 guard.disarm();
-                return;
             }
-            Err(_elapsed) => {}
+            Err(_elapsed) => {
+                if send_process_group_signal(pid, nix::sys::signal::Signal::SIGKILL) {
+                    tracing::warn!(
+                        "Process group {:?} did not exit after SIGTERM for {}; sent SIGKILL",
+                        pid,
+                        reason
+                    );
+                    escalated = true;
+                }
+            }
         }
     }
 
-    if send_process_group_signal(pid, nix::sys::signal::Signal::SIGKILL) {
-        tracing::warn!(
-            "Process group {:?} did not exit after SIGTERM for {}; sent SIGKILL",
-            pid,
-            reason
-        );
-    }
-
-    if !*child_done {
+    if escalated && !*child_done {
         match tokio::time::timeout(std::time::Duration::from_secs(2), &mut *wait_fut).await {
             Ok(Ok(_status)) => {
                 *child_done = true;
@@ -1099,6 +1117,70 @@ async fn terminate_child_process_group<F>(
                     reason
                 );
             }
+        }
+    }
+
+    if let (Some(config), Some(job_id)) = (container_config, job_id) {
+        kill_container_process_group(config, job_id).await;
+    }
+}
+
+async fn kill_container_process_group(config: &ContainerConfig, job_id: &str) {
+    run_container_kill_signal(config, job_id, "TERM").await;
+
+    tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+
+    run_container_kill_signal(config, job_id, "KILL").await;
+}
+
+async fn run_container_kill_signal(config: &ContainerConfig, job_id: &str, signal: &str) {
+    let script = format!(
+        r#"PID=$(pgrep -f "TCODE_JOB={job_id}" | grep -v "^$$\$" | sort -n | head -1); [ -n "$PID" ] && kill -{signal} -- -$(ps -o pgid= -p "$PID" | tr -d " ") || true"#,
+        job_id = job_id,
+        signal = signal,
+    );
+
+    let mut cmd = Command::new(&config.runtime);
+    cmd.arg("exec")
+        .arg("--user")
+        .arg(format!("{}:{}", config.uid, config.gid))
+        .arg(&config.name)
+        .arg("bash")
+        .arg("-c")
+        .arg(&script)
+        .stdout(Stdio::null())
+        .stderr(Stdio::piped())
+        .stdin(Stdio::null());
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), cmd.output()).await;
+
+    match result {
+        Ok(Ok(output)) => {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let trimmed = stderr.trim();
+            if !trimmed.is_empty() {
+                tracing::info!(
+                    "Container kill script stderr for job {} (SIG{}): {}",
+                    job_id,
+                    signal,
+                    trimmed
+                );
+            }
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                "Failed to send SIG{} to container process group for job {}: {}",
+                signal,
+                job_id,
+                e
+            );
+        }
+        Err(_elapsed) => {
+            tracing::warn!(
+                "Timed out sending SIG{} to container process group for job {}",
+                signal,
+                job_id
+            );
         }
     }
 }
@@ -1133,29 +1215,48 @@ async fn kill_process_group(pid: Option<u32>) {
 }
 
 /// Kills the child process group when the supervisor is dropped unexpectedly.
-struct ChildGuard(Option<u32>);
+struct ChildGuard {
+    pid: Option<u32>,
+    container_config: Option<Arc<ContainerConfig>>,
+    job_id: Option<String>,
+}
 
 impl ChildGuard {
-    fn new(pid: Option<u32>) -> Self {
-        Self(pid)
+    fn new(
+        pid: Option<u32>,
+        container_config: Option<Arc<ContainerConfig>>,
+        job_id: Option<String>,
+    ) -> Self {
+        Self {
+            pid,
+            container_config,
+            job_id,
+        }
     }
 
     fn disarm(&mut self) {
-        self.0 = None;
+        self.pid = None;
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        if let Some(pid) = self.0
+        if let Some(pid) = self.pid
             && let Ok(handle) = tokio::runtime::Handle::try_current()
         {
+            let container_config = self.container_config.clone();
+            let job_id = self.job_id.clone();
             handle.spawn(async move {
                 kill_process_group(Some(pid)).await;
+                if let (Some(config), Some(job_id)) =
+                    (container_config.as_deref(), job_id.as_deref())
+                {
+                    kill_container_process_group(config, job_id).await;
+                }
             });
-        } else if self.0.is_some() {
+        } else if self.pid.is_some() {
             tracing::warn!(
-                pid = ?self.0,
+                pid = ?self.pid,
                 "ChildGuard dropped without a tokio runtime; child process may leak"
             );
         }
