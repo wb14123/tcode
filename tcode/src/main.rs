@@ -13,8 +13,13 @@ mod tree;
 mod tree_nav;
 mod tty_stdio;
 
+mod project_config;
+
 pub(crate) use tcode_runtime::bootstrap::{auth_command_for_profile, create_llm};
 pub(crate) use tcode_runtime::{config, protocol, server, session};
+
+#[cfg(test)]
+mod project_config_tests;
 
 #[cfg(test)]
 mod cli_runtime_tests;
@@ -106,6 +111,10 @@ struct Cli {
     /// Container runtime CLI to use (default: docker)
     #[arg(long = "container-runtime", default_value = "docker", value_parser = ["docker", "podman"], requires = "container")]
     container_runtime: String,
+
+    /// Force no container, even if .tcode/config.toml specifies one
+    #[arg(long = "no-container", conflicts_with = "container")]
+    no_container: bool,
 }
 
 #[derive(Subcommand)]
@@ -379,6 +388,7 @@ async fn main() -> Result<()> {
         profile,
         container,
         container_runtime,
+        no_container,
     } = cli;
 
     // Helper to require --session flag for subcommands
@@ -394,14 +404,31 @@ async fn main() -> Result<()> {
     // The Permission branch only needs the container name for display.
     async fn resolve_container_config(
         container: &Option<String>,
-        runtime: &str,
+        container_runtime: &str,
+        no_container: bool,
     ) -> Result<Option<llm_rs::tool::ContainerConfig>> {
-        if let Some(ref name) = *container {
-            container::validate_container(name, runtime).await?;
-            Ok(Some(container::build_container_config(name, runtime)))
-        } else {
-            Ok(None)
+        if no_container {
+            return Ok(None);
         }
+        if let Some(ref name) = *container {
+            container::validate_container(name, container_runtime).await?;
+            return Ok(Some(container::build_container_config(
+                name,
+                container_runtime,
+            )));
+        }
+        // Check project-level config for a container setting
+        if let Some(project_config) = project_config::load()
+            && let Some(ref name) = project_config.container
+        {
+            let runtime = project_config
+                .container_runtime
+                .as_deref()
+                .unwrap_or("docker");
+            container::validate_container(name, runtime).await?;
+            return Ok(Some(container::build_container_config(name, runtime)));
+        }
+        Ok(None)
     }
 
     match command {
@@ -415,7 +442,8 @@ async fn main() -> Result<()> {
                 // Non-TTY: fall through; load_cfg() will surface the hint.
             }
             let config = load_cfg()?;
-            let container_config = resolve_container_config(&container, &container_runtime).await?;
+            let container_config =
+                resolve_container_config(&container, &container_runtime, no_container).await?;
             run_unified(
                 config,
                 profile.as_deref(),
@@ -462,7 +490,8 @@ async fn main() -> Result<()> {
             .await?;
             let search_engine = parse_search_engine(config.search_engine_str())?;
             tools::set_search_engine(search_engine);
-            let container_config = resolve_container_config(&container, &container_runtime).await?;
+            let container_config =
+                resolve_container_config(&container, &container_runtime, no_container).await?;
             let (llm, model, token_manager) = create_llm(&config, profile.as_deref()).await?;
             let mut chat_options = build_chat_options();
             if let Some(ref effort) = config.reasoning_effort {
@@ -576,7 +605,8 @@ async fn main() -> Result<()> {
                         chat_options.reasoning_effort = Some(effort.clone());
                     }
                     let container_config =
-                        resolve_container_config(&container, &container_runtime).await?;
+                        resolve_container_config(&container, &container_runtime, no_container)
+                            .await?;
                     Some(RuntimeDependencies {
                         llm,
                         model,
@@ -738,7 +768,8 @@ async fn main() -> Result<()> {
             // are actually delivered.
             init_remote_tracing();
 
-            let container_config = resolve_container_config(&container, &container_runtime).await?;
+            let container_config =
+                resolve_container_config(&container, &container_runtime, no_container).await?;
             let cfg = tcode_web::RemoteConfig::try_new(port)?
                 .with_bind_addr(host)
                 .with_allow_insecure_http(allow_insecure_http)

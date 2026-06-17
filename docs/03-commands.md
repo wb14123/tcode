@@ -16,6 +16,7 @@ tcode --web-only
 tcode -p <profile>
 tcode -c <container-name>
 tcode -c <container-name> --container-runtime podman
+tcode --no-container
 ```
 
 **Flags:**
@@ -27,6 +28,7 @@ tcode -c <container-name> --container-runtime podman
 | `-V`, `--version` | Print version and git commit |
 | `-c <name>`, `--container <name>` | Run bash commands inside a running Docker/Podman container. File tools remain on the host. See [02-configuration.md](02-configuration.md#container-mode). |
 | `--container-runtime <runtime>` | Container runtime CLI: `docker` (default) or `podman`. Requires `-c`. |
+| `--no-container` | Force no container, even if `-c` or project config specifies one. Conflicts with `-c`. |
 
 ---
 
@@ -208,6 +210,7 @@ tcode remote --port 8080 --password change-me
 | `--web-only` | Create and expose only web-only sessions from this remote server. Accepted before or after `remote`; examples generally put it before the subcommand. |
 | `-c <container>` / `--container <container>` | In normal remote sessions, run bash commands inside an existing Docker/Podman container. File tools still operate on the host. |
 | `--container-runtime <runtime>` | Container runtime CLI for `-c/--container`: `docker` (default) or `podman`. Requires `-c/--container`. |
+| `--no-container` | Force no container, even if `-c/--container` or project config specifies one. Conflicts with `-c/--container`. |
 
 `--session <id>` is not used by `tcode remote`; the web server lists and creates sessions through the browser UI.
 

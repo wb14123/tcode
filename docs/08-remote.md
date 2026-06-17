@@ -66,6 +66,7 @@ Relevant global flags:
 | `-p <profile>` | Load `~/.tcode/config-<profile>.toml` instead of the default config. |
 | `-c <container>` / `--container <container>` | In remote sessions, run bash commands inside an existing Docker/Podman container. File tools still operate on the host. See [Configuration: Container Mode](02-configuration.md#container-mode). |
 | `--container-runtime <runtime>` | Container runtime CLI for `-c/--container`: `docker` (default) or `podman`. Requires `-c/--container`. |
+| `--no-container` | Force no container, even if `-c/--container` or project config specifies one. Conflicts with `-c/--container`. |
 
 `--session <id>` is a global flag for terminal/tmux session commands. It is not used by `tcode remote`: the web server lists and creates sessions through the browser UI instead of attaching to one startup session.
 
