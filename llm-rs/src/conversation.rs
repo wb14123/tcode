@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
 use crate::media::{ContentPart, MediaData, media_type_from_extension};
 use crate::tool::{CancellationToken, ContainerConfig, Tool, ToolContext};
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
@@ -1532,6 +1532,16 @@ impl Conversation {
     }
 
     fn push_llm_msg(&mut self, msg: LLMMessage) -> Result<()> {
+        if let LLMMessage::Assistant {
+            ref content,
+            ref tool_calls,
+            ..
+        } = msg
+            && content.is_empty()
+            && tool_calls.is_empty()
+        {
+            bail!("Empty Assistant message (no content, no tool_calls)");
+        }
         self.llm_msgs.push(msg);
         self.save_state()?;
         Ok(())
@@ -1840,7 +1850,7 @@ impl Conversation {
                     reasoning_tokens,
                     cache_creation_input_tokens,
                     cache_read_input_tokens,
-                    raw,
+                    mut raw,
                 } => {
                     self.total_input_tokens += input_tokens;
                     self.total_output_tokens += output_tokens;
@@ -1884,7 +1894,24 @@ impl Conversation {
                             raw,
                         })?;
                         self.spawn_tool_tasks(tool_calls);
-                    } else if !accumulated_text.is_empty() || raw.is_some() {
+                    } else if raw.is_some() && accumulated_text.is_empty() {
+                        // Raw present but no text and no tool calls — only
+                        // reasoning.  Inject placeholder content so the message
+                        // is valid for the API (both "content" and "tool_calls"
+                        // are required by providers like DeepSeek).
+                        let placeholder = "[response interrupted]";
+                        if let Some(ref mut raw_obj) = raw
+                            && raw_obj.is_object()
+                        {
+                            raw_obj["content"] =
+                                serde_json::Value::String(placeholder.to_string());
+                        }
+                        self.push_llm_msg(LLMMessage::Assistant {
+                            content: placeholder.to_string(),
+                            tool_calls: vec![],
+                            raw,
+                        })?;
+                    } else if !accumulated_text.is_empty() {
                         self.push_llm_msg(LLMMessage::Assistant {
                             content: accumulated_text,
                             tool_calls: vec![],
