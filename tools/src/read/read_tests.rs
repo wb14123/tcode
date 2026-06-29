@@ -43,7 +43,7 @@ mod tests {
             cancel_token: CancellationToken::new(),
             permission: scoped,
             container_config: None,
-            media_dir: None,
+            session_dir: None,
             supports_media: false,
             llm: None,
             model: None,

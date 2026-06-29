@@ -21,8 +21,9 @@ pub fn require_media_dir(ctx: &ToolContext, action: &str) -> Result<PathBuf> {
             action
         );
     }
-    ctx.media_dir
-        .clone()
+    ctx.session_dir
+        .as_ref()
+        .map(|d| d.media_dir())
         .ok_or_else(|| anyhow!("Cannot {}: no media directory configured.", action))
 }
 

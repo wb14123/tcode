@@ -150,7 +150,7 @@ fn test_ctx() -> ToolContext {
         cancel_token: CancellationToken::new(),
         permission: llm_rs::permission::ScopedPermissionManager::always_allow("bash"),
         container_config: None,
-        media_dir: None,
+        session_dir: None,
         supports_media: false,
         llm: None,
         model: None,

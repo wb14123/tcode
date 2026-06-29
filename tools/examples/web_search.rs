@@ -18,7 +18,7 @@ async fn main() {
         cancel_token: CancellationToken::new(),
         permission: llm_rs::permission::ScopedPermissionManager::always_allow("web_search"),
         container_config: None,
-        media_dir: None,
+        session_dir: None,
         supports_media: false,
         llm: None,
         model: None,

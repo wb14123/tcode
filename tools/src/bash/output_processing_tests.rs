@@ -7,7 +7,7 @@
 
 use regex::Regex;
 
-use super::{DEFAULT_MAX_OUTPUT_CHARS, post_process};
+use super::{DEFAULT_MAX_OUTPUT_CHARS, OutputReducer, post_process};
 
 // ---------- helpers ----------
 
@@ -363,6 +363,77 @@ fn tail_char_cap_preserves_newest_lines() {
     );
 }
 
+// ---------- had_truncation() tests ----------
+
+#[test]
+fn had_truncation_false_for_no_truncation() {
+    let mut reducer = OutputReducer::new(None, None, None, DEFAULT_MAX_OUTPUT_CHARS);
+    for line in lines(["stdout| hello", "stdout| world"]) {
+        reducer.feed(line);
+    }
+    reducer.final_output();
+    assert!(!reducer.had_truncation());
+}
+
+#[test]
+fn had_truncation_true_for_char_cap() {
+    let small_cap = 10;
+    let mut reducer = OutputReducer::new(None, None, None, small_cap);
+    // Feed a line longer than the cap — it should hit the cap.
+    for line in lines(["stdout| this is a very long line that exceeds the cap"]) {
+        reducer.feed(line);
+    }
+    reducer.final_output();
+    assert!(reducer.had_truncation());
+}
+
+#[test]
+fn had_truncation_true_for_head() {
+    let mut reducer = OutputReducer::new(None, Some(1), None, DEFAULT_MAX_OUTPUT_CHARS);
+    for line in lines(["stdout| first", "stdout| second", "stdout| third"]) {
+        reducer.feed(line);
+    }
+    reducer.final_output();
+    assert!(reducer.had_truncation());
+}
+
+#[test]
+fn had_truncation_true_for_tail() {
+    let mut reducer = OutputReducer::new(None, None, Some(2), DEFAULT_MAX_OUTPUT_CHARS);
+    for line in lines([
+        "stdout| one",
+        "stdout| two",
+        "stdout| three",
+        "stdout| four",
+        "stdout| five",
+    ]) {
+        reducer.feed(line);
+    }
+    reducer.final_output();
+    assert!(reducer.had_truncation());
+}
+
+#[test]
+fn had_truncation_true_for_filter_dropping_lines() {
+    let mut reducer = OutputReducer::new(Some(re("error")), None, None, DEFAULT_MAX_OUTPUT_CHARS);
+    for line in lines(["stdout| info one", "stderr| error one", "stdout| info two"]) {
+        reducer.feed(line);
+    }
+    reducer.final_output();
+    assert!(reducer.had_truncation());
+}
+
+#[test]
+fn had_truncation_true_for_multiple_truncations() {
+    // Char cap + head: both trigger truncation.
+    let mut reducer = OutputReducer::new(None, Some(1), None, 10);
+    for line in lines(["stdout| first", "stdout| second", "stdout| third"]) {
+        reducer.feed(line);
+    }
+    reducer.final_output();
+    assert!(reducer.had_truncation());
+}
+
 // ---------- end-to-end (validation rejection) tests ----------
 //
 // These exercise the public `bash` tool entry point. They cover validation
@@ -381,7 +452,7 @@ mod e2e {
             cancel_token: CancellationToken::new(),
             permission: ScopedPermissionManager::always_allow("bash"),
             container_config: None,
-            media_dir: None,
+            session_dir: None,
             supports_media: false,
             llm: None,
             model: None,

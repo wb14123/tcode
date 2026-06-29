@@ -48,7 +48,7 @@ mod streaming {
         KEY_COMMAND, KEY_PATH, PermissionKey, PermissionScope, SCOPE_BASH, SCOPE_FILE_WRITE,
         ScopedPermissionManager, WILDCARD_VALUE,
     };
-    use llm_rs::tool::{CancellationToken, ToolContext};
+    use llm_rs::tool::{CancellationToken, SessionDir, ToolContext};
     use std::path::{Path, PathBuf};
     use tokio_stream::StreamExt;
 
@@ -118,7 +118,7 @@ mod streaming {
             cancel_token,
             permission: perm,
             container_config: None,
-            media_dir: None,
+            session_dir: None,
             supports_media: false,
             llm: None,
             model: None,
@@ -755,6 +755,186 @@ mod streaming {
             "child should finish the side effect after the stream is dropped"
         );
         assert_eq!(std::fs::read_to_string(side_effect)?, "done");
+        Ok(())
+    }
+
+    fn ctx_with_session_dir(temp_dir: &Path) -> ToolContext {
+        let session_dir = SessionDir::new(temp_dir.to_path_buf());
+        let mut ctx = ctx();
+        ctx.session_dir = Some(session_dir);
+        ctx
+    }
+
+    // ── log file tests ─────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn truncated_output_produces_log_file() -> Result<()> {
+        let dir = temp_dir()?;
+        let ctx = ctx_with_session_dir(&dir);
+
+        // Generate output that exceeds DEFAULT_MAX_OUTPUT_CHARS (20,000).
+        // 400 lines of 60 chars each ≈ 24,000 chars (including newlines).
+        let cmd = "for i in $(seq 1 400); do printf '%060d\\n' $i; done";
+        let stream = crate::bash::bash(
+            ctx,
+            cmd.to_string(),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "log file char cap test".to_string(),
+        );
+        let (chunks, err) = collect(Box::pin(stream)).await;
+        assert!(err.is_none(), "command should succeed: {err:?}");
+        let joined = chunks.join("");
+        assert!(
+            joined.contains("output truncated by chars_limit=20000"),
+            "expected char cap marker: {joined}"
+        );
+
+        // Metadata should contain log_file with hint.
+        let log_line = joined
+            .lines()
+            .find(|l| l.starts_with("log_file:"))
+            .expect("metadata must contain log_file");
+        assert!(
+            log_line.contains(" — complete raw output"),
+            "log_file line must include hint: {log_line}"
+        );
+        let log_path_str = log_line
+            .split(" — ")
+            .next()
+            .unwrap()
+            .strip_prefix("log_file: ")
+            .expect("bad format");
+        assert!(!log_path_str.is_empty(), "log_file path must not be empty");
+
+        // The log file must exist.
+        let log_path = Path::new(log_path_str);
+        assert!(log_path.exists(), "log file must exist at {log_path:?}");
+
+        // Read the log file and verify it contains raw tagged lines.
+        let log_content = std::fs::read_to_string(log_path)?;
+        assert!(
+            log_content.contains("stdout| "),
+            "log file must contain tagged stdout lines, got: {log_content:?}"
+        );
+        // Log file should have all 400 lines (or at least more than the
+        // truncated output returned to the LLM).
+        let log_line_count = log_content.lines().count();
+        assert!(
+            log_line_count >= 400,
+            "log file should contain all 400 lines, got {log_line_count}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn non_truncated_output_does_not_produce_log_file() -> Result<()> {
+        let dir = temp_dir()?;
+        let tool_log_dir = dir.join("tool-logs");
+        let ctx = ctx_with_session_dir(&dir);
+
+        // Small output that fits well within the char cap.
+        let stream = crate::bash::bash(
+            ctx,
+            "echo hello; echo world".to_string(),
+            false,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "log file no truncation test".to_string(),
+        );
+        let (chunks, err) = collect(Box::pin(stream)).await;
+        assert!(err.is_none(), "command should succeed: {err:?}");
+        let joined = chunks.join("");
+        assert!(
+            joined.contains("stdout| hello"),
+            "expected output: {joined}"
+        );
+
+        // Metadata must NOT contain log_file.
+        assert!(
+            !joined.contains("log_file:"),
+            "metadata should not contain log_file: {joined}"
+        );
+
+        // No .log files should remain in the tool-logs dir.
+        let mut log_count = 0;
+        if tool_log_dir.exists() {
+            for entry in std::fs::read_dir(&tool_log_dir)? {
+                let entry = entry?;
+                if entry.file_name().to_string_lossy().ends_with(".log") {
+                    log_count += 1;
+                }
+            }
+        }
+        assert_eq!(
+            log_count, 0,
+            "no log files should remain in {tool_log_dir:?}"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn filter_truncation_produces_log_file_with_all_lines() -> Result<()> {
+        let dir = temp_dir()?;
+        let ctx = ctx_with_session_dir(&dir);
+
+        // Generate 10 lines, use a filter that only keeps 2.
+        let cmd = "for i in $(seq 1 10); do echo line_$i; done";
+        let stream = crate::bash::bash(
+            ctx,
+            cmd.to_string(),
+            false,
+            None,
+            None,
+            Some(r"line_[12]$".to_string()),
+            None,
+            None,
+            "log file filter test".to_string(),
+        );
+        let (chunks, err) = collect(Box::pin(stream)).await;
+        assert!(err.is_none(), "command should succeed: {err:?}");
+        let joined = chunks.join("");
+        assert!(
+            joined.contains("[filter kept 2/10 lines]"),
+            "expected filter marker: {joined}"
+        );
+
+        // Metadata should contain log_file with hint.
+        let log_line = joined
+            .lines()
+            .find(|l| l.starts_with("log_file:"))
+            .expect("metadata must contain log_file for filtered output");
+        assert!(
+            log_line.contains(" — complete raw output"),
+            "log_file line must include hint: {log_line}"
+        );
+        let log_path_str = log_line
+            .split(" — ")
+            .next()
+            .unwrap()
+            .strip_prefix("log_file: ")
+            .expect("bad format");
+        assert!(!log_path_str.is_empty(), "log_file path must not be empty");
+
+        // The log file must exist.
+        let log_path = Path::new(log_path_str);
+        assert!(log_path.exists(), "log file must exist at {log_path:?}");
+
+        // Log file must contain ALL 10 lines (not just the filtered 2).
+        let log_content = std::fs::read_to_string(log_path)?;
+        for i in 1..=10 {
+            assert!(
+                log_content.contains(&format!("line_{i}")),
+                "log file must contain line_{i}: {log_content:?}"
+            );
+        }
         Ok(())
     }
 }

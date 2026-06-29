@@ -25,7 +25,7 @@
 //!
 //! // Execute with JSON string
 //! use tokio_util::sync::CancellationToken;
-//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, media_dir: None, supports_media: false, llm: None, model: None };
+//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, session_dir: None, supports_media: false, llm: None, model: None };
 //! let stream = tool.execute(ctx, r#"{"path": "/tmp/test.txt"}"#.to_string());
 //! ```
 
@@ -59,6 +59,31 @@ pub struct ContainerConfig {
     pub home: String,
 }
 
+/// Session directory structure for tool execution.
+///
+/// Provides paths for tool subdirectories (media, logs) derived from
+/// the conversation's state directory.
+#[derive(Clone, Debug)]
+pub struct SessionDir {
+    root: PathBuf,
+}
+
+impl SessionDir {
+    pub fn new(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    /// Directory for media files (images, PDFs) used in LLM conversations.
+    pub fn media_dir(&self) -> PathBuf {
+        self.root.join("media")
+    }
+
+    /// Directory for tool execution logs (e.g., full bash output when truncated).
+    pub fn tool_log_dir(&self) -> PathBuf {
+        self.root.join("tool-logs")
+    }
+}
+
 /// Context provided to every tool execution.
 /// Extensible — future additions (user info, etc.) go here.
 #[derive(Clone)]
@@ -68,8 +93,10 @@ pub struct ToolContext {
     pub permission: crate::permission::ScopedPermissionManager,
     /// Optional container configuration for Docker/Podman sandbox mode.
     pub container_config: Option<Arc<ContainerConfig>>,
-    /// Where tools can write processed media (session's media/ dir).
-    pub media_dir: Option<PathBuf>,
+    /// Session directory structure providing tool subdirectories
+    /// (media, logs). For example, `d.media_dir()` returns
+    /// `<state_dir>/media`.
+    pub session_dir: Option<SessionDir>,
     /// Whether the current model supports visual/media input (images, PDFs).
     pub supports_media: bool,
     /// Optional LLM instance for tools to call back for review.
@@ -270,7 +297,7 @@ impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send
 ///
 /// // Execute with JSON string
 /// use tokio_util::sync::CancellationToken;
-/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, media_dir: None, supports_media: false, llm: None, model: None };
+/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, session_dir: None, supports_media: false, llm: None, model: None };
 /// let stream = tool.execute(ctx, r#"{"query": "foo"}"#.to_string());
 /// ```
 pub struct Tool {

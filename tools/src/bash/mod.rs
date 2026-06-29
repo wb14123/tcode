@@ -13,6 +13,7 @@ mod command_permission_tests;
 mod output_processing_tests;
 
 use std::collections::VecDeque;
+use std::io::Write;
 use std::path::PathBuf;
 use std::process::Stdio;
 use std::sync::Arc;
@@ -56,7 +57,8 @@ const STDERR_TAG: &str = "stderr| ";
 /// which stream produced it. Both streams are captured automatically — you never
 /// need `2>&1`. The total output is capped at a hidden character limit; when the
 /// cap is hit, output is cut at the last newline boundary and a truncation marker
-/// is appended.
+/// is appended. If truncation occurs, the full raw output is saved to a file (see
+/// Truncation markers).
 ///
 /// ## Filtering and trimming (preferred over shell pipes)
 ///
@@ -78,6 +80,11 @@ const STDERR_TAG: &str = "stderr| ";
 /// Both must be > 0. They run AFTER `filter`, so `tail=10` keeps the last 10
 /// *matching* lines, not the last 10 raw lines.
 ///
+/// When a `filter` is applied and it drops lines, the full raw output is saved
+/// to a log file containing the complete raw output (before any processing);
+/// the LLM can `read`/`grep`/`glob` it instead of re-running the command
+/// with different filter/head/tail parameters.
+///
 /// ## Truncation markers
 ///
 /// Whenever post-processing drops content, an inline marker is emitted so you
@@ -92,6 +99,13 @@ const STDERR_TAG: &str = "stderr| ";
 /// Marker counts are intentionally simple; filter counts are exact, while
 /// head/tail/char-cap markers only report that truncation happened. Markers do
 /// not count toward the char cap, so a tight cap still shows actual content.
+///
+/// When output is truncated or filtered (head, tail, char cap, or filter drops
+/// lines), the full raw tagged output is saved to a log file
+/// under the session's tool-logs directory. The file path is emitted as
+/// `log_file` in the `<bash_metadata>` block at the end of the output. The
+/// LLM can then use `read`/`grep`/`glob` to search the full output instead
+/// of re-running the command.
 ///
 /// ## Other rules
 ///
@@ -267,6 +281,7 @@ pub fn bash(
             tail,
             container_config,
             cancel_token: ctx.cancel_token.clone(),
+            tool_log_dir: ctx.session_dir.as_ref().map(|d| d.tool_log_dir()),
         };
 
         let (tx, mut rx) = mpsc::unbounded_channel();
@@ -290,6 +305,7 @@ struct BashRequest {
     tail: Option<u64>,
     container_config: Option<Arc<ContainerConfig>>,
     cancel_token: CancellationToken,
+    tool_log_dir: Option<PathBuf>,
 }
 
 fn build_command(request: &BashRequest, job_id: Option<&str>) -> Result<Command> {
@@ -369,9 +385,15 @@ async fn drain_remaining_output(
     line_stream: &mut TaggedLineStream,
     reducer: &mut OutputReducer,
     output: &mut OutputSink,
+    log_file: &mut Option<(PathBuf, std::io::BufWriter<std::fs::File>)>,
 ) -> Result<()> {
     while let Some(line) = line_stream.next().await {
         let line = line?;
+        if let Some((_, writer)) = log_file
+            && let Err(e) = writeln!(writer, "{}", line)
+        {
+            tracing::warn!("Failed to write to bash log file: {e}");
+        }
         if let Some(chunk) = reducer.feed(line) {
             output.send(Ok(chunk));
         }
@@ -384,6 +406,7 @@ async fn drain_remaining_output_with_timeout(
     line_stream: &mut TaggedLineStream,
     reducer: &mut OutputReducer,
     output: &mut OutputSink,
+    log_file: &mut Option<(PathBuf, std::io::BufWriter<std::fs::File>)>,
 ) {
     if *line_stream_done {
         return;
@@ -392,7 +415,7 @@ async fn drain_remaining_output_with_timeout(
     let drain_timeout = std::time::Duration::from_millis(POST_KILL_DRAIN_TIMEOUT_MS);
     match tokio::time::timeout(
         drain_timeout,
-        drain_remaining_output(line_stream, reducer, output),
+        drain_remaining_output(line_stream, reducer, output, log_file),
     )
     .await
     {
@@ -469,6 +492,26 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
         DEFAULT_MAX_OUTPUT_CHARS,
     );
 
+    let mut log_file: Option<(PathBuf, std::io::BufWriter<std::fs::File>)> = None;
+    if let Some(ref tool_log_dir) = request.tool_log_dir {
+        if let Err(e) = std::fs::create_dir_all(tool_log_dir) {
+            tracing::warn!("Failed to create tool log directory: {e}");
+        }
+        let log_path = tool_log_dir.join(format!("bash-{}.log", Uuid::new_v4()));
+        match std::fs::File::create(&log_path) {
+            Ok(file) => {
+                log_file = Some((log_path, std::io::BufWriter::new(file)));
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "Failed to create bash log file {}: {}",
+                    log_path.display(),
+                    e
+                );
+            }
+        }
+    }
+
     let mut line_stream_done = false;
     let mut child_done = false;
     let mut exit_code: Option<i32> = None;
@@ -486,6 +529,11 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
             line = line_stream.next(), if !line_stream_done => {
                 match line {
                     Some(Ok(line)) => {
+                        if let Some((_, ref mut writer)) = log_file
+                            && let Err(e) = writeln!(writer, "{}", line)
+                        {
+                            tracing::warn!("Failed to write to bash log file: {e}");
+                        }
                         if let Some(chunk) = reducer.feed(line) {
                             output.send(Ok(chunk));
                         }
@@ -529,12 +577,19 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
                     &mut line_stream,
                     &mut reducer,
                     &mut output,
+                    &mut log_file,
                 )
                 .await;
                 if let Some(final_output) = reducer.final_output() {
                     output.send(Ok(final_output));
                 }
-                output.send(Ok(format_metadata("null", &description, Some(&err))));
+                let log_path_for_metadata = finalize_log_file(&mut log_file, &reducer);
+                output.send(Ok(format_metadata(
+                    "null",
+                    &description,
+                    Some(&err),
+                    log_path_for_metadata.as_deref(),
+                )));
                 return;
             }
             () = cancel_token.cancelled() => {
@@ -554,11 +609,18 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
                     &mut line_stream,
                     &mut reducer,
                     &mut output,
+                    &mut log_file,
                 )
                 .await;
                 if let Some(final_output) = reducer.final_output() {
                     output.send(Ok(final_output));
                 }
+                let log_path = finalize_log_file(&mut log_file, &reducer);
+                let err = if let Some(ref p) = log_path {
+                    err.context(format!("Full command output log saved to: {p}"))
+                } else {
+                    err
+                };
                 output.send(Err(err));
                 return;
             }
@@ -566,6 +628,15 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
     }
 
     if let Some(e) = stream_error {
+        if let Some(final_output) = reducer.final_output() {
+            output.send(Ok(final_output));
+        }
+        let log_path = finalize_log_file(&mut log_file, &reducer);
+        let e = if let Some(ref p) = log_path {
+            e.context(format!("Full command output log saved to: {p}"))
+        } else {
+            e
+        };
         output.send(Err(e));
         return;
     }
@@ -580,11 +651,19 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
                 .collect::<Vec<_>>()
                 .join("\n");
             if is_container_stopped_error(&tail_stderr) {
-                output.send(Err(anyhow!(
+                if let Some(final_output) = reducer.final_output() {
+                    output.send(Ok(final_output));
+                }
+                let log_path = finalize_log_file(&mut log_file, &reducer);
+                let mut err = anyhow!(
                     "Error: Container '{}' is no longer running. \
                      Ask the user to restart the container before continuing.",
                     config.name
-                )));
+                );
+                if let Some(ref p) = log_path {
+                    err = err.context(format!("Full command output log saved to: {p}"));
+                }
+                output.send(Err(err));
                 return;
             }
         }
@@ -598,7 +677,43 @@ async fn run_bash_supervisor(request: BashRequest, tx: mpsc::UnboundedSender<Res
         Some(code) => code.to_string(),
         None => "null".to_string(),
     };
-    output.send(Ok(format_metadata(&exit_str, &description, None)));
+    let log_path_for_metadata = finalize_log_file(&mut log_file, &reducer);
+    output.send(Ok(format_metadata(
+        &exit_str,
+        &description,
+        None,
+        log_path_for_metadata.as_deref(),
+    )));
+}
+
+/// Flush and close the log file writer. Returns the canonicalized absolute
+/// path if truncation occurred and the file should be kept, or `None` if
+/// the file should be deleted (no truncation or no log file at all).
+fn finalize_log_file(
+    log_file: &mut Option<(PathBuf, std::io::BufWriter<std::fs::File>)>,
+    reducer: &OutputReducer,
+) -> Option<String> {
+    let (log_path, mut writer) = log_file.take()?;
+    if let Err(e) = writer.flush() {
+        tracing::warn!("Failed to flush bash log file: {e}");
+    }
+    drop(writer);
+    if reducer.had_truncation() {
+        Some(
+            std::fs::canonicalize(&log_path)
+                .unwrap_or_else(|_| log_path.clone())
+                .to_string_lossy()
+                .to_string(),
+        )
+    } else {
+        if let Err(e) = std::fs::remove_file(&log_path) {
+            tracing::warn!(
+                "Failed to remove non-truncated bash log file {}: {e}",
+                log_path.display()
+            );
+        }
+        None
+    }
 }
 
 /// Check if a command contains any shell utility keywords that have built-in alternatives.
@@ -712,7 +827,7 @@ enum OutputMode {
 }
 
 /// Pure output reducer shared by live streaming and buffered tail output.
-struct OutputReducer {
+pub(crate) struct OutputReducer {
     filter: Option<Regex>,
     head: Option<u64>,
     max_chars: usize,
@@ -720,10 +835,16 @@ struct OutputReducer {
     kept_total: u64,
     last_stderr: VecDeque<String>,
     mode: OutputMode,
+    truncated: bool,
 }
 
 impl OutputReducer {
-    fn new(filter: Option<Regex>, head: Option<u64>, tail: Option<u64>, max_chars: usize) -> Self {
+    pub(crate) fn new(
+        filter: Option<Regex>,
+        head: Option<u64>,
+        tail: Option<u64>,
+        max_chars: usize,
+    ) -> Self {
         let mode = if let Some(limit) = tail {
             OutputMode::Tail {
                 limit,
@@ -746,10 +867,11 @@ impl OutputReducer {
             kept_total: 0,
             last_stderr: VecDeque::with_capacity(5),
             mode,
+            truncated: false,
         }
     }
 
-    fn feed(&mut self, line: String) -> Option<String> {
+    pub(crate) fn feed(&mut self, line: String) -> Option<String> {
         self.raw_total += 1;
         if let Some(s) = line.strip_prefix(STDERR_TAG) {
             if self.last_stderr.len() == 5 {
@@ -775,6 +897,7 @@ impl OutputReducer {
                 if u64::try_from(lines.len()).unwrap_or(u64::MAX) > *limit {
                     lines.pop_front();
                     *tail_hit = true;
+                    self.truncated = true;
                 }
                 None
             }
@@ -786,6 +909,7 @@ impl OutputReducer {
                 if let Some(head) = self.head
                     && self.kept_total > head
                 {
+                    self.truncated = true;
                     return None;
                 }
 
@@ -801,6 +925,7 @@ impl OutputReducer {
                 };
                 if emitted_chars.saturating_add(added_chars) > self.max_chars {
                     *cap_hit = true;
+                    self.truncated = true;
                     return None;
                 }
 
@@ -816,7 +941,7 @@ impl OutputReducer {
         }
     }
 
-    fn final_output(&mut self) -> Option<String> {
+    pub(crate) fn final_output(&mut self) -> Option<String> {
         enum FinalMode {
             Stream {
                 emitted_any: bool,
@@ -845,6 +970,9 @@ impl OutputReducer {
             } => {
                 let (content, cap_hit) =
                     apply_char_cap_from_end(lines.iter().cloned().collect(), self.max_chars);
+                if cap_hit {
+                    self.truncated = true;
+                }
                 let top_marker = if *tail_hit {
                     Some(format!("[... earlier lines omitted by tail={} ...]", limit))
                 } else {
@@ -936,6 +1064,14 @@ impl OutputReducer {
 
     fn stderr_lines(&self) -> &VecDeque<String> {
         &self.last_stderr
+    }
+
+    /// Returns true if any truncation or filtering occurred during processing.
+    ///
+    /// Must be called after [`final_output`](OutputReducer::final_output), because
+    /// tail-mode char-cap truncation is only detected during final output assembly.
+    pub(crate) fn had_truncation(&self) -> bool {
+        self.truncated || (self.filter.is_some() && self.kept_total < self.raw_total)
     }
 }
 
@@ -1264,15 +1400,23 @@ impl Drop for ChildGuard {
 }
 
 /// Format the `<bash_metadata>` block appended to every tool response.
-fn format_metadata(exit_code: &str, description: &str, error: Option<&anyhow::Error>) -> String {
+fn format_metadata(
+    exit_code: &str,
+    description: &str,
+    error: Option<&anyhow::Error>,
+    log_file: Option<&str>,
+) -> String {
+    let log_line = log_file
+        .map(|p| format!("\nlog_file: {p} — complete raw output (before any filter/head/tail/char-cap truncation); use read/grep/glob to search instead of re-running the command"))
+        .unwrap_or_default();
     match error {
         Some(e) => format!(
-            "\n<bash_metadata>\nexit_code: {}\ndescription: {}\nerror: {}\n</bash_metadata>",
-            exit_code, description, e
+            "\n<bash_metadata>\nexit_code: {}\ndescription: {}\nerror: {}{}\n</bash_metadata>",
+            exit_code, description, e, log_line
         ),
         None => format!(
-            "\n<bash_metadata>\nexit_code: {}\ndescription: {}\n</bash_metadata>",
-            exit_code, description
+            "\n<bash_metadata>\nexit_code: {}\ndescription: {}{}\n</bash_metadata>",
+            exit_code, description, log_line
         ),
     }
 }

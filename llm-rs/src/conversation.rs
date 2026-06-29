@@ -482,8 +482,8 @@ struct ConversationEnv {
     subagent_depth: usize,
     max_subagent_depth: usize,
     state_dir: Option<PathBuf>,
-    /// Where tools can write processed media (session's media/ dir).
-    media_dir: Option<PathBuf>,
+    /// Session directory structure for tool execution (media, logs, previews).
+    session_dir: Option<crate::tool::SessionDir>,
     /// Whether the current model supports visual/media input (images, PDFs).
     supports_media: bool,
     /// Permission manager shared across all conversations.
@@ -661,6 +661,41 @@ impl ConversationManager {
         )
     }
 
+    /// Create the session directory structure from the given state directory.
+    ///
+    /// Creates the `tool-logs/` subdirectory and grants a `Session`-scoped
+    /// `file_read` permission so the LLM can later `read`/`grep`/`glob` log
+    /// files produced by tools (e.g., full bash output saved on truncation).
+    fn make_session_dir(&self, state_dir: &Option<PathBuf>) -> Option<crate::tool::SessionDir> {
+        let dir = state_dir.as_ref()?;
+        let tool_logs_dir = dir.join("tool-logs");
+        if let Err(e) = std::fs::create_dir_all(&tool_logs_dir) {
+            tracing::warn!(
+                "Failed to create tool logs directory {}: {e}",
+                tool_logs_dir.display()
+            );
+        }
+        if let Ok(canonical) = std::fs::canonicalize(&tool_logs_dir) {
+            let key = crate::permission::PermissionKey {
+                tool: crate::permission::SCOPE_FILE_READ.to_string(),
+                key: crate::permission::KEY_PATH.to_string(),
+                value: canonical.to_string_lossy().to_string(),
+            };
+            if let Err(e) = self
+                .permission_manager
+                .add_permission(key, crate::permission::PermissionScope::Session)
+            {
+                tracing::warn!("Failed to add permission for tool logs directory: {e}");
+            }
+        } else {
+            tracing::warn!(
+                "Failed to canonicalize tool logs directory path: {}",
+                tool_logs_dir.display()
+            );
+        }
+        Some(crate::tool::SessionDir::new(dir.clone()))
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn new_conversation_with_id(
         self: &Arc<Self>,
@@ -709,21 +744,23 @@ impl ConversationManager {
             accumulated_tool_content: HashMap::new(),
             description: None,
             created_at: Some(now),
-            env: ConversationEnv {
-                conversation_id: conversation_id.clone(),
-                client,
-                conversation_manager: Arc::clone(self),
-                tools: tools_map,
-                chat_options,
-                subagent_depth,
-                max_subagent_depth,
-                state_dir: state_dir.clone(),
-                media_dir: state_dir.as_ref().map(|d| d.join("media")),
-                supports_media,
-                permission_manager: Arc::clone(&self.permission_manager),
-                container_config: self.container_config.clone(),
-                llm: Some(llm_clone),
-                model: model.to_string(),
+            env: {
+                ConversationEnv {
+                    conversation_id: conversation_id.clone(),
+                    client,
+                    conversation_manager: Arc::clone(self),
+                    tools: tools_map,
+                    chat_options,
+                    subagent_depth,
+                    max_subagent_depth,
+                    state_dir: state_dir.clone(),
+                    session_dir: self.make_session_dir(&state_dir),
+                    supports_media,
+                    permission_manager: Arc::clone(&self.permission_manager),
+                    container_config: self.container_config.clone(),
+                    llm: Some(llm_clone),
+                    model: model.to_string(),
+                }
             },
         };
         self.spawn_conversation(conversation)
@@ -846,21 +883,23 @@ impl ConversationManager {
             accumulated_tool_content: HashMap::new(),
             description,
             created_at,
-            env: ConversationEnv {
-                conversation_id: conv_id,
-                client,
-                conversation_manager: Arc::clone(self),
-                tools: tools_map,
-                chat_options: state.chat_options,
-                subagent_depth: state.subagent_depth,
-                max_subagent_depth,
-                state_dir: state_dir.clone(),
-                media_dir: state_dir.as_ref().map(|d| d.join("media")),
-                supports_media,
-                permission_manager: Arc::clone(&self.permission_manager),
-                container_config: self.container_config.clone(),
-                llm: Some(llm_clone),
-                model: state.model.clone(),
+            env: {
+                ConversationEnv {
+                    conversation_id: conv_id,
+                    client,
+                    conversation_manager: Arc::clone(self),
+                    tools: tools_map,
+                    chat_options: state.chat_options,
+                    subagent_depth: state.subagent_depth,
+                    max_subagent_depth,
+                    state_dir: state_dir.clone(),
+                    session_dir: self.make_session_dir(&state_dir),
+                    supports_media,
+                    permission_manager: Arc::clone(&self.permission_manager),
+                    container_config: self.container_config.clone(),
+                    llm: Some(llm_clone),
+                    model: state.model.clone(),
+                }
             },
         };
         self.spawn_conversation(conversation)
@@ -2114,7 +2153,7 @@ async fn execute_regular_tool(
         cancel_token: cancel_token.clone(),
         permission: scoped_pm,
         container_config: env.container_config.clone(),
-        media_dir: env.media_dir.clone(),
+        session_dir: env.session_dir.clone(),
         supports_media: env.supports_media,
         llm: env.llm.clone(),
         model: Some(env.model.clone()),

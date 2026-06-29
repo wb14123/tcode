@@ -106,7 +106,7 @@ async fn main() {
                                         &tool_call.name,
                                     ),
                                 container_config: None,
-                                media_dir: None,
+                                session_dir: None,
                                 supports_media: false,
                                 llm: None,
                                 model: None,
