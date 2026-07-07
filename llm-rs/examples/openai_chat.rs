@@ -83,7 +83,8 @@ async fn main() {
             LLMEvent::ToolCallStart { .. }
             | LLMEvent::ToolCallDelta { .. }
             | LLMEvent::MediaOutput { .. }
-            | LLMEvent::MediaGenerationStarted { .. } => {}
+            | LLMEvent::MediaGenerationStarted { .. }
+            | LLMEvent::MediaGenerationFailed { .. } => {}
         }
     }
 }

@@ -748,6 +748,7 @@ export class ConversationTimelineBuilder {
         case 'AssistantMediaOutput': {
           const id = this.ensureActiveAssistantId();
           const imageId = asString(payload.media_id);
+          const endStatus = payload.end_status as string | undefined;
           const imgData = payload.media as { relative_path: string; media_type: string } | undefined;
           if (imgData) {
             this.updateAssistant(id, (item) => {
@@ -757,6 +758,18 @@ export class ConversationTimelineBuilder {
                 if (block?.kind === 'image' && block.imageId === imageId && block.pending) {
                   block.pending = false;
                   block.image = { relative_path: imgData.relative_path, media_type: imgData.media_type };
+                  break;
+                }
+              }
+            });
+          } else if (endStatus === 'Failed') {
+            this.updateAssistant(id, (item) => {
+              item.msgId ??= asNumber(payload.msg_id);
+              for (let i = item.contentBlocks.length - 1; i >= 0; i--) {
+                const block = item.contentBlocks[i];
+                if (block?.kind === 'image' && block.imageId === imageId && block.pending) {
+                  block.pending = false;
+                  block.failed = true;
                   break;
                 }
               }
@@ -1102,13 +1115,20 @@ export function openLightbox(src: string): void {
 }
 
 export function renderAssistantImageBlock(
-  block: { kind: 'image'; pending: boolean; image?: { relative_path: string } },
+  block: { kind: 'image'; pending: boolean; failed?: boolean; image?: { relative_path: string } },
   sessionId: string,
 ): TemplateResult | typeof nothing {
   if (block.pending) {
     return html`
       <div class="image-placeholder">
         <div class="image-placeholder-label">Generating image…</div>
+      </div>
+    `;
+  }
+  if (block.failed) {
+    return html`
+      <div class="image-placeholder">
+        <div class="image-placeholder-label">Image generation failed</div>
       </div>
     `;
   }

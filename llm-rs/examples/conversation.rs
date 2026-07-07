@@ -290,7 +290,11 @@ fn print_message(msg: &Message) {
             );
         }
         Message::AssistantMediaOutput { media, .. } => {
-            println!("    [Media generated: {}]", media.relative_path());
+            if let Some(media) = media {
+                println!("    [Media generated: {}]", media.relative_path());
+            } else {
+                println!("    [Media generation failed]");
+            }
         }
         Message::AssistantMediaGenerating { media_id, .. } => {
             println!("    [Media generating: {}]", media_id);

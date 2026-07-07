@@ -67,6 +67,7 @@ mod tests {
                 LLMEvent::Error(_) => "Error",
                 LLMEvent::MediaGenerationStarted { .. } => "MediaGenerationStarted",
                 LLMEvent::MediaOutput { .. } => "MediaOutput",
+                LLMEvent::MediaGenerationFailed { .. } => "MediaGenerationFailed",
             })
             .collect::<Vec<_>>()
             .join(", ")

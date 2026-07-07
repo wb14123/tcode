@@ -121,6 +121,7 @@ export interface AssistantImageBlock {
   kind: 'image';
   imageId: string | null;
   pending: boolean;
+  failed?: boolean;
   image?: {
     relative_path: string;
     media_type: string;

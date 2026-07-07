@@ -343,6 +343,10 @@ pub enum LLMEvent {
         relative_path: String,
         media_type: String,
     },
+
+    /// Emitted when a media generation call (e.g. image_generation_call) fails.
+    /// The media_id correlates with the earlier MediaGenerationStarted event.
+    MediaGenerationFailed { media_id: String },
 }
 
 pub trait LLM: Send + Sync {

@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
 use crate::media::{ContentPart, MediaData, media_type_from_extension};
 use crate::tool::{CancellationToken, ContainerConfig, Tool, ToolContext};
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use tokio::sync::{broadcast, mpsc};
@@ -442,12 +442,13 @@ pub enum Message {
     },
 
     /// The LLM generated media (e.g. via OpenAI's image_generation_call).
-    /// Contains a MediaData reference to the saved file.
+    /// `media` is Some if generation succeeded, None if it failed.
     /// `media_id` correlates with AssistantMediaGenerating.
     AssistantMediaOutput {
         msg_id: MessageID,
         media_id: String,
-        media: MediaData,
+        end_status: MessageEndStatus,
+        media: Option<MediaData>,
     },
 }
 
@@ -1903,8 +1904,7 @@ impl Conversation {
                         if let Some(ref mut raw_obj) = raw
                             && raw_obj.is_object()
                         {
-                            raw_obj["content"] =
-                                serde_json::Value::String(placeholder.to_string());
+                            raw_obj["content"] = serde_json::Value::String(placeholder.to_string());
                         }
                         self.push_llm_msg(LLMMessage::Assistant {
                             content: placeholder.to_string(),
@@ -1953,7 +1953,16 @@ impl Conversation {
                     self.broadcast_msg(Message::AssistantMediaOutput {
                         msg_id: self.next_msg_id(),
                         media_id,
-                        media,
+                        end_status: MessageEndStatus::Succeeded,
+                        media: Some(media),
+                    })?;
+                }
+                LLMEvent::MediaGenerationFailed { media_id } => {
+                    self.broadcast_msg(Message::AssistantMediaOutput {
+                        msg_id: self.next_msg_id(),
+                        media_id,
+                        end_status: MessageEndStatus::Failed,
+                        media: None,
                     })?;
                 }
             }

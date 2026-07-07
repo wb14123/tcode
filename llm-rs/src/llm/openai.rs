@@ -335,6 +335,17 @@ fn build_raw_output(
         }
     }
 
+    // Remove image_generation_call items that failed or have no result --
+    // they cannot be round-tripped when store: false and serve no purpose
+    // in conversation context.
+    output.retain(|item| {
+        if item.get("type").and_then(|v| v.as_str()) != Some("image_generation_call") {
+            return true;
+        }
+        item.get("status").and_then(|v| v.as_str()) != Some("failed")
+            && item.get("result").is_some()
+    });
+
     if saw_function_calls {
         let has_fc_in_output = output
             .iter()
@@ -911,6 +922,15 @@ impl LLM for OpenAI {
                                                     return;
                                                 }
                                             }
+                                        } else if item_type == Some("image_generation_call") {
+                                            let media_id = match item
+                                                .get("id")
+                                                .and_then(|v| v.as_str())
+                                            {
+                                                Some(id) => id.to_string(),
+                                                None => Uuid::new_v4().to_string(),
+                                            };
+                                            yield LLMEvent::MediaGenerationFailed { media_id };
                                         }
                         }
                     }
