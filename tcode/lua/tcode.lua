@@ -1800,7 +1800,11 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     end,
   })
 
-  vim.keymap.set('n', 'q', ':qa!<CR>', { buffer = true, silent = true, desc = 'Quit' })
+  vim.keymap.set('n', 'q', function()
+    confirm_popup("Cancel and exit conversation? (y/n)", function()
+      vim.cmd('qa!')
+    end)
+  end, { buffer = true, silent = true, desc = 'Quit' })
 
   -- Context-aware 'o' keybinding: toggle thinking or open tool call detail
   vim.keymap.set('n', 'o', function()
