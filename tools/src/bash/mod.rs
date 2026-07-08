@@ -235,6 +235,14 @@ pub fn bash(
             None
         };
 
+        // Capture project root for workdir-boundary checks
+        let project_root = std::env::current_dir()
+            .map_err(|e| anyhow!("failed to determine current directory: {e}"))?;
+
+        // Resolve effective work directory (always concrete).
+        // When no explicit workdir is given, default to project_root.
+        let effective_work_dir = work_dir.unwrap_or_else(|| project_root.clone());
+
         // Normalize optional parameters: some models (notably OpenAI) always fill
         // in every schema field, sending `0` for unused integer options and `""` for
         // unused string options instead of omitting them.  Treat these as `None`.
@@ -261,7 +269,10 @@ pub fn bash(
         };
 
         // Permission check
-        if let Err(e) = check_bash_permission(&ctx.permission, &command, work_dir.as_deref()).await {
+        if let Err(e) =
+            check_bash_permission(&ctx.permission, &command, &effective_work_dir, &project_root)
+                .await
+        {
             yield Err(e);
             return;
         }
@@ -275,7 +286,7 @@ pub fn bash(
             command,
             description,
             timeout_ms: timeout.unwrap_or(DEFAULT_TIMEOUT_MS),
-            work_dir,
+            work_dir: Some(effective_work_dir),
             filter: compiled_filter,
             head,
             tail,

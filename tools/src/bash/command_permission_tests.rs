@@ -32,6 +32,27 @@ fn unique_temp_path(name: &str) -> PathBuf {
     root.join(format!("{}-{}", name, uuid::Uuid::new_v4()))
 }
 
+/// Returns a concrete workdir + project_root pair where workdir is under
+/// project_root. Uses the workspace directory as the project root.
+fn in_project_workdir() -> (PathBuf, PathBuf) {
+    let project_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/bash_cmd_perm");
+    std::fs::create_dir_all(&project_root).expect("failed to create project root");
+    let workdir = project_root.clone();
+    (workdir, project_root)
+}
+
+/// Returns a concrete workdir + project_root pair where workdir is OUTSIDE
+/// project_root.
+fn outside_project_workdir() -> (PathBuf, PathBuf) {
+    let project_root =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/bash_cmd_perm");
+    std::fs::create_dir_all(&project_root).expect("failed to create project root");
+    // /tmp is outside the project root
+    let workdir = std::path::PathBuf::from("/tmp");
+    (workdir, project_root)
+}
+
 /// Poll `pm.snapshot().pending.len()` until it equals `expected`, returning Err on
 /// timeout. Used by tests that spawn `check_bash_permission` in a task and need to
 /// wait for a prompt to register.
@@ -196,212 +217,129 @@ fn pm_with_wildcard() -> Result<(Arc<PermissionManager>, ScopedPermissionManager
 }
 
 // =====================================================================
-// Tests for the post-refactor invariant: `bash/command/*` does NOT
-// bypass file_read / file_write defenses for classified read/write
-// sub-commands or for top-level redirects. The wildcard only auto-
-// approves the OtherSimple branch (transparently via `has_permission_for`)
-// and the non-decomposable Complex branch.
+// Tests for the wildcard = full trust invariant.
+// The wildcard is now checked at the very top of `check_bash_permission`
+// and grants full trust — all commands auto-approve regardless of
+// workdir, file paths, redirects, or complexity.
 // =====================================================================
 
-/// Test A — a standalone `mkdir` (classified WriteCommand) must prompt for
-/// `file_write` even when the bash wildcard is stored.
+/// Wildcard + write command (mkdir) → auto-approved (full trust).
 #[tokio::test]
-async fn wildcard_does_not_bypass_file_write_for_write_command() -> Result<()> {
-    let (pm, scoped) = pm_with_wildcard()?;
+async fn wildcard_auto_approves_write_command() -> Result<()> {
+    let (_pm, scoped) = pm_with_wildcard()?;
     let path = unique_temp_path("wild-mkdir");
     let cmd = format!("mkdir {}", path.display());
+    let (workdir, project_root) = in_project_workdir();
 
-    let scoped_clone = scoped.clone();
-    let cmd_clone = cmd.clone();
-    let handle =
-        tokio::spawn(async move { check_bash_permission(&scoped_clone, &cmd_clone, None).await });
-
-    wait_for_pending(&pm, 1).await?;
-    let pending = pm.snapshot().pending;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].tool, "file_write");
-
-    let key = PermissionKey {
-        tool: pending[0].tool.clone(),
-        key: pending[0].key.clone(),
-        value: pending[0].value.clone(),
-    };
-    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
-    let result = handle.await?;
+    let result = check_bash_permission(&scoped, &cmd, &workdir, &project_root).await;
     assert!(
-        result.is_err(),
-        "expected wildcard NOT to bypass file_write for mkdir, got {:?}",
+        result.is_ok(),
+        "expected wildcard to auto-approve mkdir, got {:?}",
         result
     );
     Ok(())
 }
 
-/// Test B — a standalone `cat <path>` (classified ReadCommand) must prompt
-/// for `file_read` even when the bash wildcard is stored.
+/// Wildcard + read command (cat) → auto-approved (full trust).
 #[tokio::test]
-async fn wildcard_does_not_bypass_file_read_for_read_command() -> Result<()> {
-    let (pm, scoped) = pm_with_wildcard()?;
-    // Real file required: check_file_read_permission errors out for
-    // non-existent paths before any prompt is issued.
+async fn wildcard_auto_approves_read_command() -> Result<()> {
+    let (_pm, scoped) = pm_with_wildcard()?;
     let path = unique_temp_path("wild-cat-secret");
     tokio::fs::write(&path, "secret\n").await?;
     let cmd = format!("cat {}", path.display());
+    let (workdir, project_root) = in_project_workdir();
 
-    let scoped_clone = scoped.clone();
-    let cmd_clone = cmd.clone();
-    let handle =
-        tokio::spawn(async move { check_bash_permission(&scoped_clone, &cmd_clone, None).await });
-
-    let result = wait_for_pending(&pm, 1).await;
-    if result.is_err() {
-        // Clean up before failing
-        let _ = tokio::fs::remove_file(&path).await;
-        result?;
-    }
-    let pending = pm.snapshot().pending;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].tool, "file_read");
-
-    let key = PermissionKey {
-        tool: pending[0].tool.clone(),
-        key: pending[0].key.clone(),
-        value: pending[0].value.clone(),
-    };
-    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
-    let result = handle.await?;
+    let result = check_bash_permission(&scoped, &cmd, &workdir, &project_root).await;
     let _ = tokio::fs::remove_file(&path).await;
     assert!(
-        result.is_err(),
-        "expected wildcard NOT to bypass file_read for cat, got {:?}",
+        result.is_ok(),
+        "expected wildcard to auto-approve cat, got {:?}",
         result
     );
     Ok(())
 }
 
-/// Test C — a top-level redirect (`echo hello > /tmp/foo`) must prompt for
-/// `file_write` on the redirect target even when the bash wildcard is stored.
-/// This validates that the redirect check runs *before* the classification
-/// match (so the wildcard cannot save the OtherSimple `echo` from the
-/// redirect-defense path).
+/// Wildcard + redirect (`echo hello > /tmp/foo`) → auto-approved (full trust).
 #[tokio::test]
-async fn wildcard_does_not_bypass_redirect_file_write() -> Result<()> {
-    let (pm, scoped) = pm_with_wildcard()?;
+async fn wildcard_auto_approves_redirect() -> Result<()> {
+    let (_pm, scoped) = pm_with_wildcard()?;
     let path = unique_temp_path("wild-redirect-out");
     let cmd = format!("echo hello > {}", path.display());
+    let (workdir, project_root) = in_project_workdir();
 
-    let scoped_clone = scoped.clone();
-    let cmd_clone = cmd.clone();
-    let handle =
-        tokio::spawn(async move { check_bash_permission(&scoped_clone, &cmd_clone, None).await });
-
-    wait_for_pending(&pm, 1).await?;
-    let pending = pm.snapshot().pending;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(pending[0].tool, "file_write");
-
-    let key = PermissionKey {
-        tool: pending[0].tool.clone(),
-        key: pending[0].key.clone(),
-        value: pending[0].value.clone(),
-    };
-    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
-    let result = handle.await?;
+    let result = check_bash_permission(&scoped, &cmd, &workdir, &project_root).await;
     assert!(
-        result.is_err(),
-        "expected wildcard NOT to bypass redirect file_write, got {:?}",
+        result.is_ok(),
+        "expected wildcard to auto-approve redirect, got {:?}",
         result
     );
     Ok(())
 }
 
-/// Test D — a decomposable pipeline of OtherSimple commands (`ls | grep foo`)
-/// is fully covered by the wildcard via the recursive Complex → decompose →
-/// per-stage path. No prompts should fire.
+/// Wildcard + decomposable pipeline → auto-approved.
 #[tokio::test]
 async fn wildcard_auto_approves_decomposable_pipeline_of_other_simple() -> Result<()> {
-    let (pm, scoped) = pm_with_wildcard()?;
-    let result = check_bash_permission(&scoped, "ls | grep foo", None).await;
+    let (_pm, scoped) = pm_with_wildcard()?;
+    let (workdir, project_root) = in_project_workdir();
+    let result = check_bash_permission(&scoped, "ls | grep foo", &workdir, &project_root).await;
     assert!(
         result.is_ok(),
         "expected pipeline to auto-approve via wildcard, got {:?}",
         result
     );
-    assert!(
-        pm.snapshot().pending.is_empty(),
-        "expected no pending prompts, got {:?}",
-        pm.snapshot().pending
-    );
     Ok(())
 }
 
-/// Test E — a compound containing a write sub-command (`mkdir /tmp/foo && ls`)
-/// must prompt for `file_write` on the mkdir target even with the wildcard.
-/// After resolving the file_write with AllowSession, the recursion finishes
-/// and the overall check returns Ok (because `ls` is wildcard-approved).
+/// Wildcard + compound with write sub-command → auto-approved (full trust).
 #[tokio::test]
-async fn compound_with_write_prompts_for_file_write_only() -> Result<()> {
-    let (pm, scoped) = pm_with_wildcard()?;
+async fn wildcard_auto_approves_compound_with_write() -> Result<()> {
+    let (_pm, scoped) = pm_with_wildcard()?;
     let path = unique_temp_path("wild-compound-mkdir");
     let cmd = format!("mkdir {} && ls", path.display());
+    let (workdir, project_root) = in_project_workdir();
 
-    let scoped_clone = scoped.clone();
-    let cmd_clone = cmd.clone();
-    let handle =
-        tokio::spawn(async move { check_bash_permission(&scoped_clone, &cmd_clone, None).await });
-
-    wait_for_pending(&pm, 1).await?;
-    let pending = pm.snapshot().pending;
-    assert_eq!(pending.len(), 1);
-    assert_eq!(
-        pending[0].tool, "file_write",
-        "first prompt should be file_write for mkdir target"
-    );
-
-    let key = PermissionKey {
-        tool: pending[0].tool.clone(),
-        key: pending[0].key.clone(),
-        value: pending[0].value.clone(),
-    };
-    pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
-    let result = handle.await?;
+    let result = check_bash_permission(&scoped, &cmd, &workdir, &project_root).await;
     assert!(
         result.is_ok(),
-        "expected compound to succeed after granting file_write (ls is wildcard-approved), got {:?}",
+        "expected wildcard to auto-approve compound with write, got {:?}",
         result
     );
     Ok(())
 }
 
-/// Test F — a *non-decomposable* complex command (command substitution) IS
-/// auto-approved by the wildcard. This is the only blanket escape hatch
-/// that remains, since the parser cannot see what `$(...)` will run.
+/// Wildcard + non-decomposable complex command → auto-approved (full trust).
 #[tokio::test]
 async fn non_decomposable_complex_auto_approved_with_wildcard() -> Result<()> {
-    let (pm, scoped) = pm_with_wildcard()?;
-    // `echo $(whoami)` parses as Complex (command_substitution descendant)
-    // and is NOT decomposable (top node is `command`, not pipeline/list/
-    // redirected_statement). See `command_parser_tests::
-    // classify_command_substitution_as_complex` and the parser's
-    // `try_decompose_complex` cases A/B/C/D.
-    let result = check_bash_permission(&scoped, "echo $(whoami)", None).await;
+    let (_pm, scoped) = pm_with_wildcard()?;
+    let (workdir, project_root) = in_project_workdir();
+    let result = check_bash_permission(&scoped, "echo $(whoami)", &workdir, &project_root).await;
     assert!(
         result.is_ok(),
         "expected non-decomposable complex to auto-approve via wildcard, got {:?}",
         result
     );
+    Ok(())
+}
+
+/// Wildcard + any command + workdir outside project root → still auto-approved.
+#[tokio::test]
+async fn wildcard_auto_approves_outside_project() -> Result<()> {
+    let (_pm, scoped) = pm_with_wildcard()?;
+    let (workdir, project_root) = outside_project_workdir();
+    let result = check_bash_permission(&scoped, "echo hello", &workdir, &project_root).await;
     assert!(
-        pm.snapshot().pending.is_empty(),
-        "expected no pending prompts, got {:?}",
-        pm.snapshot().pending
+        result.is_ok(),
+        "expected wildcard to auto-approve even outside project, got {:?}",
+        result
     );
     Ok(())
 }
 
-/// Test G — same non-decomposable complex command WITHOUT the wildcard
-/// produces a `once_only` pending request via `ask_permission_once`. This
-/// replaces the old `complex_command_without_wildcard_still_prompts` test,
-/// which used a *decomposable* command (`ls | grep foo > out.txt`) — that
-/// command no longer reaches the once-only prompt path post-refactor.
+// =====================================================================
+// Tests for non-wildcard path: non-decomposable complex commands
+// =====================================================================
+
+/// Non-decomposable complex command WITHOUT wildcard → prompts once-only.
 #[tokio::test]
 async fn non_decomposable_complex_without_wildcard_prompts_once_only() -> Result<()> {
     let pm = Arc::new(PermissionManager::new(temp_perm_path()));
@@ -413,11 +351,11 @@ async fn non_decomposable_complex_without_wildcard_prompts_once_only() -> Result
         None,
     );
 
+    let (workdir, project_root) = in_project_workdir();
     let scoped_clone = scoped.clone();
-    let handle =
-        tokio::spawn(
-            async move { check_bash_permission(&scoped_clone, "echo $(whoami)", None).await },
-        );
+    let handle = tokio::spawn(async move {
+        check_bash_permission(&scoped_clone, "echo $(whoami)", &workdir, &project_root).await
+    });
 
     wait_for_pending(&pm, 1).await?;
     let state = pm.snapshot();
@@ -440,22 +378,172 @@ async fn non_decomposable_complex_without_wildcard_prompts_once_only() -> Result
     Ok(())
 }
 
-/// Test H — a compound containing a read sub-command
-/// (`cat /tmp/secret && ls`) must prompt for `file_read` on the cat target
-/// even with the wildcard.
+// =====================================================================
+// Tests for Layer 3 (OtherSimple): workdir boundary
+// =====================================================================
+
+/// OtherSimple with specific command permission + workdir inside project root → auto-approves.
+#[tokio::test]
+async fn other_simple_approved_in_project_auto_approves() -> Result<()> {
+    let pm = Arc::new(PermissionManager::new(temp_perm_path()));
+    // Pre-grant "cargo"
+    pm.add_permission(
+        PermissionKey {
+            tool: SCOPE_BASH.to_string(),
+            key: KEY_COMMAND.to_string(),
+            value: "cargo".to_string(),
+        },
+        PermissionScope::Session,
+    )?;
+    let scoped = ScopedPermissionManager::new(
+        "bash",
+        Arc::clone(&pm),
+        Arc::new(|| {}),
+        Arc::new(|| {}),
+        None,
+    );
+
+    let (workdir, project_root) = in_project_workdir();
+    let result = check_bash_permission(&scoped, "cargo build", &workdir, &project_root).await;
+    assert!(
+        result.is_ok(),
+        "expected approved command inside project to auto-approve, got {:?}",
+        result
+    );
+    assert!(
+        pm.snapshot().pending.is_empty(),
+        "expected no prompts for in-project approved command"
+    );
+    Ok(())
+}
+
+/// OtherSimple with specific command permission + workdir outside project root → prompts once-only.
+#[tokio::test]
+async fn other_simple_approved_outside_project_prompts_once_only() -> Result<()> {
+    let pm = Arc::new(PermissionManager::new(temp_perm_path()));
+    // Pre-grant "cargo"
+    pm.add_permission(
+        PermissionKey {
+            tool: SCOPE_BASH.to_string(),
+            key: KEY_COMMAND.to_string(),
+            value: "cargo".to_string(),
+        },
+        PermissionScope::Session,
+    )?;
+    let scoped = ScopedPermissionManager::new(
+        "bash",
+        Arc::clone(&pm),
+        Arc::new(|| {}),
+        Arc::new(|| {}),
+        None,
+    );
+
+    let (workdir, project_root) = outside_project_workdir();
+    let scoped_clone = scoped.clone();
+    let handle = tokio::spawn(async move {
+        check_bash_permission(&scoped_clone, "cargo build", &workdir, &project_root).await
+    });
+
+    wait_for_pending(&pm, 1).await?;
+    let state = pm.snapshot();
+    assert_eq!(state.pending.len(), 1);
+    let pending = &state.pending[0];
+    assert_eq!(pending.tool, SCOPE_BASH);
+    assert!(
+        pending.once_only,
+        "outside-project prompt should be once_only"
+    );
+    // Verify the prompt mentions "outside the project directory"
+    assert!(
+        pending.prompt.contains("outside the project directory"),
+        "prompt should mention outside project, got: {}",
+        pending.prompt
+    );
+
+    // Deny
+    let key = PermissionKey {
+        tool: pending.tool.clone(),
+        key: pending.key.clone(),
+        value: pending.value.clone(),
+    };
+    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
+    let result = handle.await?;
+    assert!(result.is_err());
+    Ok(())
+}
+
+/// OtherSimple with NO permission → prompts (always shows workdir).
+#[tokio::test]
+async fn other_simple_no_permission_prompts_with_workdir() -> Result<()> {
+    let pm = Arc::new(PermissionManager::new(temp_perm_path()));
+    let scoped = ScopedPermissionManager::new(
+        "bash",
+        Arc::clone(&pm),
+        Arc::new(|| {}),
+        Arc::new(|| {}),
+        None,
+    );
+
+    let (workdir, project_root) = in_project_workdir();
+    let workdir_display = workdir.display().to_string();
+    let scoped_clone = scoped.clone();
+    let handle = tokio::spawn(async move {
+        check_bash_permission(&scoped_clone, "git status", &workdir, &project_root).await
+    });
+
+    wait_for_pending(&pm, 1).await?;
+    let state = pm.snapshot();
+    assert_eq!(state.pending.len(), 1);
+    let pending = &state.pending[0];
+    assert_eq!(pending.tool, SCOPE_BASH);
+    assert!(
+        !pending.once_only,
+        "unapproved command should use ask_permission_with_preview (not once_only)"
+    );
+
+    // Verify prompt includes workdir
+    assert!(
+        pending.prompt.contains(&workdir_display),
+        "prompt should include workdir, got: {}",
+        pending.prompt
+    );
+
+    // Deny
+    let key = PermissionKey {
+        tool: pending.tool.clone(),
+        key: pending.key.clone(),
+        value: pending.value.clone(),
+    };
+    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
+    let result = handle.await?;
+    assert!(result.is_err());
+    Ok(())
+}
+
+/// Compound with read command (without wildcard) prompts for file_read on the cat target.
 #[tokio::test]
 async fn compound_with_read_command_prompts_for_file_read() -> Result<()> {
-    let (pm, scoped) = pm_with_wildcard()?;
+    let pm = Arc::new(PermissionManager::new(temp_perm_path()));
+    let scoped = ScopedPermissionManager::new(
+        "bash",
+        Arc::clone(&pm),
+        Arc::new(|| {}),
+        Arc::new(|| {}),
+        None,
+    );
+
     // The file must exist — `check_file_read_permission` errors out for
     // non-existent paths before any prompt is issued.
-    let path = unique_temp_path("wild-compound-cat");
+    let path = unique_temp_path("compound-cat");
     tokio::fs::write(&path, "secret\n").await?;
     let cmd = format!("cat {} && ls", path.display());
 
+    let (workdir, project_root) = in_project_workdir();
     let scoped_clone = scoped.clone();
     let cmd_clone = cmd.clone();
-    let handle =
-        tokio::spawn(async move { check_bash_permission(&scoped_clone, &cmd_clone, None).await });
+    let handle = tokio::spawn(async move {
+        check_bash_permission(&scoped_clone, &cmd_clone, &workdir, &project_root).await
+    });
 
     let wait_result = wait_for_pending(&pm, 1).await;
     if wait_result.is_err() {
@@ -479,7 +567,7 @@ async fn compound_with_read_command_prompts_for_file_read() -> Result<()> {
     let _ = tokio::fs::remove_file(&path).await;
     assert!(
         result.is_err(),
-        "expected wildcard NOT to bypass file_read for cat in compound, got {:?}",
+        "expected file_read denial to cause error, got {:?}",
         result
     );
     Ok(())

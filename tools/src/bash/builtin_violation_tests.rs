@@ -14,7 +14,13 @@
 
 use super::has_reviewable_keywords;
 
+use llm_rs::permission::{
+    KEY_COMMAND, PermissionKey, PermissionManager, PermissionScope, SCOPE_BASH,
+    ScopedPermissionManager, WILDCARD_VALUE,
+};
 use llm_rs::tool::{CancellationToken, ToolContext};
+use std::path::PathBuf;
+use std::sync::Arc;
 use tokio_stream::StreamExt;
 
 // ============================================================================
@@ -145,10 +151,34 @@ fn accepts_keywords_in_filenames_as_false_positive() {
 // Review gate integration tests
 // ============================================================================
 
+fn test_root() -> PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/bash_builtin")
+}
+
 fn test_ctx() -> ToolContext {
+    let root = test_root();
+    std::fs::create_dir_all(&root).expect("failed to create test root");
+    let pm = Arc::new(PermissionManager::new(
+        root.join(format!("pm-{}.json", uuid::Uuid::new_v4())),
+    ));
+    pm.add_permission(
+        PermissionKey {
+            tool: SCOPE_BASH.to_string(),
+            key: KEY_COMMAND.to_string(),
+            value: WILDCARD_VALUE.to_string(),
+        },
+        PermissionScope::Session,
+    )
+    .expect("pre-grant wildcard");
     ToolContext {
         cancel_token: CancellationToken::new(),
-        permission: llm_rs::permission::ScopedPermissionManager::always_allow("bash"),
+        permission: ScopedPermissionManager::new(
+            "bash",
+            pm,
+            Arc::new(|| {}),
+            Arc::new(|| {}),
+            None,
+        ),
         container_config: None,
         session_dir: None,
         supports_media: false,

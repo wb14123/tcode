@@ -443,14 +443,45 @@ fn had_truncation_true_for_multiple_truncations() {
 
 mod e2e {
     use anyhow::Result;
-    use llm_rs::permission::ScopedPermissionManager;
+    use llm_rs::permission::{
+        KEY_COMMAND, PermissionKey, PermissionManager, PermissionScope, SCOPE_BASH,
+        ScopedPermissionManager, WILDCARD_VALUE,
+    };
     use llm_rs::tool::{CancellationToken, ToolContext};
+    use std::path::PathBuf;
+    use std::sync::Arc;
     use tokio_stream::StreamExt;
 
+    fn test_root() -> PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/bash_output")
+    }
+
+    /// Create a ToolContext with the bash wildcard pre-granted so that
+    /// ReadCommand/WriteCommand workdir file-permission checks auto-approve.
     fn ctx() -> ToolContext {
+        let root = test_root();
+        std::fs::create_dir_all(&root).expect("failed to create test root");
+        let pm = Arc::new(PermissionManager::new(
+            root.join(format!("pm-{}.json", uuid::Uuid::new_v4())),
+        ));
+        pm.add_permission(
+            PermissionKey {
+                tool: SCOPE_BASH.to_string(),
+                key: KEY_COMMAND.to_string(),
+                value: WILDCARD_VALUE.to_string(),
+            },
+            PermissionScope::Session,
+        )
+        .expect("pre-grant wildcard");
         ToolContext {
             cancel_token: CancellationToken::new(),
-            permission: ScopedPermissionManager::always_allow("bash"),
+            permission: ScopedPermissionManager::new(
+                "bash",
+                pm,
+                Arc::new(|| {}),
+                Arc::new(|| {}),
+                None,
+            ),
             container_config: None,
             session_dir: None,
             supports_media: false,
