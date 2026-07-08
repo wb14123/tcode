@@ -223,7 +223,7 @@ pub fn run(profile: Option<&str>, first_run: bool) -> Result<()> {
     println!();
     println!("Config written to: {}", target.display());
     println!();
-    println!("To edit more options (model, layout, shortcuts, subagent limits,");
+    println!("To edit more options (model, layout, subagent limits,");
     println!("browser server, search engine, etc.), open the file directly.");
     println!("See the configuration reference:");
     println!("  https://github.com/wb14123/tcode/blob/main/docs/02-configuration.md");

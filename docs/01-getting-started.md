@@ -151,7 +151,7 @@ If you created a profile-specific config, use the matching profile for auth and 
 
 If you created a profile-specific config, use the matching profile for auth and runtime too: `tcode -p work openai-auth`, then `tcode -p work`.
 
-All other options (model, layout, shortcuts, subagent limits, browser server, search engine) live as commented-out lines in the generated file. Open `~/.tcode/config.toml` in your editor to uncomment and tune them. See [02-configuration.md](02-configuration.md) for the full reference.
+All other options (model, layout, subagent limits, browser server, search engine) live as commented-out lines in the generated file. Open `~/.tcode/config.toml` in your editor to uncomment and tune them. See [02-configuration.md](02-configuration.md) for the full reference.
 
 ### Web-only sessions
 
@@ -223,16 +223,14 @@ When the agent tries to use a tool that requires permission (e.g., reading a fil
 
 Approved permissions are visible in the permission pane. You can navigate to any granted permission and press **Enter** to revoke it. This gives you a clear view of exactly what the agent can do at any point. See [07-permissions.md](07-permissions.md) for a full explanation of how permissions work (scopes, matching, adding permissions proactively, etc.) and [04-keybindings.md](04-keybindings.md) for the full keybinding reference.
 
-### Using shortcuts
+### Using skills
 
-tcode comes with built-in prompt shortcuts that save typing for common workflows. In the edit pane, type `/` followed by a shortcut name and press **Tab** to expand it. For example:
+Skills with `user-invocable: true` appear as `/skill-name` completions in the edit buffer. Type `/` followed by a skill name and press **Tab** to expand the skill body into the edit buffer. For example:
 
-- `/plan` + Tab — expands to a prompt asking the agent to design and plan before implementing
-- `/review` + Tab — expands to a prompt asking for a code review via subagent
-- `/save-plan` + Tab — asks the agent to save a plan to `plan.md`
-- `/implement-plan` + Tab — asks the agent to implement an existing `plan.md`
+- `/code-review` + Tab — expands to a thorough code review prompt
+- `/write-tests` + Tab — expands to a test-writing instruction template
 
-Typing `/` at the start of a line or after a space shows a completion popup with all available shortcuts. You can customize these in the `[shortcuts]` section of your config file — see [02-configuration.md](02-configuration.md#shortcut-templates) for details.
+Typing `/` at the start of a line or after a space shows a completion popup with all user-invocable skills. Skills come from `~/.tcode/skills/` or `.tcode/skills/` directories — there are no longer any built-in shortcuts. You create and customize skills to fit your own workflows. See [02-configuration.md](02-configuration.md#skills) for setup and usage details.
 
 ### Monitoring subagents and tool calls
 
@@ -253,12 +251,12 @@ Detail views open as separate tmux windows. Use tmux window navigation to switch
 ### A typical workflow
 
 1. Start tcode in your project directory: `tcode` (or use `tcode --web-only` for standalone web research without local project access)
-2. Type `/plan` + Tab, then describe what you want to build. Send it.
-3. The agent designs a plan. Approve any tool permissions it needs (file reads, etc.) via **Ctrl-p**.
-4. Review the plan, ask questions or suggest changes.
-5. When satisfied, type `/implement-plan` + Tab and send.
-6. Monitor progress in the tree pane. Approve permissions as they come up.
-7. When done, type `/review` + Tab to have the agent review its own changes.
+2. Type `/your-skill-name` + Tab to expand a skill template, then describe what you want to build. Send it.
+3. The agent responds. Approve any tool permissions it needs (file reads, etc.) via **Ctrl-p**.
+4. Review the results, ask questions or suggest changes.
+5. Monitor progress in the tree pane. Approve permissions as they come up.
+
+Create your own skills in `~/.tcode/skills/` or `.tcode/skills/` to match your workflow. See [02-configuration.md](02-configuration.md#skills) for details.
 
 ## Next Steps
 

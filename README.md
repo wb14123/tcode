@@ -49,7 +49,7 @@ Then follow the [Getting Started](docs/01-getting-started.md) guide for prerequi
 
 More user docs:
 
-- [Configuration](docs/02-configuration.md) — config file reference, providers, layout, shortcuts
+- [Configuration](docs/02-configuration.md) — config file reference, providers, layout, skills
 - [Commands](docs/03-commands.md) — full CLI reference
 - [Keybindings](docs/04-keybindings.md) — display, edit, tree, and permission views
 - [Neovim Setup](docs/05-neovim.md) — render-markdown, tree-sitter, plugin compatibility

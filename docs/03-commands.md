@@ -34,7 +34,7 @@ tcode --no-container
 
 ### `tcode config`
 
-Interactively creates a new tcode config file at `~/.tcode/config.toml` (or `~/.tcode/config-<profile>.toml` with `-p`). Prompts for `provider` and then the credentials/endpoint fields relevant to that provider, and writes all other options (`model`, layout, shortcuts, subagent limits, browser server, search engine) as commented-out lines for you to uncomment later.
+Interactively creates a new tcode config file at `~/.tcode/config.toml` (or `~/.tcode/config-<profile>.toml` with `-p`). Prompts for `provider` and then the credentials/endpoint fields relevant to that provider, and writes all other options (`model`, layout, subagent limits, browser server, search engine) as commented-out lines for you to uncomment later.
 
 ```
 tcode config

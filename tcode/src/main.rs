@@ -33,7 +33,6 @@ mod config_wizard_tests;
 #[cfg(test)]
 mod oauth_profile_tests;
 
-use std::collections::HashMap;
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -253,35 +252,19 @@ const HIGHLIGHTS_SCM: &str = include_str!("../../tree-sitter-tcode/queries/highl
 /// and return the directory path for the Lua files.
 /// Uses `<session_dir>/lua/` so each session gets its own copy (avoids conflicts
 /// between concurrent sessions running different binary versions).
-/// Also writes `queries/tcode/{injections,highlights}.scm` under `session_dir`.
-fn ensure_lua_files(session_dir: &Path, shortcuts: &HashMap<String, String>) -> Result<PathBuf> {
+/// Writes `queries/tcode/{injections,highlights}.scm` under `session_dir`.
+///
+/// When `user_skills` is `Some`, also writes `tcode.lua` with skills preamble
+/// tables (`_G.tcode_skills` and `_G.tcode_skill_descriptions`). When `None`,
+/// only the tree-sitter query files are written (the Lua file is assumed to
+/// already exist from a prior call with skills).
+fn ensure_lua_files(
+    session_dir: &Path,
+    user_skills: Option<&[llm_rs::skill::SkillMeta]>,
+) -> Result<PathBuf> {
     let lua_dir = session_dir.join("lua");
     std::fs::create_dir_all(&lua_dir)
         .with_context(|| format!("Failed to create lua cache directory {:?}", lua_dir))?;
-    let lua_file = lua_dir.join("tcode.lua");
-
-    // Build shortcuts preamble (must come before the module code since it ends with `return M`)
-    let content = if shortcuts.is_empty() {
-        TCODE_LUA.to_string()
-    } else {
-        use std::fmt::Write;
-        let mut preamble = String::from("_G.tcode_shortcuts = {\n");
-        for (name, template) in shortcuts {
-            writeln!(
-                preamble,
-                "  ['{}'] = '{}',",
-                lua_escape(name),
-                lua_escape(template)
-            )
-            .expect("writing to String cannot fail");
-        }
-        preamble.push_str("}\n\n");
-        preamble.push_str(TCODE_LUA);
-        preamble
-    };
-
-    std::fs::write(&lua_file, content)
-        .with_context(|| format!("Failed to write tcode.lua to {:?}", lua_file))?;
 
     // Write tree-sitter query files for the tcode filetype
     let queries_dir = session_dir.join("queries").join("tcode");
@@ -291,6 +274,59 @@ fn ensure_lua_files(session_dir: &Path, shortcuts: &HashMap<String, String>) -> 
         .with_context(|| format!("Failed to write injections.scm to {:?}", queries_dir))?;
     std::fs::write(queries_dir.join("highlights.scm"), HIGHLIGHTS_SCM)
         .with_context(|| format!("Failed to write highlights.scm to {:?}", queries_dir))?;
+
+    if let Some(skills) = user_skills {
+        let lua_file = lua_dir.join("tcode.lua");
+
+        use std::fmt::Write;
+        let mut preamble = String::new();
+
+        // Build _G.tcode_skills table (body content without frontmatter).
+        // Collect names of skills whose bodies loaded successfully so the
+        // descriptions table stays in sync.
+        let mut loaded_names: Vec<&str> = Vec::new();
+        preamble.push_str("_G.tcode_skills = {\n");
+        for skill in skills {
+            match llm_rs::skill::load_skill_body(skill) {
+                Ok(body) => {
+                    writeln!(
+                        preamble,
+                        "  ['{}'] = '{}',",
+                        lua_escape(&skill.name),
+                        lua_escape(&body)
+                    )
+                    .expect("writing to String cannot fail");
+                    loaded_names.push(&skill.name);
+                }
+                Err(e) => {
+                    tracing::warn!("Failed to load skill body for '{}': {e}", skill.name);
+                }
+            }
+        }
+        preamble.push_str("}\n\n");
+
+        // Build _G.tcode_skill_descriptions table (only for skills that loaded)
+        preamble.push_str("_G.tcode_skill_descriptions = {\n");
+        for skill in skills {
+            if !loaded_names.contains(&skill.name.as_str()) {
+                continue;
+            }
+            let desc = skill.description.as_deref().unwrap_or("");
+            writeln!(
+                preamble,
+                "  ['{}'] = '{}',",
+                lua_escape(&skill.name),
+                lua_escape(desc)
+            )
+            .expect("writing to String cannot fail");
+        }
+        preamble.push_str("}\n\n");
+
+        preamble.push_str(TCODE_LUA);
+
+        std::fs::write(&lua_file, preamble)
+            .with_context(|| format!("Failed to write tcode.lua to {:?}", lua_file))?;
+    }
 
     Ok(lua_dir)
 }
@@ -519,14 +555,34 @@ async fn main() -> Result<()> {
                 },
                 config.supports_media,
             );
+
+            // Write Lua file with user-invocable skills so TUI windows
+            // started against this session have skill completion available.
+            let (all_skills, warnings) = llm_rs::skill::scan_skills();
+            for warning in &warnings {
+                tracing::warn!("{}", warning);
+            }
+            let user_skills: Vec<_> = all_skills
+                .into_iter()
+                .filter(|s| s.user_invocable)
+                .collect();
+            ensure_lua_files(sess.session_dir(), Some(&user_skills))?;
+
             server.run(None).await
         }
         Some(Commands::Edit { conversation_id }) => {
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
-            let config = load_cfg()?;
-            let lua_dir = ensure_lua_files(session.session_dir(), &config.shortcuts)?;
+            let (all_skills, warnings) = llm_rs::skill::scan_skills();
+            for warning in &warnings {
+                tracing::warn!("{}", warning);
+            }
+            let user_skills: Vec<_> = all_skills
+                .into_iter()
+                .filter(|s| s.user_invocable)
+                .collect();
+            let lua_dir = ensure_lua_files(session.session_dir(), Some(&user_skills))?;
             let client = EditClient::new(session, lua_dir, conversation_id);
             client.run().await
         }
@@ -534,8 +590,7 @@ async fn main() -> Result<()> {
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id.clone())?;
-            let config = load_cfg()?;
-            let lua_dir = ensure_lua_files(session.session_dir(), &config.shortcuts)?;
+            let lua_dir = ensure_lua_files(session.session_dir(), None)?;
             let runtime_dir = session.session_dir().clone();
             let client = DisplayClient::new(session, lua_dir, session_id, runtime_dir);
             client.run().await
@@ -544,8 +599,7 @@ async fn main() -> Result<()> {
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
-            let config = load_cfg()?;
-            let lua_dir = ensure_lua_files(session.session_dir(), &config.shortcuts)?;
+            let lua_dir = ensure_lua_files(session.session_dir(), None)?;
             let client = ToolCallDisplayClient::new(session, lua_dir, tool_call_id);
             client.run().await
         }
@@ -1324,6 +1378,20 @@ async fn run_unified_with_session(
             return Err(e.context("Failed to register unified runtime lease"));
         }
     };
+
+    // Write the Lua file with user-invocable skills before spawning TUI panes.
+    // This runs after the server is ready, so skills have been scanned once.
+    // TUI windows (display, tool-call) only write tree-sitter queries and
+    // expect the Lua file to already exist from here.
+    let (all_skills, warnings) = llm_rs::skill::scan_skills();
+    for warning in &warnings {
+        tracing::warn!("{}", warning);
+    }
+    let user_skills: Vec<_> = all_skills
+        .into_iter()
+        .filter(|s| s.user_invocable)
+        .collect();
+    ensure_lua_files(session.session_dir(), Some(&user_skills))?;
 
     let panes = match setup_layout_panes(&layout, &current_pane_id, &exe_str, &session_arg) {
         Ok(p) => p,

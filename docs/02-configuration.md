@@ -9,7 +9,7 @@ tcode stores configuration in TOML files under `~/.tcode/`:
 
 Profiles are fully self-contained. They do not inherit from the default config. Any fields omitted from a config file fall back to built-in defaults.
 
-Config files are created by the `tcode config` interactive wizard, which prompts for `provider` and then only the credentials/endpoint fields relevant to that provider. API-key providers prompt for `base_url` and `api_key`; OAuth providers and Bedrock skip those prompts. All other options (`model`, `subagent_*`, `browser_server_*`, `search_engine`, `[shortcuts]`, `[layout]`) are written as commented-out lines in the generated file — open the file in your editor and uncomment the ones you want to customize.
+Config files are created by the `tcode config` interactive wizard, which prompts for `provider` and then only the credentials/endpoint fields relevant to that provider. API-key providers prompt for `base_url` and `api_key`; OAuth providers and Bedrock skip those prompts. All other options (`model`, `subagent_*`, `browser_server_*`, `search_engine`, `[layout]`) are written as commented-out lines in the generated file — open the file in your editor and uncomment the ones you want to customize.
 
 - **First launch.** If `~/.tcode/config.toml` does not exist and stdin/stdout are both TTYs, running `tcode` (with no profile) automatically launches the wizard, writes the file, prints the absolute path, and exits. Re-run `tcode` to start a session.
 - **Explicit invocation.** Run `tcode config` any time to create the default config, or `tcode -p <profile> config` to write `~/.tcode/config-<profile>.toml`. Running `tcode config` against an existing file is a **hard error** — to regenerate, delete the file first and re-run the wizard.
@@ -92,8 +92,6 @@ reasoning_effort = "xhigh"      # optional. minimal | low | medium | high | xhig
                                  # produce an API error so you can adjust.
                                  # Omit the key entirely for the default.
 
-[shortcuts]                      # see Shortcut Templates section below
-brainstorm = "..."
 ```
 
 ## Providers
@@ -178,30 +176,6 @@ browser_server_token = "your-bearer-token"
 ```
 
 See [06-browser.md](06-browser.md) for browser setup details.
-
-## Shortcut Templates
-
-Shortcuts let you expand short names into full prompts in the edit buffer. They are defined in the `[shortcuts]` section of your config file.
-
-**Usage:**
-
-1. Type `/shortcutname` at the start of a line or after a space.
-2. `/` in those positions auto-shows a completion popup.
-3. Typing narrows the popup to matching shortcuts.
-4. Press Tab on an exact match to expand it, or press Enter on a popup selection to expand.
-
-tcode ships with 5 built-in shortcuts (`brainstorm`, `plan`, `save-plan`, `implement-plan`, `review`). If no `[shortcuts]` section exists in your config, the defaults are used. To customize, add a `[shortcuts]` section:
-
-```toml
-[shortcuts]
-brainstorm = "This is a brainstorm. Do not implement anything."
-plan = """\
-  Design and plan first. Do not implement or change any code before I confirm. \
-  Ask me questions if there is anything not clear."""
-my-shortcut = "Custom shortcut text here."
-```
-
-Use TOML multi-line strings (`"""\...\"""`) with trailing backslashes for long templates. Setting `[shortcuts]` to an empty section disables all shortcuts.
 
 ## Container Mode
 
@@ -293,6 +267,8 @@ If the same skill name appears in multiple directories, the first one found is u
 name: my-skill
 description: One-line summary shown in skill listings
 when_to_use: Guidance for the agent on when to invoke this skill
+disable-model-invocation: false    # optional, default false. When true, the agent cannot auto-invoke this skill
+user-invocable: true               # optional, default true. When false, hides from the / menu
 ---
 
 Detailed instructions go here.
@@ -303,6 +279,51 @@ Use ${CLAUDE_SKILL_DIR} to reference the skill's own directory.
 **Key details:**
 
 - **Name:** Defaults to the directory name if not set in frontmatter. Capped at 100 characters.
+- **`user-invocable`:** When true (the default), the skill appears in the edit buffer `/` completion menu. Type `/skill-name` + Tab to expand the skill body into the edit buffer. When false, the skill is hidden from the `/` menu and can only be invoked by the agent via the skill tool. This replaces the old `[shortcuts]` config section — each user-invocable skill acts as a customizable text-expansion template.
+- **`disable-model-invocation`:** When true, the agent's skill tool excludes this skill. The LLM cannot auto-invoke it. When false (the default), the agent can load the skill via the skill tool. Combine with `user-invocable: true` for a user-only text-expansion skill that the agent never sees.
+- **Interaction:** The two fields are independent. Setting `user-invocable: true` + `disable-model-invocation: true` creates a user-only shortcut (visible in `/` menu, invisible to the agent). Setting both to `false` creates an agent-only skill (hidden from `/` menu, available to the LLM). The default (`user-invocable: true`, `disable-model-invocation: false`) makes the skill available both to the agent and the user.
 - **Companion files:** Each skill directory can include up to 10 additional files (non-recursive). These are listed alongside the skill content when loaded.
 - **`${CLAUDE_SKILL_DIR}`:** Replaced with the absolute path to the skill directory at load time, useful for referencing companion scripts or data files.
-- **Registration:** Skills are scanned once at startup. The `skill` tool is only registered if at least one skill is found.
+- **Registration:** Skills are scanned once at startup. The `skill` tool is only registered if at least one agent-available skill is found.
+
+## Migrating from Shortcuts to Skills
+
+The `[shortcuts]` config section is removed. Skills with `user-invocable: true` replace it with the same `/name` + Tab expansion UX. To migrate each shortcut, create a skill directory and SKILL.md file.
+
+**Example migration.** This old config:
+
+```toml
+[shortcuts]
+brainstorm = "This is a brainstorm. Do not implement anything."
+plan = """\
+  Design and plan first. Do not implement or change any code before I confirm. \
+  Ask me questions if there is anything not clear."""
+```
+
+Becomes two skill files:
+
+`~/.tcode/skills/brainstorm/SKILL.md`:
+```markdown
+---
+description: Brainstorm to clarify requirements and features
+user-invocable: true
+disable-model-invocation: true
+---
+This is a brainstorm. Do not implement anything.
+Ask me questions if there is anything not clear.
+```
+
+`~/.tcode/skills/plan/SKILL.md`:
+```markdown
+---
+description: Design and plan first, then implement
+user-invocable: true
+disable-model-invocation: true
+---
+Design and plan first. Do not implement or change any code before I confirm.
+Ask me questions if there is anything not clear.
+```
+
+Set `disable-model-invocation: true` to prevent the agent from loading these as skill tool calls — they are user-invoked text expansion only. For new tcode installs, there are no built-in skills; create your own to match your workflow.
+
+**Breaking change:** Existing `config.toml` files with a `[shortcuts]` section will fail to parse. Remove the `[shortcuts]` section from your config file after migrating to skills.

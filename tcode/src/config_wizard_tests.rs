@@ -34,7 +34,7 @@ fn test_substitute_only_provider() -> anyhow::Result<()> {
 }
 
 #[test]
-fn test_substitute_preserves_shortcuts() -> anyhow::Result<()> {
+fn test_substitute_produces_valid_config() -> anyhow::Result<()> {
     let out = substitute_template(
         DEFAULT_CONFIG_TEMPLATE,
         "claude",
@@ -42,10 +42,10 @@ fn test_substitute_preserves_shortcuts() -> anyhow::Result<()> {
         Some("key"),
     );
     let config: TcodeConfig = toml::from_str(&out)?;
-    assert!(
-        !config.shortcuts.is_empty(),
-        "expected [shortcuts] section to still parse with entries"
-    );
+    // Verify the config round-trips through TOML parsing successfully
+    assert_eq!(config.provider.as_deref(), Some("claude"));
+    assert_eq!(config.base_url.as_deref(), Some("https://example.com"));
+    assert_eq!(config.api_key.as_deref(), Some("key"));
     Ok(())
 }
 

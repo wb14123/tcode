@@ -1,8 +1,8 @@
 use std::path::PathBuf;
 
 use crate::skill::{
-    SkillMeta, SkillSource, format_skill_entry, list_skill_files, load_skill_content,
-    scan_skills_from_dirs,
+    SkillMeta, SkillSource, format_skill_entry, list_skill_files, load_skill_body,
+    load_skill_content, scan_skills_from_dirs,
 };
 
 /// A temporary directory under `target/test-tmp/` that is removed on drop.
@@ -45,6 +45,8 @@ fn test_skill(
         dir,
         skill_file,
         source: SkillSource::ProjectTcode,
+        user_invocable: true,
+        disable_model_invocation: false,
     }
 }
 
@@ -429,5 +431,140 @@ fn test_scan_skill_name_from_dir_when_no_frontmatter_name() -> anyhow::Result<()
     assert_eq!(skills.len(), 1);
     assert_eq!(skills[0].name, "my-cool-skill");
     assert_eq!(skills[0].description.as_deref(), Some("A cool skill"));
+    Ok(())
+}
+
+// ─── user_invocable / disable_model_invocation tests ───────────────────────
+
+#[test]
+fn test_user_invocable_defaults_to_true() -> anyhow::Result<()> {
+    let base = TempDir::new("ui_default_true")?;
+    let skill = base.path().join("my-skill");
+    std::fs::create_dir(&skill)?;
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: my-skill\ndescription: A skill\n---\nBody\n",
+    )?;
+
+    let dirs = vec![(base.path().to_path_buf(), SkillSource::ProjectTcode)];
+    let (skills, warnings) = scan_skills_from_dirs(&dirs);
+
+    assert!(warnings.is_empty());
+    assert_eq!(skills.len(), 1);
+    assert!(
+        skills[0].user_invocable,
+        "user_invocable should default to true"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_user_invocable_explicit_false() -> anyhow::Result<()> {
+    let base = TempDir::new("ui_explicit_false")?;
+    let skill = base.path().join("my-skill");
+    std::fs::create_dir(&skill)?;
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: my-skill\ndescription: A skill\nuser-invocable: false\n---\nBody\n",
+    )?;
+
+    let dirs = vec![(base.path().to_path_buf(), SkillSource::ProjectTcode)];
+    let (skills, warnings) = scan_skills_from_dirs(&dirs);
+
+    assert!(warnings.is_empty());
+    assert_eq!(skills.len(), 1);
+    assert!(!skills[0].user_invocable, "user_invocable should be false");
+    Ok(())
+}
+
+#[test]
+fn test_disable_model_invocation_defaults_to_false() -> anyhow::Result<()> {
+    let base = TempDir::new("dmi_default_false")?;
+    let skill = base.path().join("my-skill");
+    std::fs::create_dir(&skill)?;
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: my-skill\ndescription: A skill\n---\nBody\n",
+    )?;
+
+    let dirs = vec![(base.path().to_path_buf(), SkillSource::ProjectTcode)];
+    let (skills, warnings) = scan_skills_from_dirs(&dirs);
+
+    assert!(warnings.is_empty());
+    assert_eq!(skills.len(), 1);
+    assert!(
+        !skills[0].disable_model_invocation,
+        "disable_model_invocation should default to false"
+    );
+    Ok(())
+}
+
+#[test]
+fn test_disable_model_invocation_explicit_true() -> anyhow::Result<()> {
+    let base = TempDir::new("dmi_explicit_true")?;
+    let skill = base.path().join("my-skill");
+    std::fs::create_dir(&skill)?;
+    std::fs::write(
+        skill.join("SKILL.md"),
+        "---\nname: my-skill\ndescription: A skill\ndisable-model-invocation: true\n---\nBody\n",
+    )?;
+
+    let dirs = vec![(base.path().to_path_buf(), SkillSource::ProjectTcode)];
+    let (skills, warnings) = scan_skills_from_dirs(&dirs);
+
+    assert!(warnings.is_empty());
+    assert_eq!(skills.len(), 1);
+    assert!(
+        skills[0].disable_model_invocation,
+        "disable_model_invocation should be true"
+    );
+    Ok(())
+}
+
+// ─── load_skill_body tests ──────────────────────────────────────────────────
+
+#[test]
+fn test_load_skill_body_strips_frontmatter() -> anyhow::Result<()> {
+    let tmp = TempDir::new("body_strips_fm")?;
+    let skill_file = tmp.path().join("SKILL.md");
+    let content = "---\nname: my-skill\ndescription: A cool skill\n---\n\nBody content here.\n";
+    std::fs::write(&skill_file, content)?;
+
+    let meta = test_skill(
+        "my-skill",
+        Some("A cool skill"),
+        None,
+        tmp.path().to_path_buf(),
+        skill_file,
+    );
+    let body = load_skill_body(&meta)?;
+    assert_eq!(body, "\nBody content here.\n");
+    Ok(())
+}
+
+#[test]
+fn test_load_skill_body_no_frontmatter_returns_full() -> anyhow::Result<()> {
+    let tmp = TempDir::new("body_no_fm")?;
+    let skill_file = tmp.path().join("SKILL.md");
+    let content = "Just plain markdown body, no frontmatter.\n\n## Section\nMore content.\n";
+    std::fs::write(&skill_file, content)?;
+
+    let meta = test_skill("plain", None, None, tmp.path().to_path_buf(), skill_file);
+    let body = load_skill_body(&meta)?;
+    assert_eq!(body, content);
+    Ok(())
+}
+
+#[test]
+fn test_load_skill_body_substitutes_skill_dir() -> anyhow::Result<()> {
+    let tmp = TempDir::new("body_subst")?;
+    let skill_file = tmp.path().join("SKILL.md");
+    let content = "---\nname: sub-test\n---\nLook in ${CLAUDE_SKILL_DIR}/templates.\n";
+    std::fs::write(&skill_file, content)?;
+
+    let meta = test_skill("sub-test", None, None, tmp.path().to_path_buf(), skill_file);
+    let body = load_skill_body(&meta)?;
+    let expected = format!("Look in {}/templates.\n", tmp.path().display());
+    assert_eq!(body, expected);
     Ok(())
 }

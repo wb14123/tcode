@@ -2010,18 +2010,18 @@ function M.setup_tool_call_display(tool_call_file, status_file)
 end
 
 -- Setup edit window for composing messages
--- Load shortcut templates from config (injected by Rust via _G.tcode_shortcuts)
--- Returns a table: { shortcut_name = "expanded text", ... }
--- Returns empty table if no shortcuts configured.
-local function load_shortcuts()
-  return _G.tcode_shortcuts or {}
+-- Load user-invocable skill templates (injected by Rust via _G.tcode_skills and _G.tcode_skill_descriptions)
+-- Returns two tables: skills (skill_name -> body_text), descriptions (skill_name -> description)
+-- Returns empty tables if no skills configured.
+local function load_user_skills()
+  return _G.tcode_skills or {}, _G.tcode_skill_descriptions or {}
 end
 
--- Attempt to expand a /shortcut at the cursor position.
--- @param shortcuts: table of shortcut_name -> template_text
+-- Attempt to expand a /skill at the cursor position.
+-- @param skills: table of skill_name -> template_text
 -- @param cursor_col: optional 0-indexed byte column (uses current cursor if nil)
 -- Returns true if expanded, false otherwise.
-local function try_expand_shortcut(shortcuts, cursor_col)
+local function try_expand_skill(skills, cursor_col)
   local line = vim.api.nvim_get_current_line()
   local cursor = vim.api.nvim_win_get_cursor(0)
   local row = cursor[1]  -- 1-indexed
@@ -2035,7 +2035,7 @@ local function try_expand_shortcut(shortcuts, cursor_col)
     return false
   end
 
-  local template = shortcuts[cmd]
+  local template = skills[cmd]
   if not template then
     return false
   end
@@ -2065,22 +2065,24 @@ local function try_expand_shortcut(shortcuts, cursor_col)
   return true
 end
 
--- Set up completion function for /shortcuts.
+-- Set up completion function for /skills.
 -- Called by nvim's insert-mode completion (<C-x><C-u>).
 -- We wire <Tab> to trigger this when appropriate.
-local function setup_shortcut_completion(shortcuts)
-  -- Build sorted list of shortcut names for stable ordering
-  local shortcut_names = {}
-  for name, _ in pairs(shortcuts) do
-    table.insert(shortcut_names, name)
+-- @param skills: table of skill_name -> body_text
+-- @param descriptions: table of skill_name -> description
+local function setup_skill_completion(skills, descriptions)
+  -- Build sorted list of skill names for stable ordering
+  local skill_names = {}
+  for name, _ in pairs(skills) do
+    table.insert(skill_names, name)
   end
-  table.sort(shortcut_names)
+  table.sort(skill_names)
 
   -- Register the completefunc
   -- completefunc is called twice by nvim:
   --   1st call (findstart=1): return the column where the completion word starts
   --   2nd call (findstart=0): return the list of matches for `base`
-  _G.tcode_shortcut_complete = function(findstart, base)
+  _G.tcode_skill_complete = function(findstart, base)
     if findstart == 1 then
       -- Find the start of the /command on the current line
       local line = vim.api.nvim_get_current_line()
@@ -2098,14 +2100,14 @@ local function setup_shortcut_completion(shortcuts)
       -- No '/' found — abort completion
       return -3
     else
-      -- Return matching shortcuts (base includes the '/')
+      -- Return matching skills (base includes the '/')
       local prefix = base:match('^/(.*)') or ''
       local matches = {}
-      for _, name in ipairs(shortcut_names) do
+      for _, name in ipairs(skill_names) do
         if name:find(prefix, 1, true) == 1 then
           table.insert(matches, {
             word = '/' .. name,
-            menu = shortcuts[name]:sub(1, 50) .. (shortcuts[name]:len() > 50 and '...' or ''),
+            menu = descriptions[name] or '',
           })
         end
       end
@@ -2113,7 +2115,7 @@ local function setup_shortcut_completion(shortcuts)
     end
   end
 
-  vim.bo.completefunc = 'v:lua.tcode_shortcut_complete'
+  vim.bo.completefunc = 'v:lua.tcode_skill_complete'
   -- Don't auto-select first entry — let user continue typing to filter
   vim.opt_local.completeopt = { 'menu', 'menuone', 'noselect' }
 end
@@ -2216,12 +2218,12 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
     end)
   end, { buffer = true, silent = true, desc = 'Open pending tool approvals' })
 
-  -- Load shortcuts from config
-  local shortcuts = load_shortcuts()
+  -- Load user-invocable skills
+  local skills, descriptions = load_user_skills()
 
-  -- Set up shortcut keybindings if shortcuts are available
-  if next(shortcuts) ~= nil then
-    setup_shortcut_completion(shortcuts)
+  -- Set up skill keybindings if skills are available
+  if next(skills) ~= nil then
+    setup_skill_completion(skills, descriptions)
 
     -- Auto-trigger completion popup when typing '/'
     vim.keymap.set('i', '/', function()
@@ -2236,9 +2238,9 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
       else
         vim.api.nvim_feedkeys('/', 'n', false)
       end
-    end, { buffer = true, silent = true, desc = 'Auto-trigger shortcut completion' })
+    end, { buffer = true, silent = true, desc = 'Auto-trigger skill completion' })
 
-    -- <Tab> in insert mode: expand shortcut, show completion, or insert tab
+    -- <Tab> in insert mode: expand skill, show completion, or insert tab
     vim.keymap.set('i', '<Tab>', function()
       -- Check if completion popup is already visible — if so, select next item
       if vim.fn.pumvisible() == 1 then
@@ -2251,21 +2253,21 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
       local before_cursor = line:sub(1, col)
       local cmd = before_cursor:match('/([%w%-_]+)%s*$')
 
-      if cmd and shortcuts[cmd] then
-        -- Exact match — expand the shortcut (pass col captured in insert mode)
+      if cmd and skills[cmd] then
+        -- Exact match — expand the skill (pass col captured in insert mode)
         vim.cmd('stopinsert')
-        try_expand_shortcut(shortcuts, col)
+        try_expand_skill(skills, col)
         vim.cmd('startinsert')
       elseif before_cursor:match('/%s*$') or cmd then
         -- Has / with partial or no text after it — trigger completion popup
         vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n', false)
       else
-        -- No shortcut context — insert a normal tab
+        -- No skill context — insert a normal tab
         vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Tab>', true, false, true), 'n', false)
       end
-    end, { buffer = true, silent = true, desc = 'Expand shortcut or insert tab' })
+    end, { buffer = true, silent = true, desc = 'Expand skill or insert tab' })
 
-    -- Auto-expand shortcut after selecting from completion popup
+    -- Auto-expand skill after selecting from completion popup
     vim.api.nvim_create_autocmd('CompleteDone', {
       buffer = 0,
       callback = function()
@@ -2273,7 +2275,7 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
         if completed and completed.word and completed.word:match('^/') then
           -- Schedule expansion to run after the completion popup closes
           vim.schedule(function()
-            try_expand_shortcut(shortcuts)
+            try_expand_skill(skills)
           end)
         end
       end,

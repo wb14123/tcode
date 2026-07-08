@@ -31,7 +31,7 @@ The edit view is the input area where the user composes messages to send.
 | `Ctrl-s` | Normal | Send message |
 | `Ctrl-j` | Insert | Insert newline at cursor |
 | `Ctrl-p` | Normal/Insert | Open pending tool approvals one by one |
-| `Tab` | Insert | Expand `/shortcut`, show completion popup, or insert tab |
+| `Tab` | Insert | Expand `/skill`, show completion popup, or insert tab |
 
 ## Tree View
 

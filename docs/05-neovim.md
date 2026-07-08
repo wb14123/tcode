@@ -48,6 +48,6 @@ tcode windows use custom statuslines to show connection status, token usage, and
 
 This only affects tcode's own neovim processes -- your other neovim instances are not affected.
 
-## Shortcut Templates
+## Skill Templates
 
-The edit view supports `/shortcut` + Tab expansion for prompt templates. See [02-configuration.md](02-configuration.md#shortcut-templates) for setup and usage details.
+The edit view supports `/skill-name` + Tab expansion for skills with `user-invocable: true`. See [02-configuration.md](02-configuration.md#skills) for setup and usage details.

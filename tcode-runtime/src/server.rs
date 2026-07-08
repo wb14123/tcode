@@ -681,7 +681,11 @@ impl Server {
             for warning in &skill_warnings {
                 tracing::warn!("{}", warning);
             }
-            let skills = std::sync::Arc::new(skills);
+            let llm_skills: Vec<_> = skills
+                .into_iter()
+                .filter(|s| !s.disable_model_invocation)
+                .collect();
+            let llm_skills = std::sync::Arc::new(llm_skills);
 
             let mut tools = vec![
                 Arc::new(tools::bash_tool()),
@@ -696,8 +700,8 @@ impl Server {
                 Arc::new(create_subagent_tool(&model_infos)),
                 Arc::new(create_continue_subagent_tool()),
             ];
-            if !skills.is_empty() {
-                tools.push(Arc::new(tools::skill_tool(Arc::clone(&skills))));
+            if !llm_skills.is_empty() {
+                tools.push(Arc::new(tools::skill_tool(Arc::clone(&llm_skills))));
             }
             tools
         };
