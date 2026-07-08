@@ -111,7 +111,7 @@ struct Cli {
     #[arg(long = "container-runtime", default_value = "docker", value_parser = ["docker", "podman"], requires = "container")]
     container_runtime: String,
 
-    /// Force no container, even if .tcode/config.toml specifies one
+    /// Force no container, even if the project config specifies one
     #[arg(long = "no-container", conflicts_with = "container")]
     no_container: bool,
 }
@@ -209,6 +209,8 @@ enum Commands {
         #[arg(long)]
         once_only: bool,
     },
+    /// Print the path to the project config directory (~/.tcode/projects/<hash>/)
+    ProjectConfigPath,
     /// Start the web backend for browser access.
     ///
     /// Binds to 127.0.0.1 by default. Pass `--host 0.0.0.0` (or another
@@ -811,6 +813,12 @@ async fn main() -> Result<()> {
         Some(Commands::Config) => config_wizard::run(profile.as_deref(), false),
         Some(Commands::AddWebUser { username, force }) => {
             tcode_web::add_web_user::run(username, force)
+        }
+        Some(Commands::ProjectConfigPath) => {
+            let cwd = std::env::current_dir().context("Failed to get current working directory")?;
+            let dir = tcode_runtime::project_config_dir(&cwd)?;
+            println!("{}", dir.display());
+            Ok(())
         }
         Some(Commands::Remote {
             port,

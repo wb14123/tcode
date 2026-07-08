@@ -58,7 +58,7 @@ The scope controls how long a permission lasts:
 | **Session** | Lasts until you close tcode | In memory only |
 | **Project** | Persists across sessions for this project directory | On disk |
 
-Project permissions are saved to `<cwd>/.tcode/permissions.json`, where `<cwd>` is the directory you launched tcode from. This means if you always launch tcode from `/home/user/myproject`, the same permission file at `/home/user/myproject/.tcode/permissions.json` is used every time.
+Project permissions are saved to `~/.tcode/projects/<hash>/permissions.json`, where `<hash>` is a SHA-256 hash of the directory you launched tcode from. Use `tcode project-config-path` to discover the exact path. The path is stable across sessions for the same working directory.
 
 ## How matching works
 

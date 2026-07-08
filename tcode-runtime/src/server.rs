@@ -612,7 +612,7 @@ impl Server {
             Some(std::env::current_dir().context("Failed to get current working directory")?)
         };
         let permissions_path = if let Some(cwd) = cwd.as_ref() {
-            cwd.join(".tcode").join("permissions.json")
+            crate::project::project_config_dir(cwd)?.join("permissions.json")
         } else {
             self.session_dir.join("permissions.json")
         };

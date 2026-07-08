@@ -36,7 +36,7 @@ tcode --no-container            # force no container, override project config
 | `-V`, `--version` | Print version and git commit |
 | `-c <name>`, `--container <name>` | Run bash commands inside a running container (see [Container Mode](#container-mode)) |
 | `--container-runtime <runtime>` | Container runtime CLI: `docker` (default) or `podman`. Requires `-c`. |
-| `--no-container` | Force no container, even if `.tcode/config.toml` specifies one. Conflicts with `-c`. |
+| `--no-container` | Force no container, even if project config (`~/.tcode/projects/<hash>/config.toml`) specifies one. Conflicts with `-c`. |
 
 All other settings live in the config file.
 
@@ -188,13 +188,15 @@ tcode -c my-dev-container --container-runtime podman
 
 ### Project-level container config
 
-You can also store the container name and runtime in `<cwd>/.tcode/config.toml` so you don't have to pass `-c` every time:
+You can also store the container name and runtime in `~/.tcode/projects/<hash>/config.toml` so you don't have to pass `-c` every time:
 
 ```toml
-# <cwd>/.tcode/config.toml
+# ~/.tcode/projects/<hash>/config.toml
 container = "my-dev-container"
 container_runtime = "podman"   # optional, defaults to "docker"
 ```
+
+Use `tcode project-config-path` to discover the exact path for your current working directory.
 
 When this file exists, running `tcode` (without `-c`) automatically uses the configured container. The `-c` flag still takes precedence over the file, and `--no-container` disables the container entirely regardless of the file.
 

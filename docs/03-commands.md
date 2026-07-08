@@ -129,6 +129,24 @@ tcode --session <id> permission
 
 ---
 
+### `tcode project-config-path`
+
+Print the absolute path to the project config directory, where `permissions.json` and project `config.toml` are stored. The path is derived from the current working directory (hashed with SHA-256) and is stable across sessions.
+
+```
+tcode project-config-path
+```
+
+Example output:
+
+```text
+/home/user/.tcode/projects/a1b2c3d4e5f6.../
+```
+
+No flags. The command only prints the path and does not create the directory.
+
+---
+
 ### `tcode browser`
 
 Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search). This is a standalone command and does not interact with the browser-server process. Press Ctrl+C to exit when done.

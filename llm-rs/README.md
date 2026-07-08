@@ -47,7 +47,7 @@ Tool calls ctx.permission.ask_permission("hostname", "example.com")
   → Tool proceeds or returns "Permission denied"
 ```
 
-Project permissions persist across sessions in `.tcode/permissions.json`.
+Project permissions persist across sessions in `~/.tcode/projects/<hash>/permissions.json`. Use `tcode project-config-path` to discover the path.
 
 ### `tool` - Tool System
 
