@@ -27,7 +27,11 @@ fn output_is_under_dot_tcode_projects() {
 fn hash_is_64_hex_chars() {
     let dir = project_config_dir(Path::new("/some/path")).unwrap();
     let hash_dir = dir.file_name().unwrap().to_string_lossy();
-    assert_eq!(hash_dir.len(), 64, "hash length should be 64, got: {hash_dir}");
+    assert_eq!(
+        hash_dir.len(),
+        64,
+        "hash length should be 64, got: {hash_dir}"
+    );
     assert!(
         hash_dir.chars().all(|c| c.is_ascii_hexdigit()),
         "hash should be all hex digits, got: {hash_dir}"
