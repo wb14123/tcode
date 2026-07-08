@@ -127,7 +127,11 @@ enum Commands {
         conversation_id: Option<String>,
     },
     /// Open display window to view conversation
-    Display,
+    Display {
+        /// Whether this is a subagent display (skips exit confirmation)
+        #[arg(long, default_value_t = false)]
+        is_subagent: bool,
+    },
     /// Show details of a specific tool call
     ToolCall {
         /// The tool call ID to display
@@ -588,13 +592,13 @@ async fn main() -> Result<()> {
             let client = EditClient::new(session, lua_dir, conversation_id);
             client.run().await
         }
-        Some(Commands::Display) => {
+        Some(Commands::Display { is_subagent }) => {
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id.clone())?;
             let lua_dir = ensure_lua_files(session.session_dir(), None)?;
             let runtime_dir = session.session_dir().clone();
-            let client = DisplayClient::new(session, lua_dir, session_id, runtime_dir);
+            let client = DisplayClient::new(session, lua_dir, session_id, runtime_dir, is_subagent);
             client.run().await
         }
         Some(Commands::ToolCall { tool_call_id }) => {
@@ -745,7 +749,7 @@ async fn main() -> Result<()> {
             let exe_str = exe.to_string_lossy();
             let sa_session = format!("{}/subagent-{}", session_id, conversation_id);
             let display_cmd = format!(
-                "{} --session={} display; tmux kill-window -t \\$TMUX_PANE",
+                "{} --session={} display --is-subagent; tmux kill-window -t \\$TMUX_PANE",
                 exe_str, sa_session
             );
             let edit_cmd = format!(

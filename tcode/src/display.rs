@@ -14,6 +14,8 @@ pub struct DisplayClient {
     /// Root directory prepended to Neovim's runtimepath so that
     /// `queries/tcode/{injections,highlights}.scm` are discovered by tree-sitter.
     runtime_dir: PathBuf,
+    /// Whether this is a subagent display (skips exit confirmation on `q`).
+    is_subagent: bool,
 }
 
 /// Find the tree-sitter tcode parser library. Checks (in order):
@@ -46,12 +48,14 @@ impl DisplayClient {
         lua_dir: PathBuf,
         session_id: String,
         runtime_dir: PathBuf,
+        is_subagent: bool,
     ) -> Self {
         Self {
             session,
             lua_dir,
             session_id,
             runtime_dir,
+            is_subagent,
         }
     }
 
@@ -99,6 +103,7 @@ impl DisplayClient {
             &parser_path,
             &self.runtime_dir,
             &effort_file,
+            self.is_subagent,
         ) {
             Ok(nvim) => nvim,
             Err(e) => {
@@ -134,9 +139,10 @@ fn spawn_nvim(
     parser_path: &Path,
     runtime_dir: &Path,
     effort_file: &Path,
+    is_subagent: bool,
 ) -> Result<Child> {
     let lua_cmd = format!(
-        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}')",
+        "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {})",
         lua_escape(&lua_dir.display().to_string()),
         lua_escape(&display_file.display().to_string()),
         lua_escape(&status_file.display().to_string()),
@@ -147,6 +153,7 @@ fn spawn_nvim(
         lua_escape(&parser_path.display().to_string()),
         lua_escape(&runtime_dir.display().to_string()),
         lua_escape(&effort_file.display().to_string()),
+        is_subagent,
     );
 
     let (stdin, stdout, stderr) = tty_stdio::get_tty_stdio();

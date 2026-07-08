@@ -1653,7 +1653,7 @@ end
 -- @param exe_path: Path to tcode executable
 -- @param parser_path: Path to libtree_sitter_tcode.so/.dylib (optional, for treesitter isolation)
 -- @param runtime_dir: Root directory containing queries/tcode/*.scm (optional, prepended to runtimepath)
-function M.setup_display(display_file, status_file, usage_file, token_usage_file, session_id, exe_path, parser_path, runtime_dir, effort_file)
+function M.setup_display(display_file, status_file, usage_file, token_usage_file, session_id, exe_path, parser_path, runtime_dir, effort_file, is_subagent)
   M.display_file = display_file or '/tmp/tcode-display.jsonl'
   M.status_file = status_file or '/tmp/tcode-status.txt'
   M.usage_file = usage_file
@@ -1800,11 +1800,15 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     end,
   })
 
-  vim.keymap.set('n', 'q', function()
-    confirm_popup("Cancel and exit conversation? (y/n)", function()
-      vim.cmd('qa!')
-    end)
-  end, { buffer = true, silent = true, desc = 'Quit' })
+  if is_subagent then
+    vim.keymap.set('n', 'q', ':qa!<CR>', { buffer = true, silent = true, desc = 'Quit' })
+  else
+    vim.keymap.set('n', 'q', function()
+      confirm_popup("Cancel and exit conversation? (y/n)", function()
+        vim.cmd('qa!')
+      end)
+    end, { buffer = true, silent = true, desc = 'Quit' })
+  end
 
   -- Context-aware 'o' keybinding: toggle thinking or open tool call detail
   vim.keymap.set('n', 'o', function()
