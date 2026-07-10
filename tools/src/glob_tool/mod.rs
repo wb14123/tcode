@@ -86,6 +86,15 @@ pub fn glob(
             }
         };
 
+        // Warn if pattern looks like an absolute path (common mistake)
+        if pattern.starts_with('/') {
+            yield Ok(
+                "Warning: pattern starts with '/'. Glob patterns are relative to the search \
+                 directory. Did you intend to use `path` for the directory and a relative pattern?\n"
+                    .to_string(),
+            );
+        }
+
         // Resolve search directory
         let search_dir = match &path {
             Some(p) => PathBuf::from(p),
