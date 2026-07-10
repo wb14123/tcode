@@ -11,7 +11,11 @@ const MAX_RESULTS: usize = 100;
 
 /// Perform the directory walk and collect matching files.
 /// This is all synchronous I/O, intended to run inside `spawn_blocking`.
-fn walk_glob(search_dir: &Path, pattern: &str) -> Result<Vec<(PathBuf, SystemTime)>> {
+fn walk_glob(
+    search_dir: &Path,
+    pattern: &str,
+    include_ignored: bool,
+) -> Result<Vec<(PathBuf, SystemTime)>> {
     let mut overrides = OverrideBuilder::new(search_dir);
     overrides
         .add(pattern)
@@ -20,10 +24,16 @@ fn walk_glob(search_dir: &Path, pattern: &str) -> Result<Vec<(PathBuf, SystemTim
         .build()
         .map_err(|e| anyhow!("Failed to build glob matcher: {}", e))?;
 
-    let walker = WalkBuilder::new(search_dir)
-        .overrides(overrides)
-        .hidden(false)
-        .build();
+    let mut builder = WalkBuilder::new(search_dir);
+    builder.overrides(overrides).hidden(false);
+    if include_ignored {
+        builder
+            .git_ignore(false)
+            .git_global(false)
+            .git_exclude(false)
+            .ignore(false);
+    }
+    let walker = builder.build();
 
     let mut files: Vec<(PathBuf, SystemTime)> = Vec::new();
     for entry in walker {
@@ -67,6 +77,11 @@ fn walk_glob(search_dir: &Path, pattern: &str) -> Result<Vec<(PathBuf, SystemTim
 /// Returns matching paths sorted by mod time. Use to find files by name.
 /// Delegate open-ended multi-round searches to a subagent.
 /// Batch multiple speculative searches in a single response for efficiency.
+///
+/// NOTE: The underlying walker respects `.gitignore` and `.ignore` files by default.
+/// A "No files found" result may mean the files exist but are being filtered out by
+/// an ignore rule — not just that the pattern matched nothing. If you suspect this,
+/// retry with `include_ignored: true` to bypass ignore rules.
 #[tool]
 pub fn glob(
     ctx: ToolContext,
@@ -75,6 +90,11 @@ pub fn glob(
     /// Directory to search in (defaults to current working directory)
     #[serde(default)]
     path: Option<String>,
+    /// When true, include files that would normally be excluded by
+    /// `.gitignore`, `.git/info/exclude`, global gitignore, and `.ignore` files.
+    /// Defaults to false (respect ignore rules).
+    #[serde(default)]
+    include_ignored: bool,
 ) -> impl tokio_stream::Stream<Item = Result<String>> {
     async_stream::stream! {
         // Resolve current working directory once
@@ -126,7 +146,7 @@ pub fn glob(
         let search_dir_clone = search_dir.clone();
         let pattern_clone = pattern.clone();
         let walk_result = tokio::task::spawn_blocking(move || {
-            walk_glob(&search_dir_clone, &pattern_clone)
+            walk_glob(&search_dir_clone, &pattern_clone, include_ignored)
         }).await;
 
         let files = match walk_result {
