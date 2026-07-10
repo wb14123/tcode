@@ -2050,8 +2050,15 @@ local function try_expand_skill(skills, cursor_col)
 
   -- Split template into lines
   local replacement_lines = {}
-  for tline in template:gmatch('[^\n]*') do
-    table.insert(replacement_lines, tline)
+  local pos = 1
+  while true do
+    local finish = template:find('\n', pos, true)
+    if not finish then
+      table.insert(replacement_lines, template:sub(pos))
+      break
+    end
+    table.insert(replacement_lines, template:sub(pos, finish - 1))
+    pos = finish + 1
   end
 
   -- Combine with surrounding text
