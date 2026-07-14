@@ -3,7 +3,7 @@ use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::AtomicI32;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
 use crate::media::{ContentPart, MediaData, media_type_from_extension};
@@ -449,6 +449,19 @@ pub enum Message {
         media_id: String,
         end_status: MessageEndStatus,
         media: Option<MediaData>,
+    },
+
+    /// Broadcast when an LLM request fails and is about to be retried.
+    /// Emitted before the backoff sleep, so the UI can show status while waiting.
+    LLMRetry {
+        msg_id: MessageID,
+        /// Which retry attempt this is (1-indexed: 1, 2, 3...)
+        attempt: u32,
+        /// Total max retry attempts
+        max_retries: u32,
+        /// Human-readable reason (e.g., "request timed out after 120s",
+        /// or the error message from the provider)
+        reason: String,
     },
 }
 
@@ -1475,6 +1488,14 @@ pub struct Conversation {
     env: ConversationEnv,
 }
 
+/// Result of consuming an LLM response stream within a single attempt.
+enum StreamResult {
+    Success,
+    Cancelled,
+    Timeout,
+    Error(String),
+}
+
 /// Multi round LLM conversation. Thread and async safe.
 impl Conversation {
     fn next_msg_id(&self) -> MessageID {
@@ -1483,6 +1504,24 @@ impl Conversation {
 
     fn broadcast_msg(&self, msg: Message) -> Result<()> {
         self.env.client.notify_msg(msg)
+    }
+
+    fn broadcast_cancelled_end(&self) -> Result<()> {
+        self.broadcast_msg(Message::AssistantMessageEnd {
+            msg_id: self.next_msg_id(),
+            end_status: MessageEndStatus::Cancelled,
+            error: None,
+            input_tokens: 0,
+            output_tokens: 0,
+            reasoning_tokens: 0,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+            aggregate_input_tokens: self.aggregate_input_tokens,
+            aggregate_output_tokens: self.aggregate_output_tokens,
+            aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
+            aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
+            tool_call_count: 0,
+        })
     }
 
     fn snapshot_state(&self) -> ConversationState {
@@ -1742,25 +1781,259 @@ impl Conversation {
             return Ok(());
         }
 
-        let mut response_stream =
-            self.llm
-                .chat(self.model.as_str(), &self.llm_msgs, &self.env.chat_options);
-        let mut accumulated_text = String::new();
-        let mut pending_tool_calls = Vec::new();
-        let mut tool_call_names: HashMap<usize, String> = HashMap::new();
+        let max_retries = self.env.chat_options.max_retries.unwrap_or(3);
+        let read_timeout =
+            Duration::from_secs(self.env.chat_options.request_timeout_secs.unwrap_or(120));
 
         self.broadcast_msg(Message::AssistantMessageStart {
             msg_id: self.next_msg_id(),
             created_at: now_millis(),
         })?;
 
-        loop {
-            let event = tokio::select! {
-                biased;
-                _ = cancel_token.cancelled() => {
+        for attempt in 0..=max_retries {
+            let mut got_content = false;
+            let mut accumulated_text = String::new();
+            let mut pending_tool_calls = Vec::new();
+            let mut tool_call_names: HashMap<usize, String> = HashMap::new();
+
+            let mut response_stream =
+                self.llm
+                    .chat(self.model.as_str(), &self.llm_msgs, &self.env.chat_options);
+
+            let inner_result: StreamResult = loop {
+                let event = tokio::select! {
+                    biased;
+                    _ = cancel_token.cancelled() => {
+                        self.broadcast_cancelled_end()?;
+                        break StreamResult::Cancelled;
+                    }
+                    event = response_stream.next() => {
+                        match event {
+                            Some(e) => e,
+                            None => { break StreamResult::Success; }
+                        }
+                    }
+                    _ = tokio::time::sleep(read_timeout) => {
+                        break StreamResult::Timeout;
+                    }
+                };
+
+                match event {
+                    LLMEvent::MessageStart { .. } => {
+                        // Token accounting is done in MessageEnd to avoid double-counting.
+                    }
+                    LLMEvent::TextDelta(text) => {
+                        got_content = true;
+                        accumulated_text.push_str(&text);
+                        self.broadcast_msg(Message::AssistantMessageChunk {
+                            msg_id: self.next_msg_id(),
+                            content: Arc::new(text),
+                        })?;
+                    }
+                    LLMEvent::ThinkingDelta(text) => {
+                        got_content = true;
+                        self.broadcast_msg(Message::AssistantThinkingChunk {
+                            msg_id: self.next_msg_id(),
+                            content: Arc::new(text),
+                        })?;
+                    }
+                    LLMEvent::ToolCall(tool_call) => {
+                        got_content = true;
+                        pending_tool_calls.push(tool_call);
+                    }
+                    LLMEvent::ToolCallStart { index, id, name } => {
+                        got_content = true;
+                        tool_call_names.insert(index, name.clone());
+                        if name == "subagent" || name == "continue_subagent" {
+                            self.broadcast_msg(Message::SubAgentInputStart {
+                                msg_id: self.next_msg_id(),
+                                tool_call_index: index,
+                                tool_call_id: id,
+                                tool_name: name,
+                                created_at: now_millis(),
+                            })?;
+                        } else {
+                            self.broadcast_msg(Message::AssistantToolCallStart {
+                                msg_id: self.next_msg_id(),
+                                tool_call_index: index,
+                                tool_call_id: id,
+                                tool_name: name,
+                                created_at: now_millis(),
+                            })?;
+                        }
+                    }
+                    LLMEvent::ToolCallDelta {
+                        index,
+                        partial_json,
+                    } => {
+                        let tool_name = tool_call_names.get(&index).cloned().unwrap_or_default();
+                        if tool_name == "subagent" || tool_name == "continue_subagent" {
+                            self.broadcast_msg(Message::SubAgentInputChunk {
+                                msg_id: self.next_msg_id(),
+                                tool_call_index: index,
+                                tool_name,
+                                content: Arc::new(partial_json),
+                            })?;
+                        } else {
+                            self.broadcast_msg(Message::AssistantToolCallArgChunk {
+                                msg_id: self.next_msg_id(),
+                                tool_call_index: index,
+                                tool_name,
+                                content: Arc::new(partial_json),
+                            })?;
+                        }
+                    }
+                    LLMEvent::MessageEnd {
+                        stop_reason,
+                        input_tokens,
+                        output_tokens,
+                        reasoning_tokens,
+                        cache_creation_input_tokens,
+                        cache_read_input_tokens,
+                        mut raw,
+                    } => {
+                        self.total_input_tokens += input_tokens;
+                        self.total_output_tokens += output_tokens;
+                        self.total_cache_creation_tokens += cache_creation_input_tokens;
+                        self.total_cache_read_tokens += cache_read_input_tokens;
+                        self.aggregate_input_tokens += input_tokens;
+                        self.aggregate_output_tokens += output_tokens;
+                        self.aggregate_cache_creation_tokens += cache_creation_input_tokens;
+                        self.aggregate_cache_read_tokens += cache_read_input_tokens;
+
+                        let (end_status, error) = if stop_reason == StopReason::MaxTokens {
+                            (
+                                MessageEndStatus::Failed,
+                                Some("Response truncated: maximum token limit reached".to_string()),
+                            )
+                        } else {
+                            (MessageEndStatus::Succeeded, None)
+                        };
+
+                        self.broadcast_msg(Message::AssistantMessageEnd {
+                            msg_id: self.next_msg_id(),
+                            end_status,
+                            error,
+                            input_tokens,
+                            output_tokens,
+                            reasoning_tokens,
+                            cache_creation_input_tokens,
+                            cache_read_input_tokens,
+                            aggregate_input_tokens: self.aggregate_input_tokens,
+                            aggregate_output_tokens: self.aggregate_output_tokens,
+                            aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
+                            aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
+                            tool_call_count: pending_tool_calls.len(),
+                        })?;
+
+                        if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
+                            let tool_calls = std::mem::take(&mut pending_tool_calls);
+                            self.push_llm_msg(LLMMessage::Assistant {
+                                content: accumulated_text.clone(),
+                                tool_calls: tool_calls.clone(),
+                                raw,
+                            })?;
+                            self.spawn_tool_tasks(tool_calls);
+                        } else if raw.is_some() && accumulated_text.is_empty() {
+                            // Raw present but no text and no tool calls — only
+                            // reasoning.  Inject placeholder content so the message
+                            // is valid for the API (both "content" and "tool_calls"
+                            // are required by providers like DeepSeek).
+                            let placeholder = "[response interrupted]";
+                            if let Some(ref mut raw_obj) = raw
+                                && raw_obj.is_object()
+                            {
+                                raw_obj["content"] =
+                                    serde_json::Value::String(placeholder.to_string());
+                            }
+                            self.push_llm_msg(LLMMessage::Assistant {
+                                content: placeholder.to_string(),
+                                tool_calls: vec![],
+                                raw,
+                            })?;
+                        } else if !accumulated_text.is_empty() {
+                            self.push_llm_msg(LLMMessage::Assistant {
+                                content: accumulated_text.clone(),
+                                tool_calls: vec![],
+                                raw,
+                            })?;
+                        }
+                        break StreamResult::Success;
+                    }
+                    LLMEvent::Error(error) => {
+                        break StreamResult::Error(error);
+                    }
+                    LLMEvent::MediaGenerationStarted { media_id } => {
+                        self.broadcast_msg(Message::AssistantMediaGenerating {
+                            msg_id: self.next_msg_id(),
+                            media_id: media_id.clone(),
+                        })?;
+                    }
+                    LLMEvent::MediaOutput {
+                        media_id,
+                        relative_path,
+                        media_type,
+                    } => {
+                        let media = MediaData::new(relative_path, media_type);
+                        self.broadcast_msg(Message::AssistantMediaOutput {
+                            msg_id: self.next_msg_id(),
+                            media_id,
+                            end_status: MessageEndStatus::Succeeded,
+                            media: Some(media),
+                        })?;
+                    }
+                    LLMEvent::MediaGenerationFailed { media_id } => {
+                        self.broadcast_msg(Message::AssistantMediaOutput {
+                            msg_id: self.next_msg_id(),
+                            media_id,
+                            end_status: MessageEndStatus::Failed,
+                            media: None,
+                        })?;
+                    }
+                }
+            };
+
+            match inner_result {
+                StreamResult::Success | StreamResult::Cancelled => {
+                    return Ok(());
+                }
+                StreamResult::Timeout | StreamResult::Error(_)
+                    if !got_content && attempt < max_retries =>
+                {
+                    let reason = match &inner_result {
+                        StreamResult::Timeout => {
+                            format!("request timed out after {}s", read_timeout.as_secs())
+                        }
+                        StreamResult::Error(msg) => msg.clone(),
+                        _ => unreachable!(),
+                    };
+                    self.broadcast_msg(Message::LLMRetry {
+                        msg_id: self.next_msg_id(),
+                        attempt: attempt + 1,
+                        max_retries,
+                        reason,
+                    })?;
+                    // Check for cancellation between inner loop returning
+                    // and the retry decision. The backoff sleep below also
+                    // has its own cancel-aware select.
+                    if cancel_token.is_cancelled() {
+                        self.broadcast_cancelled_end()?;
+                        return Ok(());
+                    }
+                    let backoff = Duration::from_secs(1 << attempt.min(4));
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            self.broadcast_cancelled_end()?;
+                            return Ok(());
+                        }
+                        _ = tokio::time::sleep(backoff) => {}
+                    }
+                }
+                StreamResult::Timeout => {
                     self.broadcast_msg(Message::AssistantMessageEnd {
                         msg_id: self.next_msg_id(),
-                        end_status: MessageEndStatus::Cancelled,
+                        end_status: MessageEndStatus::Timeout,
                         error: None,
                         input_tokens: 0,
                         output_tokens: 0,
@@ -1775,152 +2048,7 @@ impl Conversation {
                     })?;
                     return Ok(());
                 }
-                event = response_stream.next() => {
-                    match event {
-                        Some(e) => e,
-                        None => { return Ok(()); }
-                    }
-                }
-            };
-
-            match event {
-                LLMEvent::MessageStart { .. } => {
-                    // Token accounting is done in MessageEnd to avoid double-counting.
-                }
-                LLMEvent::TextDelta(text) => {
-                    accumulated_text.push_str(&text);
-                    self.broadcast_msg(Message::AssistantMessageChunk {
-                        msg_id: self.next_msg_id(),
-                        content: Arc::new(text),
-                    })?;
-                }
-                LLMEvent::ThinkingDelta(text) => {
-                    self.broadcast_msg(Message::AssistantThinkingChunk {
-                        msg_id: self.next_msg_id(),
-                        content: Arc::new(text),
-                    })?;
-                }
-                LLMEvent::ToolCall(tool_call) => {
-                    pending_tool_calls.push(tool_call);
-                }
-                LLMEvent::ToolCallStart { index, id, name } => {
-                    tool_call_names.insert(index, name.clone());
-                    if name == "subagent" || name == "continue_subagent" {
-                        self.broadcast_msg(Message::SubAgentInputStart {
-                            msg_id: self.next_msg_id(),
-                            tool_call_index: index,
-                            tool_call_id: id,
-                            tool_name: name,
-                            created_at: now_millis(),
-                        })?;
-                    } else {
-                        self.broadcast_msg(Message::AssistantToolCallStart {
-                            msg_id: self.next_msg_id(),
-                            tool_call_index: index,
-                            tool_call_id: id,
-                            tool_name: name,
-                            created_at: now_millis(),
-                        })?;
-                    }
-                }
-                LLMEvent::ToolCallDelta {
-                    index,
-                    partial_json,
-                } => {
-                    let tool_name = tool_call_names.get(&index).cloned().unwrap_or_default();
-                    if tool_name == "subagent" || tool_name == "continue_subagent" {
-                        self.broadcast_msg(Message::SubAgentInputChunk {
-                            msg_id: self.next_msg_id(),
-                            tool_call_index: index,
-                            tool_name,
-                            content: Arc::new(partial_json),
-                        })?;
-                    } else {
-                        self.broadcast_msg(Message::AssistantToolCallArgChunk {
-                            msg_id: self.next_msg_id(),
-                            tool_call_index: index,
-                            tool_name,
-                            content: Arc::new(partial_json),
-                        })?;
-                    }
-                }
-                LLMEvent::MessageEnd {
-                    stop_reason,
-                    input_tokens,
-                    output_tokens,
-                    reasoning_tokens,
-                    cache_creation_input_tokens,
-                    cache_read_input_tokens,
-                    mut raw,
-                } => {
-                    self.total_input_tokens += input_tokens;
-                    self.total_output_tokens += output_tokens;
-                    self.total_cache_creation_tokens += cache_creation_input_tokens;
-                    self.total_cache_read_tokens += cache_read_input_tokens;
-                    self.aggregate_input_tokens += input_tokens;
-                    self.aggregate_output_tokens += output_tokens;
-                    self.aggregate_cache_creation_tokens += cache_creation_input_tokens;
-                    self.aggregate_cache_read_tokens += cache_read_input_tokens;
-
-                    let (end_status, error) = if stop_reason == StopReason::MaxTokens {
-                        (
-                            MessageEndStatus::Failed,
-                            Some("Response truncated: maximum token limit reached".to_string()),
-                        )
-                    } else {
-                        (MessageEndStatus::Succeeded, None)
-                    };
-
-                    self.broadcast_msg(Message::AssistantMessageEnd {
-                        msg_id: self.next_msg_id(),
-                        end_status,
-                        error,
-                        input_tokens,
-                        output_tokens,
-                        reasoning_tokens,
-                        cache_creation_input_tokens,
-                        cache_read_input_tokens,
-                        aggregate_input_tokens: self.aggregate_input_tokens,
-                        aggregate_output_tokens: self.aggregate_output_tokens,
-                        aggregate_cache_creation_tokens: self.aggregate_cache_creation_tokens,
-                        aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
-                        tool_call_count: pending_tool_calls.len(),
-                    })?;
-
-                    if stop_reason == StopReason::ToolUse && !pending_tool_calls.is_empty() {
-                        let tool_calls = std::mem::take(&mut pending_tool_calls);
-                        self.push_llm_msg(LLMMessage::Assistant {
-                            content: accumulated_text,
-                            tool_calls: tool_calls.clone(),
-                            raw,
-                        })?;
-                        self.spawn_tool_tasks(tool_calls);
-                    } else if raw.is_some() && accumulated_text.is_empty() {
-                        // Raw present but no text and no tool calls — only
-                        // reasoning.  Inject placeholder content so the message
-                        // is valid for the API (both "content" and "tool_calls"
-                        // are required by providers like DeepSeek).
-                        let placeholder = "[response interrupted]";
-                        if let Some(ref mut raw_obj) = raw
-                            && raw_obj.is_object()
-                        {
-                            raw_obj["content"] = serde_json::Value::String(placeholder.to_string());
-                        }
-                        self.push_llm_msg(LLMMessage::Assistant {
-                            content: placeholder.to_string(),
-                            tool_calls: vec![],
-                            raw,
-                        })?;
-                    } else if !accumulated_text.is_empty() {
-                        self.push_llm_msg(LLMMessage::Assistant {
-                            content: accumulated_text,
-                            tool_calls: vec![],
-                            raw,
-                        })?;
-                    }
-                    return Ok(());
-                }
-                LLMEvent::Error(error) => {
+                StreamResult::Error(error) => {
                     self.broadcast_msg(Message::AssistantMessageEnd {
                         msg_id: self.next_msg_id(),
                         end_status: MessageEndStatus::Failed,
@@ -1938,35 +2066,11 @@ impl Conversation {
                     })?;
                     return Ok(());
                 }
-                LLMEvent::MediaGenerationStarted { media_id } => {
-                    self.broadcast_msg(Message::AssistantMediaGenerating {
-                        msg_id: self.next_msg_id(),
-                        media_id: media_id.clone(),
-                    })?;
-                }
-                LLMEvent::MediaOutput {
-                    media_id,
-                    relative_path,
-                    media_type,
-                } => {
-                    let media = MediaData::new(relative_path, media_type);
-                    self.broadcast_msg(Message::AssistantMediaOutput {
-                        msg_id: self.next_msg_id(),
-                        media_id,
-                        end_status: MessageEndStatus::Succeeded,
-                        media: Some(media),
-                    })?;
-                }
-                LLMEvent::MediaGenerationFailed { media_id } => {
-                    self.broadcast_msg(Message::AssistantMediaOutput {
-                        msg_id: self.next_msg_id(),
-                        media_id,
-                        end_status: MessageEndStatus::Failed,
-                        media: None,
-                    })?;
-                }
             }
         }
+
+        // Unreachable: the for loop always returns via match arms above.
+        Ok(())
     }
 
     /// Finish a turn if no tools are pending (normal path).

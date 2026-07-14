@@ -143,6 +143,7 @@ export interface AssistantTimelineItem extends TimelineItemBase {
   reasoningTokens: number | null;
   cacheCreationTokens: number | null;
   cacheReadTokens: number | null;
+  retry?: { attempt: number; maxRetries: number; reason: string };
 }
 
 export interface UserTimelineItem extends TimelineItemBase {

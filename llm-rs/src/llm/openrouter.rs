@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use async_stream::stream;
@@ -28,6 +29,8 @@ pub struct OpenRouter {
     client: Client,
     api_key: String,
     base_url: String,
+    /// TCP connect timeout for the reqwest client.
+    connect_timeout: Option<Duration>,
     cached_tool_defs: Option<Vec<ToolDefinition>>,
     /// Directory for loading media files (images, PDFs) referenced by ContentPart::Media.
     pub media_dir: Option<PathBuf>,
@@ -44,12 +47,26 @@ impl OpenRouter {
     /// Use this for other providers that implement the Chat Completions API.
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .expect("reqwest Client should always build with standard TLS"),
             api_key: api_key.into(),
             base_url: base_url.into(),
+            connect_timeout: Some(Duration::from_secs(30)),
             cached_tool_defs: None,
             media_dir: None,
         }
+    }
+
+    /// Set the TCP connect timeout for the reqwest HTTP client.
+    pub fn with_connect_timeout(mut self, secs: u64) -> Self {
+        self.connect_timeout = Some(Duration::from_secs(secs));
+        self.client = Client::builder()
+            .connect_timeout(self.connect_timeout.unwrap_or(Duration::from_secs(30)))
+            .build()
+            .expect("reqwest Client should always build with standard TLS");
+        self
     }
 }
 
@@ -441,6 +458,7 @@ impl LLM for OpenRouter {
             client: self.client.clone(),
             api_key: self.api_key.clone(),
             base_url: self.base_url.clone(),
+            connect_timeout: self.connect_timeout,
             cached_tool_defs: None,
             media_dir: self.media_dir.clone(),
         })

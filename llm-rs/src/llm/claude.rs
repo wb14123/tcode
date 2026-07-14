@@ -6,6 +6,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use async_stream::stream;
@@ -30,6 +31,8 @@ pub struct Claude {
     client: Client,
     get_token: GetTokenFn,
     base_url: String,
+    /// TCP connect timeout for the reqwest client.
+    connect_timeout: Option<Duration>,
     /// When true, use OAuth Bearer auth with beta headers.
     /// When false, use x-api-key header.
     use_oauth: bool,
@@ -48,12 +51,16 @@ impl Claude {
     pub fn with_base_url(access_token: impl Into<String>, base_url: impl Into<String>) -> Self {
         let token = access_token.into();
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .expect("reqwest Client should always build with standard TLS"),
             get_token: Arc::new(move || {
                 let t = token.clone();
                 Box::pin(async move { Ok(t) })
             }),
             base_url: base_url.into(),
+            connect_timeout: Some(Duration::from_secs(30)),
             use_oauth: false,
             cached_tool_defs: None,
             media_dir: None,
@@ -74,9 +81,13 @@ impl Claude {
     /// ```
     pub fn with_get_token(get_token: GetTokenFn, base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .expect("reqwest Client should always build with standard TLS"),
             get_token,
             base_url: base_url.into(),
+            connect_timeout: Some(Duration::from_secs(30)),
             use_oauth: true,
             cached_tool_defs: None,
             media_dir: None,
@@ -102,6 +113,16 @@ impl Claude {
             Box::pin(async move { p.get_access_token().await })
         });
         Self::with_get_token(get_token, base_url)
+    }
+
+    /// Set the TCP connect timeout for the reqwest HTTP client.
+    pub fn with_connect_timeout(mut self, secs: u64) -> Self {
+        self.connect_timeout = Some(Duration::from_secs(secs));
+        self.client = Client::builder()
+            .connect_timeout(self.connect_timeout.unwrap_or(Duration::from_secs(30)))
+            .build()
+            .expect("reqwest Client should always build with standard TLS");
+        self
     }
 }
 
@@ -591,6 +612,7 @@ impl LLM for Claude {
             client: self.client.clone(),
             get_token: self.get_token.clone(),
             base_url: self.base_url.clone(),
+            connect_timeout: self.connect_timeout,
             use_oauth: self.use_oauth,
             cached_tool_defs: None,
             media_dir: self.media_dir.clone(),

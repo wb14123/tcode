@@ -13,6 +13,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::Duration;
 
 use anyhow::Context;
 use async_stream::stream;
@@ -203,6 +204,8 @@ pub struct OpenAI {
     client: Client,
     get_token: GetTokenFn,
     base_url: String,
+    /// TCP connect timeout for the reqwest client.
+    connect_timeout: Option<Duration>,
     /// ChatGPT account ID for OAuth requests via the ChatGPT backend proxy.
     account_id: Option<String>,
     /// Opaque key for server-side prompt caching. Each clone (= each conversation)
@@ -223,12 +226,16 @@ impl OpenAI {
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         let token = api_key.into();
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .expect("reqwest Client should always build with standard TLS"),
             get_token: Arc::new(move || {
                 let t = token.clone();
                 Box::pin(async move { Ok(t) })
             }),
             base_url: base_url.into(),
+            connect_timeout: Some(Duration::from_secs(30)),
             account_id: None,
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
@@ -240,9 +247,13 @@ impl OpenAI {
     /// Use this for OAuth tokens with auto-refresh.
     pub fn with_get_token(get_token: GetTokenFn, base_url: impl Into<String>) -> Self {
         Self {
-            client: Client::new(),
+            client: Client::builder()
+                .connect_timeout(Duration::from_secs(30))
+                .build()
+                .expect("reqwest Client should always build with standard TLS"),
             get_token,
             base_url: base_url.into(),
+            connect_timeout: Some(Duration::from_secs(30)),
             account_id: None,
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
@@ -268,6 +279,16 @@ impl OpenAI {
     /// Set the ChatGPT account ID for OAuth requests via the ChatGPT backend proxy.
     pub fn with_account_id(mut self, account_id: Option<String>) -> Self {
         self.account_id = account_id;
+        self
+    }
+
+    /// Set the TCP connect timeout for the reqwest HTTP client.
+    pub fn with_connect_timeout(mut self, secs: u64) -> Self {
+        self.connect_timeout = Some(Duration::from_secs(secs));
+        self.client = Client::builder()
+            .connect_timeout(self.connect_timeout.unwrap_or(Duration::from_secs(30)))
+            .build()
+            .expect("reqwest Client should always build with standard TLS");
         self
     }
 }
@@ -568,6 +589,7 @@ impl LLM for OpenAI {
             client: self.client.clone(),
             get_token: self.get_token.clone(),
             base_url: self.base_url.clone(),
+            connect_timeout: self.connect_timeout,
             account_id: self.account_id.clone(),
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,

@@ -778,6 +778,21 @@ export class ConversationTimelineBuilder {
           this.store.setActiveAssistantId(id);
           break;
         }
+        case 'LLMRetry': {
+          const id = this.store.getActiveAssistantId();
+          if (id) {
+            this.updateAssistant(id, (item) => {
+              item.retry = {
+                attempt: asNumber(payload.attempt) ?? 1,
+                maxRetries: asNumber(payload.max_retries) ?? 0,
+                reason: asString(payload.reason) ?? 'unknown error',
+              };
+            });
+          } else {
+            this.addItem(createSignal(this.store, 'LLM retry', `${payload.attempt}/${payload.max_retries}: ${payload.reason}`), false);
+          }
+          break;
+        }
         default:
           this.addItem(createRawItem(this.store, event, variant));
           break;
@@ -1207,6 +1222,9 @@ function renderAssistant(item: AssistantTimelineItem, context: TimelineRenderCon
               <pre class="timeline-pre">${item.thinking}</pre>
             </details>
           `
+        : nothing}
+      ${item.retry && item.contentBlocks.length === 0
+        ? html`<div class="inline-alert warning">Retrying... (attempt ${item.retry.attempt}/${item.retry.maxRetries}) -- ${item.retry.reason}</div>`
         : nothing}
       ${item.contentBlocks.map((block) => {
         if (block.kind === 'text') {

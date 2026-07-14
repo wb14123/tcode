@@ -100,7 +100,7 @@ impl RuntimeSettings {
         }
 
         let (llm, model, token_manager) = create_llm(&self.config, self.profile.as_deref()).await?;
-        let mut chat_options = build_chat_options();
+        let mut chat_options = build_chat_options(&self.config);
         if let Some(ref effort) = self.config.reasoning_effort {
             chat_options.reasoning_effort = Some(effort.clone());
         }
@@ -403,9 +403,11 @@ fn get_api_key(config: &TcodeConfig, provider: Provider) -> String {
     String::new()
 }
 
-pub fn build_chat_options() -> ChatOptions {
+pub fn build_chat_options(config: &TcodeConfig) -> ChatOptions {
     ChatOptions {
         reasoning_effort: Some(ReasoningEffort::XHigh),
+        request_timeout_secs: config.request_timeout_secs,
+        max_retries: config.max_retries,
         ..Default::default()
     }
 }
@@ -440,7 +442,11 @@ pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<C
                     .clone()
                     .unwrap_or_else(|| provider.default_base_url().to_string());
                 let api_key = get_api_key(config, provider);
-                (Box::new(Claude::with_base_url(&api_key, &base_url)), None)
+                let mut llm = Claude::with_base_url(&api_key, &base_url);
+                if let Some(timeout) = config.connect_timeout_secs {
+                    llm = llm.with_connect_timeout(timeout);
+                }
+                (Box::new(llm), None)
             }
             Provider::ClaudeOauth => {
                 let base_url = config
@@ -456,9 +462,12 @@ pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<C
                         auth_command
                     )
                 })?;
-                let llm = Box::new(Claude::with_token_provider(manager.clone(), &base_url));
+                let mut llm = Claude::with_token_provider(manager.clone(), &base_url);
+                if let Some(timeout) = config.connect_timeout_secs {
+                    llm = llm.with_connect_timeout(timeout);
+                }
                 (
-                    llm,
+                    Box::new(llm),
                     Some(Arc::new(manager) as Arc<dyn auth::OAuthTokenManager>),
                 )
             }
@@ -468,7 +477,11 @@ pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<C
                     .clone()
                     .unwrap_or_else(|| provider.default_base_url().to_string());
                 let api_key = get_api_key(config, provider);
-                (Box::new(OpenAI::with_base_url(&api_key, &base_url)), None)
+                let mut llm = OpenAI::with_base_url(&api_key, &base_url);
+                if let Some(timeout) = config.connect_timeout_secs {
+                    llm = llm.with_connect_timeout(timeout);
+                }
+                (Box::new(llm), None)
             }
             Provider::OpenAiOauth => {
                 let base_url = config
@@ -489,12 +502,13 @@ pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<C
                     .try_read()
                     .ok()
                     .and_then(|t| t.account_id.clone());
-                let llm = Box::new(
-                    OpenAI::with_token_provider(manager.clone(), &base_url)
-                        .with_account_id(account_id),
-                );
+                let mut llm = OpenAI::with_token_provider(manager.clone(), &base_url)
+                    .with_account_id(account_id);
+                if let Some(timeout) = config.connect_timeout_secs {
+                    llm = llm.with_connect_timeout(timeout);
+                }
                 (
-                    llm,
+                    Box::new(llm),
                     Some(Arc::new(manager) as Arc<dyn auth::OAuthTokenManager>),
                 )
             }
@@ -504,10 +518,11 @@ pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<C
                     .clone()
                     .unwrap_or_else(|| provider.default_base_url().to_string());
                 let api_key = get_api_key(config, provider);
-                (
-                    Box::new(OpenRouter::with_base_url(&api_key, &base_url)),
-                    None,
-                )
+                let mut llm = OpenRouter::with_base_url(&api_key, &base_url);
+                if let Some(timeout) = config.connect_timeout_secs {
+                    llm = llm.with_connect_timeout(timeout);
+                }
+                (Box::new(llm), None)
             }
             Provider::Bedrock => {
                 let region = resolve_aws_region(config);

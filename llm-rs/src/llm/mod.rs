@@ -128,6 +128,12 @@ pub struct ChatOptions {
     pub reasoning_budget: Option<u32>,
     /// If true, model uses reasoning internally but doesn't return it in the response.
     pub exclude_reasoning: bool,
+    /// TCP connect timeout in seconds. None means use default (30s).
+    pub connect_timeout_secs: Option<u64>,
+    /// Max seconds between SSE events before stream is considered stalled. None means use default (120s).
+    pub request_timeout_secs: Option<u64>,
+    /// Max retry attempts for failed LLM requests (0 = no retry). None means use default (3).
+    pub max_retries: Option<u32>,
 }
 
 // ============================================================================

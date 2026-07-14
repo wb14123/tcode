@@ -111,12 +111,18 @@ mod tests {
             reasoning_effort: Some(ReasoningEffort::High),
             reasoning_budget: None,
             exclude_reasoning: true,
+            connect_timeout_secs: Some(45),
+            request_timeout_secs: Some(90),
+            max_retries: Some(5),
         };
         let json = serde_json::to_string(&opts)?;
         let deserialized: ChatOptions = serde_json::from_str(&json)?;
         assert_eq!(deserialized.max_tokens, Some(8192));
         assert_eq!(deserialized.reasoning_effort, Some(ReasoningEffort::High));
         assert!(deserialized.exclude_reasoning);
+        assert_eq!(deserialized.connect_timeout_secs, Some(45));
+        assert_eq!(deserialized.request_timeout_secs, Some(90));
+        assert_eq!(deserialized.max_retries, Some(5));
         Ok(())
     }
 
@@ -129,6 +135,39 @@ mod tests {
         assert_eq!(deserialized.reasoning_effort, None);
         assert_eq!(deserialized.reasoning_budget, None);
         assert!(!deserialized.exclude_reasoning);
+        assert_eq!(deserialized.connect_timeout_secs, None);
+        assert_eq!(deserialized.request_timeout_secs, None);
+        assert_eq!(deserialized.max_retries, None);
+        Ok(())
+    }
+
+    // ======== Message::LLMRetry serde ========
+
+    #[test]
+    fn message_llm_retry_serde() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+        let msg = Message::LLMRetry {
+            msg_id: 42,
+            attempt: 2,
+            max_retries: 3,
+            reason: "request timed out after 120s".to_string(),
+        };
+        let json = serde_json::to_string(&msg)?;
+        let deserialized: Message = serde_json::from_str(&json)?;
+        match deserialized {
+            Message::LLMRetry {
+                msg_id,
+                attempt,
+                max_retries,
+                reason,
+            } => {
+                assert_eq!(msg_id, 42);
+                assert_eq!(attempt, 2);
+                assert_eq!(max_retries, 3);
+                assert_eq!(reason, "request timed out after 120s");
+            }
+            _ => panic!("Expected LLMRetry variant"),
+        }
         Ok(())
     }
 

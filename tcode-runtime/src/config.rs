@@ -22,6 +22,12 @@ pub struct TcodeConfig {
     pub layout: Option<LayoutNode>,
     #[serde(default)]
     pub supports_media: bool,
+    #[serde(default)]
+    pub connect_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub max_retries: Option<u32>,
 }
 
 impl TcodeConfig {
@@ -268,6 +274,9 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # search_engine = "google"         # kagi | google
 # supports_media = false         # set to true if your model supports visual/media input (images, PDFs); bedrock Claude supports media
 # reasoning_effort = "xhigh"    # optional. minimal | low | medium | high | xhigh | max. Defaults to "xhigh". Omit for default.
+# connect_timeout_secs = 30    # TCP connect timeout in seconds
+# request_timeout_secs = 120   # max seconds between SSE events before timeout
+# max_retries = 3              # max retry attempts (0 = no retry)
 
 # [layout]
 # split = "horizontal"

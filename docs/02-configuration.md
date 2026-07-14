@@ -91,6 +91,15 @@ reasoning_effort = "xhigh"      # optional. minimal | low | medium | high | xhig
                                  # Not all values are supported by all providers — unsupported values
                                  # produce an API error so you can adjust.
                                  # Omit the key entirely for the default.
+connect_timeout_secs = 30       # TCP connect timeout in seconds. Applies to Claude, OpenAI, and
+                                 # OpenRouter providers (Bedrock uses AWS SDK timeouts).
+                                 # Defaults to 30 if omitted.
+request_timeout_secs = 120      # max seconds between SSE events before the stream is considered
+                                 # stalled and the request is retried. Defaults to 120 if omitted.
+max_retries = 3                 # max retry attempts for failed LLM requests (0 = no retry).
+                                 # Only retries when no content (text or tool calls) has been
+                                 # received yet — partial responses are never retried.
+                                 # Defaults to 3 if omitted.
 
 ```
 

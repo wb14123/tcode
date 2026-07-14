@@ -299,5 +299,13 @@ fn print_message(msg: &Message) {
         Message::AssistantMediaGenerating { media_id, .. } => {
             println!("    [Media generating: {}]", media_id);
         }
+        Message::LLMRetry {
+            attempt,
+            max_retries,
+            reason,
+            ..
+        } => {
+            println!("    [LLM retry {}/{}: {}]", attempt, max_retries, reason);
+        }
     }
 }

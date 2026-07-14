@@ -535,7 +535,7 @@ async fn main() -> Result<()> {
             let container_config =
                 resolve_container_config(&container, &container_runtime, no_container).await?;
             let (llm, model, token_manager) = create_llm(&config, profile.as_deref()).await?;
-            let mut chat_options = build_chat_options();
+            let mut chat_options = build_chat_options(&config);
             if let Some(ref effort) = config.reasoning_effort {
                 chat_options.reasoning_effort = Some(effort.clone());
             }
@@ -660,7 +660,7 @@ async fn main() -> Result<()> {
                 RuntimeProbeStatus::NoSocket | RuntimeProbeStatus::NoListener => {
                     let (llm, model, token_manager) =
                         create_llm(&config, profile.as_deref()).await?;
-                    let mut chat_options = build_chat_options();
+                    let mut chat_options = build_chat_options(&config);
                     if let Some(ref effort) = config.reasoning_effort {
                         chat_options.reasoning_effort = Some(effort.clone());
                     }
@@ -964,7 +964,7 @@ async fn run_unified(
     let session = Session::new(session_id.clone())?;
     initialize_new_session_mode(&session, requested_mode)?;
     let (llm, model, token_manager) = create_llm(&config, profile).await?;
-    let mut chat_options = build_chat_options();
+    let mut chat_options = build_chat_options(&config);
     if let Some(ref effort) = config.reasoning_effort {
         chat_options.reasoning_effort = Some(effort.clone());
     }

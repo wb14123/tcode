@@ -1437,6 +1437,15 @@ local function render_event(buf, ns, event)
       append_lines(buf, { '', '![img](file://' .. encoded .. ')' })
     end
 
+  elseif variant == 'LLMRetry' then
+    local attempt = data.attempt or 1
+    local max_retries = data.max_retries or 0
+    local reason = data.reason or ''
+    local msg = string.format('[Retrying... (attempt %d/%d) -- %s]', attempt, max_retries, reason)
+    append_lines(buf, { msg })
+    local line = vim.api.nvim_buf_line_count(buf) - 1
+    vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeTokens', line, 0, -1)
+
   elseif variant == 'AssistantRequestEnd' then
     append_lines(buf, { '► END' })
     local info_line = vim.api.nvim_buf_line_count(buf) - 1
