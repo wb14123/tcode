@@ -191,7 +191,7 @@ This makes the web remote server safe for remotely exposed browser access. Norma
 | Sessions | `~/.tcode/sessions/` |
 | Trash | `~/.tcode/trash/` (per-user, configured in `web-users.toml`) |
 | Browser-server socket | `~/.tcode/browser-server.sock` |
-| Browser profile | `~/.tcode/chrome/` |
+| Browser profile | `~/.tcode/chrome/` (or `~/snap/<name>/common/.tcode-chrome/` for snap packages) |
 
 Provider API keys can be stored in the config file or passed via environment variables:
 
@@ -213,7 +213,9 @@ By default, tcode auto-starts a sibling `browser-server` binary and talks to it 
 ~/.tcode/browser-server.sock
 ```
 
-The browser profile is persistent:
+The browser profile is persistent (see
+[Profile location](06-browser.md#profile-location) for the snap-aware
+path):
 
 ```text
 ~/.tcode/chrome/
@@ -338,6 +340,8 @@ cp ~/.tcode/web-users.toml "$HOME/tcode-docker-data/"
 # Optional, only if needed:
 # cp -a ~/.tcode/auth "$HOME/tcode-docker-data/"
 # cp -a ~/.tcode/chrome "$HOME/tcode-docker-data/"
+# If using snap Chromium, copy the snap profile instead:
+# cp -a ~/snap/chromium/common/.tcode-chrome "$HOME/tcode-docker-data/"
 ```
 
 If your `web-users.toml` specifies a `trash_dir` outside the data directory (e.g. `/home/alice/.tcode/trash`), ensure that path is accessible from the container — either mount it explicitly or place it inside the mounted data directory so the server can write deleted sessions there.
@@ -359,6 +363,9 @@ The container uses:
 ```text
 /home/tcode/.tcode/chrome
 ```
+
+If you use snap Chromium, your profile is at
+`~/snap/chromium/common/.tcode-chrome/` on the host. Copy that instead.
 
 You can prepare browser data outside Docker with:
 

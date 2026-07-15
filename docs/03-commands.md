@@ -149,7 +149,11 @@ No flags. The command only prints the path and does not create the directory.
 
 ### `tcode browser`
 
-Launches Chrome with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search). This is a standalone command and does not interact with the browser-server process. Press Ctrl+C to exit when done.
+Launches Chrome with the persistent profile. Use this to log in to
+services (e.g., Kagi for web search). The profile location depends on
+your Chrome installation; see [Browser Setup](06-browser.md#profile-location).
+This is a standalone command and does not interact with the
+browser-server process. Press Ctrl+C to exit when done.
 
 ```
 tcode browser
