@@ -18,7 +18,7 @@ use tokio_stream::{Stream, StreamExt};
 use super::sse;
 use super::{
     ChatOptions, GetTokenFn, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason,
-    TokenProvider, ToolCall, is_manual_only_model,
+    TokenProvider, ToolCall, is_manual_only_model, model_max_output_tokens,
 };
 use crate::tool::Tool;
 
@@ -728,16 +728,14 @@ impl LLM for Claude {
 
             // Calculate max_tokens: must be greater than thinking.budget_tokens if thinking is enabled
             // Use provided max_tokens option, otherwise use defaults
-            const DEFAULT_OUTPUT_TOKENS: u32 = 8192;
-            const DEFAULT_ADAPTIVE_OUTPUT_TOKENS: u32 = 16000;
             let max_tokens = if let Some(user_max) = max_tokens_option {
                 user_max
             } else if let Some(ref config) = thinking
                 && let Some(budget) = config.budget_tokens
             {
-                budget + DEFAULT_OUTPUT_TOKENS
+                budget + model_max_output_tokens(&model)
             } else {
-                DEFAULT_ADAPTIVE_OUTPUT_TOKENS
+                model_max_output_tokens(&model)
             };
 
             let request_body = MessagesRequest {

@@ -27,7 +27,7 @@ use super::openai_common::effort_to_str;
 use super::sse;
 use super::{
     ChatOptions, GetTokenFn, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, TokenProvider,
-    ToolCall,
+    ToolCall, model_max_output_tokens,
 };
 use crate::tool::Tool;
 use crate::tool::normalize_schema;
@@ -604,6 +604,26 @@ impl LLM for OpenAI {
     fn available_models(&self) -> Vec<ModelInfo> {
         vec![
             ModelInfo {
+                id: "gpt-5.6".into(),
+                description: "GPT-5.6 frontier model".into(),
+            },
+            ModelInfo {
+                id: "gpt-5.6-sol".into(),
+                description: "GPT-5.6 Sol: frontier reasoning".into(),
+            },
+            ModelInfo {
+                id: "gpt-5.6-terra".into(),
+                description: "GPT-5.6 Terra: balanced cost/performance".into(),
+            },
+            ModelInfo {
+                id: "gpt-5.6-luna".into(),
+                description: "GPT-5.6 Luna: cost-effective".into(),
+            },
+            ModelInfo {
+                id: "gpt-5.5".into(),
+                description: "Flagship GPT-5.5 model".into(),
+            },
+            ModelInfo {
                 id: "gpt-5".into(),
                 description: "Most capable OpenAI model".into(),
             },
@@ -661,7 +681,9 @@ impl LLM for OpenAI {
                 Some(tool_items)
             }
         };
-        let max_output_tokens = options.max_tokens;
+        let max_output_tokens = options
+            .max_tokens
+            .or_else(|| Some(model_max_output_tokens(&model)));
         let cache_key = self.cache_key.clone();
 
         // Build reasoning config

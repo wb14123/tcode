@@ -23,13 +23,12 @@ use tokio_stream::Stream;
 
 use super::{
     ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall,
-    is_manual_only_model,
+    is_manual_only_model, model_max_output_tokens,
 };
 use crate::media::ContentPart;
 use crate::tool::{self, Tool};
 
 const TOOL_PREFIX: &str = "mcp_";
-const DEFAULT_OUTPUT_TOKENS: u32 = 8192;
 pub(super) const MAX_CACHE_POINTS_PER_REQUEST: usize = 4;
 
 pub struct Bedrock {
@@ -832,14 +831,16 @@ impl LLM for Bedrock {
                 .reasoning_effort
                 .as_ref()
                 .unwrap_or(&ReasoningEffort::XHigh);
-            let mt = options.max_tokens.unwrap_or(16000);
+            let mt = options
+                .max_tokens
+                .unwrap_or_else(|| model_max_output_tokens(model.as_str()));
             (Some(build_adaptive_thinking_document(effort.as_str())), mt)
         } else {
             let budget = thinking_budget(options);
             let mt = match (budget, options.max_tokens) {
                 (_, Some(user_max)) => user_max,
-                (Some(b), None) => b + DEFAULT_OUTPUT_TOKENS,
-                (None, None) => DEFAULT_OUTPUT_TOKENS,
+                (Some(b), None) => b + model_max_output_tokens(model.as_str()),
+                (None, None) => model_max_output_tokens(model.as_str()),
             };
             (budget.map(build_thinking_document), mt)
         };

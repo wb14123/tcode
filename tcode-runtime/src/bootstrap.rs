@@ -360,7 +360,7 @@ impl Provider {
     fn default_model(&self) -> &'static str {
         match self {
             Provider::Claude | Provider::ClaudeOauth => "claude-opus-4-6",
-            Provider::OpenAi => "gpt-5-nano",
+            Provider::OpenAi => "gpt-5.5",
             Provider::OpenAiOauth => "gpt-5.4",
             Provider::OpenRouter => "deepseek/deepseek-r1",
             Provider::Bedrock => "us.anthropic.claude-opus-4-6-v1",
@@ -406,6 +406,7 @@ fn get_api_key(config: &TcodeConfig, provider: Provider) -> String {
 pub fn build_chat_options(config: &TcodeConfig) -> ChatOptions {
     ChatOptions {
         reasoning_effort: Some(ReasoningEffort::XHigh),
+        max_tokens: config.max_tokens,
         request_timeout_secs: config.request_timeout_secs,
         max_retries: config.max_retries,
         ..Default::default()

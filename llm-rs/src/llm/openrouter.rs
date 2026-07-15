@@ -17,7 +17,10 @@ use tokio_stream::{Stream, StreamExt};
 
 use super::openai_common::{self, ReasoningRequest, ToolDefinition};
 use super::sse;
-use super::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
+use super::{
+    ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall,
+    model_max_output_tokens,
+};
 use crate::tool::Tool;
 
 // ============================================================================
@@ -471,8 +474,24 @@ impl LLM for OpenRouter {
     fn available_models(&self) -> Vec<ModelInfo> {
         vec![
             ModelInfo {
+                id: "deepseek/deepseek-v4-pro".into(),
+                description: "DeepSeek V4 Pro: flagship MoE model".into(),
+            },
+            ModelInfo {
+                id: "deepseek/deepseek-v4-flash".into(),
+                description: "DeepSeek V4 Flash: cost-effective".into(),
+            },
+            ModelInfo {
                 id: "deepseek/deepseek-r1".into(),
                 description: "DeepSeek R1 reasoning model".into(),
+            },
+            ModelInfo {
+                id: "openai/gpt-5.6".into(),
+                description: "OpenAI GPT-5.6".into(),
+            },
+            ModelInfo {
+                id: "openai/gpt-5.5".into(),
+                description: "OpenAI GPT-5.5".into(),
             },
             ModelInfo {
                 id: "openai/gpt-5".into(),
@@ -495,7 +514,9 @@ impl LLM for OpenRouter {
         let api_key = self.api_key.clone();
         let base_url = self.base_url.clone();
         let model = model.to_string();
-        let max_tokens = options.max_tokens;
+        let max_tokens = options
+            .max_tokens
+            .or_else(|| Some(model_max_output_tokens(&model)));
         let reasoning_request = openai_common::build_reasoning_request(options);
 
         // Convert messages (scope media_dir so it's not captured by the stream)

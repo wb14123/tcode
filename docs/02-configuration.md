@@ -91,6 +91,11 @@ reasoning_effort = "xhigh"      # optional. minimal | low | medium | high | xhig
                                  # Not all values are supported by all providers — unsupported values
                                  # produce an API error so you can adjust.
                                  # Omit the key entirely for the default.
+max_tokens = 16000               # optional. Override max output tokens. Omit for automatic
+                                 # model-specific limits (e.g. 128K for GPT-5 / Claude Opus 4.6+,
+                                 # 384K for DeepSeek V4 Pro, 64K for Claude Sonnet/Haiku).
+                                 # Set to a lower value to cap output; set to a higher value
+                                 # only if the model supports more than the automatic limit.
 connect_timeout_secs = 30       # TCP connect timeout in seconds. Applies to Claude, OpenAI, and
                                  # OpenRouter providers (Bedrock uses AWS SDK timeouts).
                                  # Defaults to 30 if omitted.
@@ -109,7 +114,7 @@ max_retries = 3                 # max retry attempts for failed LLM requests (0 
 |---------------|-----------------|-----------------------|---------------------------------------|------------------------------------------|
 | Claude        | `claude`        | `ANTHROPIC_API_KEY`   | `claude-opus-4-6`                     | `https://api.anthropic.com`              |
 | Claude OAuth  | `claude-oauth`  | *(none — OAuth-only)* | `claude-opus-4-6`                     | `https://api.anthropic.com`              |
-| OpenAI        | `open-ai`       | `OPENAI_API_KEY`      | `gpt-5-nano`                          | `https://api.openai.com/v1`              |
+| OpenAI        | `open-ai`       | `OPENAI_API_KEY`      | `gpt-5.5`                             | `https://api.openai.com/v1`              |
 | OpenAI OAuth  | `open-ai-oauth` | *(none — OAuth-only)* | `gpt-5.4`                             | `https://chatgpt.com/backend-api/codex`  |
 | OpenRouter    | `open-router`   | `OPENROUTER_API_KEY`  | `deepseek/deepseek-r1`                | `https://openrouter.ai/api/v1`           |
 | AWS Bedrock   | `bedrock`       | AWS credential chain  | `us.anthropic.claude-opus-4-6-v1`     | Region-based Bedrock Runtime endpoint    |

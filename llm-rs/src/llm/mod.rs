@@ -110,6 +110,76 @@ pub(crate) fn is_manual_only_model(model: &str) -> bool {
         || model.contains("claude-haiku-4-5")
 }
 
+/// Returns the API-enforced maximum output token limit for a given model.
+///
+/// Uses substring matching so it works for both direct API model names
+/// (`claude-opus-4-8`) and Bedrock ARN-format model IDs
+/// (`us.anthropic.claude-opus-4-8-v1`).
+///
+/// Provider-based fallbacks are used for unrecognised models within a known
+/// provider family.  The global fallback is the largest known value so that
+/// over-estimating produces a clear API error rather than silent truncation.
+pub(crate) fn model_max_output_tokens(model: &str) -> u32 {
+    // Claude: 128K models
+    if model.contains("claude-fable-5")
+        || model.contains("claude-mythos-5")
+        || model.contains("claude-opus-4-8")
+        || model.contains("claude-opus-4-7")
+        || model.contains("claude-opus-4-6")
+    {
+        return 128_000;
+    }
+
+    // Claude: 64K models
+    if model.contains("claude-sonnet-4-6")
+        || model.contains("claude-haiku-4-5")
+        || model.contains("claude-opus-4-5")
+        || model.contains("claude-sonnet-4-5")
+    {
+        return 64_000;
+    }
+
+    // OpenAI GPT-5 family (covers gpt-5, gpt-5.4, gpt-5.5, gpt-5.6, etc.)
+    if model.contains("gpt-5") {
+        return 128_000;
+    }
+
+    // OpenAI o3
+    if model.contains("o3") {
+        return 100_000;
+    }
+
+    // DeepSeek V4 Pro
+    if model.contains("deepseek-v4-pro") {
+        return 384_000;
+    }
+
+    // DeepSeek V4 Flash
+    if model.contains("deepseek-v4-flash") {
+        return 65_536;
+    }
+
+    // DeepSeek R1
+    if model.contains("deepseek-r1") {
+        return 16_000;
+    }
+
+    // --- Provider-based fallbacks for unrecognised models ---
+
+    if model.contains("claude") {
+        return 128_000;
+    }
+    if model.contains("gpt") {
+        return 128_000;
+    }
+    if model.contains("deepseek") {
+        return 384_000;
+    }
+
+    // Global fallback: largest known value
+    384_000
+}
+
 /// Information about an available model.
 #[derive(Clone, Debug)]
 pub struct ModelInfo {
