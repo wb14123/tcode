@@ -32,11 +32,49 @@ static BROWSER_STATE: LazyLock<Mutex<BrowserState>> = LazyLock::new(|| {
 static CHECKER_RUNNING: AtomicBool = AtomicBool::new(false);
 
 /// Get the Chrome user data directory for persistent sessions.
+///
+/// When Chromium/Chrome is installed via snap, uses a snap-accessible path
+/// because snap's AppArmor confinement blocks writes to `~/.tcode/`.
 pub fn chrome_data_dir() -> PathBuf {
-    dirs::home_dir()
-        .unwrap_or_else(|| PathBuf::from("."))
-        .join(".tcode")
-        .join("chrome")
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
+
+    // Detect snap-installed browsers and use a path inside the snap's writable area.
+    // Snap confinement only allows writes under ~/snap/<name>/.
+    if let Ok(exe) = headless_chrome::browser::default_executable()
+        && let Some(snap_name) = snap_name_from_exe(&exe)
+    {
+        return home
+            .join("snap")
+            .join(snap_name)
+            .join("common")
+            .join(".tcode-chrome");
+    }
+
+    home.join(".tcode").join("chrome")
+}
+
+/// Extract the snap package name from a binary path like
+/// `/snap/bin/chromium` or `/snap/chromium/current/usr/bin/chromium`.
+/// Returns `None` if the binary is not under `/snap/`.
+fn snap_name_from_exe(exe: &std::path::Path) -> Option<&str> {
+    let exe_str = exe.to_str()?;
+    if !exe_str.starts_with("/snap/") {
+        return None;
+    }
+    // "/snap/bin/chromium" -> Some("chromium")
+    // "/snap/chromium/3087/usr/bin/chromium-browser" -> Some("chromium")
+    let parts: Vec<&str> = exe_str.split('/').collect();
+    for (i, part) in parts.iter().enumerate() {
+        if *part == "snap"
+            && let Some(next) = parts.get(i + 1)
+        {
+            if *next == "bin" {
+                return parts.get(i + 2).copied();
+            }
+            return Some(next);
+        }
+    }
+    None
 }
 
 /// Configure the idle timeout for the shared browser.
