@@ -92,8 +92,10 @@ reasoning_effort = "xhigh"      # optional. minimal | low | medium | high | xhig
                                  # produce an API error so you can adjust.
                                  # Omit the key entirely for the default.
 max_tokens = 16000               # optional. Override max output tokens. Omit for automatic
-                                 # model-specific limits (e.g. 128K for GPT-5 / Claude Opus 4.6+,
-                                 # 384K for DeepSeek V4 Pro, 64K for Claude Sonnet/Haiku).
+                                 # model-specific limits (e.g. 128K for Claude Opus 4.6+, 384K
+                                 # for DeepSeek V4 Pro, 64K for Claude Sonnet/Haiku).  OpenAI
+                                 # providers ignore this field when omitted and let the API
+                                 # decide.
                                  # Set to a lower value to cap output; set to a higher value
                                  # only if the model supports more than the automatic limit.
 connect_timeout_secs = 30       # TCP connect timeout in seconds. Applies to Claude, OpenAI, and

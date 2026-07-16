@@ -27,7 +27,7 @@ use super::openai_common::effort_to_str;
 use super::sse;
 use super::{
     ChatOptions, GetTokenFn, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, TokenProvider,
-    ToolCall, model_max_output_tokens,
+    ToolCall,
 };
 use crate::tool::Tool;
 use crate::tool::normalize_schema;
@@ -681,9 +681,7 @@ impl LLM for OpenAI {
                 Some(tool_items)
             }
         };
-        let max_output_tokens = options
-            .max_tokens
-            .or_else(|| Some(model_max_output_tokens(&model)));
+        let max_output_tokens = options.max_tokens;
         let cache_key = self.cache_key.clone();
 
         // Build reasoning config
