@@ -113,6 +113,7 @@ mod tests {
             exclude_reasoning: true,
             connect_timeout_secs: Some(45),
             request_timeout_secs: Some(90),
+            media_generation_timeout_secs: Some(300),
             max_retries: Some(5),
         };
         let json = serde_json::to_string(&opts)?;
@@ -122,6 +123,7 @@ mod tests {
         assert!(deserialized.exclude_reasoning);
         assert_eq!(deserialized.connect_timeout_secs, Some(45));
         assert_eq!(deserialized.request_timeout_secs, Some(90));
+        assert_eq!(deserialized.media_generation_timeout_secs, Some(300));
         assert_eq!(deserialized.max_retries, Some(5));
         Ok(())
     }
@@ -137,6 +139,7 @@ mod tests {
         assert!(!deserialized.exclude_reasoning);
         assert_eq!(deserialized.connect_timeout_secs, None);
         assert_eq!(deserialized.request_timeout_secs, None);
+        assert_eq!(deserialized.media_generation_timeout_secs, None);
         assert_eq!(deserialized.max_retries, None);
         Ok(())
     }

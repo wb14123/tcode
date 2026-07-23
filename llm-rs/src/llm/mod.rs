@@ -204,6 +204,11 @@ pub struct ChatOptions {
     pub request_timeout_secs: Option<u64>,
     /// Max retry attempts for failed LLM requests (0 = no retry). None means use default (3).
     pub max_retries: Option<u32>,
+    /// Max seconds to wait for media generation (image, etc.) after MediaGenerationStarted.
+    /// This is separate from request_timeout_secs because media generation is not streamed
+    /// like text — the server produces the result in one shot and may need more time.
+    /// None means use default (300s).
+    pub media_generation_timeout_secs: Option<u64>,
 }
 
 // ============================================================================

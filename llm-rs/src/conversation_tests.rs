@@ -161,6 +161,7 @@ mod tests {
                 exclude_reasoning: false,
                 connect_timeout_secs: None,
                 request_timeout_secs: None,
+                media_generation_timeout_secs: None,
                 max_retries: None,
             },
             msg_id_counter: 42,

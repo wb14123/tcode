@@ -408,6 +408,7 @@ pub fn build_chat_options(config: &TcodeConfig) -> ChatOptions {
         reasoning_effort: Some(ReasoningEffort::XHigh),
         max_tokens: config.max_tokens,
         request_timeout_secs: config.request_timeout_secs,
+        media_generation_timeout_secs: config.media_generation_timeout_secs,
         max_retries: config.max_retries,
         ..Default::default()
     }

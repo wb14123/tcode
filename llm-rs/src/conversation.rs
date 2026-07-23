@@ -1784,6 +1784,12 @@ impl Conversation {
         let max_retries = self.env.chat_options.max_retries.unwrap_or(3);
         let read_timeout =
             Duration::from_secs(self.env.chat_options.request_timeout_secs.unwrap_or(120));
+        let media_timeout = Duration::from_secs(
+            self.env
+                .chat_options
+                .media_generation_timeout_secs
+                .unwrap_or(300),
+        );
 
         self.broadcast_msg(Message::AssistantMessageStart {
             msg_id: self.next_msg_id(),
@@ -1800,6 +1806,7 @@ impl Conversation {
                 self.llm
                     .chat(self.model.as_str(), &self.llm_msgs, &self.env.chat_options);
 
+            let mut idle_timeout = std::pin::pin!(tokio::time::sleep(read_timeout));
             let inner_result: StreamResult = loop {
                 let event = tokio::select! {
                     biased;
@@ -1813,7 +1820,7 @@ impl Conversation {
                             None => { break StreamResult::Success; }
                         }
                     }
-                    _ = tokio::time::sleep(read_timeout) => {
+                    _ = &mut idle_timeout => {
                         break StreamResult::Timeout;
                     }
                 };
@@ -1968,6 +1975,10 @@ impl Conversation {
                             msg_id: self.next_msg_id(),
                             media_id: media_id.clone(),
                         })?;
+                        idle_timeout
+                            .as_mut()
+                            .reset(tokio::time::Instant::now() + media_timeout);
+                        continue;
                     }
                     LLMEvent::MediaOutput {
                         media_id,
@@ -1991,6 +2002,9 @@ impl Conversation {
                         })?;
                     }
                 }
+                idle_timeout
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + read_timeout);
             };
 
             match inner_result {

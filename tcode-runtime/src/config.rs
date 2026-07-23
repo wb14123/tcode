@@ -28,6 +28,8 @@ pub struct TcodeConfig {
     #[serde(default)]
     pub request_timeout_secs: Option<u64>,
     #[serde(default)]
+    pub media_generation_timeout_secs: Option<u64>,
+    #[serde(default)]
     pub max_retries: Option<u32>,
 }
 
@@ -278,6 +280,7 @@ pub const DEFAULT_CONFIG_TEMPLATE: &str = r#"# tcode configuration
 # max_tokens =                   # optional. Override max output tokens. Omit for automatic model-specific limits.
 # connect_timeout_secs = 30    # TCP connect timeout in seconds
 # request_timeout_secs = 120   # max seconds between SSE events before timeout
+# media_generation_timeout_secs = 300   # max seconds to wait for media (image) generation after it starts
 # max_retries = 3              # max retry attempts (0 = no retry)
 
 # [layout]
