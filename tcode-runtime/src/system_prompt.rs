@@ -57,9 +57,11 @@ Strongly prefer the dedicated file tools over bash for reading code and files:
 Never use bash to read code or files: `cat`, `ls`, `find`, `grep`/`rg`, `head`, `tail`,
 `sed`, `awk`, `wc`, `echo` all have dedicated-tool or bash-parameter replacements.
 Bash commands using these utilities are auto-reviewed and may be denied - use
-`read`/`glob`/`grep` instead and skip the round-trip. The dedicated tools return
-structured, paginated output (line numbers, `#|` annotations, offset/limit control,
-char caps) that is token-efficient and precise; bash output is char-capped and truncated.
+`read`/`glob`/`grep` instead and skip the round-trip. Also do not use `git -C <path>`
+to run git against a different directory - pass the `workdir` parameter to the bash
+tool instead. The dedicated tools return structured, paginated output (line numbers,
+`#|` annotations, offset/limit control, char caps) that is token-efficient and precise;
+bash output is char-capped and truncated.
 
 ### Bash output filtering
 

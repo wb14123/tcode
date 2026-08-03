@@ -115,7 +115,7 @@ const STDERR_TAG: &str = "stderr| ";
 ///
 /// - Before creating files/dirs, verify parent dir exists. Quote paths with spaces.
 /// - Optional timeout, default 120000ms (2 min). Always provide a 5-10 word description.
-/// - Use `workdir` instead of `cd <dir> && <command>`.
+/// - Use `workdir` instead of `cd <dir> && <command>` or `git -C <dir>`.
 /// - Never use bash for `ls`, `find`, `grep`/`rg`, `cat`, `head`, `tail`, `sed`, `awk`, `wc`, `echo` — use `read` for files/directories, `glob` for recursive patterns, `grep` for content search. Such commands are auto-reviewed and may be denied.
 /// - Multiple commands: parallel tool calls for independent; `&&` for sequential dependent; `;` for sequential independent.
 #[tool(self_managed_cancellation = true)]
@@ -199,6 +199,7 @@ pub fn bash(
                  - `glob` tool → recursive file pattern matching\n\
                  - `grep` tool → content search in files\n\
                  - `filter` / `head` / `tail` params → output filtering and trimming\n\
+                 - `workdir` param → working directory instead of `cd` / `git -C`\n\
                  \n\
                  Do NOT retry with `skip_auto_review: true` as a shortcut. Only use it if you\n\
                  have thoroughly verified that no combination of built-in tools and bash\n\
@@ -736,8 +737,9 @@ fn finalize_log_file(
 /// Uses word-boundary regex `\b{word}\b` for each keyword. This may produce false
 /// positives on filenames like `grep-test` (since `\b` treats `-` as non-word boundary),
 /// which is acceptable — the review LLM will correctly respond CONTINUE for those.
+/// `git -C` is included because the bash tool's `workdir` parameter replaces it.
 const REVIEWABLE_KEYWORDS: &[&str] = &[
-    "ls", "find", "grep", "rg", "cat", "head", "tail", "sed", "awk", "echo", "2>&1",
+    "ls", "find", "grep", "rg", "cat", "head", "tail", "sed", "awk", "echo", "2>&1", "git -C",
 ];
 
 fn has_reviewable_keywords(command: &str) -> bool {
@@ -768,6 +770,7 @@ async fn review_bash_command(
          - bash `filter` parameter: filters command output line-by-line (replaces `grep`, `rg`, `sed`, `awk` in pipelines)\n\
          - bash `head` parameter: keeps first N lines (replaces `head` in pipelines)\n\
          - bash `tail` parameter: keeps last N lines (replaces `tail` in pipelines)\n\
+         - bash `workdir` parameter: sets the command's working directory (replaces `cd <dir> && <command>` and `git -C <dir>`)\n\
          - Direct response: for `echo`, the LLM should respond directly instead of using bash\n\
          - `2>&1` is NEVER needed — the bash tool automatically captures and merges both\n\
            stdout and stderr (each line is tagged `stdout| ` or `stderr| `). If the command\n\

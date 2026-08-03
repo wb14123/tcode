@@ -89,6 +89,15 @@ fn detects_echo() {
 }
 
 #[test]
+fn detects_git_minus_c() {
+    // `git -C <path>` is replaced by the bash tool's `workdir` parameter
+    assert!(has_reviewable_keywords("git -C /tmp status"));
+    assert!(has_reviewable_keywords("git -C /tmp"));
+    assert!(has_reviewable_keywords("git -C /repo log --oneline"));
+    assert!(has_reviewable_keywords("cd /x && git -C /y status"));
+}
+
+#[test]
 fn detects_keywords_in_pipelines() {
     assert!(has_reviewable_keywords("cargo test 2>&1 | grep FAIL"));
     assert!(has_reviewable_keywords("cargo build 2>&1 | tail -n 30"));
@@ -115,6 +124,7 @@ fn ignores_non_keyword_commands() {
     assert!(!has_reviewable_keywords("cargo test"));
     assert!(!has_reviewable_keywords("git status"));
     assert!(!has_reviewable_keywords("git log --oneline"));
+    assert!(!has_reviewable_keywords("git diff -C src/"));
     assert!(!has_reviewable_keywords("npm install"));
     assert!(!has_reviewable_keywords("docker ps"));
     assert!(!has_reviewable_keywords("python script.py"));
