@@ -572,3 +572,108 @@ async fn compound_with_read_command_prompts_for_file_read() -> Result<()> {
     );
     Ok(())
 }
+
+/// `>/dev/null` redirect auto-approves when file_write for /dev/null is granted.
+#[tokio::test]
+async fn dev_null_redirect_approved_with_grant() -> Result<()> {
+    if !std::path::Path::new("/dev/null").exists() {
+        // Non-Unix platform without /dev/null — nothing to test.
+        return Ok(());
+    }
+    let pm = Arc::new(PermissionManager::new(temp_perm_path()));
+    let canonical = tokio::fs::canonicalize("/dev/null").await?;
+    pm.add_permission(
+        PermissionKey {
+            tool: "file_write".to_string(),
+            key: "path".to_string(),
+            value: canonical.to_string_lossy().to_string(),
+        },
+        PermissionScope::Session,
+    )?;
+
+    let (workdir, project_root) = in_project_workdir();
+    // `echo hi > /dev/null` is a ReadCommand, whose layer also checks read
+    // permission on the workdir itself. Grant it so the only permission under
+    // test is the /dev/null redirect.
+    let canonical_workdir = tokio::fs::canonicalize(&workdir).await?;
+    pm.add_permission(
+        PermissionKey {
+            tool: "file_read".to_string(),
+            key: "path".to_string(),
+            value: canonical_workdir.to_string_lossy().to_string(),
+        },
+        PermissionScope::Session,
+    )?;
+
+    let scoped = ScopedPermissionManager::new(
+        "bash",
+        Arc::clone(&pm),
+        Arc::new(|| {}),
+        Arc::new(|| {}),
+        None,
+    );
+
+    let result =
+        check_bash_permission(&scoped, "echo hi > /dev/null", &workdir, &project_root).await;
+    assert!(
+        result.is_ok(),
+        "expected /dev/null redirect to auto-approve with grant, got {:?}",
+        result
+    );
+    assert!(
+        pm.snapshot().pending.is_empty(),
+        "expected no prompts for granted /dev/null redirect"
+    );
+    Ok(())
+}
+
+/// Without a grant, `>/dev/null` prompts for file_write on the redirect target.
+#[tokio::test]
+async fn dev_null_redirect_prompts_without_grant() -> Result<()> {
+    if !std::path::Path::new("/dev/null").exists() {
+        // Non-Unix platform without /dev/null — nothing to test.
+        return Ok(());
+    }
+    let pm = Arc::new(PermissionManager::new(temp_perm_path()));
+    let scoped = ScopedPermissionManager::new(
+        "bash",
+        Arc::clone(&pm),
+        Arc::new(|| {}),
+        Arc::new(|| {}),
+        None,
+    );
+
+    let (workdir, project_root) = in_project_workdir();
+    let scoped_clone = scoped.clone();
+    let handle = tokio::spawn(async move {
+        check_bash_permission(
+            &scoped_clone,
+            "echo hi > /dev/null",
+            &workdir,
+            &project_root,
+        )
+        .await
+    });
+
+    wait_for_pending(&pm, 1).await?;
+    let state = pm.snapshot();
+    assert_eq!(state.pending.len(), 1);
+    assert_eq!(
+        state.pending[0].tool, "file_write",
+        "redirect to /dev/null should prompt for file_write without a grant"
+    );
+
+    let key = PermissionKey {
+        tool: state.pending[0].tool.clone(),
+        key: state.pending[0].key.clone(),
+        value: state.pending[0].value.clone(),
+    };
+    pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
+    let result = handle.await?;
+    assert!(
+        result.is_err(),
+        "expected file_write denial for /dev/null redirect to cause error, got {:?}",
+        result
+    );
+    Ok(())
+}

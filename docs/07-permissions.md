@@ -38,7 +38,7 @@ The **key** says what *type* of resource the permission controls within that too
 
 The **value** is the actual resource being permitted. What it looks like depends on the key:
 
-- **`path`** values are directory paths like `/home/user/myproject`. A file permission always covers the *directory* (and all its children), not a single file. So granting `file_write > path > /home/user/myproject` lets the agent write to any file inside `/home/user/myproject/`.
+- **`path`** values are directory paths like `/home/user/myproject`. A file permission granted via a prompt always covers the *directory* (and all its children), not a single file. So granting `file_write > path > /home/user/myproject` lets the agent write to any file inside `/home/user/myproject/`. A path grant can also be a single file path (e.g. the built-in `/dev/null` grant), which covers exactly that file.
 
   `path` permissions gate the dedicated file tools — `read`, `write`, `edit`, `glob`, `grep`, and LSP-backed lookups. Each of those tools consults your grants before touching the filesystem, so for them the restriction is real. It is **not** a filesystem sandbox: the check happens at the tool boundary, not at the OS level. Bash commands are handled separately, by best-effort syntax analysis of the command — see [Bash commands and file paths](#how-matching-works) below.
 
@@ -64,13 +64,15 @@ Project permissions are saved to `~/.tcode/projects/<hash>/permissions.json`, wh
 
 Permissions are **hierarchical**:
 
-- **File paths:** A permission for `/home/user/myproject` also covers `/home/user/myproject/src/main.rs` and any other file or subdirectory within it.
+- **File paths:** A permission for `/home/user/myproject` also covers `/home/user/myproject/src/main.rs` and any other file or subdirectory within it — for reads and writes alike (a grant on any directory along a file's path matches that file). A permission can also target a single file path directly (e.g. `/dev/null`) — that grant covers exactly that file and nothing else.
 
 - **Commands:** A permission for `cargo` also covers `cargo build`, `cargo test --release`, etc. The system matches by prefix — if the command starts with the permitted value, it's allowed.
 
 - **Initial read access to the current directory (normal sessions only):** When you start tcode, it automatically grants a *session-scoped* `file_read > path > <project directory>` permission. This lets the agent explore the project without you having to approve every file read. The grant appears in the permission tree, so you can **revoke** it at any time — subsequent cwd reads will then prompt. Writing still requires explicit permission. Web-only sessions do not register local file tools, so this initial grant does not apply.
 
   > **Be mindful of where you launch tcode.** If you run `tcode` from `/home/user`, the agent can read everything under your home directory. Always launch tcode from the specific project directory you want to work in.
+
+- **`/dev/null` read/write access (normal sessions):** When you start tcode, it automatically grants *session-scoped* `file_read > path > /dev/null` and `file_write > path > /dev/null` permissions. This lets the agent use `/dev/null` as a discard sink or empty input without prompting — e.g. bash redirects like `cmd > /dev/null 2>&1` or `cat < /dev/null`. The grants appear in the permission tree, so you can **revoke** them at any time — subsequent uses of `/dev/null` will then prompt. Writing to `/dev/null` discards the data and reading it returns end-of-file, so these grants are safe by construction.
 
 - **Initial web_fetch access (web-only sessions):** When you start a web-only session with `--web-only`, tcode automatically grants a *session-scoped* `web_fetch > hostname > *` wildcard permission. This lets the agent fetch any hostname without prompting. The grant appears in the permission tree, so you can **revoke** it at any time — subsequent `web_fetch` calls will then prompt for each new hostname.
 

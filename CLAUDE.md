@@ -9,7 +9,7 @@ Always tail cargo output: `cargo check 2>&1 | tail -n 30`, `cargo build 2>&1 | t
 Never `cargo build --release` for dev — too slow. Use `cargo check` (fastest), `cargo build` (debug), `--release` only when user requests.
 
 ### After Every Change
-Run `cargo fmt` then `cargo clippy 2>&1 | tail -n 30`. Fix all warnings before done.
+Run `cargo fmt` then `cargo clippy --all-targets 2>&1 | tail -n 30` (the `--all-targets` flag also lints tests and examples). Fix all warnings before done.
 
 ### Lint Resolution
 - **Never add `#[allow(...)]`** to suppress warnings — fix the underlying issue instead.

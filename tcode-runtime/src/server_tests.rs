@@ -5,7 +5,9 @@ use std::time::{Duration, Instant};
 
 use llm_rs::conversation::{Message, MessageEndStatus};
 use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo};
-use llm_rs::permission::{KEY_HOSTNAME, PermissionKey, SCOPE_WEB_FETCH, WILDCARD_VALUE};
+use llm_rs::permission::{
+    KEY_HOSTNAME, PermissionKey, SCOPE_FILE_READ, SCOPE_FILE_WRITE, SCOPE_WEB_FETCH, WILDCARD_VALUE,
+};
 use llm_rs::tool::Tool;
 use tokio::net::UnixListener;
 use tokio_stream::Stream;
@@ -533,5 +535,36 @@ async fn close_stale_running_tool_call_writes_cancelled_status() -> anyhow::Resu
         }
     ));
 
+    Ok(())
+}
+
+/// The default /dev/null startup grants add session-scoped file_read + file_write.
+#[tokio::test]
+async fn dev_null_default_permissions_granted() -> anyhow::Result<()> {
+    if !std::path::Path::new("/dev/null").exists() {
+        // Non-Unix platform without /dev/null — nothing to test.
+        return Ok(());
+    }
+
+    let pm = Arc::new(llm_rs::permission::PermissionManager::new(
+        temp_dir().join("permissions.json"),
+    ));
+    crate::server::grant_dev_null_default_permissions(&pm).await;
+
+    let canonical = tokio::fs::canonicalize("/dev/null").await?;
+    let value = canonical.to_string_lossy().to_string();
+    let session = pm.snapshot().session;
+    for scope in [SCOPE_FILE_READ, SCOPE_FILE_WRITE] {
+        assert!(
+            session.iter().any(|k| {
+                k.tool == scope && k.key == llm_rs::permission::KEY_PATH && k.value == value
+            }),
+            "expected session grant {scope}/path/{value}"
+        );
+    }
+    assert!(
+        pm.snapshot().pending.is_empty(),
+        "default grants should not create pending requests"
+    );
     Ok(())
 }

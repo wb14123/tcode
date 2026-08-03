@@ -3,13 +3,13 @@ mod tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use anyhow::Result;
+    use anyhow::{Result, anyhow};
     use llm_rs::permission::{
         PermissionDecision, PermissionKey, PermissionManager, PermissionScope,
         ScopedPermissionManager,
     };
 
-    use crate::file_permission::check_file_read_permission;
+    use crate::file_permission::{check_file_read_permission, check_file_write_permission};
 
     fn test_root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/file_permission")
@@ -31,6 +31,27 @@ mod tests {
             tool: tool.to_string(),
             key: key.to_string(),
             value: value.to_string(),
+        }
+    }
+
+    /// Poll `pm.snapshot().pending.len()` until it equals `expected`, returning Err on
+    /// timeout. Used by tests that spawn a permission check in a task and need to
+    /// wait for a prompt to register.
+    async fn wait_for_pending(pm: &PermissionManager, expected: usize) -> Result<()> {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        loop {
+            let count = pm.snapshot().pending.len();
+            if count == expected {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err(anyhow!(
+                    "timed out waiting for {} pending requests (have {})",
+                    expected,
+                    count
+                ));
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
     }
 
@@ -159,6 +180,123 @@ mod tests {
         assert!(pm.snapshot().pending.is_empty());
 
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn exact_file_path_grant_matches_read() -> Result<()> {
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+
+        let dir = test_root().join(uuid::Uuid::new_v4().to_string());
+        let file = dir.join("target.txt");
+        std::fs::create_dir_all(&dir)?;
+        tokio::fs::write(&file, "content").await?;
+
+        // Grant file_read for the exact file path (not the parent directory).
+        let canonical = tokio::fs::canonicalize(&file).await?;
+        let key = make_key("file_read", "path", canonical.to_string_lossy().as_ref());
+        pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
+
+        let scoped = make_scoped(Arc::clone(&pm));
+        let result = check_file_read_permission(&scoped, &file, false).await;
+        assert!(
+            result.is_ok(),
+            "exact-file grant should match, got {:?}",
+            result
+        );
+        assert!(
+            pm.snapshot().pending.is_empty(),
+            "exact-file grant should not prompt"
+        );
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dev_null_grants_pass_read_and_write() -> Result<()> {
+        if !Path::new("/dev/null").exists() {
+            // Non-Unix platform without /dev/null — nothing to test.
+            return Ok(());
+        }
+
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let canonical = tokio::fs::canonicalize("/dev/null").await?;
+        let value = canonical.to_string_lossy().to_string();
+        for scope in ["file_read", "file_write"] {
+            pm.resolve(
+                &make_key(scope, "path", &value),
+                &PermissionDecision::AllowSession,
+                None,
+            )?;
+        }
+
+        let scoped = make_scoped(Arc::clone(&pm));
+
+        let read = check_file_read_permission(&scoped, Path::new("/dev/null"), false).await;
+        assert!(
+            read.is_ok(),
+            "read /dev/null with grant should pass, got {:?}",
+            read
+        );
+
+        let write = check_file_write_permission(&scoped, Path::new("/dev/null"), "", "bash").await;
+        assert!(
+            write.is_ok(),
+            "write /dev/null with grant should pass, got {:?}",
+            write
+        );
+
+        assert!(
+            pm.snapshot().pending.is_empty(),
+            "/dev/null grants should not prompt"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn dev_null_grant_does_not_cover_sibling_devices() -> Result<()> {
+        if !Path::new("/dev/null").exists() || !Path::new("/dev/zero").exists() {
+            // Non-Unix platform without device files — nothing to test.
+            return Ok(());
+        }
+
+        let pm = Arc::new(PermissionManager::new(temp_path()));
+        let canonical = tokio::fs::canonicalize("/dev/null").await?;
+        pm.resolve(
+            &make_key("file_write", "path", canonical.to_string_lossy().as_ref()),
+            &PermissionDecision::AllowSession,
+            None,
+        )?;
+
+        let scoped = make_scoped(Arc::clone(&pm));
+        let scoped_clone = scoped.clone();
+        let handle = tokio::spawn(async move {
+            check_file_write_permission(&scoped_clone, Path::new("/dev/zero"), "", "bash").await
+        });
+
+        // A /dev/null grant must NOT silently approve a write to a sibling
+        // device file — /dev/zero should still prompt.
+        wait_for_pending(&pm, 1).await?;
+        let state = pm.snapshot();
+        assert_eq!(state.pending.len(), 1);
+        assert_eq!(
+            state.pending[0].tool, "file_write",
+            "write to /dev/zero should prompt despite the /dev/null grant"
+        );
+
+        let key = PermissionKey {
+            tool: state.pending[0].tool.clone(),
+            key: state.pending[0].key.clone(),
+            value: state.pending[0].value.clone(),
+        };
+        pm.resolve(&key, &PermissionDecision::Deny { reason: None }, None)?;
+        let result = handle.await?;
+        assert!(
+            result.is_err(),
+            "expected file_write denial for /dev/zero to cause error, got {:?}",
+            result
+        );
         Ok(())
     }
 }

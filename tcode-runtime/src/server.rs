@@ -15,8 +15,8 @@ use llm_rs::conversation::{
 };
 use llm_rs::llm::{ChatOptions, LLM};
 use llm_rs::permission::{
-    KEY_HOSTNAME, KEY_PATH, PermissionKey, PermissionScope, SCOPE_FILE_READ, SCOPE_WEB_FETCH,
-    WILDCARD_VALUE,
+    KEY_HOSTNAME, KEY_PATH, PermissionKey, PermissionScope, SCOPE_FILE_READ, SCOPE_FILE_WRITE,
+    SCOPE_WEB_FETCH, WILDCARD_VALUE,
 };
 use llm_rs::tool::{ContainerConfig, Tool};
 use sha2::Digest;
@@ -641,6 +641,12 @@ impl Server {
                 .context("Failed to add cwd read permission")?;
         }
 
+        // Grant session-scoped file_read + file_write for /dev/null so the
+        // agent can use it as a discard sink / empty input without prompting
+        // (e.g. `cmd > /dev/null 2>&1`). Same pattern as the cwd read grant
+        // above: session-level, visible in the permission tree, and revocable.
+        grant_dev_null_default_permissions(manager.permission_manager()).await;
+
         // Grant session-scoped web_fetch wildcard permission for web-only
         // sessions so the agent can fetch any hostname without prompting.
         // Follows the same pattern as the cwd read grant above: session-level,
@@ -1051,6 +1057,39 @@ impl Server {
             }
         }
         Ok(())
+    }
+}
+
+/// Grant session-scoped `file_read` + `file_write` permissions for `/dev/null`
+/// so the agent can use it as a discard sink / empty input without prompting
+/// (e.g. bash redirects like `cmd > /dev/null 2>&1` or `cat < /dev/null`).
+///
+/// Follows the same pattern as the cwd read grant: session-level, visible in
+/// the permission tree, and revocable by the user. On platforms where
+/// `/dev/null` does not exist, logs a warning and skips the grants instead of
+/// failing — absence of the null device should never break session startup.
+pub(crate) async fn grant_dev_null_default_permissions(
+    permission_manager: &llm_rs::permission::PermissionManager,
+) {
+    let canonical = match tokio::fs::canonicalize("/dev/null").await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "Failed to canonicalize /dev/null; skipping default null-device grants: {e}"
+            );
+            return;
+        }
+    };
+    let value = canonical.to_string_lossy().to_string();
+    for scope in [SCOPE_FILE_READ, SCOPE_FILE_WRITE] {
+        let key = PermissionKey {
+            tool: scope.to_string(),
+            key: KEY_PATH.to_string(),
+            value: value.clone(),
+        };
+        if let Err(e) = permission_manager.add_permission(key, PermissionScope::Session) {
+            tracing::warn!("Failed to add {scope} permission for /dev/null: {e}");
+        }
     }
 }
 

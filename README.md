@@ -79,10 +79,10 @@ cargo check           # Quick type checking
 cargo build           # Debug build
 cargo test            # Run tests
 cargo fmt             # Format code
-cargo clippy          # Lint code
+cargo clippy --all-targets  # Lint code, tests, and examples
 ```
 
-Run `cargo fmt` and `cargo clippy` after each change to ensure consistent formatting and catch common issues.
+Run `cargo fmt` and `cargo clippy --all-targets` after each change to ensure consistent formatting and catch common issues.
 
 The web UI frontend is built separately with Node/Vite:
 

@@ -31,13 +31,16 @@ fn widen_to_project_dir(dir: &Path) -> PathBuf {
     }
 }
 
-/// Walk ancestors from `permission_dir` up to root, checking for a stored permission.
+/// Walk from `start_path` itself, then its ancestors up to root, checking for
+/// a stored permission. Starting at the path itself means exact-file-path
+/// grants (e.g. a default `/dev/null` grant) match, while directory grants
+/// still cover everything below them.
 fn has_ancestor_permission(
     permission: &ScopedPermissionManager,
     scope: &str,
-    permission_dir: &Path,
+    start_path: &Path,
 ) -> bool {
-    let mut ancestor: Option<&Path> = Some(permission_dir);
+    let mut ancestor: Option<&Path> = Some(start_path);
     while let Some(dir) = ancestor {
         let dir_str = dir.to_string_lossy();
         if permission.has_permission_for(scope, "path", &dir_str) {
@@ -76,9 +79,10 @@ async fn canonicalize_path(path: &Path) -> Result<(PathBuf, bool)> {
 
 /// Check whether the caller has permission to read `path`.
 ///
-/// Checks for a stored `file_read` permission (hierarchical, walking ancestor
-/// directories) or prompts the user. The initial cwd read permission is granted
-/// at session start and appears in the permission tree so it can be revoked.
+/// Checks for a stored `file_read` permission (hierarchical: the canonical
+/// path itself, then its ancestor directories) or prompts the user. The
+/// initial cwd read permission is granted at session start and appears in
+/// the permission tree so it can be revoked.
 pub async fn check_file_read_permission(
     permission: &ScopedPermissionManager,
     path: &Path,
@@ -90,7 +94,7 @@ pub async fn check_file_read_permission(
     }
 
     let permission_dir = permission_dir_for(&canonical_path, is_dir);
-    if has_ancestor_permission(permission, SCOPE_FILE_READ, &permission_dir) {
+    if has_ancestor_permission(permission, SCOPE_FILE_READ, &canonical_path) {
         return Ok(());
     }
 
@@ -119,6 +123,12 @@ pub async fn check_file_read_permission(
 /// When the file is inside the project directory (cwd), the permission prompt
 /// covers the entire project folder instead of just the parent directory,
 /// so a single "allow for session/project" grants write access project-wide.
+///
+/// The permission check walks the canonical path itself and then its
+/// ancestors, so exact-file-path grants (e.g. the default `/dev/null` grant)
+/// match, and a stored grant on any directory along the path — not just the
+/// prompt's project root — approves writes beneath it. The walk only matches
+/// existing explicit grants; it never grants anything by itself.
 pub async fn check_file_write_permission(
     permission: &ScopedPermissionManager,
     path: &Path,
@@ -129,7 +139,7 @@ pub async fn check_file_write_permission(
 
     let parent_dir = permission_dir_for(&canonical_path, false);
     let permission_dir = widen_to_project_dir(&parent_dir);
-    if has_ancestor_permission(permission, SCOPE_FILE_WRITE, &permission_dir) {
+    if has_ancestor_permission(permission, SCOPE_FILE_WRITE, &canonical_path) {
         return Ok(());
     }
 
