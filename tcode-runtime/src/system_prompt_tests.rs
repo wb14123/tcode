@@ -22,8 +22,27 @@ mod tests {
         assert!(prompt.contains("Current directory:"));
         assert!(prompt.contains("Subagent Rules"));
         assert!(prompt.contains("Tool Usage"));
-        assert!(prompt.contains("`read`/`write`/`edit`"));
+        assert!(prompt.contains("Strongly prefer the dedicated file tools"));
         assert!(prompt.contains("Output Style"));
+    }
+
+    #[test]
+    fn normal_system_prompt_prefers_file_tools_over_bash() {
+        let prompt = build_prompt(SessionMode::Normal, None);
+
+        assert!(prompt.contains("Never use bash to read code or files"));
+        assert!(prompt.contains("`cat`, `ls`, `find`, `grep`/`rg`"));
+        assert!(prompt.contains("auto-reviewed"));
+    }
+
+    #[test]
+    fn subagent_prompt_includes_file_tool_preference() {
+        let builder = tcode_system_prompt_builder(SessionMode::Normal, None);
+        let prompt = builder(SystemPromptContext { subagent_depth: 1 });
+
+        assert!(prompt.starts_with("You are a subagent spawned for a specific task."));
+        assert!(prompt.contains("Never use bash to read code or files"));
+        assert!(prompt.contains("Strongly prefer the dedicated file tools"));
     }
 
     #[test]

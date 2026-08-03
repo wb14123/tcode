@@ -48,8 +48,12 @@ const STDERR_TAG: &str = "stderr| ";
 
 /// Run a shell command and return its tagged, optionally filtered/trimmed output.
 ///
-/// Use this for terminal operations only (git, npm, cargo, docker, etc.). NOT for
-/// file ops — use `read`/`write`/`edit`/`grep`/`glob` for those.
+/// Use this for terminal operations only (git, npm, cargo, docker, etc.).
+/// Strongly prefer the dedicated file tools over bash for reading code and files:
+/// `read` for contents/directory listings, `glob` for finding files by pattern,
+/// `grep` for content search (and `write`/`edit` for modifications). Never use bash
+/// for `cat`, `ls`, `find`, `grep`/`rg`, `head`, `tail`, `sed`, `awk`, `wc`, `echo` —
+/// those utilities are auto-reviewed and may be denied; use the dedicated tools instead.
 ///
 /// ## Output format
 ///
@@ -112,7 +116,7 @@ const STDERR_TAG: &str = "stderr| ";
 /// - Before creating files/dirs, verify parent dir exists. Quote paths with spaces.
 /// - Optional timeout, default 120000ms (2 min). Always provide a 5-10 word description.
 /// - Use `workdir` instead of `cd <dir> && <command>`.
-/// - Never use bash for `ls`, `find`, `grep`, `cat`, `head`, `tail`, `sed`, `awk`, `echo` — use `read` for files/directories, `glob` for recursive patterns, `grep` for content search.
+/// - Never use bash for `ls`, `find`, `grep`/`rg`, `cat`, `head`, `tail`, `sed`, `awk`, `wc`, `echo` — use `read` for files/directories, `glob` for recursive patterns, `grep` for content search. Such commands are auto-reviewed and may be denied.
 /// - Multiple commands: parallel tool calls for independent; `&&` for sequential dependent; `;` for sequential independent.
 #[tool(self_managed_cancellation = true)]
 #[allow(clippy::too_many_arguments)]

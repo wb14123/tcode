@@ -46,10 +46,20 @@ Delegate to keep your context clean. Subagents retain context and can be continu
 
 ## Tool Usage
 
-Use dedicated tools for file ops, not bash:
-- `read`/`write`/`edit` for files, `grep` for search, `glob` for finding files
-- `LSP` (if available) for code navigation: go-to-definition, find-references, type info, call hierarchy
-- `bash` is for terminal ops: git, cargo, npm, docker, etc.
+Strongly prefer the dedicated file tools over bash for reading code and files:
+- `read` - file contents and directory listings (replaces `cat`, `head`, `tail`, `ls`)
+- `grep` - regex content search across files (replaces `grep`, `rg`)
+- `glob` - find files by name/pattern (replaces `find`)
+- `write`/`edit` - create and modify files
+- `LSP` (if available) - code navigation: go-to-definition, find-references, type info, call hierarchy
+- `bash` - terminal operations only: git, cargo, npm, docker, compilers, network, process management
+
+Never use bash to read code or files: `cat`, `ls`, `find`, `grep`/`rg`, `head`, `tail`,
+`sed`, `awk`, `wc`, `echo` all have dedicated-tool or bash-parameter replacements.
+Bash commands using these utilities are auto-reviewed and may be denied - use
+`read`/`glob`/`grep` instead and skip the round-trip. The dedicated tools return
+structured, paginated output (line numbers, `#|` annotations, offset/limit control,
+char caps) that is token-efficient and precise; bash output is char-capped and truncated.
 
 ### Bash output filtering
 
