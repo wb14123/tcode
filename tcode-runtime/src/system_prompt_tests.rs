@@ -36,6 +36,16 @@ mod tests {
     }
 
     #[test]
+    fn normal_system_prompt_prefers_simple_commands() {
+        let prompt = build_prompt(SessionMode::Normal, None);
+
+        assert!(prompt.contains("Prefer simple commands"));
+        assert!(prompt.contains("`&&`"));
+        assert!(prompt.contains("`;`"));
+        assert!(prompt.contains("auto-reviewed"));
+    }
+
+    #[test]
     fn subagent_prompt_includes_file_tool_preference() {
         let builder = tcode_system_prompt_builder(SessionMode::Normal, None);
         let prompt = builder(SystemPromptContext { subagent_depth: 1 });
@@ -43,6 +53,7 @@ mod tests {
         assert!(prompt.starts_with("You are a subagent spawned for a specific task."));
         assert!(prompt.contains("Never use bash to read code or files"));
         assert!(prompt.contains("Strongly prefer the dedicated file tools"));
+        assert!(prompt.contains("Prefer simple commands"));
     }
 
     #[test]

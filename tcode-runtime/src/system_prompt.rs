@@ -81,6 +81,14 @@ shell pipeline only when the processing cannot be expressed with \
 `filter` / `head` / `tail` (rare — e.g. `awk` column extraction, \
 `sort | uniq -c`).
 
+### Prefer simple commands
+
+Prefer one simple command per bash call over bundling several with `&&` or `;`. \
+Each bash call is auto-reviewed independently, so splitting steps into separate \
+calls is easier to review. Chain commands only when it serves a functional \
+purpose - e.g. piping output between commands - not just to run multiple \
+commands at once.
+
 ## Efficient Reading
 
 1. `grep` to find relevant lines → `read` with offset/limit for just that section

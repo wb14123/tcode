@@ -117,7 +117,7 @@ const STDERR_TAG: &str = "stderr| ";
 /// - Optional timeout, default 120000ms (2 min). Always provide a 5-10 word description.
 /// - Use `workdir` instead of `cd <dir> && <command>` or `git -C <dir>`.
 /// - Never use bash for `ls`, `find`, `grep`/`rg`, `cat`, `head`, `tail`, `sed`, `awk`, `wc`, `echo` — use `read` for files/directories, `glob` for recursive patterns, `grep` for content search. Such commands are auto-reviewed and may be denied.
-/// - Multiple commands: parallel tool calls for independent; `&&` for sequential dependent; `;` for sequential independent.
+/// - Prefer one command per call: don't bundle multiple commands with `&&` or `;` - separate bash calls are easier to review. Chain only when functionally useful (e.g. piping data between commands), not just to run several commands together.
 #[tool(self_managed_cancellation = true)]
 #[allow(clippy::too_many_arguments)]
 pub fn bash(
