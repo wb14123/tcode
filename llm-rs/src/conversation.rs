@@ -2,7 +2,6 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::AtomicI32;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
@@ -214,7 +213,6 @@ pub enum SystemMessageLevel {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum Message {
     UserMessage {
-        msg_id: MessageID,
         created_at: u64,
         content: Arc<String>,
         /// Relative paths from media/ dir like ["uuid.png"].
@@ -223,27 +221,21 @@ pub enum Message {
         media_filenames: Vec<String>,
     },
 
-    ConversationSaved {
-        msg_id: MessageID,
-    },
+    ConversationSaved {},
 
     AssistantMessageStart {
-        msg_id: MessageID,
         created_at: u64,
     },
 
     AssistantMessageChunk {
-        msg_id: MessageID,
         content: Arc<String>,
     },
 
     AssistantThinkingChunk {
-        msg_id: MessageID,
         content: Arc<String>,
     },
 
     AssistantMessageEnd {
-        msg_id: MessageID,
         end_status: MessageEndStatus,
         error: Option<String>,
         input_tokens: i32,
@@ -260,7 +252,6 @@ pub enum Message {
     },
 
     ToolMessageStart {
-        msg_id: MessageID,
         tool_call_id: String,
         created_at: u64,
         tool_name: String,
@@ -268,14 +259,12 @@ pub enum Message {
     },
 
     ToolOutputChunk {
-        msg_id: MessageID,
         tool_call_id: String,
         tool_name: String,
         content: Arc<ContentPart>,
     },
 
     ToolMessageEnd {
-        msg_id: MessageID,
         tool_call_id: String,
         end_status: MessageEndStatus,
         input_tokens: i32,
@@ -285,7 +274,6 @@ pub enum Message {
     /// Fired when a subagent tool call input is beginning to stream (before the conversation is
     /// created). Allows the UI to show a pending node immediately.
     SubAgentInputStart {
-        msg_id: MessageID,
         tool_call_index: usize,
         tool_call_id: String,
         tool_name: String,
@@ -294,21 +282,18 @@ pub enum Message {
 
     /// A partial chunk of subagent tool call input (task text).
     SubAgentInputChunk {
-        msg_id: MessageID,
         tool_call_index: usize,
         tool_name: String,
         content: Arc<String>,
     },
 
     SubAgentStart {
-        msg_id: MessageID,
         tool_call_id: String,
         conversation_id: String,
         description: String,
     },
 
     SubAgentEnd {
-        msg_id: MessageID,
         conversation_id: String,
         end_status: MessageEndStatus,
         response: Arc<String>,
@@ -318,7 +303,6 @@ pub enum Message {
 
     /// A sub-agent turn completed but the conversation is still alive (idle).
     SubAgentTurnEnd {
-        msg_id: MessageID,
         conversation_id: String,
         end_status: MessageEndStatus,
         response: Arc<String>,
@@ -330,7 +314,6 @@ pub enum Message {
 
     /// A sub-agent is being resumed with a follow-up message.
     SubAgentContinue {
-        msg_id: MessageID,
         tool_call_id: String,
         conversation_id: String,
         description: String,
@@ -346,7 +329,6 @@ pub enum Message {
 
     /// A tool call block has started streaming; name and id are now known.
     AssistantToolCallStart {
-        msg_id: MessageID,
         tool_call_index: usize,
         tool_call_id: String,
         tool_name: String,
@@ -355,7 +337,6 @@ pub enum Message {
 
     /// A partial JSON fragment of a tool call's arguments arrived.
     AssistantToolCallArgChunk {
-        msg_id: MessageID,
         tool_call_index: usize,
         tool_name: String,
         content: Arc<String>,
@@ -364,57 +345,47 @@ pub enum Message {
     /// Broadcast by subagent when the user types `/done` in its interactive edit window.
     /// Monitored by the parent's tool task to recover a cancelled subagent result.
     UserRequestEnd {
-        msg_id: MessageID,
         conversation_id: String,
     },
 
     /// Sent by tool task through loop_tx when a cancelled subagent is recovered via `/done`.
     ToolCallResolved {
-        msg_id: MessageID,
         tool_call_id: String,
         content: Arc<String>,
     },
 
     /// System-level message (info, warning, error)
     SystemMessage {
-        msg_id: MessageID,
         created_at: u64,
         level: SystemMessageLevel,
         message: String,
     },
 
     /// Signal that permission state has changed. UI should re-query for full state.
-    PermissionUpdated {
-        msg_id: MessageID,
-    },
+    PermissionUpdated {},
 
     /// Signal that a tool is waiting for user permission approval.
     ToolRequestPermission {
-        msg_id: MessageID,
         tool_call_id: String,
     },
 
     /// Signal that a previously requested permission was approved and the tool is resuming.
     ToolPermissionApproved {
-        msg_id: MessageID,
         tool_call_id: String,
     },
 
     /// A subagent (or one of its descendants) is waiting for user permission.
     SubAgentWaitingPermission {
-        msg_id: MessageID,
         conversation_id: String,
     },
 
     /// A subagent's pending permission was approved.
     SubAgentPermissionApproved {
-        msg_id: MessageID,
         conversation_id: String,
     },
 
     /// A subagent's tool was denied by the user.
     SubAgentPermissionDenied {
-        msg_id: MessageID,
         conversation_id: String,
     },
 
@@ -437,7 +408,6 @@ pub enum Message {
     /// The LLM has started generating media. Provides a media_id for
     /// correlation with the eventual AssistantMediaOutput.
     AssistantMediaGenerating {
-        msg_id: MessageID,
         media_id: String,
     },
 
@@ -445,7 +415,6 @@ pub enum Message {
     /// `media` is Some if generation succeeded, None if it failed.
     /// `media_id` correlates with AssistantMediaGenerating.
     AssistantMediaOutput {
-        msg_id: MessageID,
         media_id: String,
         end_status: MessageEndStatus,
         media: Option<MediaData>,
@@ -454,7 +423,6 @@ pub enum Message {
     /// Broadcast when an LLM request fails and is about to be retried.
     /// Emitted before the backoff sleep, so the UI can show status while waiting.
     LLMRetry {
-        msg_id: MessageID,
         /// Which retry attempt this is (1-indexed: 1, 2, 3...)
         attempt: u32,
         /// Total max retry attempts
@@ -463,6 +431,15 @@ pub enum Message {
         /// or the error message from the provider)
         reason: String,
     },
+}
+
+/// A broadcast message: a `Message` plus the monotonically increasing id
+/// assigned to it when it was broadcast. The id is unique per conversation
+/// and strictly increasing in broadcast order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BroadcastMessage {
+    pub id: MessageID,
+    pub msg: Message,
 }
 
 // ============================================================================
@@ -580,7 +557,7 @@ fn prepare_conversation(
     // non-lossy/backpressured persistence path.
     let (notify_tx, _) = broadcast::channel(10_000);
     let client = Arc::new(ConversationClient {
-        msg_id_counter: AtomicI32::new(msg_id_start),
+        msg_id_counter: parking_lot::Mutex::new(msg_id_start),
         msgs: parking_lot::RwLock::new(Vec::new()),
         summary: parking_lot::RwLock::new(summary),
         input_channel_tx: input_tx,
@@ -1072,7 +1049,6 @@ fn log_and_broadcast_system_message(
         SystemMessageLevel::Info => tracing::info!(%message),
     }
     if let Err(e) = client.notify_msg(Message::SystemMessage {
-        msg_id: client.next_msg_id(),
         created_at: now_millis(),
         level,
         message,
@@ -1104,7 +1080,9 @@ struct SubagentResponse {
 /// Collect a subagent's first-turn response and publish results to the parent via `loop_tx`.
 /// `/done` recovery after cancellation is handled by the server's `UserRequestEnd` handler.
 async fn collect_subagent_response(
-    sub_stream: &mut (impl Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + Unpin),
+    sub_stream: &mut (
+             impl Stream<Item = Result<Arc<BroadcastMessage>, BroadcastStreamRecvError>> + Unpin
+         ),
     cancel_token: &CancellationToken,
     subagent_client: &ConversationClient,
     parent_client: &Arc<ConversationClient>,
@@ -1143,7 +1121,7 @@ async fn collect_subagent_response(
             }
         };
 
-        match &*msg {
+        match &msg.msg {
             Message::AssistantMessageChunk { content, .. } => {
                 resp.text.push_str(content);
             }
@@ -1304,7 +1282,6 @@ async fn collect_subagent_response(
                     cancel_token.is_cancelled() || resp.end_status == MessageEndStatus::Cancelled;
                 loop_tx
                     .send(Message::ToolOutputChunk {
-                        msg_id: 0,
                         tool_call_id: tool_call_id.to_string(),
                         tool_name: "subagent".to_string(),
                         content: Arc::new(ContentPart::Text(text)),
@@ -1313,7 +1290,6 @@ async fn collect_subagent_response(
                     .context("failed to send ToolOutputChunk")?;
                 loop_tx
                     .send(Message::ToolMessageEnd {
-                        msg_id: 0,
                         tool_call_id: tool_call_id.to_string(),
                         end_status: if cancelled {
                             MessageEndStatus::Cancelled
@@ -1331,7 +1307,6 @@ async fn collect_subagent_response(
             // Tool in subagent requests permission → bubble SubAgent status to parent
             Message::ToolRequestPermission { .. } => {
                 if let Err(e) = parent_client.notify_msg(Message::SubAgentWaitingPermission {
-                    msg_id: parent_client.next_msg_id(),
                     conversation_id: subagent_conv_id.to_string(),
                 }) {
                     tracing::error!(error = %e, "failed to send SubAgentWaitingPermission to parent");
@@ -1340,7 +1315,6 @@ async fn collect_subagent_response(
             // Tool permission approved → bubble up
             Message::ToolPermissionApproved { .. } => {
                 if let Err(e) = parent_client.notify_msg(Message::SubAgentPermissionApproved {
-                    msg_id: parent_client.next_msg_id(),
                     conversation_id: subagent_conv_id.to_string(),
                 }) {
                     tracing::error!(error = %e, "failed to send SubAgentPermissionApproved to parent");
@@ -1352,7 +1326,6 @@ async fn collect_subagent_response(
                 ..
             } => {
                 if let Err(e) = parent_client.notify_msg(Message::SubAgentPermissionDenied {
-                    msg_id: parent_client.next_msg_id(),
                     conversation_id: subagent_conv_id.to_string(),
                 }) {
                     tracing::error!(error = %e, "failed to send SubAgentPermissionDenied to parent");
@@ -1360,22 +1333,17 @@ async fn collect_subagent_response(
             }
             // Forward permission signals to parent so the UI sees them
             Message::PermissionUpdated { .. } => {
-                if let Err(e) = parent_client.notify_msg(Message::PermissionUpdated {
-                    msg_id: parent_client.next_msg_id(),
-                }) {
+                if let Err(e) = parent_client.notify_msg(Message::PermissionUpdated {}) {
                     tracing::error!(error = %e, "failed to forward PermissionUpdated to parent");
                 }
             }
             // Recursive bubble-up from nested subagents: re-emit with THIS subagent's conversation_id
             Message::SubAgentWaitingPermission { .. } => {
                 // Also forward PermissionUpdated so the permission UI works at all ancestor levels
-                if let Err(e) = parent_client.notify_msg(Message::PermissionUpdated {
-                    msg_id: parent_client.next_msg_id(),
-                }) {
+                if let Err(e) = parent_client.notify_msg(Message::PermissionUpdated {}) {
                     tracing::error!(error = %e, "failed to forward PermissionUpdated to parent");
                 }
                 if let Err(e) = parent_client.notify_msg(Message::SubAgentWaitingPermission {
-                    msg_id: parent_client.next_msg_id(),
                     conversation_id: subagent_conv_id.to_string(),
                 }) {
                     tracing::error!(error = %e, "failed to re-emit SubAgentWaitingPermission to parent");
@@ -1383,7 +1351,6 @@ async fn collect_subagent_response(
             }
             Message::SubAgentPermissionApproved { .. } => {
                 if let Err(e) = parent_client.notify_msg(Message::SubAgentPermissionApproved {
-                    msg_id: parent_client.next_msg_id(),
                     conversation_id: subagent_conv_id.to_string(),
                 }) {
                     tracing::error!(error = %e, "failed to re-emit SubAgentPermissionApproved to parent");
@@ -1391,7 +1358,6 @@ async fn collect_subagent_response(
             }
             Message::SubAgentPermissionDenied { .. } => {
                 if let Err(e) = parent_client.notify_msg(Message::SubAgentPermissionDenied {
-                    msg_id: parent_client.next_msg_id(),
                     conversation_id: subagent_conv_id.to_string(),
                 }) {
                     tracing::error!(error = %e, "failed to re-emit SubAgentPermissionDenied to parent");
@@ -1498,17 +1464,12 @@ enum StreamResult {
 
 /// Multi round LLM conversation. Thread and async safe.
 impl Conversation {
-    fn next_msg_id(&self) -> MessageID {
-        self.env.client.next_msg_id()
-    }
-
     fn broadcast_msg(&self, msg: Message) -> Result<()> {
         self.env.client.notify_msg(msg)
     }
 
     fn broadcast_cancelled_end(&self) -> Result<()> {
         self.broadcast_msg(Message::AssistantMessageEnd {
-            msg_id: self.next_msg_id(),
             end_status: MessageEndStatus::Cancelled,
             error: None,
             input_tokens: 0,
@@ -1562,9 +1523,7 @@ impl Conversation {
             let target = dir.join("conversation-state.json");
             std::fs::write(&tmp, &json)?;
             std::fs::rename(&tmp, &target)?;
-            if let Err(e) = self.broadcast_msg(Message::ConversationSaved {
-                msg_id: self.next_msg_id(),
-            }) {
+            if let Err(e) = self.broadcast_msg(Message::ConversationSaved {}) {
                 tracing::warn!(error = %e, "failed to broadcast conversation saved notification");
             }
         }
@@ -1598,7 +1557,6 @@ impl Conversation {
             format_subagent_result(conversation_id, &response.text, &response.end_status);
 
         client.notify_msg(Message::SubAgentTurnEnd {
-            msg_id: client.next_msg_id(),
             conversation_id: conversation_id.to_string(),
             end_status: response.end_status.clone(),
             response: Arc::new(result_text.clone()),
@@ -1638,11 +1596,9 @@ impl Conversation {
                     // (for subagents) can still forward the PermissionUpdated signal.
                     self.env.permission_manager.close_all_pending();
                     self.broadcast_msg(Message::PermissionUpdated {
-                        msg_id: self.next_msg_id(),
-                    })?;
+                                })?;
                     self.broadcast_msg(Message::AssistantMessageEnd {
-                        msg_id: self.next_msg_id(),
-                        end_status: MessageEndStatus::Cancelled,
+                                    end_status: MessageEndStatus::Cancelled,
                         error: None,
                         input_tokens: 0,
                         output_tokens: 0,
@@ -1667,8 +1623,7 @@ impl Conversation {
                                 self.fill_remaining_cancelled(true)?;
                                 self.env.permission_manager.close_all_pending();
                                 self.broadcast_msg(Message::PermissionUpdated {
-                                    msg_id: self.next_msg_id(),
-                                })?;
+                                                        })?;
                                 self.env.client.reset_cancel_token();
                             }
                             self.cancelled_tools.clear();
@@ -1685,8 +1640,7 @@ impl Conversation {
                             }
                             self.push_llm_msg(LLMMessage::User(parts))?;
                             self.broadcast_msg(Message::UserMessage {
-                                msg_id: self.next_msg_id(),
-                                created_at: now_millis(),
+                                                    created_at: now_millis(),
                                 content: Arc::clone(&content),
                                 media_filenames: media_filenames.clone(),
                             })?;
@@ -1792,7 +1746,6 @@ impl Conversation {
         );
 
         self.broadcast_msg(Message::AssistantMessageStart {
-            msg_id: self.next_msg_id(),
             created_at: now_millis(),
         })?;
 
@@ -1833,14 +1786,12 @@ impl Conversation {
                         got_content = true;
                         accumulated_text.push_str(&text);
                         self.broadcast_msg(Message::AssistantMessageChunk {
-                            msg_id: self.next_msg_id(),
                             content: Arc::new(text),
                         })?;
                     }
                     LLMEvent::ThinkingDelta(text) => {
                         got_content = true;
                         self.broadcast_msg(Message::AssistantThinkingChunk {
-                            msg_id: self.next_msg_id(),
                             content: Arc::new(text),
                         })?;
                     }
@@ -1853,7 +1804,6 @@ impl Conversation {
                         tool_call_names.insert(index, name.clone());
                         if name == "subagent" || name == "continue_subagent" {
                             self.broadcast_msg(Message::SubAgentInputStart {
-                                msg_id: self.next_msg_id(),
                                 tool_call_index: index,
                                 tool_call_id: id,
                                 tool_name: name,
@@ -1861,7 +1811,6 @@ impl Conversation {
                             })?;
                         } else {
                             self.broadcast_msg(Message::AssistantToolCallStart {
-                                msg_id: self.next_msg_id(),
                                 tool_call_index: index,
                                 tool_call_id: id,
                                 tool_name: name,
@@ -1876,14 +1825,12 @@ impl Conversation {
                         let tool_name = tool_call_names.get(&index).cloned().unwrap_or_default();
                         if tool_name == "subagent" || tool_name == "continue_subagent" {
                             self.broadcast_msg(Message::SubAgentInputChunk {
-                                msg_id: self.next_msg_id(),
                                 tool_call_index: index,
                                 tool_name,
                                 content: Arc::new(partial_json),
                             })?;
                         } else {
                             self.broadcast_msg(Message::AssistantToolCallArgChunk {
-                                msg_id: self.next_msg_id(),
                                 tool_call_index: index,
                                 tool_name,
                                 content: Arc::new(partial_json),
@@ -1918,7 +1865,6 @@ impl Conversation {
                         };
 
                         self.broadcast_msg(Message::AssistantMessageEnd {
-                            msg_id: self.next_msg_id(),
                             end_status,
                             error,
                             input_tokens,
@@ -1972,7 +1918,6 @@ impl Conversation {
                     }
                     LLMEvent::MediaGenerationStarted { media_id } => {
                         self.broadcast_msg(Message::AssistantMediaGenerating {
-                            msg_id: self.next_msg_id(),
                             media_id: media_id.clone(),
                         })?;
                         idle_timeout
@@ -1987,7 +1932,6 @@ impl Conversation {
                     } => {
                         let media = MediaData::new(relative_path, media_type);
                         self.broadcast_msg(Message::AssistantMediaOutput {
-                            msg_id: self.next_msg_id(),
                             media_id,
                             end_status: MessageEndStatus::Succeeded,
                             media: Some(media),
@@ -1995,7 +1939,6 @@ impl Conversation {
                     }
                     LLMEvent::MediaGenerationFailed { media_id } => {
                         self.broadcast_msg(Message::AssistantMediaOutput {
-                            msg_id: self.next_msg_id(),
                             media_id,
                             end_status: MessageEndStatus::Failed,
                             media: None,
@@ -2022,7 +1965,6 @@ impl Conversation {
                         _ => unreachable!(),
                     };
                     self.broadcast_msg(Message::LLMRetry {
-                        msg_id: self.next_msg_id(),
                         attempt: attempt + 1,
                         max_retries,
                         reason,
@@ -2046,7 +1988,6 @@ impl Conversation {
                 }
                 StreamResult::Timeout => {
                     self.broadcast_msg(Message::AssistantMessageEnd {
-                        msg_id: self.next_msg_id(),
                         end_status: MessageEndStatus::Timeout,
                         error: None,
                         input_tokens: 0,
@@ -2064,7 +2005,6 @@ impl Conversation {
                 }
                 StreamResult::Error(error) => {
                     self.broadcast_msg(Message::AssistantMessageEnd {
-                        msg_id: self.next_msg_id(),
                         end_status: MessageEndStatus::Failed,
                         error: Some(error),
                         input_tokens: 0,
@@ -2194,7 +2134,6 @@ fn spawn_tool_task(
             let message = format!("Tool task failed: {}", e);
             tracing::error!(%message);
             if let Err(e2) = client.notify_msg(Message::SystemMessage {
-                msg_id: client.next_msg_id(),
                 created_at: now_millis(),
                 level: SystemMessageLevel::Error,
                 message,
@@ -2231,7 +2170,6 @@ impl Drop for ToolCompleteGuard {
         if !self.defused {
             // Best-effort send — the channel is bounded so we use try_send.
             if let Err(e) = self.loop_tx.try_send(Message::ToolMessageEnd {
-                msg_id: 0,
                 tool_call_id: self.tool_call_id.clone(),
                 end_status: MessageEndStatus::Failed,
                 input_tokens: 0,
@@ -2264,7 +2202,6 @@ async fn execute_regular_tool(
     );
 
     env.client.notify_msg(Message::ToolMessageStart {
-        msg_id: env.client.next_msg_id(),
         tool_call_id: tool_call.id.clone(),
         created_at: now_millis(),
         tool_name: tool_call.name.clone(),
@@ -2280,20 +2217,16 @@ async fn execute_regular_tool(
         Arc::clone(&env.permission_manager),
         Arc::new(move || {
             if let Err(e) = client_clone.notify_msg(Message::ToolRequestPermission {
-                msg_id: client_clone.next_msg_id(),
                 tool_call_id: tc_id.clone(),
             }) {
                 tracing::error!(error = %e, "failed to send ToolRequestPermission");
             }
-            if let Err(e) = client_clone.notify_msg(Message::PermissionUpdated {
-                msg_id: client_clone.next_msg_id(),
-            }) {
+            if let Err(e) = client_clone.notify_msg(Message::PermissionUpdated {}) {
                 tracing::error!(error = %e, "failed to send PermissionUpdated");
             }
         }),
         Arc::new(move || {
             if let Err(e) = client_clone2.notify_msg(Message::ToolPermissionApproved {
-                msg_id: client_clone2.next_msg_id(),
                 tool_call_id: tc_id2.clone(),
             }) {
                 tracing::error!(error = %e, "failed to send ToolPermissionApproved");
@@ -2323,14 +2256,12 @@ async fn execute_regular_tool(
             );
             let content = Arc::new(chunk.clone());
             env.client.notify_msg(Message::ToolOutputChunk {
-                msg_id: env.client.next_msg_id(),
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
                 content: Arc::clone(&content),
             })?;
             loop_tx
                 .send(Message::ToolOutputChunk {
-                    msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
                     content,
@@ -2359,14 +2290,12 @@ async fn execute_regular_tool(
         );
         let content = Arc::new(ContentPart::Text(error_msg.clone()));
         env.client.notify_msg(Message::ToolOutputChunk {
-            msg_id: env.client.next_msg_id(),
             tool_call_id: tool_call.id.clone(),
             tool_name: tool_call.name.clone(),
             content: Arc::clone(&content),
         })?;
         loop_tx
             .send(Message::ToolOutputChunk {
-                msg_id: 0,
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
                 content,
@@ -2380,16 +2309,13 @@ async fn execute_regular_tool(
     // If the tool was cancelled (possibly while waiting for permission), notify
     // the permission UI so it refreshes and drops any stale pending entries.
     if end_status == MessageEndStatus::Cancelled
-        && let Err(e) = env.client.notify_msg(Message::PermissionUpdated {
-            msg_id: env.client.next_msg_id(),
-        })
+        && let Err(e) = env.client.notify_msg(Message::PermissionUpdated {})
     {
         tracing::error!(error = %e, "failed to send PermissionUpdated on cancel");
     }
 
     // Broadcast ToolMessageEnd for UI
     env.client.notify_msg(Message::ToolMessageEnd {
-        msg_id: env.client.next_msg_id(),
         tool_call_id: tool_call.id.clone(),
         end_status: end_status.clone(),
         input_tokens: 0,
@@ -2399,7 +2325,6 @@ async fn execute_regular_tool(
     // Send ToolMessageEnd to event loop
     loop_tx
         .send(Message::ToolMessageEnd {
-            msg_id: 0,
             tool_call_id: tool_call.id.clone(),
             end_status,
             input_tokens: 0,
@@ -2415,7 +2340,7 @@ async fn execute_regular_tool(
 /// response, publishes results to the parent, and — if cancelled — keeps watching for
 /// `UserRequestEnd` (the user typing `/done`) to recover the subagent result.
 fn spawn_subagent_stream_handler(
-    mut sub_stream: impl Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>>
+    mut sub_stream: impl Stream<Item = Result<Arc<BroadcastMessage>, BroadcastStreamRecvError>>
     + Unpin
     + Send
     + 'static,
@@ -2461,7 +2386,6 @@ async fn execute_subagent(
             let error = format!("Error: Failed to parse subagent arguments: {}", e);
             loop_tx
                 .send(Message::ToolOutputChunk {
-                    msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
                     content: Arc::new(ContentPart::Text(error)),
@@ -2469,7 +2393,6 @@ async fn execute_subagent(
                 .await?;
             loop_tx
                 .send(Message::ToolMessageEnd {
-                    msg_id: 0,
                     tool_call_id: tool_call.id,
                     end_status: MessageEndStatus::Failed,
                     input_tokens: 0,
@@ -2507,7 +2430,6 @@ async fn execute_subagent(
             let error = format!("Error: Failed to create subagent state dir: {}", e);
             loop_tx
                 .send(Message::ToolOutputChunk {
-                    msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
                     content: Arc::new(ContentPart::Text(error)),
@@ -2515,7 +2437,6 @@ async fn execute_subagent(
                 .await?;
             loop_tx
                 .send(Message::ToolMessageEnd {
-                    msg_id: 0,
                     tool_call_id: tool_call.id,
                     end_status: MessageEndStatus::Failed,
                     input_tokens: 0,
@@ -2549,7 +2470,6 @@ async fn execute_subagent(
                 let error = format!("Error: Failed to create subagent conversation: {}", e);
                 loop_tx
                     .send(Message::ToolOutputChunk {
-                        msg_id: 0,
                         tool_call_id: tool_call.id.clone(),
                         tool_name: tool_call.name.clone(),
                         content: Arc::new(ContentPart::Text(error)),
@@ -2557,7 +2477,6 @@ async fn execute_subagent(
                     .await?;
                 loop_tx
                     .send(Message::ToolMessageEnd {
-                        msg_id: 0,
                         tool_call_id: tool_call.id,
                         end_status: MessageEndStatus::Failed,
                         input_tokens: 0,
@@ -2589,7 +2508,6 @@ async fn execute_subagent(
     );
     env.client
         .notify_msg(Message::SubAgentStart {
-            msg_id: env.client.next_msg_id(),
             tool_call_id: tool_call.id.clone(),
             conversation_id: subagent_conv_id.clone(),
             description: task_preview,
@@ -2602,7 +2520,6 @@ async fn execute_subagent(
         let error = format!("Error: Failed to send task to subagent: {}", e);
         env.client
             .notify_msg(Message::SubAgentEnd {
-                msg_id: env.client.next_msg_id(),
                 conversation_id: subagent_conv_id.clone(),
                 end_status: MessageEndStatus::Failed,
                 response: Arc::new(error.clone()),
@@ -2612,7 +2529,6 @@ async fn execute_subagent(
             .context("failed to broadcast SubAgentEnd")?;
         loop_tx
             .send(Message::ToolOutputChunk {
-                msg_id: 0,
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
                 content: Arc::new(ContentPart::Text(error)),
@@ -2620,7 +2536,6 @@ async fn execute_subagent(
             .await?;
         loop_tx
             .send(Message::ToolMessageEnd {
-                msg_id: 0,
                 tool_call_id: tool_call.id,
                 end_status: MessageEndStatus::Failed,
                 input_tokens: 0,
@@ -2656,7 +2571,6 @@ async fn execute_continue_subagent(
             let error = format!("Error: Failed to parse continue_subagent arguments: {}", e);
             loop_tx
                 .send(Message::ToolOutputChunk {
-                    msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
                     content: Arc::new(ContentPart::Text(error)),
@@ -2664,7 +2578,6 @@ async fn execute_continue_subagent(
                 .await?;
             loop_tx
                 .send(Message::ToolMessageEnd {
-                    msg_id: 0,
                     tool_call_id: tool_call.id,
                     end_status: MessageEndStatus::Failed,
                     input_tokens: 0,
@@ -2687,7 +2600,6 @@ async fn execute_continue_subagent(
             );
             loop_tx
                 .send(Message::ToolOutputChunk {
-                    msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
                     content: Arc::new(ContentPart::Text(error)),
@@ -2695,7 +2607,6 @@ async fn execute_continue_subagent(
                 .await?;
             loop_tx
                 .send(Message::ToolMessageEnd {
-                    msg_id: 0,
                     tool_call_id: tool_call.id,
                     end_status: MessageEndStatus::Failed,
                     input_tokens: 0,
@@ -2708,7 +2619,6 @@ async fn execute_continue_subagent(
             let error = format!("Error: Failed to get subagent conversation: {}", e);
             loop_tx
                 .send(Message::ToolOutputChunk {
-                    msg_id: 0,
                     tool_call_id: tool_call.id.clone(),
                     tool_name: tool_call.name.clone(),
                     content: Arc::new(ContentPart::Text(error)),
@@ -2716,7 +2626,6 @@ async fn execute_continue_subagent(
                 .await?;
             loop_tx
                 .send(Message::ToolMessageEnd {
-                    msg_id: 0,
                     tool_call_id: tool_call.id,
                     end_status: MessageEndStatus::Failed,
                     input_tokens: 0,
@@ -2742,7 +2651,6 @@ async fn execute_continue_subagent(
 
     env.client
         .notify_msg(Message::SubAgentContinue {
-            msg_id: env.client.next_msg_id(),
             tool_call_id: tool_call.id.clone(),
             conversation_id: params.conversation_id.clone(),
             description: msg_preview,
@@ -2755,7 +2663,6 @@ async fn execute_continue_subagent(
         let error = format!("Error: Failed to send follow-up to subagent: {}", e);
         env.client
             .notify_msg(Message::SubAgentTurnEnd {
-                msg_id: env.client.next_msg_id(),
                 conversation_id: params.conversation_id,
                 end_status: MessageEndStatus::Failed,
                 response: Arc::new(error.clone()),
@@ -2767,7 +2674,6 @@ async fn execute_continue_subagent(
             .context("failed to broadcast SubAgentTurnEnd")?;
         loop_tx
             .send(Message::ToolOutputChunk {
-                msg_id: 0,
                 tool_call_id: tool_call.id.clone(),
                 tool_name: tool_call.name.clone(),
                 content: Arc::new(ContentPart::Text(error)),
@@ -2775,7 +2681,6 @@ async fn execute_continue_subagent(
             .await?;
         loop_tx
             .send(Message::ToolMessageEnd {
-                msg_id: 0,
                 tool_call_id: tool_call.id,
                 end_status: MessageEndStatus::Failed,
                 input_tokens: 0,
@@ -2799,11 +2704,11 @@ async fn execute_continue_subagent(
 
 /// Use for the client to send chat messages and subscribe to the conversation's messages.
 pub struct ConversationClient {
-    msg_id_counter: AtomicI32,
-    msgs: parking_lot::RwLock<Vec<Arc<Message>>>,
+    msg_id_counter: parking_lot::Mutex<i32>,
+    msgs: parking_lot::RwLock<Vec<Arc<BroadcastMessage>>>,
     summary: parking_lot::RwLock<ConversationSummary>,
     input_channel_tx: mpsc::Sender<Message>,
-    new_msg_notify_tx: broadcast::Sender<Arc<Message>>,
+    new_msg_notify_tx: broadcast::Sender<Arc<BroadcastMessage>>,
     tool_cancel_tokens: parking_lot::Mutex<HashMap<String, CancellationToken>>,
     /// Conversation-level cancellation token. Cancelling this cancels all child tool tokens.
     cancel_token: parking_lot::Mutex<CancellationToken>,
@@ -2812,16 +2717,19 @@ pub struct ConversationClient {
 }
 
 impl ConversationClient {
-    /// Allocate the next unique message ID.
-    pub fn next_msg_id(&self) -> MessageID {
-        self.msg_id_counter
-            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
-    }
-
     /// Read the current counter value (for snapshotting state).
     pub(crate) fn msg_id_counter_value(&self) -> i32 {
-        self.msg_id_counter
-            .load(std::sync::atomic::Ordering::SeqCst)
+        *self.msg_id_counter.lock()
+    }
+
+    /// Ensure the id counter is at least `min`, so the next assigned id exceeds
+    /// every id already persisted to disk (e.g. after resume-time synthetic
+    /// stale-close events extended a file's id range beyond the saved counter).
+    pub fn ensure_msg_id_counter_at_least(&self, min: i32) {
+        let mut counter = self.msg_id_counter.lock();
+        if *counter < min {
+            *counter = min;
+        }
     }
 
     pub fn conversation_summary(&self) -> ConversationSummary {
@@ -2910,7 +2818,6 @@ impl ConversationClient {
     /// Broadcast a warning-level system message to subscribers.
     pub fn broadcast_system_warning(&self, message: String) {
         if let Err(e) = self.notify_msg(Message::SystemMessage {
-            msg_id: self.next_msg_id(),
             created_at: now_millis(),
             level: SystemMessageLevel::Warning,
             message,
@@ -2961,7 +2868,6 @@ impl ConversationClient {
     pub async fn send_chat(&self, content: &str) -> Result<()> {
         self.input_channel_tx
             .send(Message::UserMessage {
-                msg_id: self.next_msg_id(),
                 created_at: now_millis(),
                 content: Arc::new(content.to_string()),
                 media_filenames: vec![],
@@ -2979,7 +2885,6 @@ impl ConversationClient {
     ) -> Result<()> {
         self.input_channel_tx
             .send(Message::UserMessage {
-                msg_id: self.next_msg_id(),
                 created_at: now_millis(),
                 content: Arc::new(content.to_string()),
                 media_filenames,
@@ -2991,16 +2896,19 @@ impl ConversationClient {
     /// Used for conversation to notify a new message if available
     pub fn notify_msg(&self, msg: Message) -> Result<()> {
         self.update_summary_for_message(&msg);
-        let msg = Arc::new(msg);
-        self.msgs.write().push(Arc::clone(&msg));
-        self.new_msg_notify_tx.send(msg).map_err(|e| {
+        let mut counter = self.msg_id_counter.lock();
+        let id = *counter;
+        *counter += 1;
+        let envelope = Arc::new(BroadcastMessage { id, msg });
+        self.msgs.write().push(Arc::clone(&envelope));
+        self.new_msg_notify_tx.send(envelope).map_err(|e| {
             anyhow::anyhow!("failed to send msg to the notification broadcast: {e}")
         })?;
         Ok(())
     }
 
     /// Get a snapshot of all messages in the conversation.
-    pub fn get_messages(&self) -> Vec<Arc<Message>> {
+    pub fn get_messages(&self) -> Vec<Arc<BroadcastMessage>> {
         self.msgs.read().clone()
     }
 
@@ -3010,12 +2918,20 @@ impl ConversationClient {
     /// then the stream continues with normal messages.
     pub fn subscribe(
         &self,
-    ) -> impl Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + use<> {
+    ) -> impl Stream<Item = Result<Arc<BroadcastMessage>, BroadcastStreamRecvError>> + use<> {
         // TODO: handle error and return error in stream
-        let msgs = self.msgs.read();
+        // Hold the counter mutex while snapshotting history and subscribing to
+        // the live channel. notify_msg pushes to msgs and broadcasts under this
+        // same lock, so no broadcast can slip between the two steps: every
+        // message is delivered exactly once, either in the replay or on the
+        // live channel. Without the lock a concurrent notify_msg could be
+        // missed entirely (sent before the subscribe) or delivered twice
+        // (already in the snapshot and again on the channel).
+        let _guard = self.msg_id_counter.lock();
+        let msgs = self.msgs.read().clone();
         let tx = self.new_msg_notify_tx.subscribe();
         let stream = BroadcastStream::new(tx);
-        tokio_stream::iter(msgs.clone().into_iter().map(Ok)).chain(stream)
+        tokio_stream::iter(msgs.into_iter().map(Ok)).chain(stream)
     }
 
     /// Extract the latest assistant response text from this conversation's message history.
@@ -3025,8 +2941,8 @@ impl ConversationClient {
         let msgs = self.msgs.read();
         let mut chunks = Vec::new();
         let mut found_end = false;
-        for msg in msgs.iter().rev() {
-            match &**msg {
+        for env in msgs.iter().rev() {
+            match &env.msg {
                 Message::AssistantMessageEnd { .. } if !found_end => {
                     found_end = true;
                 }
@@ -3055,7 +2971,6 @@ impl ConversationClient {
     ) -> Result<()> {
         self.input_channel_tx
             .send(Message::ToolCallResolved {
-                msg_id: 0,
                 tool_call_id,
                 content,
             })
@@ -3067,7 +2982,7 @@ impl ConversationClient {
     /// Useful for continue_subagent to avoid reprocessing old messages.
     pub fn subscribe_new(
         &self,
-    ) -> impl Stream<Item = Result<Arc<Message>, BroadcastStreamRecvError>> + use<> {
+    ) -> impl Stream<Item = Result<Arc<BroadcastMessage>, BroadcastStreamRecvError>> + use<> {
         let tx = self.new_msg_notify_tx.subscribe();
         BroadcastStream::new(tx)
     }
@@ -3080,7 +2995,7 @@ impl ConversationClient {
         // tests exercise the same lag tolerance for streamed tool output.
         let (notify_tx, _) = broadcast::channel(10_000);
         ConversationClient {
-            msg_id_counter: AtomicI32::new(0),
+            msg_id_counter: parking_lot::Mutex::new(0),
             msgs: parking_lot::RwLock::new(Vec::new()),
             summary: parking_lot::RwLock::new(ConversationSummary::default()),
             input_channel_tx: input_tx,

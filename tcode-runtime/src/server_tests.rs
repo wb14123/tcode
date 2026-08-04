@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use llm_rs::conversation::{Message, MessageEndStatus};
+use llm_rs::conversation::{BroadcastMessage, Message, MessageEndStatus};
 use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo};
 use llm_rs::permission::{
     KEY_HOSTNAME, PermissionKey, SCOPE_FILE_READ, SCOPE_FILE_WRITE, SCOPE_WEB_FETCH, WILDCARD_VALUE,
@@ -500,12 +500,14 @@ async fn server_run_removes_stale_socket_inside_startup_path_before_bind() -> an
 async fn close_stale_running_tool_call_writes_cancelled_status() -> anyhow::Result<()> {
     let dir = temp_dir();
     let tool_call_id = "tool-1";
-    let start = Message::ToolMessageStart {
-        msg_id: 1,
-        tool_call_id: tool_call_id.to_string(),
-        created_at: 0,
-        tool_name: "bash".to_string(),
-        tool_args: "{}".to_string(),
+    let start = BroadcastMessage {
+        id: 5,
+        msg: Message::ToolMessageStart {
+            tool_call_id: tool_call_id.to_string(),
+            created_at: 0,
+            tool_name: "bash".to_string(),
+            tool_args: "{}".to_string(),
+        },
     };
     let line = serde_json::to_string(&start)?;
     tokio::fs::write(dir.join("display.jsonl"), format!("{line}\n")).await?;
@@ -515,7 +517,7 @@ async fn close_stale_running_tool_call_writes_cancelled_status() -> anyhow::Resu
     )
     .await?;
 
-    close_stale_running_items(&dir).await?;
+    let high_waters = close_stale_running_items(&dir).await?;
 
     let status =
         tokio::fs::read_to_string(dir.join(format!("tool-call-{tool_call_id}-status.txt"))).await?;
@@ -526,14 +528,131 @@ async fn close_stale_running_tool_call_writes_cancelled_status() -> anyhow::Resu
         .lines()
         .last()
         .expect("display should contain synthetic end event");
-    let end: Message = serde_json::from_str(last_line)?;
+    let end: BroadcastMessage = serde_json::from_str(last_line)?;
+    // Synthetic end continues from the max existing id (5) + 1.
+    assert_eq!(end.id, 6);
     assert!(matches!(
-        end,
+        end.msg,
         Message::ToolMessageEnd {
             end_status: MessageEndStatus::Cancelled,
             ..
         }
     ));
+
+    // The returned high-water is the id the conversation's counter must be at
+    // least so the next broadcast exceeds all persisted ids (5, plus the
+    // synthetic 6 -> next id 7).
+    assert_eq!(high_waters.get(&dir).copied(), Some(7));
+
+    Ok(())
+}
+
+/// Legacy-format display.jsonl lines (old sessions with `msg_id` inside the
+/// variant) must still be recognized, and the synthetic stale-close event must
+/// continue from the legacy id, written in the new envelope format.
+#[tokio::test]
+async fn close_stale_legacy_format_line_migrates_to_envelope() -> anyhow::Result<()> {
+    let dir = temp_dir();
+    let legacy_line = serde_json::json!({
+        "ToolMessageStart": {
+            "msg_id": 1,
+            "tool_call_id": "tool-1",
+            "created_at": 0,
+            "tool_name": "bash",
+            "tool_args": "{}",
+        }
+    });
+    tokio::fs::write(dir.join("display.jsonl"), format!("{legacy_line}\n")).await?;
+
+    let high_waters = close_stale_running_items(&dir).await?;
+
+    let display = tokio::fs::read_to_string(dir.join("display.jsonl")).await?;
+    let last_line = display
+        .lines()
+        .last()
+        .expect("display should contain synthetic end event");
+    let end: BroadcastMessage = serde_json::from_str(last_line)?;
+    // Legacy msg_id 1 is the max existing id; the synthetic end continues with 2.
+    assert_eq!(end.id, 2);
+    assert!(matches!(
+        end.msg,
+        Message::ToolMessageEnd {
+            end_status: MessageEndStatus::Cancelled,
+            ..
+        }
+    ));
+
+    // High-water continues past the synthetic id: next id must be at least 3.
+    assert_eq!(high_waters.get(&dir).copied(), Some(3));
+
+    Ok(())
+}
+
+/// Per-tool-call files can carry chunks (e.g. ToolOutputChunk) whose ids never
+/// reached display.jsonl; the synthetic stale-close id must continue from the
+/// highest id across BOTH files.
+#[tokio::test]
+async fn close_stale_id_scan_includes_per_tool_call_files() -> anyhow::Result<()> {
+    let dir = temp_dir();
+    let tool_call_id = "tool-1";
+
+    // display.jsonl only carries the start event (id 1)...
+    let start = serde_json::json!({
+        "id": 1,
+        "msg": {
+            "ToolMessageStart": {
+                "tool_call_id": tool_call_id,
+                "created_at": 0,
+                "tool_name": "bash",
+                "tool_args": "{}",
+            }
+        }
+    });
+    tokio::fs::write(dir.join("display.jsonl"), format!("{start}\n")).await?;
+
+    // ...while the per-tool-call file carries a later chunk (id 10) that never
+    // reached display.jsonl (preview throttling drops many chunks).
+    let chunk = serde_json::json!({
+        "id": 10,
+        "msg": {
+            "ToolOutputChunk": {
+                "tool_call_id": tool_call_id,
+                "tool_name": "bash",
+                "content": "partial output",
+            }
+        }
+    });
+    tokio::fs::write(
+        dir.join(format!("tool-call-{tool_call_id}.jsonl")),
+        format!("{chunk}\n"),
+    )
+    .await?;
+
+    let high_waters = close_stale_running_items(&dir).await?;
+
+    let display = tokio::fs::read_to_string(dir.join("display.jsonl")).await?;
+    let last_line = display
+        .lines()
+        .last()
+        .expect("display should contain synthetic end event");
+    let end: BroadcastMessage = serde_json::from_str(last_line)?;
+    // Synthetic end continues from max(1, 10) + 1 = 11.
+    assert_eq!(end.id, 11);
+    assert!(matches!(
+        end.msg,
+        Message::ToolMessageEnd {
+            end_status: MessageEndStatus::Cancelled,
+            ..
+        }
+    ));
+
+    // The same envelope is appended to the per-tool-call file.
+    let tc = tokio::fs::read_to_string(dir.join(format!("tool-call-{tool_call_id}.jsonl"))).await?;
+    let tc_end: BroadcastMessage = serde_json::from_str(tc.lines().last().expect("tool-call end"))?;
+    assert_eq!(tc_end.id, 11);
+
+    // High-water continues past the synthetic id: next id must be at least 12.
+    assert_eq!(high_waters.get(&dir).copied(), Some(12));
 
     Ok(())
 }

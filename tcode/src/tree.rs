@@ -6,7 +6,7 @@ use std::sync::mpsc;
 use std::time::Duration;
 
 use anyhow::Result;
-use llm_rs::conversation::{Message, MessageEndStatus};
+use llm_rs::conversation::{BroadcastMessage, Message, MessageEndStatus};
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
@@ -361,15 +361,21 @@ impl TreeState {
             if line.is_empty() {
                 continue;
             }
-            match serde_json::from_str::<Message>(line) {
-                Ok(msg) => self.process_event(&dir, owner_node, &msg),
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        line = %line.chars().take(80).collect::<String>(),
-                        "Failed to parse JSONL line"
-                    );
-                }
+            // New wire format: {"id": N, "msg": {"Variant": {...}}}; legacy
+            // files are {"Variant": {..., "msg_id": N}}. A resumed old session
+            // can produce mixed-format lines in one file, so parse per line.
+            match serde_json::from_str::<BroadcastMessage>(line) {
+                Ok(env) => self.process_event(&dir, owner_node, &env.msg),
+                Err(_) => match serde_json::from_str::<Message>(line) {
+                    Ok(msg) => self.process_event(&dir, owner_node, &msg),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            line = %line.chars().take(80).collect::<String>(),
+                            "Failed to parse JSONL line"
+                        );
+                    }
+                },
             }
         }
 
@@ -1391,4 +1397,41 @@ pub fn run_tree(session: Session) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tree_tests {
+    use std::fs::File;
+    use std::io::Write;
+
+    use super::TreeState;
+
+    fn test_root() -> std::path::PathBuf {
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/tree")
+    }
+
+    fn temp_dir() -> std::path::PathBuf {
+        let dir = test_root().join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&dir).expect("failed to create test dir");
+        dir
+    }
+
+    #[test]
+    fn dual_parse_new_and_legacy_lines() -> anyhow::Result<()> {
+        let dir = temp_dir();
+        let display_file = dir.join("display.jsonl");
+        let new_format = r#"{"id": 5, "msg": {"AssistantToolCallStart": {"tool_call_index": 0, "tool_call_id": "t1", "tool_name": "bash", "created_at": 0}}}"#;
+        let legacy_format = r#"{"AssistantToolCallStart": {"msg_id": 3, "tool_call_index": 1, "tool_call_id": "t2", "tool_name": "bash", "created_at": 0}}"#;
+        let mut file = File::create(&display_file)?;
+        writeln!(file, "{new_format}")?;
+        writeln!(file, "{legacy_format}")?;
+        drop(file);
+
+        let mut state = TreeState::new(dir, "test-session".to_string());
+        state.read_file(&display_file);
+
+        assert!(state.tool_call_idx.contains_key("t1"));
+        assert!(state.tool_call_idx.contains_key("t2"));
+        Ok(())
+    }
 }

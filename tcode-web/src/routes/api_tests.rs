@@ -3,8 +3,8 @@ use std::path::{Path, PathBuf};
 use axum::response::IntoResponse;
 
 use super::api::{
-    empty_permission_state, ensure_session_resumable, heartbeat_interval_seconds,
-    jsonl_line_from_bytes, send_appended_jsonl_events,
+    empty_permission_state, ensure_session_resumable, find_subagent_tool_call_id,
+    heartbeat_interval_seconds, jsonl_line_from_bytes, send_appended_jsonl_events,
 };
 
 fn test_root() -> PathBuf {
@@ -15,6 +15,15 @@ fn temp_dir() -> PathBuf {
     let dir = test_root().join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&dir).expect("failed to create test dir");
     dir
+}
+
+async fn resolve_tool_call_id(
+    display_path: &Path,
+    subagent_id: &str,
+) -> anyhow::Result<Option<String>> {
+    find_subagent_tool_call_id(display_path, subagent_id)
+        .await
+        .map_err(|e| anyhow::anyhow!("find_subagent_tool_call_id failed: {:?}", e))
 }
 
 #[test]
@@ -189,5 +198,89 @@ async fn jsonl_stream_reader_does_not_advance_past_invalid_utf8_line() -> anyhow
         rx.try_recv(),
         Err(tokio::sync::mpsc::error::TryRecvError::Empty)
     ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn find_subagent_tool_call_id_resolves_legacy_and_envelope_lines() -> anyhow::Result<()> {
+    let dir = temp_dir();
+    let display = dir.join("display.jsonl");
+    let legacy = serde_json::json!({
+        "SubAgentStart": {
+            "msg_id": 1,
+            "tool_call_id": "tool-1",
+            "conversation_id": "sub-1",
+            "description": "d"
+        }
+    });
+    let envelope = serde_json::json!({
+        "id": 2,
+        "msg": {
+            "SubAgentContinue": {
+                "tool_call_id": "tool-2",
+                "conversation_id": "sub-1",
+                "description": "d"
+            }
+        }
+    });
+    let other = serde_json::json!({
+        "id": 3,
+        "msg": {
+            "SubAgentStart": {
+                "tool_call_id": "tool-3",
+                "conversation_id": "sub-other",
+                "description": "d"
+            }
+        }
+    });
+    tokio::fs::write(
+        &display,
+        format!("{}\nnot json\n{}\n{}\n", legacy, envelope, other),
+    )
+    .await?;
+
+    assert_eq!(
+        resolve_tool_call_id(&display, "sub-1").await?.as_deref(),
+        Some("tool-2")
+    );
+    assert_eq!(
+        resolve_tool_call_id(&display, "sub-other")
+            .await?
+            .as_deref(),
+        Some("tool-3")
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn find_subagent_tool_call_id_legacy_only_missing_and_nonmatching() -> anyhow::Result<()> {
+    let dir = temp_dir();
+    let display = dir.join("display.jsonl");
+    let legacy = serde_json::json!({
+        "SubAgentStart": {
+            "msg_id": 1,
+            "tool_call_id": "tool-1",
+            "conversation_id": "sub-1",
+            "description": "d"
+        }
+    });
+    tokio::fs::write(&display, format!("{}\n", legacy)).await?;
+
+    assert_eq!(
+        resolve_tool_call_id(&display, "sub-1").await?.as_deref(),
+        Some("tool-1")
+    );
+    assert_eq!(
+        resolve_tool_call_id(&display, "sub-other")
+            .await?
+            .as_deref(),
+        None
+    );
+    assert_eq!(
+        resolve_tool_call_id(&dir.join("does-not-exist.jsonl"), "sub-1")
+            .await?
+            .as_deref(),
+        None
+    );
     Ok(())
 }

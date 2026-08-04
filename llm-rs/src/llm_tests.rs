@@ -150,7 +150,6 @@ mod tests {
     fn message_llm_retry_serde() -> anyhow::Result<()> {
         use crate::conversation::Message;
         let msg = Message::LLMRetry {
-            msg_id: 42,
             attempt: 2,
             max_retries: 3,
             reason: "request timed out after 120s".to_string(),
@@ -159,12 +158,10 @@ mod tests {
         let deserialized: Message = serde_json::from_str(&json)?;
         match deserialized {
             Message::LLMRetry {
-                msg_id,
                 attempt,
                 max_retries,
                 reason,
             } => {
-                assert_eq!(msg_id, 42);
                 assert_eq!(attempt, 2);
                 assert_eq!(max_retries, 3);
                 assert_eq!(reason, "request timed out after 120s");

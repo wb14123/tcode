@@ -55,12 +55,35 @@ function asNumber(value: unknown): number | null {
   return typeof value === 'number' ? value : null;
 }
 
-function oneKeyObject(value: unknown): [string, Record<string, unknown>] | null {
+function taggedPayload(value: unknown): [string, Record<string, unknown>] | null {
   const record = asRecord(value);
   if (!record) {
     return null;
   }
 
+  // Envelope shape: {"id": <number>, "msg": {"Variant": {...}}}. Detected
+  // first so a legacy single-key line whose only key happens to be "msg" is
+  // never misread as an envelope.
+  const msg = asRecord(record.msg);
+  if (msg) {
+    const entries = Object.entries(msg);
+    if (entries.length !== 1) {
+      return null;
+    }
+
+    const [variant, payload] = entries[0];
+    const payloadRecord = asRecord(payload);
+    const id = asNumber(record.id);
+    if (!payloadRecord || id === null) {
+      return null;
+    }
+
+    // Normalize: expose the envelope id to handlers as payload.msg_id.
+    payloadRecord.msg_id = id;
+    return [variant, payloadRecord];
+  }
+
+  // Legacy shape: single top-level variant key, e.g. {"Variant": {...}}.
   const entries = Object.entries(record);
   if (entries.length !== 1) {
     return null;
@@ -83,7 +106,7 @@ export function parseStreamLine(rawText: string): RawStreamEvent | null {
 
   try {
     const rawJson = JSON.parse(rawText) as unknown;
-    const tagged = oneKeyObject(rawJson);
+    const tagged = taggedPayload(rawJson);
     const wire: WireMessageEnvelope | null = tagged
       ? {
           variant: tagged[0],

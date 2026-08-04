@@ -1578,6 +1578,12 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
         if line ~= '' then
           local ok, event = pcall(vim.json.decode, line)
           if ok and event then
+            -- New wire format: {"id": N, "msg": {"Variant": {...}}}. Unwrap
+            -- to the legacy {"Variant": {...}} shape the renderers expect.
+            -- Legacy lines have no top-level "msg" key and pass through.
+            if type(event) == 'table' and type(event.msg) == 'table' then
+              event = event.msg
+            end
             if on_event then
               local variant, event_data = next(event)
               local ev_ok, ev_err = pcall(on_event, variant, event_data)

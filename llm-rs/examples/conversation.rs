@@ -119,8 +119,8 @@ async fn main() -> anyhow::Result<()> {
         while let Some(result) = msg_stream.next().await {
             match result {
                 Ok(msg) => {
-                    let done = matches!(*msg, Message::AssistantRequestEnd { .. });
-                    print_message(&msg);
+                    let done = matches!(&msg.msg, Message::AssistantRequestEnd { .. });
+                    print_message(&msg.msg);
                     if done {
                         break;
                     }

@@ -16,7 +16,7 @@ use axum::{
 };
 use base64::Engine;
 use llm_rs::{
-    conversation::{ConversationState, Message},
+    conversation::{BroadcastMessage, ConversationState, Message},
     permission::{PermissionDecision, PermissionKey, PermissionScope, PermissionState},
 };
 use serde::{Deserialize, Serialize};
@@ -1087,7 +1087,7 @@ async fn root_conversation_id(session_dir: &Path) -> ApiResult<String> {
     Ok(state.id)
 }
 
-async fn find_subagent_tool_call_id(
+pub(crate) async fn find_subagent_tool_call_id(
     display_path: &Path,
     subagent_id: &str,
 ) -> ApiResult<Option<String>> {
@@ -1099,9 +1099,12 @@ async fn find_subagent_tool_call_id(
 
     let mut last_match = None;
     for line in text.lines() {
-        let event = match serde_json::from_str::<Message>(line) {
-            Ok(event) => event,
-            Err(_) => continue,
+        let event = match serde_json::from_str::<BroadcastMessage>(line) {
+            Ok(envelope) => envelope.msg,
+            Err(_) => match serde_json::from_str::<Message>(line) {
+                Ok(event) => event,
+                Err(_) => continue,
+            },
         };
         match event {
             Message::SubAgentStart {

@@ -1,6 +1,6 @@
 import { TimelineStore } from './src/timeline-store.ts';
 import { StreamEventBatcher } from './src/stream-event-batcher.ts';
-import { ConversationTimelineBuilder } from './src/messages.ts';
+import { ConversationTimelineBuilder, parseStreamLine } from './src/messages.ts';
 import { specialToolArgsPresentation } from './src/tool-args.ts';
 import { subagentRowTitle } from './src/timeline-render-helpers.ts';
 
@@ -327,7 +327,35 @@ async function validateStreamEventBatcher() {
   assert(batches[2].join(',') === 'AssistantMessageEnd', 'final event applies as its own batch');
 }
 
+function validateWireFormatNormalization() {
+  const newShape = parseStreamLine(
+    '{"id": 7, "msg": {"UserMessage": {"created_at": 123, "content": "hi", "media_filenames": []}}}',
+  );
+  assert(newShape?.wire?.variant === 'UserMessage', 'new shape parses the variant from the msg envelope');
+  assert(newShape?.wire?.payload.msg_id === 7, 'new shape injects the envelope id into payload.msg_id');
+
+  const legacyShape = parseStreamLine(
+    '{"UserMessage": {"msg_id": 7, "created_at": 123, "content": "hi", "media_filenames": []}}',
+  );
+  assert(legacyShape?.wire?.variant === 'UserMessage', 'legacy shape parses the top-level variant key');
+  assert(legacyShape?.wire?.payload.msg_id === 7, 'legacy shape keeps the payload msg_id');
+
+  const noMsgIdVariant = parseStreamLine('{"id": 8, "msg": {"AggregateTokenUpdate": {}}}');
+  assert(noMsgIdVariant?.wire?.variant === 'AggregateTokenUpdate', 'new shape parses variants that historically had no msg_id');
+  assert(
+    noMsgIdVariant?.wire?.payload.msg_id === 8,
+    'new shape normalizes msg_id for variants that historically had none',
+  );
+
+  const multiVariant = parseStreamLine('{"id": 8, "msg": {"UserMessage": {}, "AssistantMessageStart": {}}}');
+  assert(multiVariant?.wire === null, 'multi-variant msg envelopes fall back to raw events');
+
+  const notAnEnvelope = parseStreamLine('{"id": 8, "msg": "not an object"}');
+  assert(notAnEnvelope?.wire === null, 'non-object msg values fall back to raw events');
+}
+
 validateTimelineStore();
+validateWireFormatNormalization();
 validateSubagentInputAggregation();
 validateActiveWorkState();
 validateSpecialToolArgsPresentation();

@@ -639,8 +639,8 @@ mod tests {
         mock: MockLlm,
         chat_options: ChatOptions,
         dir: &Path,
-    ) -> anyhow::Result<Vec<Arc<crate::conversation::Message>>> {
-        use crate::conversation::Message;
+    ) -> anyhow::Result<Vec<Arc<crate::conversation::BroadcastMessage>>> {
+        use crate::conversation::{BroadcastMessage, Message};
         let permissions_file = dir.join("permissions.json");
         std::fs::write(&permissions_file, "[]")?;
         let manager = ConversationManager::new(permissions_file, None);
@@ -661,7 +661,7 @@ mod tests {
         let mut stream = client.subscribe();
         client.send_chat("Hello").await?;
 
-        let mut messages: Vec<Arc<Message>> = Vec::new();
+        let mut messages: Vec<Arc<BroadcastMessage>> = Vec::new();
         let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
         tokio::pin!(deadline);
 
@@ -670,7 +670,7 @@ mod tests {
                 msg = stream.next() => {
                     match msg {
                         Some(Ok(m)) => {
-                            let is_end = matches!(&*m, Message::AssistantMessageEnd { .. });
+                            let is_end = matches!(&m.msg, Message::AssistantMessageEnd { .. });
                             messages.push(m);
                             if is_end {
                                 break;
@@ -691,11 +691,11 @@ mod tests {
 
     /// Extract a sorted, de-duplicated list of Message variant names for
     /// asserting the presence of expected variants.
-    fn msg_variants(msgs: &[Arc<crate::conversation::Message>]) -> Vec<String> {
+    fn msg_variants(msgs: &[Arc<crate::conversation::BroadcastMessage>]) -> Vec<String> {
         let mut names: Vec<String> = msgs
             .iter()
             .map(|m| {
-                let s = format!("{:?}", m);
+                let s = format!("{:?}", &m.msg);
                 s.split('{').next().unwrap_or(&s).trim().to_string()
             })
             .collect();
@@ -706,10 +706,10 @@ mod tests {
 
     /// Count occurrences of a specific Message variant in the collected messages.
     fn count_msg<T: Fn(&crate::conversation::Message) -> bool>(
-        msgs: &[Arc<crate::conversation::Message>],
+        msgs: &[Arc<crate::conversation::BroadcastMessage>],
         pred: T,
     ) -> usize {
-        msgs.iter().filter(|m| pred(m)).count()
+        msgs.iter().filter(|m| pred(&m.msg)).count()
     }
 
     // ----------------------------------------------------------------
@@ -760,7 +760,7 @@ mod tests {
         // Verify specific retry attempts
         let retry_attempts: Vec<u32> = msgs
             .iter()
-            .filter_map(|m| match &**m {
+            .filter_map(|m| match &m.msg {
                 Message::LLMRetry { attempt, .. } => Some(*attempt),
                 _ => None,
             })
@@ -769,17 +769,17 @@ mod tests {
 
         // Chunk with "Hello" content arrived on retry
         let has_hello = msgs.iter().any(|m| {
-            matches!(m.as_ref(), Message::AssistantMessageChunk { content, .. } if content.as_ref() == "Hello")
+            matches!(&m.msg, Message::AssistantMessageChunk { content, .. } if content.as_ref() == "Hello")
         });
         assert!(has_hello, "Expected AssistantMessageChunk with 'Hello'");
 
         // Final status is Succeeded
         let end = msgs
             .iter()
-            .find(|m| matches!(m.as_ref(), Message::AssistantMessageEnd { .. }));
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }));
         assert!(end.is_some(), "Expected AssistantMessageEnd");
         if let Some(m) = end {
-            match &**m {
+            match &m.msg {
                 Message::AssistantMessageEnd { end_status, .. } => {
                     assert_eq!(*end_status, MessageEndStatus::Succeeded);
                 }
@@ -828,10 +828,10 @@ mod tests {
         // Final status is Timeout
         let end = msgs
             .iter()
-            .find(|m| matches!(m.as_ref(), Message::AssistantMessageEnd { .. }));
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }));
         assert!(end.is_some(), "Expected AssistantMessageEnd");
         if let Some(m) = end {
-            match &**m {
+            match &m.msg {
                 Message::AssistantMessageEnd { end_status, .. } => {
                     assert_eq!(*end_status, MessageEndStatus::Timeout);
                 }
@@ -868,7 +868,7 @@ mod tests {
 
         // Chunk with "Partial" arrived
         let has_partial = msgs.iter().any(|m| {
-            matches!(m.as_ref(), Message::AssistantMessageChunk { content, .. } if content.as_ref() == "Partial")
+            matches!(&m.msg, Message::AssistantMessageChunk { content, .. } if content.as_ref() == "Partial")
         });
         assert!(has_partial, "Expected chunk with 'Partial'");
 
@@ -879,10 +879,10 @@ mod tests {
         // Final status is Timeout (no retry after content was seen)
         let end = msgs
             .iter()
-            .find(|m| matches!(m.as_ref(), Message::AssistantMessageEnd { .. }));
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }));
         assert!(end.is_some(), "Expected AssistantMessageEnd");
         if let Some(m) = end {
-            match &**m {
+            match &m.msg {
                 Message::AssistantMessageEnd { end_status, .. } => {
                     assert_eq!(*end_status, MessageEndStatus::Timeout);
                 }
@@ -935,7 +935,7 @@ mod tests {
 
         // Verify retry reason contains the error
         let has_error_reason = msgs.iter().any(|m| {
-            matches!(m.as_ref(), Message::LLMRetry { reason, .. } if reason.contains("500 Internal Server Error"))
+            matches!(&m.msg, Message::LLMRetry { reason, .. } if reason.contains("500 Internal Server Error"))
         });
         assert!(
             has_error_reason,
@@ -944,16 +944,16 @@ mod tests {
 
         // Recovered on retry
         let has_recovered = msgs.iter().any(|m| {
-            matches!(m.as_ref(), Message::AssistantMessageChunk { content, .. } if content.as_ref() == "Recovered")
+            matches!(&m.msg, Message::AssistantMessageChunk { content, .. } if content.as_ref() == "Recovered")
         });
         assert!(has_recovered, "Expected chunk with 'Recovered'");
 
         // Final status is Succeeded
         let end = msgs
             .iter()
-            .find(|m| matches!(m.as_ref(), Message::AssistantMessageEnd { .. }));
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }));
         if let Some(m) = end {
-            match &**m {
+            match &m.msg {
                 Message::AssistantMessageEnd { end_status, .. } => {
                     assert_eq!(*end_status, MessageEndStatus::Succeeded);
                 }
@@ -969,7 +969,7 @@ mod tests {
     // ----------------------------------------------------------------
     #[tokio::test]
     async fn retry_cancellation_during_backoff() -> anyhow::Result<()> {
-        use crate::conversation::{Message, MessageEndStatus};
+        use crate::conversation::{BroadcastMessage, Message, MessageEndStatus};
         let dir = temp_dir()?;
         // First call stalls, then the mock will be cancelled
         let mock = MockLlm::new(vec![
@@ -1003,7 +1003,7 @@ mod tests {
         let mut stream = client.subscribe();
         client.send_chat("Hello").await?;
 
-        let mut messages: Vec<Arc<Message>> = Vec::new();
+        let mut messages: Vec<Arc<BroadcastMessage>> = Vec::new();
         let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
         tokio::pin!(deadline);
 
@@ -1014,8 +1014,8 @@ mod tests {
                 msg = stream.next() => {
                     match msg {
                         Some(Ok(m)) => {
-                            let is_retry = matches!(&*m, Message::LLMRetry { .. });
-                            let is_end = matches!(&*m, Message::AssistantMessageEnd { .. });
+                            let is_retry = matches!(&m.msg, Message::LLMRetry { .. });
+                            let is_end = matches!(&m.msg, Message::AssistantMessageEnd { .. });
                             messages.push(m);
                             if is_retry && !saw_retry {
                                 saw_retry = true;
@@ -1046,10 +1046,10 @@ mod tests {
         // Final status should be Cancelled (not Timeout)
         let end = messages
             .iter()
-            .find(|m| matches!(m.as_ref(), Message::AssistantMessageEnd { .. }));
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }));
         assert!(end.is_some(), "Expected AssistantMessageEnd");
         if let Some(m) = end {
-            match &**m {
+            match &m.msg {
                 Message::AssistantMessageEnd { end_status, .. } => {
                     assert_eq!(*end_status, MessageEndStatus::Cancelled);
                 }
@@ -1087,16 +1087,223 @@ mod tests {
         // Immediate AssistantMessageEnd with Timeout
         let end = msgs
             .iter()
-            .find(|m| matches!(m.as_ref(), Message::AssistantMessageEnd { .. }));
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }));
         assert!(end.is_some(), "Expected AssistantMessageEnd");
         if let Some(m) = end {
-            match &**m {
+            match &m.msg {
                 Message::AssistantMessageEnd { end_status, .. } => {
                     assert_eq!(*end_status, MessageEndStatus::Timeout);
                 }
                 _ => unreachable!(),
             }
         }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: BroadcastMessage envelope serde round-trip
+    // ----------------------------------------------------------------
+    #[test]
+    fn broadcast_message_serde_roundtrip() -> anyhow::Result<()> {
+        use crate::conversation::{BroadcastMessage, Message, MessageEndStatus};
+        let envelopes = vec![
+            BroadcastMessage {
+                id: 7,
+                msg: Message::UserMessage {
+                    created_at: 123,
+                    content: Arc::new("hello".to_string()),
+                    media_filenames: vec!["uuid.png".to_string()],
+                },
+            },
+            // Empty struct variants must survive the envelope round trip too.
+            BroadcastMessage {
+                id: 8,
+                msg: Message::ConversationSaved {},
+            },
+            BroadcastMessage {
+                id: 9,
+                msg: Message::PermissionUpdated {},
+            },
+            BroadcastMessage {
+                id: 10,
+                msg: Message::AssistantMessageEnd {
+                    end_status: MessageEndStatus::Succeeded,
+                    error: None,
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    reasoning_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    aggregate_input_tokens: 1,
+                    aggregate_output_tokens: 2,
+                    aggregate_cache_creation_tokens: 0,
+                    aggregate_cache_read_tokens: 0,
+                    tool_call_count: 0,
+                },
+            },
+        ];
+        for envelope in envelopes {
+            let json = serde_json::to_string(&envelope)?;
+            let parsed: BroadcastMessage = serde_json::from_str(&json)?;
+            let json2 = serde_json::to_string(&parsed)?;
+            assert_eq!(json, json2);
+        }
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: legacy Message JSON (with msg_id) still parses as Message
+    // ----------------------------------------------------------------
+    #[test]
+    fn legacy_message_json_still_parses() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+        let legacy = r#"{"UserMessage": {"msg_id": 7, "created_at": 123, "content": "hi", "media_filenames": ["uuid.png"]}}"#;
+        let msg: Message = serde_json::from_str(legacy)?;
+        match msg {
+            Message::UserMessage {
+                created_at,
+                content,
+                media_filenames,
+            } => {
+                assert_eq!(created_at, 123);
+                assert_eq!(content.as_str(), "hi");
+                assert_eq!(media_filenames, vec!["uuid.png".to_string()]);
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: broadcast ids are contiguous, strictly increasing, and the
+    // stream order matches the replay order from get_messages()
+    // ----------------------------------------------------------------
+    #[tokio::test]
+    async fn broadcast_ids_are_contiguous_and_match_replay_order() -> anyhow::Result<()> {
+        use crate::conversation::{BroadcastMessage, Message, SystemMessageLevel};
+        let client = Arc::new(ConversationClient::new_for_test());
+        let mut stream = client.subscribe();
+
+        let tasks_per_worker = 25usize;
+        let workers = 4usize;
+        let total = tasks_per_worker * workers;
+
+        // Spawn several workers broadcasting concurrently. The counter mutex
+        // serializes id assignment, so ids must come out contiguous and ordered.
+        let mut tasks = Vec::new();
+        for w in 0..workers {
+            let client = Arc::clone(&client);
+            tasks.push(tokio::spawn(async move {
+                for i in 0..tasks_per_worker {
+                    let n = (w * tasks_per_worker + i) as u64;
+                    client.notify_msg(Message::SystemMessage {
+                        created_at: n,
+                        level: SystemMessageLevel::Info,
+                        message: format!("worker-{w}-msg-{n}"),
+                    })?;
+                }
+                anyhow::Ok(())
+            }));
+        }
+
+        // Collect everything the stream yields while the workers broadcast.
+        let mut received: Vec<Arc<BroadcastMessage>> = Vec::new();
+        while received.len() < total {
+            match stream.next().await {
+                Some(Ok(env)) => received.push(env),
+                Some(Err(_)) => continue,
+                None => break,
+            }
+        }
+        for task in tasks {
+            task.await??;
+        }
+
+        assert_eq!(
+            received.len(),
+            total,
+            "stream should yield exactly {total} messages"
+        );
+
+        // (a) ids are contiguous 0,1,2,... in the exact order received, and
+        // each envelope's payload matches its id (distinct payloads)
+        for (idx, env) in received.iter().enumerate() {
+            assert_eq!(env.id, idx as i32, "stream ids must be contiguous");
+            let n = env.id as u64;
+            match &env.msg {
+                Message::SystemMessage {
+                    created_at,
+                    message,
+                    ..
+                } => {
+                    assert_eq!(*created_at, n, "payload must correspond to id");
+                    assert_eq!(
+                        message,
+                        &format!("worker-{}-msg-{n}", n / tasks_per_worker as u64)
+                    );
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        // (b) get_messages() afterwards yields the same ids in the same order
+        let replay = client.get_messages();
+        assert_eq!(replay.len(), total);
+        let received_ids: Vec<i32> = received.iter().map(|env| env.id).collect();
+        let replay_ids: Vec<i32> = replay.iter().map(|env| env.id).collect();
+        assert_eq!(
+            received_ids, replay_ids,
+            "replay order must match stream order"
+        );
+        for (idx, env) in replay.iter().enumerate() {
+            assert_eq!(env.id, idx as i32, "replay ids must be contiguous");
+        }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: ensure_msg_id_counter_at_least bumps a lagging counter and is a
+    // no-op when the counter is already at or above the requested value.
+    // ----------------------------------------------------------------
+    #[test]
+    fn ensure_msg_id_counter_at_least_bumps_or_keeps() -> anyhow::Result<()> {
+        use crate::conversation::{ConversationClient, Message, SystemMessageLevel};
+        let client = Arc::new(ConversationClient::new_for_test());
+
+        // Keep a live subscriber so notify_msg's broadcast send doesn't fail.
+        let _stream = client.subscribe();
+
+        let system = |n: u64| Message::SystemMessage {
+            created_at: n,
+            level: SystemMessageLevel::Info,
+            message: format!("msg-{n}"),
+        };
+
+        // Two broadcasts consume ids 0 and 1; the counter is now 2.
+        client.notify_msg(system(0))?;
+        client.notify_msg(system(1))?;
+
+        // A resume-time seed that is above the current counter takes effect.
+        client.ensure_msg_id_counter_at_least(10);
+        client.notify_msg(system(2))?;
+        let msgs = client.get_messages();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(
+            msgs[2].id, 10,
+            "seeded counter must be used for the next id"
+        );
+
+        // Seeding below the current counter is a no-op.
+        client.ensure_msg_id_counter_at_least(5);
+        client.notify_msg(system(3))?;
+        let msgs = client.get_messages();
+        assert_eq!(msgs.len(), 4);
+        assert_eq!(
+            msgs[3].id, 11,
+            "a lower seed must not move the counter back"
+        );
 
         Ok(())
     }
