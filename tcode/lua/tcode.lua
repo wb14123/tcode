@@ -344,7 +344,8 @@ local function render_info(buf, ns, data, token_prefix, insert_at)
   return info_line
 end
 
--- Find and update the range extmark for a tool_call_id to extend to end_row
+-- Find and update the range extmark for a tool_call_id to extend to end_row.
+-- end_row is exclusive (first row after the covered range).
 local function extend_tc_extmark(buf, tool_call_id, end_row)
   local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, {})
   for _, mark in ipairs(marks) do
@@ -373,7 +374,8 @@ local function get_tc_extmark_end_row(buf, tool_call_id)
   return nil
 end
 
--- Find and update the range extmark for a conversation_id to extend to end_row
+-- Find and update the range extmark for a conversation_id to extend to end_row.
+-- end_row is exclusive (first row after the covered range).
 local function extend_sa_extmark(buf, conversation_id, end_row)
   local marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, { details = true })
   local best_mark = nil
@@ -449,6 +451,7 @@ end
 
 -- Find a thinking extmark at the given buffer line (0-indexed)
 -- Only returns extmarks that are tracked in thinking_entries (not highlights)
+-- Range extmarks use exclusive end_row: first row after the covered range.
 local function find_thinking_at_line(buf, line)
   local marks = vim.api.nvim_buf_get_extmarks(buf, thinking_ns, 0, -1, { details = true })
   for _, mark in ipairs(marks) do
@@ -457,8 +460,8 @@ local function find_thinking_at_line(buf, line)
     if thinking_entries[mark_id] then
       local start_row = mark[2]
       local details = mark[4]
-      local end_row = details.end_row or start_row
-      if line >= start_row and line <= end_row then
+      local end_row = details.end_row or (start_row + 1)
+      if line >= start_row and line < end_row then
         return mark_id
       end
     end
@@ -495,7 +498,8 @@ local function toggle_thinking(buf, mark_id)
     end
     vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
       id = mark_id,
-      end_row = start_row + #content_lines - 1,
+      -- end_row is exclusive: first row after the covered content range.
+      end_row = start_row + #content_lines,
       end_col = 0,
       virt_lines = { { { '[Thinking... press o to collapse]', 'TCodeTokens' } } },
       virt_lines_above = true,
@@ -788,7 +792,7 @@ local function render_event(buf, ns, event, envelope_id)
     append_text(buf, data.content)
     -- Extend the active subagent's sa_ns range extmark as content streams
     if sa_active_conv then
-      extend_sa_extmark(buf, sa_active_conv, vim.api.nvim_buf_line_count(buf) - 1)
+      extend_sa_extmark(buf, sa_active_conv, vim.api.nvim_buf_line_count(buf))
     end
 
   elseif variant == 'AssistantMessageEnd' then
@@ -919,8 +923,9 @@ local function render_event(buf, ns, event, envelope_id)
 
       -- Navigation extmark: from the label row through the (empty) output
       -- content row so that ToolOutputChunk's extmark-based append finds
-      -- the correct insert row.
-      local nav_end_row = output_fence_row + 1
+      -- the correct insert row. end_row is exclusive (first row after the
+      -- covered range), so nav_end_row is one past the empty content row.
+      local nav_end_row = output_fence_row + 2
       local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, label_row, 0, {
         end_row = nav_end_row, end_col = 0,
       })
@@ -962,7 +967,7 @@ local function render_event(buf, ns, event, envelope_id)
         tc_fence_opened[data.tool_call_id] = true
         local last_line = vim.api.nvim_buf_line_count(buf) - 1
         local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, label_line, 0, {
-          end_row = last_line,
+          end_row = last_line + 1,
           end_col = 0,
         })
         tc_extmark_ids[mark_id] = data.tool_call_id
@@ -974,7 +979,7 @@ local function render_event(buf, ns, event, envelope_id)
       local end_row = get_tc_extmark_end_row(buf, data.tool_call_id)
       if end_row then
         local lines_before = vim.api.nvim_buf_line_count(buf)
-        insert_text_at(buf, end_row, data.content)
+        insert_text_at(buf, end_row - 1, data.content)
         local lines_added = vim.api.nvim_buf_line_count(buf) - lines_before
         extend_tc_extmark(buf, data.tool_call_id, end_row + lines_added)
       else
@@ -991,7 +996,7 @@ local function render_event(buf, ns, event, envelope_id)
       if tc_fence_opened[data.tool_call_id] then
         local end_row = get_tc_extmark_end_row(buf, data.tool_call_id)
         if end_row then
-          insert_lines_at(buf, end_row + 1, { TC_FENCE })
+          insert_lines_at(buf, end_row, { TC_FENCE })
           extend_tc_extmark(buf, data.tool_call_id, end_row + 1)
         end
         tc_fence_opened[data.tool_call_id] = nil
@@ -999,7 +1004,7 @@ local function render_event(buf, ns, event, envelope_id)
       -- Find the row *after* the closing fence to insert info outside the code block
       local end_row = get_tc_extmark_end_row(buf, data.tool_call_id)
       if end_row then
-        insert_row = end_row + 1
+        insert_row = end_row
       end
       -- Update label with final status
       if tc_label_marks[data.tool_call_id] then
@@ -1184,7 +1189,7 @@ local function render_event(buf, ns, event, envelope_id)
       -- Set up the sa_ns range extmark spanning label through the new blank row.
       if conv_id and label_row then
         local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_row, 0, {
-          end_row = blank_row, end_col = 0,
+          end_row = blank_row + 1, end_col = 0,
         })
         sa_extmark_ids[mark_id] = conv_id
         sa_active_conv = conv_id
@@ -1205,7 +1210,7 @@ local function render_event(buf, ns, event, envelope_id)
         })
         local last_line = vim.api.nvim_buf_line_count(buf) - 1
         local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_line, 0, {
-          end_row = last_line, end_col = 0,
+          end_row = last_line + 1, end_col = 0,
         })
         sa_extmark_ids[mark_id] = conv_id
         sa_active_conv = conv_id
@@ -1262,8 +1267,8 @@ local function render_event(buf, ns, event, envelope_id)
     -- Render error as real text if present (needs to be visible/copyable)
     if type(data.error) == 'string' and data.error ~= '' then
       if sa_end_row then
-        insert_lines_at(buf, sa_end_row, { '' })
-        local error_start_line = sa_end_row
+        insert_lines_at(buf, sa_end_row - 1, { '' })
+        local error_start_line = sa_end_row - 1
         local error_lines = vim.split('Error: ' .. data.error, '\n', { plain = true })
         vim.api.nvim_buf_set_lines(buf, error_start_line, error_start_line + 1, false, error_lines)
         for i = 0, #error_lines - 1 do
@@ -1359,7 +1364,7 @@ local function render_event(buf, ns, event, envelope_id)
           -- Set up sa_ns range extmark from label row to current buffer end
           local current_last_line = vim.api.nvim_buf_line_count(buf) - 1
           local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_row, 0, {
-            end_row = current_last_line, end_col = 0,
+            end_row = current_last_line + 1, end_col = 0,
           })
           sa_extmark_ids[mark_id] = data.conversation_id
           sa_active_conv = data.conversation_id
@@ -1867,14 +1872,14 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
       return
     end
 
-    -- Check for subagent extmark
+    -- Check for subagent extmark (end_row is exclusive: first row after the covered range)
     if M.exe_path and M.session_id then
       local sa_marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, { details = true })
       for _, mark in ipairs(sa_marks) do
         local start_row = mark[2]
         local details = mark[4]
-        local end_row = details.end_row or start_row
-        if cursor_line >= start_row and cursor_line <= end_row and sa_extmark_ids[mark[1]] then
+        local end_row = details.end_row or (start_row + 1)
+        if cursor_line >= start_row and cursor_line < end_row and sa_extmark_ids[mark[1]] then
           local conv_id = sa_extmark_ids[mark[1]]
           vim.fn.system(string.format('%s --session=%s open-subagent %s',
             M.exe_path, M.session_id, conv_id))
@@ -1893,8 +1898,8 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     for _, mark in ipairs(marks) do
       local start_row = mark[2]
       local details = mark[4]
-      local end_row = details.end_row or start_row
-      if cursor_line >= start_row and cursor_line <= end_row and tc_extmark_ids[mark[1]] then
+      local end_row = details.end_row or (start_row + 1)
+      if cursor_line >= start_row and cursor_line < end_row and tc_extmark_ids[mark[1]] then
         tool_call_id = tc_extmark_ids[mark[1]]
         break
       end
@@ -1920,8 +1925,8 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     for _, mark in ipairs(sa_marks) do
       local start_row = mark[2]
       local details = mark[4]
-      local end_row = details.end_row or start_row
-      if cursor_line >= start_row and cursor_line <= end_row and sa_extmark_ids[mark[1]] then
+      local end_row = details.end_row or (start_row + 1)
+      if cursor_line >= start_row and cursor_line < end_row and sa_extmark_ids[mark[1]] then
         local conv_id = sa_extmark_ids[mark[1]]
         local sa_entries = sa_label_marks[conv_id]
         if not sa_entries or #sa_entries == 0 then
@@ -1944,8 +1949,8 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     for _, mark in ipairs(marks) do
       local start_row = mark[2]
       local details = mark[4]
-      local end_row = details.end_row or start_row
-      if cursor_line >= start_row and cursor_line <= end_row and tc_extmark_ids[mark[1]] then
+      local end_row = details.end_row or (start_row + 1)
+      if cursor_line >= start_row and cursor_line < end_row and tc_extmark_ids[mark[1]] then
         tool_call_id = tc_extmark_ids[mark[1]]
         break
       end
@@ -2017,7 +2022,7 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
       for _, mark in ipairs(marks) do
         local start_row = mark[2]
         local details = mark[4]
-        local end_row = details.end_row or start_row
+        local end_row = details.end_row or (start_row + 1)
         if cursor_line >= start_row and cursor_line < end_row and um_extmark_ids[mark[1]] then
           msg_id = um_extmark_ids[mark[1]]
           break
