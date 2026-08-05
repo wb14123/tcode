@@ -79,6 +79,13 @@ local sa_extmark_ids = {}  -- extmark_id -> conversation_id
 local sa_label_marks = {}
 local sa_input_marks = {}  -- tool_call_id -> { extmark_id, ns, tool_name }
 local sa_active_conv = nil -- conversation_id of the subagent currently streaming output
+
+-- Namespace and lookup table for user-message range extmarks.
+-- Maps extmark ID -> msg_id (the display envelope id) so `gb` can find
+-- which user message the cursor is on and branch the session there.
+local um_ns = vim.api.nvim_create_namespace('tcode_um')
+local um_extmark_ids = {}  -- extmark_id -> msg_id
+
 local tc_full_input = false  -- true in detail view: never collapse tool input
 
 -- Namespace for tool-call / subagent generation-state anchor extmarks.
@@ -736,14 +743,22 @@ end
 
 -- Render a single JSONL event into the buffer with extmarks
 -- Serde externally-tagged enums: {"VariantName": {fields...}}
-local function render_event(buf, ns, event)
+local function render_event(buf, ns, event, envelope_id)
   local variant, data = next(event)
   if not variant then return end
 
   if variant == 'UserMessage' then
-    render_label(buf, ns, '► USER', '>>> USER', 'TCodeUser', data)
+    local label_row = render_label(buf, ns, '► USER', '>>> USER', 'TCodeUser', data)
     local content_lines = vim.split(data.content, '\n', { plain = true })
     append_lines(buf, content_lines)
+    -- Range extmark covering the label row through the end of the content so
+    -- `gb` can map a cursor line back to this user message's envelope id.
+    -- end_row is exclusive.
+    local end_row = label_row + 1 + #content_lines
+    local mark_id = vim.api.nvim_buf_set_extmark(buf, um_ns, label_row, 0, {
+      end_row = end_row, end_col = 0,
+    })
+    um_extmark_ids[mark_id] = envelope_id or data.msg_id
 
   elseif variant == 'AssistantMessageStart' then
     render_label(buf, ns, '► ASSISTANT', '>>> ASSISTANT', 'TCodeAssistant', data)
@@ -1578,6 +1593,13 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
         if line ~= '' then
           local ok, event = pcall(vim.json.decode, line)
           if ok and event then
+            -- Capture the envelope id (pinned reference to this display event)
+            -- BEFORE unwrapping, so `gb` can target the exact user message.
+            -- Legacy lines have no top-level id; envelope_id stays nil.
+            local envelope_id = nil
+            if type(event) == 'table' and event.id ~= nil then
+              envelope_id = event.id
+            end
             -- New wire format: {"id": N, "msg": {"Variant": {...}}}. Unwrap
             -- to the legacy {"Variant": {...}} shape the renderers expect.
             -- Legacy lines have no top-level "msg" key and pass through.
@@ -1591,7 +1613,7 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
                 vim.api.nvim_err_writeln('on_event error: ' .. tostring(ev_err))
               end
             end
-            local render_ok, render_err = pcall(render_event, buf, ns, event)
+            local render_ok, render_err = pcall(render_event, buf, ns, event, envelope_id)
             if not render_ok then
               vim.api.nvim_err_writeln('render_event error: ' .. tostring(render_err))
               break
@@ -1668,7 +1690,7 @@ end
 -- @param exe_path: Path to tcode executable
 -- @param parser_path: Path to libtree_sitter_tcode.so/.dylib (optional, for treesitter isolation)
 -- @param runtime_dir: Root directory containing queries/tcode/*.scm (optional, prepended to runtimepath)
-function M.setup_display(display_file, status_file, usage_file, token_usage_file, session_id, exe_path, parser_path, runtime_dir, effort_file, is_subagent)
+function M.setup_display(display_file, status_file, usage_file, token_usage_file, session_id, exe_path, parser_path, runtime_dir, effort_file, is_subagent, profile)
   M.display_file = display_file or '/tmp/tcode-display.jsonl'
   M.status_file = status_file or '/tmp/tcode-status.txt'
   M.usage_file = usage_file
@@ -1676,6 +1698,7 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   M.effort_file = effort_file
   M.session_id = session_id
   M.exe_path = exe_path
+  M.profile = profile
 
   vim.g.tcode_status = 'Connecting...'
   vim.g.tcode_usage = ''
@@ -1725,6 +1748,7 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
 
   -- Reset first_event flag for this display session
   first_event = true
+  um_extmark_ids = {}
 
   -- Register tcode tree-sitter parser and start highlighting
   if parser_path and parser_path ~= '' then
@@ -1979,6 +2003,46 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   -- Open pending tool approvals (Ctrl-P)
   vim.keymap.set('n', '<C-p>', open_pending_approvals,
     { buffer = true, silent = true, desc = 'Open pending tool approvals' })
+
+  -- Branch the conversation at the user message under the cursor (gb)
+  if not is_subagent then
+    vim.keymap.set('n', 'gb', function()
+      if not M.exe_path or not M.session_id then
+        vim.notify('Session info not available', vim.log.levels.ERROR)
+        return
+      end
+      local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
+      local marks = vim.api.nvim_buf_get_extmarks(buf, um_ns, 0, -1, { details = true })
+      local msg_id = nil
+      for _, mark in ipairs(marks) do
+        local start_row = mark[2]
+        local details = mark[4]
+        local end_row = details.end_row or start_row
+        if cursor_line >= start_row and cursor_line < end_row and um_extmark_ids[mark[1]] then
+          msg_id = um_extmark_ids[mark[1]]
+          break
+        end
+      end
+      if not msg_id then
+        vim.notify('not on a user message', vim.log.levels.WARN)
+        return
+      end
+      local profile_part = ''
+      if M.profile and M.profile ~= '' then
+        -- Single-quote-escape so a profile with shell metacharacters is never
+        -- interpreted by the shell that runs the CLI command.
+        profile_part = " -p '" .. M.profile:gsub("'", "'\\''") .. "'"
+      end
+      local cmd = string.format('%s%s --session=%s branch %s',
+        M.exe_path, profile_part, M.session_id, tostring(msg_id))
+      local result = vim.fn.system(cmd)
+      local trimmed = vim.trim(result)
+      if trimmed ~= '' then
+        local level = vim.v.shell_error ~= 0 and vim.log.levels.ERROR or vim.log.levels.INFO
+        vim.notify(trimmed, level, { title = 'TCode' })
+      end
+    end, { buffer = true, silent = true, desc = 'Branch conversation at user message' })
+  end
 end
 
 -- Setup tool call display window for viewing a single tool call's details

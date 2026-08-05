@@ -1,4 +1,5 @@
 mod approve_ui;
+mod branch;
 mod claude_auth;
 mod cli_runtime;
 mod config_wizard;
@@ -17,6 +18,9 @@ mod project_config;
 
 pub(crate) use tcode_runtime::bootstrap::{auth_command_for_profile, create_llm};
 pub(crate) use tcode_runtime::{config, protocol, server, session};
+
+#[cfg(test)]
+mod branch_tests;
 
 #[cfg(test)]
 mod project_config_tests;
@@ -155,6 +159,11 @@ enum Commands {
     },
     /// Attach to an existing session and resume the conversation
     Attach,
+    /// Branch off a new independent session at a user message (clone history up to, not including, that message)
+    Branch {
+        /// The display msg_id of the target user message
+        msg_id: i32,
+    },
     /// Cancel a running tool call
     CancelTool {
         /// The tool call ID to cancel
@@ -598,7 +607,14 @@ async fn main() -> Result<()> {
             let session = Session::new(session_id.clone())?;
             let lua_dir = ensure_lua_files(session.session_dir(), None)?;
             let runtime_dir = session.session_dir().clone();
-            let client = DisplayClient::new(session, lua_dir, session_id, runtime_dir, is_subagent);
+            let client = DisplayClient::new(
+                session,
+                lua_dir,
+                session_id,
+                runtime_dir,
+                is_subagent,
+                profile.clone(),
+            );
             client.run().await
         }
         Some(Commands::ToolCall { tool_call_id }) => {
@@ -682,8 +698,13 @@ async fn main() -> Result<()> {
                 runtime_deps,
                 &config,
                 "Attaching to session",
+                profile.as_deref(),
             )
             .await
+        }
+        Some(Commands::Branch { msg_id }) => {
+            let session_id = require_session(session)?;
+            branch::run_branch(profile.as_deref(), &session_id, msg_id)
         }
         Some(Commands::Sessions) => {
             use std::os::unix::net::UnixStream;
@@ -976,7 +997,15 @@ async fn run_unified(
         container_config,
     });
 
-    run_unified_with_session(session, session_id, runtime_deps, &config, "Session").await
+    run_unified_with_session(
+        session,
+        session_id,
+        runtime_deps,
+        &config,
+        "Session",
+        profile,
+    )
+    .await
 }
 
 struct PaneInfo {
@@ -1249,6 +1278,7 @@ async fn run_unified_with_session(
     runtime_deps: Option<RuntimeDependencies>,
     config: &config::TcodeConfig,
     label: &str,
+    profile: Option<&str>,
 ) -> Result<()> {
     let max_subagent_depth = config.max_subagent_depth.unwrap_or(10);
     let subagent_model_selection = config.subagent_model_selection.unwrap_or(false);
@@ -1276,7 +1306,10 @@ async fn run_unified_with_session(
     let exe_path =
         std::env::current_exe().context("Failed to determine current executable path")?;
     let exe_str = exe_path.to_string_lossy();
-    let session_arg = format!("--session={}", session_id);
+    let session_arg = match profile {
+        Some(p) => format!("-p {} --session={}", branch::shell_quote(p), session_id),
+        None => format!("--session={}", session_id),
+    };
 
     // Capture current pane ID before starting/attaching runtime so failures do not leak leases.
     let current_pane_id = std::env::var("TMUX_PANE")
