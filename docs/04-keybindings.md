@@ -17,9 +17,10 @@ The display view shows the conversation output (assistant messages, tool calls, 
 | `Ctrl-k` | Running tool call | Cancel the tool call (with confirmation popup) |
 | `Ctrl-c` | Anywhere | Cancel the entire conversation (with confirmation popup) |
 | `Ctrl-p` | Anywhere | Open pending tool approvals one by one |
+| `gb` | User message | Branch the conversation at that user message (clone history up to it into a new session in a new tmux tab) |
 | `q` | Anywhere | Quit |
 
-Context is determined by cursor position using extmarks. `Ctrl-k` checks for a subagent under the cursor first, then falls back to a tool call. A `[Ctrl-k to cancel]` hint is shown on tool and subagent labels while they are running and removed when they finish. `Ctrl-c` reads the root conversation ID and cancels it, cascading to all running tools and child subagents. `Ctrl-p` loops through pending tool approvals via tmux popups.
+Context is determined by cursor position using extmarks. `Ctrl-k` checks for a subagent under the cursor first, then falls back to a tool call. A `[Ctrl-k to cancel]` hint is shown on tool and subagent labels while they are running and removed when they finish. `Ctrl-c` reads the root conversation ID and cancels it, cascading to all running tools and child subagents. `Ctrl-p` loops through pending tool approvals via tmux popups. `gb` is available only in the main display (not subagent displays) and only on user-message rows; elsewhere it reports "not on a user message". Branches are fully independent sessions opened with the same config profile as the source display.
 
 ## Edit View
 

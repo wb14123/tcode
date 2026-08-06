@@ -413,6 +413,35 @@ tcode --session <id> open-subagent <conversation-id>
 
 ---
 
+### `tcode branch`
+
+Clones a session's history strictly before a target user message into a
+brand-new, fully independent session and opens it in a new tmux tab (invoked
+by the `gb` keybinding in the display). The new session contains everything
+before that user message — the message itself is rewritten by typing a
+replacement in the new session — and is self-contained: subagent
+conversations, tool-call details, and media are copied, so the source session
+can be deleted without affecting the branch. The branch is opened with the
+same config profile as the source display.
+
+```
+tcode --session <id> branch <msg-id>
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--session <id>` | **(required)** Source session ID |
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `<msg-id>` | **(required)** The display id of the user message to branch at |
+
+---
+
 ### `tcode approve-next`
 
 Opens pending tool approval requests one by one in tmux popups. This is the handler behind the `Ctrl-p` keybinding.
