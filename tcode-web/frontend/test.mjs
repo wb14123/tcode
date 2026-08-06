@@ -361,4 +361,4 @@ validateActiveWorkState();
 validateSpecialToolArgsPresentation();
 validateSubagentPromptPreview();
 await validateStreamEventBatcher();
-console.log('stage7 validation passed');
+console.log('frontend test passed');
