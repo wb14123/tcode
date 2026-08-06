@@ -220,7 +220,7 @@ impl SessionDir {
         let resolved = self.path.join("media").join(filename);
         let is_missing = !resolved.exists();
         match self.resolve_contained(resolved) {
-            Ok(path) if is_missing => Err(ApiError::not_found("media not found")),
+            Ok(_) if is_missing => Err(ApiError::not_found("media not found")),
             Ok(path) => Ok(path),
             Err(e) => Err(e),
         }

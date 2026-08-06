@@ -345,7 +345,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Recreate the function signature with stripped parameter attributes
     let fn_generics = &input_fn.sig.generics;
-    let fn_unsafety = &input_fn.sig.unsafety;
+    let fn_safety = &input_fn.sig.safety;
     let fn_abi = &input_fn.sig.abi;
     let fn_output = &input_fn.sig.output;
 
@@ -410,7 +410,7 @@ pub fn tool(attr: TokenStream, item: TokenStream) -> TokenStream {
 
         // Original function (with cleaned params)
         #(#other_fn_attrs)*
-        #vis #fn_unsafety #fn_abi fn #fn_name #fn_generics (#(#clean_inputs),*) #fn_output #block
+        #vis #fn_safety #fn_abi fn #fn_name #fn_generics (#(#clean_inputs),*) #fn_output #block
 
         // Tool constructor function
         #vis fn #tool_fn_name() -> #crate_path::tool::Tool {

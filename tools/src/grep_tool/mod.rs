@@ -130,7 +130,7 @@ fn search_grep(
     }
 
     // Sort by mtime descending (most recently modified first)
-    all_file_matches.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    all_file_matches.sort_by_key(|b| std::cmp::Reverse(b.mtime));
 
     Ok((all_file_matches, total_match_count))
 }

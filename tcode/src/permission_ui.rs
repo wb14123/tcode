@@ -1029,10 +1029,7 @@ pub fn launch_approval_popup(
 /// (0 means nothing was pending).
 pub fn approve_all_pending(session_id: &str, socket_path: &PathBuf) -> Option<usize> {
     let mut count = 0;
-    loop {
-        let Some(state) = query_permission_state_sync(socket_path) else {
-            break;
-        };
+    while let Some(state) = query_permission_state_sync(socket_path) {
         let Some(pending) = state.pending.first() else {
             break;
         };

@@ -215,12 +215,12 @@ impl AppState {
         // (live, non-expired token). We only escalate to a write lock
         // when we actually need to evict.
         let now = Instant::now();
-        if let Some(session) = self.sessions.read().get(candidate) {
+        {
+            let guard = self.sessions.read();
+            let session = guard.get(candidate)?;
             if now < session.expires_at {
                 return Some(session.username.clone());
             }
-        } else {
-            return None;
         }
         // Token was present but expired. Re-check under the write lock
         // (a concurrent `revoke_session` or `insert_session_with_expiry`

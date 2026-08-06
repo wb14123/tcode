@@ -732,7 +732,7 @@ async fn main() -> Result<()> {
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                entries.sort_by(|a, b| b.4.cmp(&a.4));
+                entries.sort_by_key(|b| std::cmp::Reverse(b.4));
 
                 println!("Sessions:");
                 for (id, status, mode, description, _) in entries {

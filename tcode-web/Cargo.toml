@@ -10,10 +10,10 @@ bundled-frontend = ["dep:include_dir"]
 anyhow = "1"
 argon2 = "0.6.0-rc.8"
 axum = { version = "0.8", features = ["multipart"] }
-axum-extra = { version = "0.10", features = ["cookie"] }
-base64 = "0.22"
+axum-extra = { version = "0.12", features = ["cookie"] }
+base64 = "0.23"
 dirs = "6"
-getrandom = "0.3"
+getrandom = "0.4"
 include_dir = { version = "0.7", optional = true }
 llm-rs = { path = "../llm-rs" }
 parking_lot = "0.12"

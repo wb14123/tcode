@@ -69,7 +69,7 @@ fn walk_glob(
     }
 
     // Sort by mtime descending (most recently modified first)
-    files.sort_by(|a, b| b.1.cmp(&a.1));
+    files.sort_by_key(|b| std::cmp::Reverse(b.1));
     Ok(files)
 }
 

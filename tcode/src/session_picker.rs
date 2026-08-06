@@ -112,7 +112,7 @@ pub fn pick_session() -> Result<Option<String>> {
         .collect();
 
     // Sort by last_active_at descending (most recent first)
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.1));
 
     let entries: Vec<SessionEntry> = entries.into_iter().map(|(e, _)| e).collect();
 

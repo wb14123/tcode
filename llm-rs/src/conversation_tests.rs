@@ -695,7 +695,7 @@ mod tests {
         let mut names: Vec<String> = msgs
             .iter()
             .map(|m| {
-                let s = format!("{:?}", &m.msg);
+                let s = format!("{:?}", m.msg);
                 s.split('{').next().unwrap_or(&s).trim().to_string()
             })
             .collect();

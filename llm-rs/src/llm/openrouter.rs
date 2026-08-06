@@ -712,7 +712,7 @@ impl LLM for OpenRouter {
                         if let Some(reason) = choice.finish_reason {
                             stop_reason = Some(match reason.as_str() {
                                 "tool_calls" => {
-                                    for (_, (id, name, args)) in tool_calls.iter() {
+                                    for (id, name, args) in tool_calls.values() {
                                         yield LLMEvent::ToolCall(ToolCall {
                                             id: id.clone(),
                                             name: name.clone(),
@@ -730,7 +730,7 @@ impl LLM for OpenRouter {
 
             // Stream ended without [DONE]
             if !tool_calls.is_empty() {
-                for (_, (id, name, args)) in tool_calls.iter() {
+                for (id, name, args) in tool_calls.values() {
                     yield LLMEvent::ToolCall(ToolCall {
                         id: id.clone(),
                         name: name.clone(),

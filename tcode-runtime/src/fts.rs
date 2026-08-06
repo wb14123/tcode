@@ -235,10 +235,12 @@ pub fn search_with_cancel(
         return Ok(Vec::new());
     };
     let cancel_addr = cancel as *const AtomicBool as usize;
-    conn.progress_handler(
+    if let Err(err) = conn.progress_handler(
         1_000,
         Some(move || unsafe { (*(cancel_addr as *const AtomicBool)).load(Ordering::Relaxed) }),
-    );
+    ) {
+        tracing::warn!("failed to install SQLite progress handler: {err}");
+    }
 
     let mut results = Vec::new();
     let mut stmt = match conn.prepare(
@@ -693,7 +695,11 @@ fn non_empty_indexable(
 
 fn build_match_query(query: &str) -> Option<String> {
     let raw_tokens: Vec<&str> = if contains_cjk(query) {
-        JIEBA.cut(query, false)
+        JIEBA
+            .cut(query, false)
+            .into_iter()
+            .map(|token| token.word)
+            .collect()
     } else {
         query.split_whitespace().collect()
     };
@@ -726,7 +732,12 @@ fn build_match_query(query: &str) -> Option<String> {
 
 fn segment_text(text: &str) -> String {
     if contains_cjk(text) {
-        JIEBA.cut(text, false).join(" ")
+        JIEBA
+            .cut(text, false)
+            .into_iter()
+            .map(|token| token.word)
+            .collect::<Vec<_>>()
+            .join(" ")
     } else {
         text.to_string()
     }

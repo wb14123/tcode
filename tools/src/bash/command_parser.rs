@@ -248,7 +248,8 @@ pub fn try_decompose_complex(command: &str) -> Option<DecomposedCommand> {
                     sub_commands,
                     redirections,
                 });
-            } else if let Some(list_node) = inner_children.iter().find(|n| n.kind() == "list") {
+            } else {
+                let list_node = inner_children.iter().find(|n| n.kind() == "list")?;
                 // redirected_statement wraps a list (e.g. `echo start && cat file | sort > out`)
                 // Decompose the list sequentially, then collect the top-level file redirects
                 let mut result = decompose_sequential(command, &[*list_node])?;
@@ -256,8 +257,6 @@ pub fn try_decompose_complex(command: &str) -> Option<DecomposedCommand> {
                 result.redirections.input_files.extend(redir.input_files);
                 result.redirections.output_files.extend(redir.output_files);
                 return Some(result);
-            } else {
-                return None;
             }
         }
 
@@ -371,7 +370,8 @@ fn decompose_sequential(command: &str, nodes: &[tree_sitter::Node]) -> Option<De
             "redirected_statement" => {
                 let inner_children = named_children(&leaf);
                 let inner = inner_children.iter().find(|n| n.kind() != "file_redirect");
-                if let Some(inner_node) = inner {
+                {
+                    let inner_node = inner?;
                     if inner_node.kind() == "pipeline" {
                         // Pipeline with top-level redirect (e.g., `cmd1 | cmd2 > file`)
                         let stages = extract_pipeline_stages(*inner_node, command)?;
@@ -392,8 +392,6 @@ fn decompose_sequential(command: &str, nodes: &[tree_sitter::Node]) -> Option<De
                         }
                         sub_commands.push(leaf_text.to_string());
                     }
-                } else {
-                    return None;
                 }
             }
             // Regular leaf — parse and check
@@ -465,11 +463,11 @@ fn has_complex_descendants(node: &tree_sitter::Node) -> bool {
             | "process_substitution"
             | "subshell"
             | "expansion"
-            | "simple_expansion" => {
+            | "simple_expansion"
+                if current.id() != node.id() =>
+            {
                 // Only flag if it's not the root node itself
-                if current.id() != node.id() {
-                    return true;
-                }
+                return true;
             }
             _ => {}
         }
