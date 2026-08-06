@@ -1,4 +1,5 @@
 import { LitElement, html, nothing, type TemplateResult } from 'lit';
+import { shouldSubmitOnEnter } from '../composer-input';
 import { processImageFile } from '../image-processing';
 
 export interface MessageSubmitDetail {
@@ -33,6 +34,8 @@ class TcodeComposer extends LitElement {
   secondaryAction: unknown = nothing;
   private text = '';
   private maxTextareaHeight: number | null = null;
+  private coarsePointer = false;
+  private coarsePointerQuery: MediaQueryList | null = null;
   declare mediaFiles: File[];
 
   createRenderRoot(): this {
@@ -61,12 +64,21 @@ class TcodeComposer extends LitElement {
     if (this.mediaFiles === undefined) {
       this.mediaFiles = [];
     }
+    this.coarsePointerQuery = window.matchMedia('(pointer: coarse)');
+    this.coarsePointer = this.coarsePointerQuery.matches;
+    this.coarsePointerQuery.addEventListener('change', this.onCoarsePointerChange);
   }
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.coarsePointerQuery?.removeEventListener('change', this.onCoarsePointerChange);
+    this.coarsePointerQuery = null;
     this.clearMediaFiles();
   }
+
+  private onCoarsePointerChange = (event: MediaQueryListEvent): void => {
+    this.coarsePointer = event.matches;
+  };
 
   private mediaFileUrls = new Map<File, string>();
 
@@ -124,14 +136,7 @@ class TcodeComposer extends LitElement {
   }
 
   private onKeyDown = (event: KeyboardEvent): void => {
-    if (
-      event.key !== 'Enter' ||
-      event.shiftKey ||
-      event.altKey ||
-      event.ctrlKey ||
-      event.metaKey ||
-      event.isComposing
-    ) {
+    if (!shouldSubmitOnEnter(this.coarsePointer, event)) {
       return;
     }
 

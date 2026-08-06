@@ -3,6 +3,7 @@ import { StreamEventBatcher } from './src/stream-event-batcher.ts';
 import { ConversationTimelineBuilder, parseStreamLine } from './src/messages.ts';
 import { specialToolArgsPresentation } from './src/tool-args.ts';
 import { subagentRowTitle } from './src/timeline-render-helpers.ts';
+import { shouldSubmitOnEnter } from './src/composer-input.ts';
 
 function assert(condition, message) {
   if (!condition) {
@@ -295,6 +296,36 @@ function validateSubagentPromptPreview() {
   assert(internalIdTitle === 'Waiting for subagent…', 'subagent collapsed title does not show internal conversation ids');
 }
 
+function enterState(overrides = {}) {
+  return {
+    key: 'Enter',
+    shiftKey: false,
+    ctrlKey: false,
+    altKey: false,
+    metaKey: false,
+    isComposing: false,
+    ...overrides,
+  };
+}
+
+function validateComposerEnterDecision() {
+  assert(shouldSubmitOnEnter(false, enterState()) === true, 'desktop plain Enter submits');
+  assert(shouldSubmitOnEnter(false, enterState({ key: 'a' })) === false, 'desktop non-Enter key does not submit');
+  assert(shouldSubmitOnEnter(false, enterState({ shiftKey: true })) === false, 'desktop Shift+Enter is a newline');
+  assert(shouldSubmitOnEnter(false, enterState({ ctrlKey: true })) === false, 'desktop Ctrl+Enter does not submit');
+  assert(shouldSubmitOnEnter(false, enterState({ altKey: true })) === false, 'desktop Alt+Enter does not submit');
+  assert(shouldSubmitOnEnter(false, enterState({ metaKey: true })) === false, 'desktop Meta+Enter does not submit');
+  assert(shouldSubmitOnEnter(false, enterState({ isComposing: true })) === false, 'desktop IME composing Enter does not submit');
+
+  assert(shouldSubmitOnEnter(true, enterState()) === false, 'touch plain Enter is a newline');
+  assert(shouldSubmitOnEnter(true, enterState({ key: 'a' })) === false, 'touch non-Enter key does not submit');
+  assert(shouldSubmitOnEnter(true, enterState({ shiftKey: true })) === false, 'touch Shift+Enter is a newline');
+  assert(shouldSubmitOnEnter(true, enterState({ ctrlKey: true })) === false, 'touch Ctrl+Enter is a newline');
+  assert(shouldSubmitOnEnter(true, enterState({ altKey: true })) === false, 'touch Alt+Enter is a newline');
+  assert(shouldSubmitOnEnter(true, enterState({ metaKey: true })) === false, 'touch Meta+Enter is a newline');
+  assert(shouldSubmitOnEnter(true, enterState({ isComposing: true })) === false, 'touch IME composing Enter is a newline');
+}
+
 async function validateStreamEventBatcher() {
   let nextFrame = 1;
   const callbacks = new Map();
@@ -360,5 +391,6 @@ validateSubagentInputAggregation();
 validateActiveWorkState();
 validateSpecialToolArgsPresentation();
 validateSubagentPromptPreview();
+validateComposerEnterDecision();
 await validateStreamEventBatcher();
 console.log('frontend test passed');
