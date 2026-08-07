@@ -715,12 +715,19 @@ fn finalize_log_file(
     }
     drop(writer);
     if reducer.had_truncation() {
-        Some(
-            std::fs::canonicalize(&log_path)
-                .unwrap_or_else(|_| log_path.clone())
-                .to_string_lossy()
-                .to_string(),
-        )
+        let path = std::fs::canonicalize(&log_path).unwrap_or_else(|_| log_path.clone());
+        let Some(path_str) = path.to_str() else {
+            let err = std::str::from_utf8(path.as_os_str().as_encoded_bytes())
+                .expect_err("path.to_str() returned None, so the bytes are not valid UTF-8");
+            tracing::warn!(
+                "Bash log path is not valid UTF-8 (first invalid byte at offset {}), \
+                 skipping the log path report: {:?}",
+                err.valid_up_to(),
+                path
+            );
+            return None;
+        };
+        Some(path_str.to_string())
     } else {
         if let Err(e) = std::fs::remove_file(&log_path) {
             tracing::warn!(
@@ -1093,6 +1100,20 @@ impl OutputReducer {
     }
 }
 
+/// Convert an output-stream read error into an actionable error for the LLM.
+/// A `Lines` error of kind `InvalidData` means a line was not valid UTF-8 —
+/// replace the bare "stream did not contain valid UTF-8" with a hint about
+/// inspecting the raw bytes (re-run through base64) or asking the user.
+fn output_utf8_error(e: std::io::Error) -> anyhow::Error {
+    if e.kind() == std::io::ErrorKind::InvalidData {
+        anyhow::Error::msg(tcode_encoding::non_utf8_output_message_no_offset(
+            "command output",
+        ))
+    } else {
+        anyhow::Error::from(e)
+    }
+}
+
 /// Merge tagged stdout and stderr lines into a single stream.
 /// Yields each tagged line as it arrives from the process.
 fn process_line_stream(
@@ -1106,7 +1127,7 @@ fn process_line_stream(
         Box::pin(
             tokio_stream::wrappers::LinesStream::new(reader.lines()).map(move |l| {
                 l.map(|line| format!("{}{}", tag, line))
-                    .map_err(anyhow::Error::from)
+                    .map_err(output_utf8_error)
             }),
         )
     }
@@ -1310,8 +1331,19 @@ async fn run_container_kill_signal(config: &ContainerConfig, job_id: &str, signa
 
     match result {
         Ok(Ok(output)) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let trimmed = stderr.trim();
+            let trimmed = match std::str::from_utf8(&output.stderr) {
+                Ok(stderr) => stderr.trim().to_string(),
+                Err(err) => {
+                    tracing::warn!(
+                        "Container kill script stderr for job {} (SIG{}) is not valid UTF-8 \
+                         (first invalid byte at offset {}); logging raw bytes instead",
+                        job_id,
+                        signal,
+                        err.valid_up_to()
+                    );
+                    format!("{:?}", output.stderr)
+                }
+            };
             if !trimmed.is_empty() {
                 tracing::info!(
                     "Container kill script stderr for job {} (SIG{}): {}",

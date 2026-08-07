@@ -20,6 +20,7 @@ use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use tcode_encoding::path_to_str;
 
 use crate::protocol::{ClientMessage, ServerMessage};
 use crate::session::Session;
@@ -28,6 +29,31 @@ use crate::tree_nav::TreeNav;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Returns the current executable path as a UTF-8 string, or `None` if it
+/// cannot be determined or is not valid UTF-8 (both cases are logged).
+fn current_exe_str() -> Option<String> {
+    let exe = match std::env::current_exe() {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "failed to determine current executable path"
+            );
+            return None;
+        }
+    };
+    match path_to_str(&exe) {
+        Ok(s) => Some(s.to_string()),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "current executable path is not valid UTF-8"
+            );
+            None
+        }
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -209,7 +235,16 @@ impl PermissionTreeState {
                     Some(p.request_id.clone()),
                     p.preview_file_path
                         .as_ref()
-                        .map(|p| p.to_string_lossy().to_string()),
+                        .and_then(|p| match path_to_str(p) {
+                            Ok(s) => Some(s.to_string()),
+                            Err(e) => {
+                                tracing::warn!(
+                                    error = %e,
+                                    "skipping preview with non-UTF-8 file path"
+                                );
+                                None
+                            }
+                        }),
                     p.once_only,
                 ));
         }
@@ -490,13 +525,12 @@ impl PermissionTreeState {
                         // Manage (revoke) existing permission — use the old
                         // inline popup path since launch_approval_popup is
                         // for pending items only.
-                        let exe = match std::env::current_exe() {
-                            Ok(p) => p.to_string_lossy().to_string(),
-                            Err(_) => return false,
+                        let Some(exe_str) = current_exe_str() else {
+                            return false;
                         };
                         match Command::new("tmux")
                             .args(["display-popup", "-E", "-w", "60", "-h", "20", "--"])
-                            .arg(&exe)
+                            .arg(&exe_str)
                             .arg(format!("--session={}", self.session_id))
                             .args(["approve", "--manage"])
                             .args(["--tool", &tool_name])
@@ -516,13 +550,12 @@ impl PermissionTreeState {
             NodeKind::Key { key } => {
                 // Launch an add-permission popup for this key.
                 let tool_name = self.find_tool_for_node_idx(idx);
-                let exe = match std::env::current_exe() {
-                    Ok(p) => p.to_string_lossy().to_string(),
-                    Err(_) => return false,
+                let Some(exe_str) = current_exe_str() else {
+                    return false;
                 };
                 match Command::new("tmux")
                     .args(["display-popup", "-E", "-w", "60", "-h", "20", "--"])
-                    .arg(&exe)
+                    .arg(&exe_str)
                     .arg(format!("--session={}", self.session_id))
                     .args(["approve", "--add"])
                     .args(["--tool", &tool_name])
@@ -839,13 +872,12 @@ pub fn launch_approval_popup(
     preview_file_path: Option<&str>,
     once_only: bool,
 ) -> bool {
-    let exe = match std::env::current_exe() {
-        Ok(p) => p.to_string_lossy().to_string(),
-        Err(_) => return false,
+    let Some(exe_str) = current_exe_str() else {
+        return false;
     };
 
     let mut cmd_args: Vec<String> = vec![
-        exe,
+        exe_str,
         format!("--session={}", session_id),
         "approve".into(),
         "--tool".into(),
@@ -881,7 +913,16 @@ pub fn launch_approval_popup(
         .output()
         .ok()
         .and_then(|out| {
-            let s = String::from_utf8_lossy(&out.stdout);
+            let s = match std::str::from_utf8(&out.stdout) {
+                Ok(s) => s,
+                Err(err) => {
+                    tracing::warn!(
+                        "tmux display-message output is not valid UTF-8 (first invalid byte at offset {}); using default window size",
+                        err.valid_up_to()
+                    );
+                    return None;
+                }
+            };
             let mut parts = s.split_whitespace();
             let w: usize = parts.next()?.parse().ok()?;
             let h: usize = parts.next()?.parse().ok()?;
@@ -1043,8 +1084,16 @@ pub fn approve_all_pending(session_id: &str, socket_path: &PathBuf) -> Option<us
             pending
                 .preview_file_path
                 .as_ref()
-                .map(|p| p.to_string_lossy())
-                .as_deref(),
+                .and_then(|p| match path_to_str(p) {
+                    Ok(s) => Some(s),
+                    Err(e) => {
+                        tracing::warn!(
+                            error = %e,
+                            "skipping preview with non-UTF-8 file path"
+                        );
+                        None
+                    }
+                }),
             pending.once_only,
         );
         if !decided {

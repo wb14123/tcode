@@ -73,16 +73,17 @@ impl Drop for SocketStartLock {
     }
 }
 
-fn socket_start_lock_path(socket_path: &Path) -> PathBuf {
+fn socket_start_lock_path(socket_path: &Path) -> Result<PathBuf> {
     if let Some(file_name) = socket_path.file_name() {
-        socket_path.with_file_name(format!("{}.lock", file_name.to_string_lossy()))
+        let file_name = tcode_encoding::path_to_str(Path::new(file_name))?;
+        Ok(socket_path.with_file_name(format!("{file_name}.lock")))
     } else {
-        socket_path.with_extension("lock")
+        Ok(socket_path.with_extension("lock"))
     }
 }
 
 async fn acquire_socket_start_lock(socket_path: &Path) -> Result<SocketStartLock> {
-    let lock_path = socket_start_lock_path(socket_path);
+    let lock_path = socket_start_lock_path(socket_path)?;
     if let Some(parent) = lock_path.parent() {
         std::fs::create_dir_all(parent).with_context(|| {
             format!(
@@ -633,7 +634,7 @@ impl Server {
             let key = PermissionKey {
                 tool: SCOPE_FILE_READ.to_string(),
                 key: KEY_PATH.to_string(),
-                value: canonical_cwd.to_string_lossy().to_string(),
+                value: tcode_encoding::path_to_str(&canonical_cwd)?.to_string(),
             };
             manager
                 .permission_manager()
@@ -645,7 +646,7 @@ impl Server {
         // agent can use it as a discard sink / empty input without prompting
         // (e.g. `cmd > /dev/null 2>&1`). Same pattern as the cwd read grant
         // above: session-level, visible in the permission tree, and revocable.
-        grant_dev_null_default_permissions(manager.permission_manager()).await;
+        grant_dev_null_default_permissions(manager.permission_manager()).await?;
 
         // Grant session-scoped web_fetch wildcard permission for web-only
         // sessions so the agent can fetch any hostname without prompting.
@@ -1080,17 +1081,17 @@ impl Server {
 /// failing — absence of the null device should never break session startup.
 pub(crate) async fn grant_dev_null_default_permissions(
     permission_manager: &llm_rs::permission::PermissionManager,
-) {
+) -> Result<()> {
     let canonical = match tokio::fs::canonicalize("/dev/null").await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(
                 "Failed to canonicalize /dev/null; skipping default null-device grants: {e}"
             );
-            return;
+            return Ok(());
         }
     };
-    let value = canonical.to_string_lossy().to_string();
+    let value = tcode_encoding::path_to_str(&canonical)?.to_string();
     for scope in [SCOPE_FILE_READ, SCOPE_FILE_WRITE] {
         let key = PermissionKey {
             tool: scope.to_string(),
@@ -1101,6 +1102,7 @@ pub(crate) async fn grant_dev_null_default_permissions(
             tracing::warn!("Failed to add {scope} permission for /dev/null: {e}");
         }
     }
+    Ok(())
 }
 
 /// Fetch subscription usage and write a human-readable summary to the usage file.
@@ -1245,11 +1247,12 @@ fn run_event_writer(
             let event = match item {
                 Ok(event) => event,
                 Err(BroadcastStreamRecvError::Lagged(n)) => {
-                    // Known limitation: conversation broadcasts are lossy. The
-                    // 10k sender buffer makes this unlikely for normal streamed
-                    // tool output, but if this happens display previews and
-                    // per-tool detail files may miss chunks. A strict guarantee
-                    // would need a non-lossy persistence path.
+                    // Known limitation: conversation broadcasts may drop
+                    // updates for lagging receivers. The 10k sender buffer
+                    // makes this unlikely for normal streamed tool output,
+                    // but if this happens display previews and per-tool
+                    // detail files may miss chunks. A strict guarantee would
+                    // need a backpressured persistence path.
                     tracing::warn!(skipped = n, "broadcast lagged");
                     continue;
                 }
@@ -2383,7 +2386,17 @@ fn close_stale_in_dir<'a>(
             .with_context(|| format!("Failed to read directory {:?}", dir))?;
         while let Some(entry) = read_dir.next_entry().await? {
             let name = entry.file_name();
-            let name_str = name.to_string_lossy();
+            let name_str = match tcode_encoding::path_to_str(Path::new(&name)) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = ?entry.path(),
+                        "Skipping entry with non-UTF-8 name during stale tool-call scan"
+                    );
+                    continue;
+                }
+            };
             if !name_str.starts_with("tool-call-") || !name_str.ends_with(".jsonl") {
                 continue;
             }
@@ -2504,7 +2517,17 @@ fn close_stale_in_dir<'a>(
             .with_context(|| format!("Failed to read directory {:?}", dir))?;
         while let Some(entry) = read_dir.next_entry().await? {
             let name = entry.file_name();
-            let name_str = name.to_string_lossy();
+            let name_str = match tcode_encoding::path_to_str(Path::new(&name)) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = ?entry.path(),
+                        "Skipping entry with non-UTF-8 name during stale subagent scan"
+                    );
+                    continue;
+                }
+            };
             if name_str.starts_with("subagent-") && entry.file_type().await?.is_dir() {
                 let subdir = entry.path();
                 close_stale_in_dir(&subdir, high_waters)

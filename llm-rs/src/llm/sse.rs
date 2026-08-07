@@ -31,12 +31,18 @@ pub(crate) async fn check_response(
 /// Yields `SseEvent` items for each `data:` line encountered. Handles
 /// `event:` lines (associated with the next `data:` line) and empty-line
 /// event boundaries per the SSE specification.
+///
+/// Network chunks are accumulated as raw bytes and only complete
+/// `\n`-terminated lines are strict-decoded, so a multi-byte UTF-8 character
+/// split across chunk boundaries is never corrupted. A line that is not valid
+/// UTF-8 terminates the stream with an `Err` (fail loudly rather than show
+/// mangled text).
 pub(crate) fn sse_stream(
     response: reqwest::Response,
 ) -> Pin<Box<dyn Stream<Item = Result<SseEvent, String>> + Send>> {
     Box::pin(stream! {
         let mut byte_stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer: Vec<u8> = Vec::new();
         let mut current_event_type: Option<String> = None;
 
         while let Some(chunk_result) = byte_stream.next().await {
@@ -48,11 +54,21 @@ pub(crate) fn sse_stream(
                 }
             };
 
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-
-            while let Some(line_end) = buffer.find('\n') {
-                let line = buffer[..line_end].trim_end().to_string();
-                buffer = buffer[line_end + 1..].to_string();
+            for raw_line in tcode_encoding::split_lines(&mut buffer, &chunk) {
+                // Trim trailing `\r` / ASCII whitespace from the line BYTES so
+                // a CRLF trailing `\r` never reaches the JSON parser.
+                let trimmed = raw_line.trim_ascii_end();
+                let line = match std::str::from_utf8(trimmed) {
+                    Ok(line) => line,
+                    Err(err) => {
+                        yield Err(format!(
+                            "SSE stream contains invalid UTF-8 (first invalid byte at offset {}): {:?}",
+                            err.valid_up_to(),
+                            trimmed
+                        ));
+                        return;
+                    }
+                };
 
                 if line.is_empty() {
                     current_event_type = None;

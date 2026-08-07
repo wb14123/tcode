@@ -19,6 +19,9 @@ mod openai_tests;
 #[cfg(test)]
 mod openrouter_tests;
 
+#[cfg(test)]
+mod sse_tests;
+
 pub use bedrock::Bedrock;
 pub use claude::Claude;
 pub use openai::OpenAI;

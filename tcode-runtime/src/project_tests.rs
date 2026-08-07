@@ -19,14 +19,14 @@ fn different_paths_produce_different_hashes() {
 #[test]
 fn output_is_under_dot_tcode_projects() {
     let dir = project_config_dir(Path::new("/some/path")).unwrap();
-    let path_str = dir.to_string_lossy();
+    let path_str = dir.to_str().unwrap();
     assert!(path_str.contains(".tcode/projects/"), "got: {path_str}");
 }
 
 #[test]
 fn hash_is_64_hex_chars() {
     let dir = project_config_dir(Path::new("/some/path")).unwrap();
-    let hash_dir = dir.file_name().unwrap().to_string_lossy();
+    let hash_dir = dir.file_name().unwrap().to_str().unwrap();
     assert_eq!(
         hash_dir.len(),
         64,
@@ -48,7 +48,7 @@ fn trailing_slash_is_significant() {
 #[test]
 fn non_ascii_paths_do_not_panic() {
     let dir = project_config_dir(Path::new("/home/ユーザー/プロジェクト")).unwrap();
-    let hash_dir = dir.file_name().unwrap().to_string_lossy();
+    let hash_dir = dir.file_name().unwrap().to_str().unwrap();
     assert_eq!(hash_dir.len(), 64);
     assert!(hash_dir.chars().all(|c| c.is_ascii_hexdigit()));
 }
@@ -59,7 +59,7 @@ fn hash_is_stable_across_calls() {
     let dir2 = project_config_dir(Path::new("/fixed/test/path")).unwrap();
     assert_eq!(dir1, dir2);
     // Also verify the hash subdirectory is deterministic
-    let hash1 = dir1.file_name().unwrap().to_string_lossy();
-    let hash2 = dir2.file_name().unwrap().to_string_lossy();
+    let hash1 = dir1.file_name().unwrap().to_str().unwrap();
+    let hash2 = dir2.file_name().unwrap().to_str().unwrap();
     assert_eq!(hash1, hash2);
 }

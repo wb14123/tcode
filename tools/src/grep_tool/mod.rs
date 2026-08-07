@@ -220,12 +220,26 @@ pub fn grep(
         }
 
         let mut matches_emitted = 0;
+        let skipped = file_matches
+            .iter()
+            .filter(|fm| tcode_encoding::path_to_str(&fm.path).is_err())
+            .count();
         for file_match in &file_matches {
             if matches_emitted >= MAX_RESULTS {
                 break;
             }
 
-            let file_path_str = file_match.path.to_string_lossy();
+            let file_path_str = match tcode_encoding::path_to_str(&file_match.path) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = ?file_match.path,
+                        "Skipping file with non-UTF-8 path in grep results"
+                    );
+                    continue;
+                }
+            };
             output.push_str(&format!("\n{}:\n", file_path_str));
 
             for line in &file_match.lines {
@@ -241,6 +255,12 @@ pub fn grep(
             output.push_str(&format!(
                 "\n(Results truncated: showing {} of {} total matches)",
                 MAX_RESULTS, total_match_count
+            ));
+        }
+        if skipped > 0 {
+            output.push_str(&format!(
+                "\n(Note: {} file(s) with non-UTF-8 paths were omitted from the results.)",
+                skipped
             ));
         }
 

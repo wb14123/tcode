@@ -238,6 +238,51 @@ fn emit_line(
     Some(processed.chars_used)
 }
 
+/// Build the fail-loudly error for non-UTF-8 file content, including an
+/// actionable hint for the LLM: the raw bytes cannot be displayed as text, but
+/// can be inspected by re-reading through base64 or by asking the user.
+fn invalid_utf8_read_error(
+    path_display: &str,
+    line: u64,
+    err: &std::str::Utf8Error,
+) -> anyhow::Error {
+    anyhow!(
+        "Failed to read {}: content is not valid UTF-8 (line {}, invalid byte or incomplete \
+         character at offset {}). The raw bytes cannot be displayed as text. To inspect them, \
+         re-read the file through base64 (e.g. run `base64 <file>` via the bash tool), or ask \
+         the user to check the file's encoding.",
+        path_display,
+        line,
+        err.valid_up_to()
+    )
+}
+
+/// If the first invalid byte of a line is at or beyond the remaining display
+/// budget, truncate `line_bytes` to the last complete char within the budget
+/// and return `true` (the line is emitted capped). Otherwise return `false`
+/// and the caller must fail loudly.
+fn truncate_beyond_budget(
+    line_bytes: &mut Vec<u8>,
+    err: &std::str::Utf8Error,
+    remaining: usize,
+) -> bool {
+    let prefix = &line_bytes[..err.valid_up_to()];
+    let prefix_str =
+        std::str::from_utf8(prefix).expect("bytes before valid_up_to() are valid UTF-8");
+    let prefix_chars = prefix_str.chars().count();
+    if prefix_chars >= remaining {
+        let cut = prefix_str
+            .char_indices()
+            .nth(remaining)
+            .map(|(i, _)| i)
+            .unwrap_or(prefix.len());
+        line_bytes.truncate(cut);
+        true
+    } else {
+        false
+    }
+}
+
 /// Read a directory and return a plain-text listing with a footer.
 async fn read_directory(path: &Path) -> Result<String> {
     let mut dir_iter = tokio::fs::read_dir(path)
@@ -257,8 +302,25 @@ async fn read_directory(path: &Path) -> Result<String> {
     items.sort_by_key(|e| e.file_name());
 
     let mut entries: Vec<String> = Vec::new();
+    let mut skipped_names = 0usize;
     for entry in items {
-        let name = entry.file_name().to_string_lossy().to_string();
+        let name_bytes = entry.file_name();
+        let name = match tcode_encoding::path_to_str(Path::new(&name_bytes)) {
+            Ok(name) => name.to_string(),
+            Err(e) => {
+                // One non-UTF-8 entry name must not fail the whole listing:
+                // skip it (with a log) and keep going. The requested path
+                // itself still propagates as before. The caller is told how
+                // many entries were omitted.
+                skipped_names += 1;
+                tracing::warn!(
+                    "Skipping directory entry with non-UTF-8 name {:?}: {}",
+                    name_bytes,
+                    e
+                );
+                continue;
+            }
+        };
         match entry.file_type().await {
             Ok(ft) if ft.is_dir() => entries.push(format!("{}/", name)),
             _ => entries.push(name),
@@ -266,7 +328,7 @@ async fn read_directory(path: &Path) -> Result<String> {
     }
 
     let count = entries.len();
-    let path_display = path.to_string_lossy().into_owned();
+    let path_display = tcode_encoding::path_to_str(path)?.to_string();
     let mut output = entries.join("\n");
     if !output.is_empty() {
         output.push('\n');
@@ -275,6 +337,12 @@ async fn read_directory(path: &Path) -> Result<String> {
         "#| Directory: {} ({} entries)",
         path_display, count
     ));
+    if skipped_names > 0 {
+        output.push_str(&format!(
+            "\n#| Note: {} non-UTF-8 entry name(s) omitted from this listing.",
+            skipped_names
+        ));
+    }
     Ok(output)
 }
 
@@ -388,7 +456,7 @@ pub fn read(
             .unwrap_or(false);
 
         if is_image {
-            let path_display = path.to_string_lossy().into_owned();
+            let path_display = tcode_encoding::path_to_str(path)?.to_string();
 
             let media_dir = media_util::require_media_dir(&ctx, "read image file")?;
 
@@ -425,7 +493,7 @@ pub fn read(
             .unwrap_or(false);
 
         if is_pdf {
-            let path_display = path.to_string_lossy().into_owned();
+            let path_display = tcode_encoding::path_to_str(path)?.to_string();
 
             let media_dir = media_util::require_media_dir(&ctx, "read PDF file")?;
 
@@ -473,7 +541,7 @@ pub fn read(
         let max_chars = max_read_chars.unwrap_or(DEFAULT_MAX_READ_CHARS).max(1) as usize;
         let flo = first_line_offset.unwrap_or(0) as usize;
 
-        let path_display = path.to_string_lossy().into_owned();
+        let path_display = tcode_encoding::path_to_str(path)?.to_string();
 
         // Yield header
         yield ContentPart::Text(format!("#| File: {}", path_display));
@@ -501,8 +569,29 @@ pub fn read(
                 if !partial_line.is_empty() && lines_yielded < lim && !was_truncated {
                     current_line += 1;
                     if current_line >= start {
-                        let line_str = String::from_utf8_lossy(&partial_line);
-                        if emit_line(&line_str, current_line, flo_applied, flo, chars_consumed, max_chars, partial_capped, &mut batch, &mut was_truncated, &mut last_truncated_line, &mut last_truncated_offset).is_some() {
+                        let line_str = match std::str::from_utf8(&partial_line) {
+                            Ok(s) => s,
+                            Err(e) => {
+                                // If the first invalid byte lies at or beyond the
+                                // remaining display budget it would never be displayed:
+                                // emit the line truncated to the budget instead of
+                                // failing the whole read.
+                                let remaining = max_chars.saturating_sub(chars_consumed);
+                                if truncate_beyond_budget(&mut partial_line, &e, remaining) {
+                                    partial_capped = true;
+                                    std::str::from_utf8(&partial_line).expect(
+                                        "truncated line is valid UTF-8: cut lands on a char boundary",
+                                    )
+                                } else {
+                                    Err(invalid_utf8_read_error(
+                                        &path_display,
+                                        current_line,
+                                        &e,
+                                    ))?
+                                }
+                            }
+                        };
+                        if emit_line(line_str, current_line, flo_applied, flo, chars_consumed, max_chars, partial_capped, &mut batch, &mut was_truncated, &mut last_truncated_line, &mut last_truncated_offset).is_some() {
                             if first_emitted_line == 0 {
                                 first_emitted_line = current_line;
                             }
@@ -528,8 +617,34 @@ pub fn read(
                             if !partial_capped {
                                 partial_line.extend_from_slice(&buf_owned[pos..line_end]);
                             }
-                            let line_str = String::from_utf8_lossy(&partial_line);
-                            if let Some(chars_used) = emit_line(&line_str, current_line, flo_applied, flo, chars_consumed, max_chars, partial_capped, &mut batch, &mut was_truncated, &mut last_truncated_line, &mut last_truncated_offset) {
+                            let line_str = match std::str::from_utf8(&partial_line) {
+                                Ok(s) => s,
+                                Err(e) => {
+                                    // If the first invalid byte lies at or beyond the
+                                    // remaining display budget it would never be
+                                    // displayed: emit the line truncated to the budget
+                                    // instead of failing the whole read.
+                                    let remaining =
+                                        max_chars.saturating_sub(chars_consumed);
+                                    if truncate_beyond_budget(
+                                        &mut partial_line,
+                                        &e,
+                                        remaining,
+                                    ) {
+                                        partial_capped = true;
+                                        std::str::from_utf8(&partial_line).expect(
+                                            "truncated line is valid UTF-8: cut lands on a char boundary",
+                                        )
+                                    } else {
+                                        Err(invalid_utf8_read_error(
+                                            &path_display,
+                                            current_line,
+                                            &e,
+                                        ))?
+                                    }
+                                }
+                            };
+                            if let Some(chars_used) = emit_line(line_str, current_line, flo_applied, flo, chars_consumed, max_chars, partial_capped, &mut batch, &mut was_truncated, &mut last_truncated_line, &mut last_truncated_offset) {
                                 chars_consumed += chars_used + 1;
                                 flo_applied = true;
                                 if first_emitted_line == 0 {
@@ -546,23 +661,110 @@ pub fn read(
                         pos = line_end + 1;
                     }
                     None => {
-                        if !partial_capped {
+                        // Only accumulate/count for lines inside the read window.
+                        if current_line + 1 >= start
+                            && lines_yielded < lim
+                            && !was_truncated
+                            && !partial_capped
+                        {
                             let remaining = &buf_owned[pos..buf_len];
                             let char_space = max_chars.saturating_sub(partial_buf_chars);
                             if char_space == 0 {
                                 partial_capped = true;
                             } else {
-                                let remaining_str = String::from_utf8_lossy(remaining);
-                                let take_chars = remaining_str.chars().count().min(char_space);
-                                let byte_end = remaining_str
-                                    .char_indices()
-                                    .nth(take_chars)
-                                    .map(|(i, _)| i)
-                                    .unwrap_or(remaining.len());
-                                partial_line.extend_from_slice(&remaining[..byte_end]);
-                                partial_buf_chars += take_chars;
-                                if partial_buf_chars >= max_chars {
-                                    partial_capped = true;
+                                // Validate the ACCUMULATED line (partial_line ++ this
+                                // segment), never the segment alone: a segment that starts
+                                // with a continuation byte (a char straddling the previous
+                                // buffer boundary) is invalid in isolation but valid once
+                                // merged with partial_line.
+                                let mut combined = partial_line.clone();
+                                combined.extend_from_slice(remaining);
+                                match std::str::from_utf8(&combined) {
+                                    Ok(s) => {
+                                        // Fully valid: count complete chars and cut at a
+                                        // char boundary.
+                                        let combined_chars = s.chars().count();
+                                        let new_chars =
+                                            combined_chars.saturating_sub(partial_buf_chars);
+                                        let take_chars = new_chars.min(char_space);
+                                        let cut_pos = s
+                                            .char_indices()
+                                            .nth(partial_buf_chars + take_chars)
+                                            .map(|(i, _)| i)
+                                            .unwrap_or(combined.len());
+                                        partial_line.extend_from_slice(
+                                            &remaining[..cut_pos - partial_line.len()],
+                                        );
+                                        partial_buf_chars += take_chars;
+                                        if partial_buf_chars >= max_chars {
+                                            partial_capped = true;
+                                        }
+                                    }
+                                    Err(e) if e.error_len().is_some() => {
+                                        // Genuinely invalid byte. If it lies at or beyond
+                                        // the remaining display budget it would never be
+                                        // displayed: stop accumulating (drop everything
+                                        // from the budget on, including the invalid byte)
+                                        // and continue the read with the line capped.
+                                        // Otherwise fail the read loudly.
+                                        let prefix = &combined[..e.valid_up_to()];
+                                        let prefix_str = std::str::from_utf8(prefix)
+                                            .expect("bytes before valid_up_to() are valid UTF-8");
+                                        let prefix_chars = prefix_str.chars().count();
+                                        let remaining_budget =
+                                            max_chars.saturating_sub(chars_consumed);
+                                        if prefix_chars >= remaining_budget {
+                                            let cut_combined = prefix_str
+                                                .char_indices()
+                                                .nth(remaining_budget)
+                                                .map(|(i, _)| i)
+                                                .unwrap_or(prefix.len());
+                                            let take =
+                                                cut_combined.saturating_sub(partial_line.len());
+                                            partial_line
+                                                .extend_from_slice(&remaining[..take]);
+                                            partial_buf_chars = max_chars;
+                                            partial_capped = true;
+                                        } else {
+                                            Err(invalid_utf8_read_error(
+                                                &path_display,
+                                                current_line + 1,
+                                                &e,
+                                            ))?;
+                                        }
+                                    }
+                                    Err(e) => {
+                                        // The accumulated line ends mid-character; it
+                                        // completes in a later chunk. Count only complete
+                                        // chars so far; the incomplete tail is buffered
+                                        // raw and uncounted until it completes.
+                                        let prefix = &combined[..e.valid_up_to()];
+                                        let prefix_str = std::str::from_utf8(prefix)
+                                            .expect("bytes before valid_up_to() are valid UTF-8");
+                                        let prefix_chars = prefix_str.chars().count();
+                                        let new_chars =
+                                            prefix_chars.saturating_sub(partial_buf_chars);
+                                        if new_chars < char_space {
+                                            // The incomplete char fits within the budget:
+                                            // append the full segment as raw bytes.
+                                            partial_line.extend_from_slice(remaining);
+                                            partial_buf_chars += new_chars;
+                                        } else {
+                                            // The cap cuts within this segment, before the
+                                            // incomplete char: keep only complete chars so
+                                            // partial_line ends at a char boundary.
+                                            let cut_combined = prefix_str
+                                                .char_indices()
+                                                .nth(partial_buf_chars + char_space)
+                                                .map(|(i, _)| i)
+                                                .unwrap_or(prefix.len());
+                                            partial_line.extend_from_slice(
+                                                &remaining[..cut_combined - partial_line.len()],
+                                            );
+                                            partial_buf_chars = max_chars;
+                                            partial_capped = true;
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -63,7 +63,7 @@ mod streaming {
     }
 
     fn shell_quote(path: &Path) -> String {
-        format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+        format!("'{}'", path.to_str().unwrap().replace('\'', "'\\''"))
     }
 
     /// Create a ToolContext with permissions pre-granted for any bash command.
@@ -96,7 +96,7 @@ mod streaming {
             PermissionKey {
                 tool: SCOPE_FILE_WRITE.to_string(),
                 key: KEY_PATH.to_string(),
-                value: cwd.to_string_lossy().into_owned(),
+                value: cwd.to_str().unwrap().to_string(),
             },
             PermissionScope::Session,
         )
@@ -108,7 +108,7 @@ mod streaming {
             PermissionKey {
                 tool: SCOPE_FILE_WRITE.to_string(),
                 key: KEY_PATH.to_string(),
-                value: test_root.to_string_lossy().into_owned(),
+                value: test_root.to_str().unwrap().to_string(),
             },
             PermissionScope::Session,
         )
@@ -435,7 +435,7 @@ mod streaming {
             command,
             false,
             Some(10_000),
-            Some(dir.to_string_lossy().into_owned()),
+            Some(dir.to_str().unwrap().to_string()),
             None,
             None,
             None,
@@ -533,7 +533,7 @@ mod streaming {
             command,
             false,
             Some(10_000),
-            Some(dir.to_string_lossy().into_owned()),
+            Some(dir.to_str().unwrap().to_string()),
             None,
             None,
             None,
@@ -562,7 +562,7 @@ mod streaming {
         let args = serde_json::json!({
             "command": command,
             "timeout": 10000,
-            "workdir": dir.to_string_lossy().into_owned(),
+            "workdir": dir.to_str().unwrap().to_string(),
             "description": "pre cancelled execute test"
         })
         .to_string();
@@ -655,7 +655,7 @@ mod streaming {
             command,
             false,
             Some(5_000),
-            Some(dir.to_string_lossy().into_owned()),
+            Some(dir.to_str().unwrap().to_string()),
             None,
             Some(1),
             None,
@@ -691,7 +691,7 @@ mod streaming {
             command,
             false,
             Some(5_000),
-            Some(dir.to_string_lossy().into_owned()),
+            Some(dir.to_str().unwrap().to_string()),
             None,
             None,
             None,
@@ -726,7 +726,7 @@ mod streaming {
             command,
             false,
             Some(5_000),
-            Some(dir.to_string_lossy().into_owned()),
+            Some(dir.to_str().unwrap().to_string()),
             None,
             Some(1),
             None,
@@ -868,7 +868,7 @@ mod streaming {
         if tool_log_dir.exists() {
             for entry in std::fs::read_dir(&tool_log_dir)? {
                 let entry = entry?;
-                if entry.file_name().to_string_lossy().ends_with(".log") {
+                if entry.file_name().to_str().unwrap().ends_with(".log") {
                     log_count += 1;
                 }
             }
@@ -937,4 +937,30 @@ mod streaming {
         }
         Ok(())
     }
+}
+
+// ── invalid-UTF-8 output error hint ────────────────────────────────────────
+
+#[test]
+fn invalid_utf8_output_error_has_inspection_hint() {
+    use std::io::ErrorKind;
+
+    let err = std::io::Error::new(ErrorKind::InvalidData, "stream did not contain valid UTF-8");
+    let msg = super::output_utf8_error(err).to_string();
+    assert!(msg.contains("not valid UTF-8"), "names the failure: {msg}");
+    assert!(
+        msg.contains("base64"),
+        "must hint at inspecting via base64: {msg}"
+    );
+    assert!(
+        msg.contains("ask the user"),
+        "must tell the LLM it can ask the user: {msg}"
+    );
+}
+
+#[test]
+fn non_utf8_io_error_passes_through_unchanged() {
+    let err = std::io::Error::other("some other error");
+    let msg = super::output_utf8_error(err).to_string();
+    assert_eq!(msg, "some other error");
 }

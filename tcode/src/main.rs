@@ -37,6 +37,9 @@ mod config_wizard_tests;
 #[cfg(test)]
 mod oauth_profile_tests;
 
+#[cfg(test)]
+mod tree_tests;
+
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
@@ -46,6 +49,7 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
+use tcode_encoding::{non_utf8_output_message, path_to_str};
 use tokio::process::Child;
 use tracing_subscriber::EnvFilter;
 
@@ -387,14 +391,24 @@ async fn send_server_message(
     Ok(())
 }
 
-/// Run a shell command and bail on failure.
-fn run_shell_cmd(cmd: &str, context_msg: &str) -> Result<()> {
-    let output = Command::new("sh")
-        .args(["-c", cmd])
+/// Run a tmux command via argv (no shell involved) and bail on failure with
+/// its stderr.
+fn run_tmux_command(args: &[&str], context_msg: &str) -> Result<()> {
+    let output = Command::new("tmux")
+        .args(args)
         .output()
         .map_err(|e| anyhow!("{}: {}", context_msg, e))?;
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
+        let stderr = match std::str::from_utf8(&output.stderr) {
+            Ok(s) => s.to_string(),
+            Err(err) => {
+                tracing::warn!(
+                    "tmux stderr is not valid UTF-8 (first invalid byte at offset {}); using error message instead",
+                    err.valid_up_to()
+                );
+                non_utf8_output_message("tmux output", &err)
+            }
+        };
         anyhow::bail!("{}: {}", context_msg, stderr);
     }
     Ok(())
@@ -756,32 +770,53 @@ async fn main() -> Result<()> {
         Some(Commands::OpenToolCall { tool_call_id }) => {
             let session_id = require_session(session)?;
             let exe = std::env::current_exe().context("Failed to determine current executable")?;
-            let exe_str = exe.to_string_lossy();
+            let exe_str = path_to_str(&exe)?;
+            // The inner command is run by tmux via the pane shell, so the exe
+            // is shell-quoted for that parse; tmux itself is invoked via argv.
             let inner_cmd = format!(
                 "{} --session={} tool-call {}",
-                exe_str, session_id, tool_call_id
+                branch::shell_quote(exe_str),
+                session_id,
+                tool_call_id
             );
-            let tmux_cmd = format!("tmux new-window -n \"tool-detail\" \"{}\"", inner_cmd);
-            run_shell_cmd(&tmux_cmd, "Failed to open tool-call detail window")
+            run_tmux_command(
+                &["new-window", "-n", "tool-detail", inner_cmd.as_str()],
+                "Failed to open tool-call detail window",
+            )
         }
         Some(Commands::OpenSubagent { conversation_id }) => {
             let session_id = require_session(session)?;
             let exe = std::env::current_exe().context("Failed to determine current executable")?;
-            let exe_str = exe.to_string_lossy();
+            let exe_str = path_to_str(&exe)?;
             let sa_session = format!("{}/subagent-{}", session_id, conversation_id);
+            // `$TMUX_PANE` is expanded by the pane shell; tmux itself is
+            // invoked via argv with `;` as the command separator.
             let display_cmd = format!(
-                "{} --session={} display --is-subagent; tmux kill-window -t \\$TMUX_PANE",
-                exe_str, sa_session
+                "{} --session={} display --is-subagent; tmux kill-window -t $TMUX_PANE",
+                branch::shell_quote(exe_str),
+                sa_session
             );
             let edit_cmd = format!(
                 "{} --session={} edit --conversation-id={}",
-                exe_str, sa_session, conversation_id
+                branch::shell_quote(exe_str),
+                sa_session,
+                conversation_id
             );
-            let tmux_cmd = format!(
-                "tmux new-window -n \"subagent\" \"{}\" \\; split-window -v -p 30 \"{}\"",
-                display_cmd, edit_cmd
-            );
-            run_shell_cmd(&tmux_cmd, "Failed to open subagent window")
+            run_tmux_command(
+                &[
+                    "new-window",
+                    "-n",
+                    "subagent",
+                    display_cmd.as_str(),
+                    ";",
+                    "split-window",
+                    "-v",
+                    "-p",
+                    "30",
+                    edit_cmd.as_str(),
+                ],
+                "Failed to open subagent window",
+            )
         }
         Some(Commands::Permission) => {
             let session_id = match session_id_or_pick(session)? {
@@ -1063,10 +1098,28 @@ fn create_layout_panes(
                 .context("Failed to run tmux split-window")?;
 
             if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                bail!("tmux split-window failed: {}", stderr.trim());
+                let stderr = match std::str::from_utf8(&output.stderr) {
+                    Ok(s) => s.trim().to_string(),
+                    Err(err) => {
+                        tracing::warn!(
+                            "tmux split-window stderr is not valid UTF-8 (first invalid byte at offset {}); using error message instead",
+                            err.valid_up_to()
+                        );
+                        non_utf8_output_message("command output", &err)
+                    }
+                };
+                bail!("tmux split-window failed: {}", stderr);
             }
-            let b_pane_id = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let b_pane_id = match std::str::from_utf8(&output.stdout) {
+                Ok(s) => s.trim().to_string(),
+                Err(err) => {
+                    tracing::warn!(
+                        "tmux split-window stdout is not valid UTF-8 (first invalid byte at offset {}); treating pane id as empty",
+                        err.valid_up_to()
+                    );
+                    String::new()
+                }
+            };
             if b_pane_id.is_empty() {
                 bail!("tmux split-window did not return a pane ID");
             }
@@ -1133,7 +1186,16 @@ fn setup_layout_panes(
             .context("Failed to run tmux swap-pane")?;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = match std::str::from_utf8(&output.stderr) {
+                Ok(s) => s.to_string(),
+                Err(err) => {
+                    tracing::warn!(
+                        "tmux swap-pane stderr is not valid UTF-8 (first invalid byte at offset {}); using error message instead",
+                        err.valid_up_to()
+                    );
+                    non_utf8_output_message("command output", &err)
+                }
+            };
             kill_spawned_panes(&spawned_pane_ids);
             bail!("tmux swap-pane failed: {}", stderr);
         }
@@ -1150,10 +1212,18 @@ fn setup_layout_panes(
             continue; // display runs in-process in the caller
         }
         let cmd = match pane.command {
-            config::PanelCommand::Edit => format!("{} {} edit", exe_str, session_arg),
-            config::PanelCommand::Tree => format!("{} {} tree", exe_str, session_arg),
+            config::PanelCommand::Edit => {
+                format!("{} {} edit", branch::shell_quote(exe_str), session_arg)
+            }
+            config::PanelCommand::Tree => {
+                format!("{} {} tree", branch::shell_quote(exe_str), session_arg)
+            }
             config::PanelCommand::Permission => {
-                let inner = format!("{} {} permission", exe_str, session_arg);
+                let inner = format!(
+                    "{} {} permission",
+                    branch::shell_quote(exe_str),
+                    session_arg
+                );
                 format!(
                     "bash -c '{} 2>&1; ret=$?; if [ $ret -ne 0 ]; then echo \"[permission pane exited with code $ret — press Enter to close]\"; read; fi'",
                     inner.replace('\'', "'\\''")
@@ -1166,12 +1236,11 @@ fn setup_layout_panes(
             .output();
         match output {
             Ok(o) if !o.status.success() => {
-                let stderr = String::from_utf8_lossy(&o.stderr);
                 tracing::warn!(
-                    "failed to start {} pane in {}: {}",
+                    "failed to start {} pane in {}: stderr bytes {:?}",
                     pane.command,
                     pane.pane_id,
-                    stderr
+                    o.stderr
                 );
             }
             Err(e) => {
@@ -1305,7 +1374,7 @@ async fn run_unified_with_session(
 
     let exe_path =
         std::env::current_exe().context("Failed to determine current executable path")?;
-    let exe_str = exe_path.to_string_lossy();
+    let exe_str = path_to_str(&exe_path)?;
     let session_arg = match profile {
         Some(p) => format!("-p {} --session={}", branch::shell_quote(p), session_id),
         None => format!("--session={}", session_id),
@@ -1438,7 +1507,7 @@ async fn run_unified_with_session(
         .collect();
     ensure_lua_files(session.session_dir(), Some(&user_skills))?;
 
-    let panes = match setup_layout_panes(&layout, &current_pane_id, &exe_str, &session_arg) {
+    let panes = match setup_layout_panes(&layout, &current_pane_id, exe_str, &session_arg) {
         Ok(p) => p,
         Err(e) => {
             lease.detach().await;
@@ -1449,8 +1518,8 @@ async fn run_unified_with_session(
         }
     };
 
-    // Display runs as child process with saved original stdio FDs
-    let display_cmd = format!("{} {} display", exe_str, session_arg);
+    // Display runs as child process with saved original stdio FDs. The exe and
+    // args are passed via argv (no shell), so no quoting is needed.
     let (stdin, stdout, stderr) = match tty_stdio::get_original_stdio() {
         Some(stdio) => stdio,
         None => {
@@ -1463,8 +1532,8 @@ async fn run_unified_with_session(
         }
     };
 
-    let mut display_child = match Command::new("sh")
-        .args(["-c", &display_cmd])
+    let mut display_child = match Command::new(exe_str)
+        .args([session_arg.as_str(), "display"])
         .stdin(stdin)
         .stdout(stdout)
         .stderr(stderr)

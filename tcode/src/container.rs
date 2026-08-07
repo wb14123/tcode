@@ -1,5 +1,6 @@
 use anyhow::{Result, bail};
 use llm_rs::tool::ContainerConfig;
+use tcode_encoding::{non_utf8_output_message, path_to_str};
 
 /// Validate that a container is ready for use with tcode.
 ///
@@ -32,7 +33,16 @@ pub async fn validate_container(name: &str, runtime: &str) -> Result<()> {
         .await;
     match inspect_result {
         Ok(output) if output.status.success() => {
-            let status = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let status = match std::str::from_utf8(&output.stdout) {
+                Ok(s) => s.trim().to_string(),
+                Err(err) => {
+                    tracing::warn!(
+                        "container status output is not valid UTF-8 (first invalid byte at offset {}); using error message instead",
+                        err.valid_up_to()
+                    );
+                    non_utf8_output_message("container status", &err)
+                }
+            };
             if status != "running" {
                 bail!(
                     "Container '{name}' is not running (status: {status}). Start it before running tcode."
@@ -87,9 +97,9 @@ pub async fn validate_container(name: &str, runtime: &str) -> Result<()> {
         path: marker_path.clone(),
     };
 
-    let marker_path_str = marker_path.to_string_lossy();
+    let marker_path_str = path_to_str(&marker_path)?;
     let test_result = tokio::process::Command::new(runtime)
-        .args(["exec", name, "test", "-f", &marker_path_str])
+        .args(["exec", name, "test", "-f", marker_path_str])
         .output()
         .await;
     match test_result {

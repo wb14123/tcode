@@ -11,6 +11,7 @@ browser-server = { path = "../browser-server" }
 chrono = "0.4"
 tcode-web = { path = "../tcode-web" }
 tcode-runtime = { path = "../tcode-runtime" }
+tcode-encoding = { path = "../tcode-encoding" }
 dirs = "6"
 auth = { path = "../auth" }
 lsp-client = { path = "../lsp-client" }

@@ -280,7 +280,7 @@ fn test_load_skill_content_crlf_line_endings() -> anyhow::Result<()> {
 
     let meta = test_skill("test", None, None, tmp.path().to_path_buf(), skill_file);
     let loaded = load_skill_content(&meta)?;
-    let expected = content.replace("${CLAUDE_SKILL_DIR}", &tmp.path().to_string_lossy());
+    let expected = content.replace("${CLAUDE_SKILL_DIR}", tmp.path().to_str().unwrap());
     assert_eq!(loaded, expected);
     Ok(())
 }

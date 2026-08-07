@@ -14,6 +14,7 @@ use llm_rs::conversation::{BroadcastMessage, ConversationState, Message};
 use llm_rs::llm::LLMMessage;
 use llm_rs::media::ContentPart;
 use rand::RngExt;
+use tcode_encoding::{non_utf8_output_message, path_to_str};
 
 /// Result of cutting a display file at a target user-message envelope.
 #[derive(Debug)]
@@ -424,8 +425,11 @@ pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     {
         let entry = entry.with_context(|| format!("failed to read entry in {}", src.display()))?;
         let name = entry.file_name();
-        let name_str = name.to_string_lossy();
-        if name_str.ends_with(".tmp") {
+        // Non-UTF-8 names cannot carry the ASCII `.tmp` suffix, so they fall
+        // through (copied) instead of being skipped as temp files.
+        if let Some(name_str) = name.to_str()
+            && name_str.ends_with(".tmp")
+        {
             continue;
         }
         let src_path = entry.path();
@@ -504,7 +508,9 @@ fn spawn_tmux_attach_tab(
     profile: Option<&str>,
     session_id: &str,
 ) -> std::io::Result<std::process::Output> {
-    let exe_q = shell_quote(&exe.to_string_lossy());
+    let exe_str =
+        path_to_str(exe).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+    let exe_q = shell_quote(exe_str);
     let profile_q = profile
         .map(|p| format!(" -p {}", shell_quote(p)))
         .unwrap_or_default();
@@ -830,7 +836,16 @@ pub(crate) fn run_branch(
     match spawn_outcome {
         Ok(output) if output.status.success() => {}
         Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = match std::str::from_utf8(&output.stderr) {
+                Ok(s) => s.to_string(),
+                Err(err) => {
+                    tracing::warn!(
+                        "tmux attach-tab stderr is not valid UTF-8 (first invalid byte at offset {}); using error message instead",
+                        err.valid_up_to()
+                    );
+                    non_utf8_output_message("tmux output", &err)
+                }
+            };
             println!(
                 "Branched to session {}; failed to open the tab: {} - run \"tcode attach --session={}\" later",
                 new_id, stderr, new_id

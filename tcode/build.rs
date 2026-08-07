@@ -95,7 +95,13 @@ fn main() {
         .args(["rev-parse", "--short", "HEAD"])
         .output()
     {
-        let hash = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let hash = match String::from_utf8(output.stdout) {
+            Ok(s) => s.trim().to_string(),
+            Err(err) => panic!(
+                "git rev-parse output is not valid UTF-8 (first invalid byte at offset {}); cannot determine git commit hash",
+                err.utf8_error().valid_up_to()
+            ),
+        };
         if !hash.is_empty() {
             println!("cargo:rustc-env=GIT_HASH={hash}");
         }

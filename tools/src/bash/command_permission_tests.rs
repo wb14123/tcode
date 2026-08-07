@@ -586,7 +586,7 @@ async fn dev_null_redirect_approved_with_grant() -> Result<()> {
         PermissionKey {
             tool: "file_write".to_string(),
             key: "path".to_string(),
-            value: canonical.to_string_lossy().to_string(),
+            value: canonical.to_str().unwrap().to_string(),
         },
         PermissionScope::Session,
     )?;
@@ -600,7 +600,7 @@ async fn dev_null_redirect_approved_with_grant() -> Result<()> {
         PermissionKey {
             tool: "file_read".to_string(),
             key: "path".to_string(),
-            value: canonical_workdir.to_string_lossy().to_string(),
+            value: canonical_workdir.to_str().unwrap().to_string(),
         },
         PermissionScope::Session,
     )?;

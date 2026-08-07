@@ -16,6 +16,7 @@ tokio = { version = "1.51.1", features = ["macros", "rt", "rt-multi-thread", "sy
 tokio-stream = { version = "0.1", features = ["sync"] }
 tokio-util = { version = "0.7", features = ["rt"] }
 llm-rs-macros = { path = "../llm-rs-macros" }
+tcode-encoding = { path = "../tcode-encoding" }
 aws-config = { version = "1", features = ["behavior-version-latest"] }
 aws-sdk-bedrockruntime = "1"
 aws-smithy-types = "1"

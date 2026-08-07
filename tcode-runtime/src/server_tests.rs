@@ -668,10 +668,10 @@ async fn dev_null_default_permissions_granted() -> anyhow::Result<()> {
     let pm = Arc::new(llm_rs::permission::PermissionManager::new(
         temp_dir().join("permissions.json"),
     ));
-    crate::server::grant_dev_null_default_permissions(&pm).await;
+    crate::server::grant_dev_null_default_permissions(&pm).await?;
 
     let canonical = tokio::fs::canonicalize("/dev/null").await?;
-    let value = canonical.to_string_lossy().to_string();
+    let value = canonical.to_str().unwrap().to_string();
     let session = pm.snapshot().session;
     for scope in [SCOPE_FILE_READ, SCOPE_FILE_WRITE] {
         assert!(

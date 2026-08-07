@@ -606,7 +606,7 @@ pub async fn init_browser_client(
 
     let client = BrowserClient::unix(socket_path.clone())?
         .with_auto_restart(socket_path, browser_server_exe);
-    client.ensure_server_running().await;
+    client.ensure_server_running().await?;
     set_global_client(client);
     Ok(())
 }

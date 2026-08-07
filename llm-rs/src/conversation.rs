@@ -552,9 +552,9 @@ fn prepare_conversation(
     let (input_tx, input_rx) = mpsc::channel(100);
     // Temporary mitigation for high-volume streamed tool output (notably bash):
     // event writers subscribe through this broadcast channel and persist tool
-    // detail files from it. Broadcast is still lossy if a receiver lags beyond
-    // this capacity, so strict detail-file completeness would require a
-    // non-lossy/backpressured persistence path.
+    // detail files from it. Broadcast may still drop updates if a receiver lags
+    // beyond this capacity, so strict detail-file completeness would require a
+    // backpressured persistence path.
     let (notify_tx, _) = broadcast::channel(10_000);
     let client = Arc::new(ConversationClient {
         msg_id_counter: parking_lot::Mutex::new(msg_id_start),
@@ -657,8 +657,14 @@ impl ConversationManager {
     /// Creates the `tool-logs/` subdirectory and grants a `Session`-scoped
     /// `file_read` permission so the LLM can later `read`/`grep`/`glob` log
     /// files produced by tools (e.g., full bash output saved on truncation).
-    fn make_session_dir(&self, state_dir: &Option<PathBuf>) -> Option<crate::tool::SessionDir> {
-        let dir = state_dir.as_ref()?;
+    fn make_session_dir(
+        &self,
+        state_dir: &Option<PathBuf>,
+    ) -> Result<Option<crate::tool::SessionDir>> {
+        let dir = match state_dir {
+            Some(dir) => dir,
+            None => return Ok(None),
+        };
         let tool_logs_dir = dir.join("tool-logs");
         if let Err(e) = std::fs::create_dir_all(&tool_logs_dir) {
             tracing::warn!(
@@ -670,7 +676,7 @@ impl ConversationManager {
             let key = crate::permission::PermissionKey {
                 tool: crate::permission::SCOPE_FILE_READ.to_string(),
                 key: crate::permission::KEY_PATH.to_string(),
-                value: canonical.to_string_lossy().to_string(),
+                value: tcode_encoding::path_to_str(&canonical)?.to_string(),
             };
             if let Err(e) = self
                 .permission_manager
@@ -684,7 +690,7 @@ impl ConversationManager {
                 tool_logs_dir.display()
             );
         }
-        Some(crate::tool::SessionDir::new(dir.clone()))
+        Ok(Some(crate::tool::SessionDir::new(dir.clone())))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -745,7 +751,7 @@ impl ConversationManager {
                     subagent_depth,
                     max_subagent_depth,
                     state_dir: state_dir.clone(),
-                    session_dir: self.make_session_dir(&state_dir),
+                    session_dir: self.make_session_dir(&state_dir)?,
                     supports_media,
                     permission_manager: Arc::clone(&self.permission_manager),
                     container_config: self.container_config.clone(),
@@ -884,7 +890,7 @@ impl ConversationManager {
                     subagent_depth: state.subagent_depth,
                     max_subagent_depth,
                     state_dir: state_dir.clone(),
-                    session_dir: self.make_session_dir(&state_dir),
+                    session_dir: self.make_session_dir(&state_dir)?,
                     supports_media,
                     permission_manager: Arc::clone(&self.permission_manager),
                     container_config: self.container_config.clone(),

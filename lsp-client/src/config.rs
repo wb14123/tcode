@@ -190,17 +190,46 @@ io.stdout:write(vim.json.encode({ servers = servers, extensions = exts }))
     };
 
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        tracing::warn!(
-            "nvim exited with status {} during LSP config extraction. stderr: {}",
-            output.status,
-            stderr.trim()
-        );
+        match std::str::from_utf8(&output.stderr) {
+            Ok(stderr) => {
+                tracing::warn!(
+                    "nvim exited with status {} during LSP config extraction. stderr: {}",
+                    output.status,
+                    stderr.trim()
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "nvim exited with status {} during LSP config extraction. stderr was not valid UTF-8 (first invalid byte at offset {}), raw bytes: {:?}",
+                    output.status,
+                    e.valid_up_to(),
+                    output.stderr
+                );
+            }
+        }
         return Ok(empty_config());
     }
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = match std::str::from_utf8(&output.stdout) {
+        Ok(stdout) => stdout,
+        Err(e) => {
+            tracing::warn!(
+                "nvim LSP config extraction: stdout is not valid UTF-8 (first invalid byte at offset {}), falling back to empty config",
+                e.valid_up_to()
+            );
+            return Ok(empty_config());
+        }
+    };
+    let stderr = match std::str::from_utf8(&output.stderr) {
+        Ok(stderr) => stderr,
+        Err(e) => {
+            tracing::warn!(
+                "nvim LSP config extraction: stderr is not valid UTF-8 (first invalid byte at offset {}), falling back to empty config",
+                e.valid_up_to()
+            );
+            return Ok(empty_config());
+        }
+    };
     if !stderr.is_empty() {
         tracing::debug!("nvim LSP config extraction stderr: {}", stderr.trim());
     }

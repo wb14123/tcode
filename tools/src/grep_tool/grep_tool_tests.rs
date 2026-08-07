@@ -64,7 +64,7 @@ fn include_filter_restricts_files() -> Result<()> {
     let (results, total) = search_grep(&dir, "fn main", Some("*.rs"))?;
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
-    assert!(results[0].path.to_string_lossy().ends_with("match.rs"));
+    assert!(results[0].path.to_str().unwrap().ends_with("match.rs"));
 
     std::fs::remove_dir_all(&dir)?;
     Ok(())
@@ -109,7 +109,7 @@ fn binary_files_skipped() -> Result<()> {
     let (results, total) = search_grep(&dir, "hello", None)?;
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
-    assert!(results[0].path.to_string_lossy().ends_with("text.txt"));
+    assert!(results[0].path.to_str().unwrap().ends_with("text.txt"));
 
     std::fs::remove_dir_all(&dir)?;
     Ok(())
@@ -157,7 +157,7 @@ fn single_file_path_works() -> Result<()> {
     let (results, total) = search_grep(&file, "alpha", None)?;
     assert_eq!(total, 1);
     assert_eq!(results.len(), 1);
-    assert!(results[0].path.to_string_lossy().ends_with("target.txt"));
+    assert!(results[0].path.to_str().unwrap().ends_with("target.txt"));
 
     std::fs::remove_dir_all(&dir)?;
     Ok(())

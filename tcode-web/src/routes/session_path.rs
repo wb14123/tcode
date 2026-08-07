@@ -138,7 +138,7 @@ impl SessionDir {
 
     /// Find a subagent directory by ID, containment-checked against root.
     pub(crate) fn subagent_dir(&self, id: &str) -> ApiResult<SessionDir> {
-        let found = find_subagent_dir_inner(&self.path, id)
+        let found = find_subagent_dir_inner(&self.path, id)?
             .ok_or_else(|| ApiError::not_found("subagent not found"))?;
         if !found.starts_with(&self.root) {
             return Err(ApiError::bad_request("path traversal detected"));
@@ -244,23 +244,25 @@ impl SessionDir {
     }
 }
 
-fn find_subagent_dir_inner(dir: &Path, subagent_id: &str) -> Option<PathBuf> {
-    let entries = std::fs::read_dir(dir).ok()?;
-    for entry in entries.flatten() {
+fn find_subagent_dir_inner(dir: &Path, subagent_id: &str) -> ApiResult<Option<PathBuf>> {
+    let entries = std::fs::read_dir(dir).map_err(|e| ApiError::internal(e.to_string()))?;
+    for entry in entries {
+        let entry = entry.map_err(|e| ApiError::internal(e.to_string()))?;
         let path = entry.path();
         if !path.is_dir() {
             continue;
         }
         let name = entry.file_name();
-        let name = name.to_string_lossy();
+        let name = tcode_encoding::path_to_str(Path::new(&name))
+            .map_err(|e| ApiError::internal(e.to_string()))?;
         if name == format!("subagent-{subagent_id}") {
-            return Some(path);
+            return Ok(Some(path));
         }
         if name.starts_with("subagent-")
-            && let Some(found) = find_subagent_dir_inner(&path, subagent_id)
+            && let Some(found) = find_subagent_dir_inner(&path, subagent_id)?
         {
-            return Some(found);
+            return Ok(Some(found));
         }
     }
-    None
+    Ok(None)
 }

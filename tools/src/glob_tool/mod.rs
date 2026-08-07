@@ -168,18 +168,47 @@ pub fn glob(
 
         let total = files.len();
         let truncated = total > MAX_RESULTS;
+        let skipped = files
+            .iter()
+            .filter(|(p, _)| tcode_encoding::path_to_str(p).is_err())
+            .count();
 
-        let mut output = files.iter()
-            .take(MAX_RESULTS)
-            .map(|(p, _)| p.to_string_lossy().to_string())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut output = String::new();
+        for (p, _) in files.iter().take(MAX_RESULTS) {
+            let path_str = match tcode_encoding::path_to_str(p) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        path = ?p,
+                        "Skipping file with non-UTF-8 path in glob results"
+                    );
+                    continue;
+                }
+            };
+            output.push_str(path_str);
+            output.push('\n');
+        }
+        // Drop the trailing newline added by the loop (original joined with "\n").
+        if !output.is_empty() {
+            output.pop();
+        }
 
         if truncated {
             output.push_str(&format!(
                 "\n\n(Results truncated: showing {} of {} total matches)",
                 MAX_RESULTS, total
             ));
+        }
+        if skipped > 0 {
+            let note = format!(
+                "({skipped} file(s) with non-UTF-8 paths were omitted from the results.)"
+            );
+            if output.is_empty() {
+                output.push_str(&note);
+            } else {
+                output.push_str(&format!("\n\n{note}"));
+            }
         }
 
         yield Ok(output);

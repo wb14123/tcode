@@ -22,6 +22,7 @@ use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 
 use crate::session::Session;
 use crate::tree_nav::TreeNav;
+use tcode_encoding::{non_utf8_output_message, path_to_str, split_lines};
 
 // ---------------------------------------------------------------------------
 // Data types
@@ -127,12 +128,13 @@ struct TreeNode {
 
 struct FileTracker {
     offset: u64,
-    line_buffer: String,
+    /// Raw bytes of the trailing unterminated line, carried between reads.
+    line_buffer: Vec<u8>,
     /// Index of the Root or SubAgent node that owns this conversation dir.
     owner_node: usize,
 }
 
-struct TreeState {
+pub(crate) struct TreeState {
     arena: Vec<TreeNode>,
     /// Visible node indices (rebuilt by `rebuild_visible`).
     visible: Vec<usize>,
@@ -143,7 +145,7 @@ struct TreeState {
     /// dir path → root/subagent node index.
     dir_to_node: HashMap<PathBuf, usize>,
     /// tool_call_id → node index.
-    tool_call_idx: HashMap<String, usize>,
+    pub(crate) tool_call_idx: HashMap<String, usize>,
     /// conversation_id → node index.
     conversation_idx: HashMap<String, usize>,
     /// Maps tool_call_id → node arena index for subagent nodes created by SubAgentInputStart.
@@ -157,7 +159,7 @@ struct TreeState {
 }
 
 impl TreeState {
-    fn new(session_dir: PathBuf, session_id: String) -> Self {
+    pub(crate) fn new(session_dir: PathBuf, session_id: String) -> Self {
         let mut state = TreeState {
             arena: Vec::new(),
             visible: Vec::new(),
@@ -188,7 +190,7 @@ impl TreeState {
             display_file,
             FileTracker {
                 offset: 0,
-                line_buffer: String::new(),
+                line_buffer: Vec::new(),
                 owner_node: root_idx,
             },
         );
@@ -283,7 +285,7 @@ impl TreeState {
                     .entry(display_file)
                     .or_insert_with(|| FileTracker {
                         offset: 0,
-                        line_buffer: String::new(),
+                        line_buffer: Vec::new(),
                         owner_node: node_idx,
                     });
             }
@@ -304,7 +306,7 @@ impl TreeState {
     }
 
     /// Read new bytes from a single tracked file and process events.
-    fn read_file(&mut self, path: &PathBuf) {
+    pub(crate) fn read_file(&mut self, path: &PathBuf) {
         let (offset, owner_node, mut line_buffer) = match self.file_trackers.get(path) {
             Some(t) => (t.offset, t.owner_node, t.line_buffer.clone()),
             None => return,
@@ -332,32 +334,33 @@ impl TreeState {
             tracing::warn!(path = %path.display(), error = %e, "Failed to read JSONL file");
             return;
         }
-        let new_text = String::from_utf8_lossy(&new_bytes);
 
-        // Prepend buffered partial line
-        let combined = if line_buffer.is_empty() {
-            new_text.to_string()
-        } else {
-            let mut s = std::mem::take(&mut line_buffer);
-            s.push_str(&new_text);
-            s
-        };
-
-        let mut lines: Vec<&str> = combined.split('\n').collect();
-        // If no trailing newline, last element is incomplete
-        let last = lines.pop().unwrap_or("");
-        let new_line_buffer = if combined.ends_with('\n') {
-            // last is "" after split, nothing buffered
-            String::new()
-        } else {
-            last.to_string()
-        };
+        // Split into complete `\n`-terminated lines. The trailing unterminated
+        // partial line stays in `line_buffer` (raw bytes) until a later read
+        // completes it.
+        let lines = split_lines(&mut line_buffer, &new_bytes);
 
         // Determine the directory that owns this file
         let dir = path.parent().unwrap_or(Path::new("")).to_path_buf();
 
         for line in &lines {
-            let line = line.trim();
+            // Decode only complete lines: `\n` (0x0A) can never appear inside a
+            // multi-byte UTF-8 sequence, so a `\n`-delimited line always contains
+            // complete characters. A genuinely invalid line is skipped - the UI
+            // must not die on one bad line.
+            let line_text = match std::str::from_utf8(line) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(
+                        path = %path.display(),
+                        offset = offset,
+                        error = %e,
+                        "Skipping JSONL line with invalid UTF-8"
+                    );
+                    continue;
+                }
+            };
+            let line = line_text.trim();
             if line.is_empty() {
                 continue;
             }
@@ -382,7 +385,7 @@ impl TreeState {
         // Update tracker
         if let Some(tracker) = self.file_trackers.get_mut(path) {
             tracker.offset = offset + new_bytes.len() as u64;
-            tracker.line_buffer = new_line_buffer;
+            tracker.line_buffer = line_buffer;
         }
     }
 
@@ -547,7 +550,7 @@ impl TreeState {
                             .and_modify(|t| t.owner_node = idx)
                             .or_insert_with(|| FileTracker {
                                 offset: 0,
-                                line_buffer: String::new(),
+                                line_buffer: Vec::new(),
                                 owner_node: idx,
                             });
                     }
@@ -591,7 +594,7 @@ impl TreeState {
                             .entry(sa_display)
                             .or_insert_with(|| FileTracker {
                                 offset: 0,
-                                line_buffer: String::new(),
+                                line_buffer: Vec::new(),
                                 owner_node: node_idx,
                             });
                     }
@@ -835,7 +838,16 @@ impl TreeState {
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         match std::process::Command::new(&exe).args(&args_ref).output() {
             Ok(output) if !output.status.success() => {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stderr = match std::str::from_utf8(&output.stderr) {
+                    Ok(s) => s.trim().to_string(),
+                    Err(err) => {
+                        tracing::warn!(
+                            "cancel command stderr is not valid UTF-8 (first invalid byte at offset {}); using error message instead",
+                            err.valid_up_to()
+                        );
+                        non_utf8_output_message("command output", &err)
+                    }
+                };
                 tracing::error!("Cancel command failed: {}", stderr);
                 self.status_message = Some(format!("Cancel failed: {}", stderr));
             }
@@ -854,7 +866,9 @@ impl TreeState {
     fn resolve_exe(&self) -> Result<String, String> {
         let exe = std::env::current_exe()
             .map_err(|e| format!("Failed to determine current executable: {}", e))?;
-        let exe_str = exe.to_string_lossy().to_string();
+        let exe_str = path_to_str(&exe)
+            .map_err(|e| format!("Failed to determine current executable: {}", e))?
+            .to_string();
 
         // On Linux, /proc/self/exe gets " (deleted)" appended after a rebuild
         if exe_str.ends_with(" (deleted)") {
@@ -970,7 +984,16 @@ impl TreeState {
         let args_ref: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
         match std::process::Command::new(&exe).args(&args_ref).output() {
             Ok(output) if !output.status.success() => {
-                let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+                let stderr = match std::str::from_utf8(&output.stderr) {
+                    Ok(s) => s.trim().to_string(),
+                    Err(err) => {
+                        tracing::warn!(
+                            "open detail stderr is not valid UTF-8 (first invalid byte at offset {}); using error message instead",
+                            err.valid_up_to()
+                        );
+                        non_utf8_output_message("command output", &err)
+                    }
+                };
                 tracing::error!("Failed to open detail view: {}", stderr);
                 self.status_message = Some(format!("Open failed: {}", stderr));
             }
@@ -1397,41 +1420,4 @@ pub fn run_tree(session: Session) -> Result<()> {
     disable_raw_mode()?;
     execute!(terminal.backend_mut(), LeaveAlternateScreen)?;
     Ok(())
-}
-
-#[cfg(test)]
-mod tree_tests {
-    use std::fs::File;
-    use std::io::Write;
-
-    use super::TreeState;
-
-    fn test_root() -> std::path::PathBuf {
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/tree")
-    }
-
-    fn temp_dir() -> std::path::PathBuf {
-        let dir = test_root().join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&dir).expect("failed to create test dir");
-        dir
-    }
-
-    #[test]
-    fn dual_parse_new_and_legacy_lines() -> anyhow::Result<()> {
-        let dir = temp_dir();
-        let display_file = dir.join("display.jsonl");
-        let new_format = r#"{"id": 5, "msg": {"AssistantToolCallStart": {"tool_call_index": 0, "tool_call_id": "t1", "tool_name": "bash", "created_at": 0}}}"#;
-        let legacy_format = r#"{"AssistantToolCallStart": {"msg_id": 3, "tool_call_index": 1, "tool_call_id": "t2", "tool_name": "bash", "created_at": 0}}"#;
-        let mut file = File::create(&display_file)?;
-        writeln!(file, "{new_format}")?;
-        writeln!(file, "{legacy_format}")?;
-        drop(file);
-
-        let mut state = TreeState::new(dir, "test-session".to_string());
-        state.read_file(&display_file);
-
-        assert!(state.tool_call_idx.contains_key("t1"));
-        assert!(state.tool_call_idx.contains_key("t2"));
-        Ok(())
-    }
 }

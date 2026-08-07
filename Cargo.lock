@@ -2957,6 +2957,7 @@ dependencies = [
  "serde",
  "serde-saphyr",
  "serde_json",
+ "tcode-encoding",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -4908,6 +4909,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.11.0",
+ "tcode-encoding",
  "tcode-runtime",
  "tcode-web",
  "tokio",
@@ -4920,6 +4922,14 @@ dependencies = [
  "urlencoding",
  "uuid",
  "webbrowser",
+]
+
+[[package]]
+name = "tcode-encoding"
+version = "0.3.0"
+dependencies = [
+ "anyhow",
+ "uuid",
 ]
 
 [[package]]
@@ -4945,6 +4955,7 @@ dependencies = [
  "serde_json",
  "sha2 0.11.0",
  "subtle",
+ "tcode-encoding",
  "tokio",
  "tokio-stream",
  "tokio-util",
@@ -4973,6 +4984,7 @@ dependencies = [
  "rpassword",
  "serde",
  "serde_json",
+ "tcode-encoding",
  "tcode-runtime",
  "time",
  "tokio",
@@ -5351,6 +5363,7 @@ dependencies = [
  "schemars",
  "serde",
  "serde_json",
+ "tcode-encoding",
  "tokio",
  "tokio-stream",
  "tracing",

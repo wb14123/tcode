@@ -116,13 +116,14 @@ impl BrowserClient {
 
     /// Ensure the browser-server is running. Checks health and restarts if needed.
     /// Intended for use at startup; request-time recovery uses the retry logic in `post`.
-    pub async fn ensure_server_running(&self) {
+    pub async fn ensure_server_running(&self) -> Result<()> {
         if self.health_check().await {
-            return;
+            return Ok(());
         }
         if let Some(ref config) = self.restart_config {
-            self.restart_server(config).await;
+            self.restart_server(config).await?;
         }
+        Ok(())
     }
 
     async fn post<Req, Resp>(&self, path: &str, body: &Req) -> Result<Resp>
@@ -144,7 +145,7 @@ impl BrowserClient {
             Err(first_err) => {
                 // Connection failed — try restarting the server if configured, then retry once
                 if let Some(ref config) = self.restart_config {
-                    self.restart_server(config).await;
+                    self.restart_server(config).await?;
                     build_request().send().await.map_err(|e| {
                         anyhow!("browser-server unreachable after restart attempt: {e}")
                     })?
@@ -190,12 +191,12 @@ impl BrowserClient {
     }
 
     /// Restart the browser-server process. Uses a mutex to prevent concurrent restart attempts.
-    async fn restart_server(&self, config: &RestartConfig) {
+    async fn restart_server(&self, config: &RestartConfig) -> Result<()> {
         let _lock = config.lock.lock().await;
 
         // After acquiring lock, check if another request already restarted the server
         if self.health_check().await {
-            return;
+            return Ok(());
         }
 
         tracing::info!("Browser-server is not responding, attempting restart");
@@ -205,6 +206,8 @@ impl BrowserClient {
         {
             tracing::warn!("Failed to remove stale browser-server socket: {e}");
         }
+
+        let socket_path_str = tcode_encoding::path_to_str(&config.socket_path)?;
 
         let log_path = config.socket_path.with_extension("log");
         let stderr_stdio = match std::fs::OpenOptions::new()
@@ -223,12 +226,7 @@ impl BrowserClient {
         };
 
         match std::process::Command::new(&config.server_exe)
-            .args([
-                "--socket",
-                &config.socket_path.to_string_lossy(),
-                "--idle-timeout",
-                "300",
-            ])
+            .args(["--socket", socket_path_str, "--idle-timeout", "300"])
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
             .stderr(stderr_stdio)
@@ -238,7 +236,7 @@ impl BrowserClient {
                 for _ in 0..50 {
                     if self.health_check().await {
                         tracing::info!("Browser-server restarted successfully");
-                        return;
+                        return Ok(());
                     }
                     tokio::time::sleep(Duration::from_millis(100)).await;
                 }
@@ -248,6 +246,7 @@ impl BrowserClient {
                 tracing::warn!("Failed to restart browser-server: {e}");
             }
         }
+        Ok(())
     }
 }
 

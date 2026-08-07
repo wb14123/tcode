@@ -64,7 +64,7 @@ mod tests {
         let key = PermissionKey {
             tool: "file_read".to_string(),
             key: "path".to_string(),
-            value: cwd.to_string_lossy().to_string(),
+            value: cwd.to_str().unwrap().to_string(),
         };
         pm.add_permission(key, PermissionScope::Session)?;
 
@@ -85,7 +85,7 @@ mod tests {
         let key = PermissionKey {
             tool: "file_read".to_string(),
             key: "path".to_string(),
-            value: cwd_canonical.to_string_lossy().to_string(),
+            value: cwd_canonical.to_str().unwrap().to_string(),
         };
         pm.add_permission(key, PermissionScope::Session)?;
 
@@ -95,7 +95,8 @@ mod tests {
         let dir_name = cwd
             .file_name()
             .expect("cwd should have a file name")
-            .to_string_lossy()
+            .to_str()
+            .unwrap()
             .to_string();
         let traversal_path = cwd.join("..").join(&dir_name);
         let result = check_file_read_permission(&scoped, &traversal_path, true).await;
@@ -113,7 +114,7 @@ mod tests {
         std::fs::create_dir_all(&sub)?;
 
         let canonical_base = tokio::fs::canonicalize(&base).await?;
-        let canonical_base_str = canonical_base.to_string_lossy().to_string();
+        let canonical_base_str = canonical_base.to_str().unwrap().to_string();
 
         let key = make_key("file_read", "path", &canonical_base_str);
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
@@ -152,7 +153,7 @@ mod tests {
         std::fs::create_dir_all(&dir)?;
 
         let canonical_dir = tokio::fs::canonicalize(&dir).await?;
-        let canonical_dir_str = canonical_dir.to_string_lossy().to_string();
+        let canonical_dir_str = canonical_dir.to_str().unwrap().to_string();
 
         let key = make_key("file_read", "path", &canonical_dir_str);
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
@@ -194,7 +195,7 @@ mod tests {
 
         // Grant file_read for the exact file path (not the parent directory).
         let canonical = tokio::fs::canonicalize(&file).await?;
-        let key = make_key("file_read", "path", canonical.to_string_lossy().as_ref());
+        let key = make_key("file_read", "path", canonical.to_str().unwrap());
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
 
         let scoped = make_scoped(Arc::clone(&pm));
@@ -222,7 +223,7 @@ mod tests {
 
         let pm = Arc::new(PermissionManager::new(temp_path()));
         let canonical = tokio::fs::canonicalize("/dev/null").await?;
-        let value = canonical.to_string_lossy().to_string();
+        let value = canonical.to_str().unwrap().to_string();
         for scope in ["file_read", "file_write"] {
             pm.resolve(
                 &make_key(scope, "path", &value),
@@ -264,7 +265,7 @@ mod tests {
         let pm = Arc::new(PermissionManager::new(temp_path()));
         let canonical = tokio::fs::canonicalize("/dev/null").await?;
         pm.resolve(
-            &make_key("file_write", "path", canonical.to_string_lossy().as_ref()),
+            &make_key("file_write", "path", canonical.to_str().unwrap()),
             &PermissionDecision::AllowSession,
             None,
         )?;

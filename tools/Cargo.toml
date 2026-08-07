@@ -9,6 +9,7 @@ chrono = "0.4"
 async-stream = "0.3"
 browser-server = { path = "../browser-server" }
 lsp-client = { path = "../lsp-client" }
+tcode-encoding = { path = "../tcode-encoding" }
 lsp-types = "0.97"
 url = "2"
 tracing = "0.1"

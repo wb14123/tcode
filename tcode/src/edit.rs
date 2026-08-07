@@ -41,7 +41,8 @@ impl EditClient {
             let mut dir = self.session.session_dir().clone();
             while dir
                 .file_name()
-                .is_some_and(|n| n.to_string_lossy().starts_with("subagent-"))
+                .and_then(|n| n.to_str())
+                .is_some_and(|n| n.starts_with("subagent-"))
             {
                 if let Some(parent) = dir.parent() {
                     dir = parent.to_path_buf();

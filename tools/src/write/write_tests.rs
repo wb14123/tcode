@@ -37,7 +37,7 @@ mod tests {
         let key = PermissionKey {
             tool: "file_write".to_string(),
             key: "path".to_string(),
-            value: canonical_dir.to_string_lossy().to_string(),
+            value: canonical_dir.to_str().unwrap().to_string(),
         };
         pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
         let scoped =
@@ -72,7 +72,7 @@ mod tests {
         let ctx = make_ctx_with_write_permission(&dir)?;
         let stream = crate::write::write(
             ctx,
-            file_path.to_string_lossy().to_string(),
+            file_path.to_str().unwrap().to_string(),
             "hello world\n".to_string(),
         );
         let result = collect_stream(Box::pin(stream)).await;
@@ -100,7 +100,7 @@ mod tests {
         let ctx = make_ctx_with_write_permission(&dir)?;
         let stream = crate::write::write(
             ctx,
-            file_path.to_string_lossy().to_string(),
+            file_path.to_str().unwrap().to_string(),
             "new content\n".to_string(),
         );
         let result = collect_stream(Box::pin(stream)).await;
@@ -162,7 +162,7 @@ mod tests {
         };
         let stream = crate::write::write(
             ctx,
-            file_path.to_string_lossy().to_string(),
+            file_path.to_str().unwrap().to_string(),
             "content".to_string(),
         );
         let result = collect_stream(Box::pin(stream)).await;

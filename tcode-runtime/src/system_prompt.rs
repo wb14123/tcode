@@ -154,12 +154,19 @@ fn build_normal_system_prompt(
     container_config: Option<&ContainerConfig>,
 ) -> String {
     let role = system_prompt_role(context.subagent_depth);
-    let cwd = std::env::current_dir()
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|e| {
+    let cwd = match std::env::current_dir() {
+        Ok(p) => match tcode_encoding::path_to_str(&p) {
+            Ok(s) => s.to_string(),
+            Err(e) => {
+                tracing::warn!("Failed to decode current directory as UTF-8: {e}");
+                "unknown".to_string()
+            }
+        },
+        Err(e) => {
             tracing::warn!("Failed to get current directory: {}", e);
             "unknown".to_string()
-        });
+        }
+    };
     let start_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z");
     let rules = format!("{COMMON_SUBAGENT_RULES}{NORMAL_SUBAGENT_RULES}{OUTPUT_STYLE_RULES}");
     let mut prompt = format!(

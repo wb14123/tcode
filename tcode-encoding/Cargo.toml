@@ -1,0 +1,10 @@
+[package]
+name = "tcode-encoding"
+version.workspace = true
+edition = "2024"
+
+[dependencies]
+anyhow = "1"
+
+[dev-dependencies]
+uuid = { version = "1", features = ["v4"] }

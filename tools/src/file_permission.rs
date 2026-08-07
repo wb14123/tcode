@@ -39,16 +39,16 @@ fn has_ancestor_permission(
     permission: &ScopedPermissionManager,
     scope: &str,
     start_path: &Path,
-) -> bool {
+) -> Result<bool> {
     let mut ancestor: Option<&Path> = Some(start_path);
     while let Some(dir) = ancestor {
-        let dir_str = dir.to_string_lossy();
-        if permission.has_permission_for(scope, "path", &dir_str) {
-            return true;
+        let dir_str = tcode_encoding::path_to_str(dir)?;
+        if permission.has_permission_for(scope, "path", dir_str) {
+            return Ok(true);
         }
         ancestor = dir.parent();
     }
-    false
+    Ok(false)
 }
 
 /// Canonicalize a path, handling non-existent files by canonicalizing the parent
@@ -94,11 +94,11 @@ pub async fn check_file_read_permission(
     }
 
     let permission_dir = permission_dir_for(&canonical_path, is_dir);
-    if has_ancestor_permission(permission, SCOPE_FILE_READ, &canonical_path) {
+    if has_ancestor_permission(permission, SCOPE_FILE_READ, &canonical_path)? {
         return Ok(());
     }
 
-    let permission_dir_str = permission_dir.to_string_lossy().to_string();
+    let permission_dir_str = tcode_encoding::path_to_str(&permission_dir)?.to_string();
     // NOTE: `permission_dir_str` must be a real canonicalized path, never the
     // literal "*". "*" is reserved as a wildcard in the permission store and
     // only enters storage via the user-initiated add-permission UI flow.
@@ -139,11 +139,11 @@ pub async fn check_file_write_permission(
 
     let parent_dir = permission_dir_for(&canonical_path, false);
     let permission_dir = widen_to_project_dir(&parent_dir);
-    if has_ancestor_permission(permission, SCOPE_FILE_WRITE, &canonical_path) {
+    if has_ancestor_permission(permission, SCOPE_FILE_WRITE, &canonical_path)? {
         return Ok(());
     }
 
-    let permission_dir_str = permission_dir.to_string_lossy().to_string();
+    let permission_dir_str = tcode_encoding::path_to_str(&permission_dir)?.to_string();
     let prompt = if exists {
         format!("Allow write to existing file {}?", path.display())
     } else {

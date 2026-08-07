@@ -311,8 +311,8 @@ fn parse_skill_md(
 pub fn load_skill_content(skill: &SkillMeta) -> Result<String> {
     let content = std::fs::read_to_string(&skill.skill_file)
         .with_context(|| format!("reading {}", skill.skill_file.display()))?;
-    let dir_str = skill.dir.to_string_lossy();
-    Ok(content.replace("${CLAUDE_SKILL_DIR}", &dir_str))
+    let dir_str = tcode_encoding::path_to_str(&skill.dir)?;
+    Ok(content.replace("${CLAUDE_SKILL_DIR}", dir_str))
 }
 
 /// Load only the markdown body of a skill, stripping YAML frontmatter.
@@ -321,7 +321,7 @@ pub fn load_skill_content(skill: &SkillMeta) -> Result<String> {
 pub fn load_skill_body(skill: &SkillMeta) -> Result<String> {
     let content = std::fs::read_to_string(&skill.skill_file)
         .with_context(|| format!("reading {}", skill.skill_file.display()))?;
-    let dir_str = skill.dir.to_string_lossy();
+    let dir_str = tcode_encoding::path_to_str(&skill.dir)?;
 
     let body = if let Some(after_open) = content.strip_prefix("---\n") {
         // NOTE: same "\n---" edge case as parse_skill_md — an unindented
@@ -343,7 +343,7 @@ pub fn load_skill_body(skill: &SkillMeta) -> Result<String> {
         &content
     };
 
-    Ok(body.replace("${CLAUDE_SKILL_DIR}", &dir_str))
+    Ok(body.replace("${CLAUDE_SKILL_DIR}", dir_str))
 }
 
 /// List up to 10 non-SKILL.md files (shallow, no recursion) in the skill directory.
