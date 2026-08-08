@@ -24,31 +24,30 @@ pub(crate) struct DisplayCut {
     /// Typed-parsed envelopes from the retained lines.
     pub(crate) retained_envelopes: Vec<BroadcastMessage>,
     /// Top-level `id` of every retained line that has one, in file order.
-    pub(crate) retained_ids: Vec<i32>,
-    /// Largest retained id (`None` when there are none).
-    pub(crate) max_retained_id: Option<i32>,
+    pub(crate) retained_ids: Vec<i64>,
     /// 1-based position of the target among `UserMessage` envelopes.
     pub(crate) target_ordinal: usize,
     /// The target `UserMessage` envelope's message.
     pub(crate) target: Message,
     /// The target envelope's top-level id (equals the requested `msg_id`).
-    pub(crate) target_id: i32,
+    pub(crate) target_id: i64,
 }
 
-/// Convert a JSON number to i32, tolerating i64/u64 forms and integral floats.
-pub(crate) fn number_to_i32(n: &serde_json::Number) -> Option<i32> {
+/// Convert a JSON number to i64, tolerating i64/u64 forms and integral floats.
+pub(crate) fn number_to_i64(n: &serde_json::Number) -> Option<i64> {
     if let Some(v) = n.as_i64() {
-        return i32::try_from(v).ok();
+        return Some(v);
     }
     if let Some(v) = n.as_u64() {
-        return i32::try_from(v).ok();
+        return i64::try_from(v).ok();
     }
+    // `i64::MAX as f64` rounds up to 2^63, so bound against 2^63 directly
+    // (both bounds are exactly representable).
     if let Some(f) = n.as_f64()
         && f.fract() == 0.0
-        && f >= i32::MIN as f64
-        && f <= i32::MAX as f64
+        && (-9223372036854775808.0..9223372036854775808.0).contains(&f)
     {
-        return Some(f as i32);
+        return Some(f as i64);
     }
     None
 }
@@ -99,10 +98,10 @@ pub(crate) fn truncate_state_at_user(
 /// legacy line (variant-level `msg_id` only) is a hard "old format" error.
 pub(crate) fn truncate_display_at_msg_id(
     lines: &[String],
-    target_msg_id: i32,
+    target_msg_id: i64,
 ) -> Result<DisplayCut> {
     let mut retained_envelopes: Vec<BroadcastMessage> = vec![];
-    let mut retained_ids: Vec<i32> = vec![];
+    let mut retained_ids: Vec<i64> = vec![];
     let mut user_msg_count = 0usize;
     let mut target_ordinal = 0usize;
     let mut target: Option<Message> = None;
@@ -138,35 +137,34 @@ pub(crate) fn truncate_display_at_msg_id(
             continue;
         }
 
-        let Some(id) = value
+        if value
             .get("id")
             .and_then(serde_json::Value::as_number)
-            .and_then(number_to_i32)
-        else {
+            .and_then(number_to_i64)
+            .is_none()
+        {
             tracing::warn!(
                 line = line_idx + 1,
-                "skipping display line with an id that is not a valid i32"
+                "skipping display line with an id that is not a valid i64"
             );
             continue;
-        };
+        }
 
         let envelope = match serde_json::from_value::<BroadcastMessage>(value) {
             Ok(envelope) => envelope,
             Err(e) => {
-                // Keep the id tracked even when the typed parse fails.
                 tracing::warn!(
                     error = %e,
                     line = line_idx + 1,
                     "skipping display line that failed to parse as a BroadcastMessage"
                 );
-                retained_ids.push(id);
                 continue;
             }
         };
 
         if matches!(envelope.msg, Message::UserMessage { .. }) {
             user_msg_count += 1;
-            if envelope.id == target_msg_id {
+            if envelope.id.as_i64() == target_msg_id {
                 target_ordinal = user_msg_count;
                 target = Some(envelope.msg);
                 cut_line = Some(line_idx);
@@ -174,21 +172,19 @@ pub(crate) fn truncate_display_at_msg_id(
             }
         }
 
+        retained_ids.push(envelope.id.as_i64());
         retained_envelopes.push(envelope);
-        retained_ids.push(id);
     }
 
     let (target, cut_line) = match (target, cut_line) {
         (Some(t), Some(l)) => (t, l),
         _ => bail!("target msg_id {} not found", target_msg_id),
     };
-    let max_retained_id = retained_ids.iter().copied().max();
 
     Ok(DisplayCut {
         retained_lines: lines[..cut_line].to_vec(),
         retained_envelopes,
         retained_ids,
-        max_retained_id,
         target_ordinal,
         target,
         target_id: target_msg_id,
@@ -367,41 +363,6 @@ pub(crate) fn validate_branch(
             state_path.display(),
             display_media,
             state_media
-        );
-    }
-
-    // Check 3: retained display ids are strictly increasing and every
-    // retained id is strictly less than the target id.
-    let mut prev: Option<i32> = None;
-    for &id in &cut.retained_ids {
-        if let Some(p) = prev
-            && id <= p
-        {
-            bail!(
-                "branch validation failed ({}): retained display ids are not strictly increasing: {id} follows {p}",
-                display_path.display()
-            );
-        }
-        if id >= cut.target_id {
-            bail!(
-                "branch validation failed ({}): retained display id {id} is not strictly less than target id {}",
-                display_path.display(),
-                cut.target_id
-            );
-        }
-        prev = Some(id);
-    }
-
-    // Check 4: the state's counter is strictly greater than every retained
-    // display id.
-    if let Some(max_id) = cut.max_retained_id
-        && state.msg_id_counter <= max_id
-    {
-        bail!(
-            "branch validation failed ({}): msg_id_counter {} is not strictly greater than max retained display id {}",
-            state_path.display(),
-            state.msg_id_counter,
-            max_id
         );
     }
 
@@ -648,6 +609,23 @@ pub(crate) fn build_branch_content(
     fs::write(&display_target, display_content)
         .with_context(|| format!("failed to write {}", display_target.display()))?;
 
+    // msg-id-epoch: the source's current epoch file, so the branch's first
+    // resume bumps from the source's current epoch (new ids start one epoch
+    // above every retained id, since the source's epoch file is always at or
+    // above the newest persisted id in the source). A legacy source has no
+    // such file: copy nothing, and the branch's first resume treats missing
+    // as 0 and bumps to epoch 1.
+    let epoch_src = source_dir.join("msg-id-epoch");
+    if epoch_src.is_file() {
+        fs::copy(&epoch_src, staging.join("msg-id-epoch")).with_context(|| {
+            format!(
+                "failed to copy {} to {}",
+                epoch_src.display(),
+                staging.join("msg-id-epoch").display()
+            )
+        })?;
+    }
+
     // media/.
     copy_media_refs(source_dir, staging, truncated_state, cut)?;
 
@@ -774,7 +752,7 @@ pub(crate) fn commit_branch_staging(
 pub(crate) fn run_branch(
     profile: Option<&str>,
     source_session_id: &str,
-    target_msg_id: i32,
+    target_msg_id: i64,
 ) -> Result<()> {
     let base = tcode_runtime::session::base_path()?;
     let source_dir = base.join(source_session_id);
@@ -792,6 +770,14 @@ pub(crate) fn run_branch(
     let lines: Vec<String> = content.lines().map(str::to_string).collect();
     let cut = truncate_display_at_msg_id(&lines, target_msg_id)
         .with_context(|| format!("in display file {}", display_path.display()))?;
+    tracing::debug!(
+        target_msg_id = cut.target_id,
+        target_ordinal = cut.target_ordinal,
+        retained_lines = cut.retained_lines.len(),
+        retained_envelopes = cut.retained_envelopes.len(),
+        retained_ids = cut.retained_ids.len(),
+        "display cut complete"
+    );
 
     // Step 2: read the full state, validate against it, then truncate it.
     let state_json = fs::read_to_string(&state_path)

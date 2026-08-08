@@ -652,6 +652,10 @@ local function close_args_fence(buf, tool_call_id)
   local close_row
   if args_open_row == nil then
     -- Anchor lost (buffer invalidated or mark deleted). Fall back to append.
+    if state.content_deferred then
+      append_lines(buf, vim.split(table.concat(state.content_parts), '\n', { plain = true }))
+      state.content_deferred = false
+    end
     append_lines(buf, { TC_FENCE })
     close_row = vim.api.nvim_buf_line_count(buf) - 1
   else
@@ -660,6 +664,12 @@ local function close_args_fence(buf, tool_call_id)
     -- at args_open_row + 1 (the row just after the opening fence).
     local full_content = table.concat(state.content_parts)
     local content_line_count = #vim.split(full_content, '\n', { plain = true })
+    -- Bulk load deferred the per-chunk appends; materialize the full content
+    -- in one insert so the fence math below sees the content rows it expects.
+    if state.content_deferred then
+      insert_lines_at(buf, args_open_row + 1, vim.split(full_content, '\n', { plain = true }))
+      state.content_deferred = false
+    end
     close_row = args_open_row + 1 + math.max(content_line_count, 1)
     insert_lines_at(buf, close_row, { TC_FENCE })
   end
@@ -747,7 +757,11 @@ end
 
 -- Render a single JSONL event into the buffer with extmarks
 -- Serde externally-tagged enums: {"VariantName": {fields...}}
-local function render_event(buf, ns, event, envelope_id)
+-- `bulk` is true during the initial load of an existing session: per-chunk
+-- buffer writes for content that is immediately collapsed are skipped (the
+-- collapse point materializes it), and per-chunk highlight passes are
+-- deferred to the collapse. Live streaming always passes false.
+local function render_event(buf, ns, event, envelope_id, bulk)
   local variant, data = next(event)
   if not variant then return end
 
@@ -776,14 +790,16 @@ local function render_event(buf, ns, event, envelope_id)
       thinking_state.last_highlighted_row = thinking_state.start_row - 1
     end
     table.insert(thinking_state.content_parts, data.content)
-    append_text(buf, data.content)
-    -- Only highlight newly added lines (avoid O(n²) re-highlighting)
-    local end_line = vim.api.nvim_buf_line_count(buf) - 1
-    local from = thinking_state.last_highlighted_row + 1
-    for i = from, end_line do
-      vim.api.nvim_buf_add_highlight(buf, thinking_ns, 'TCodeThinking', i, 0, -1)
+    if not bulk then
+      append_text(buf, data.content)
+      -- Only highlight newly added lines (avoid O(n²) re-highlighting)
+      local end_line = vim.api.nvim_buf_line_count(buf) - 1
+      local from = thinking_state.last_highlighted_row + 1
+      for i = from, end_line do
+        vim.api.nvim_buf_add_highlight(buf, thinking_ns, 'TCodeThinking', i, 0, -1)
+      end
+      thinking_state.last_highlighted_row = end_line
     end
-    thinking_state.last_highlighted_row = end_line
 
   elseif variant == 'AssistantMessageChunk' then
     if thinking_state.is_thinking then
@@ -859,6 +875,14 @@ local function render_event(buf, ns, event, envelope_id)
     if tool_call_id and tool_call_gen_state[tool_call_id] then
       local state = tool_call_gen_state[tool_call_id]
       local content = tostring(data.content)
+
+      -- Bulk load: accumulate content without per-chunk buffer writes;
+      -- close_args_fence materializes it in one insert.
+      if bulk then
+        state.content_deferred = true
+        table.insert(state.content_parts, content)
+        return
+      end
 
       -- Append text to buffer (streams into the open fence block)
       append_text(buf, content)
@@ -1107,6 +1131,15 @@ local function render_event(buf, ns, event, envelope_id)
     if tool_call_id and tool_call_gen_state[tool_call_id] then
       local state = tool_call_gen_state[tool_call_id]
       local content = tostring(data.content)
+
+      -- Bulk load: accumulate content without per-chunk buffer writes;
+      -- close_args_fence materializes it in one insert.
+      if bulk then
+        state.content_deferred = true
+        table.insert(state.content_parts, content)
+        return
+      end
+
       append_text(buf, content)
       table.insert(state.content_parts, content)
       -- Highlight with TCodeToolArgs. Resolve the current args start row via
@@ -1560,7 +1593,46 @@ end
 -- @param ns: extmark namespace
 -- @param on_event: optional callback(variant, data) called for each decoded event before rendering
 local function create_jsonl_reader(filepath, buf, ns, on_event)
-  local state = { last_size = 0, line_buffer = '' }
+  local state = { last_size = 0, line_buffer = '', is_initial_load = true }
+
+  -- One-shot settle timer used to flush content deferred during the initial
+  -- bulk load (thinking blocks / open args fences that never hit a collapse
+  -- point, e.g. a crashed session). It is re-armed on every content read, so
+  -- it only fires after the file has been quiet for SETTLE_MS — a live
+  -- session keeps streaming and never flushes prematurely, while a static
+  -- file (idle/crashed) materializes its deferred content once.
+  local flush_timer = nil
+
+  local function cancel_flush_timer()
+    if flush_timer then
+      flush_timer:stop()
+      flush_timer:close()
+      flush_timer = nil
+    end
+  end
+
+  local function flush_deferred()
+    if not vim.api.nvim_buf_is_valid(buf) then return end
+    if thinking_state.is_thinking then
+      collapse_thinking(buf, ns)
+    end
+    for tool_call_id, _ in pairs(tool_call_gen_state) do
+      close_args_fence(buf, tool_call_id)
+    end
+  end
+
+  local function arm_flush_timer()
+    cancel_flush_timer()
+    flush_timer = vim.uv.new_timer()
+    flush_timer:start(500, 0, vim.schedule_wrap(flush_deferred))
+  end
+
+  -- Stop the timer when the buffer goes away (harmless if already fired).
+  vim.api.nvim_create_autocmd({ 'BufDelete', 'BufWipeout' }, {
+    buffer = buf,
+    once = true,
+    callback = cancel_flush_timer,
+  })
 
   local function check()
     local file = io.open(filepath, 'r')
@@ -1571,6 +1643,9 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
 
     if not new_content or #new_content == 0 then return end
     state.last_size = state.last_size + #new_content
+    -- Any new content pushes the settle-flush out: while the file keeps
+    -- growing the stream is live and collapse points handle fences naturally.
+    arm_flush_timer()
 
     local data = state.line_buffer .. new_content
     local lines = vim.split(data, '\n', { plain = true })
@@ -1618,13 +1693,21 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
                 vim.api.nvim_err_writeln('on_event error: ' .. tostring(ev_err))
               end
             end
-            local render_ok, render_err = pcall(render_event, buf, ns, event, envelope_id)
+            local render_ok, render_err = pcall(render_event, buf, ns, event, envelope_id, state.is_initial_load)
             if not render_ok then
               vim.api.nvim_err_writeln('render_event error: ' .. tostring(render_err))
               break
             end
           end
         end
+      end
+      if state.is_initial_load then
+        state.is_initial_load = false
+        -- No immediate flush here: arm_flush_timer (called on every content
+        -- read above) fires once the file has been quiet for 500 ms, so a
+        -- live session mid-args/mid-thinking keeps its fence open and
+        -- subsequent chunks stream normally, while a static file (idle or
+        -- crashed) materializes deferred content exactly once.
       end
 
       if win ~= -1 and was_at_bottom then

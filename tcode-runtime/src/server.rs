@@ -11,7 +11,8 @@ use fs2::FileExt;
 use futures::{SinkExt, Stream, StreamExt};
 use llm_rs::conversation::{
     BroadcastMessage, ConversationClient, ConversationManager, ConversationState, Message,
-    MessageEndStatus, create_continue_subagent_tool, create_subagent_tool, format_subagent_result,
+    MessageEndStatus, UniqueId, UniqueIdGenerator, create_continue_subagent_tool,
+    create_subagent_tool, format_subagent_result,
 };
 use llm_rs::llm::{ChatOptions, LLM};
 use llm_rs::permission::{
@@ -824,24 +825,35 @@ impl Server {
             // Close stale pending permission requests from previous session
             manager.permission_manager().close_all_pending();
 
-            // Close stale "running" tool calls and subagents in display files,
-            // and get each directory's high-water id so counters seeded from
-            // the (possibly lagging) saved state are bumped past every id
-            // already persisted on disk — otherwise resumed conversations
-            // could re-issue ids used by the synthetic stale-close events.
-            let stale_high_waters = close_stale_running_items(&self.session_dir)
+            // Close stale "running" tool calls and subagents in display files.
+            // Synthetic stale-close events reserve ids from the shared session
+            // id generator (via each dir's conversation client; no broadcast,
+            // no msgs push). The epoch-file protocol ran exactly once — for
+            // the ROOT dir, at the very start of resume_conversation_tree —
+            // and that single generator is shared by the root and all resumed
+            // subagents, so every minted id is above every id already
+            // persisted in that dir — no on-disk id scan is needed.
+            //
+            // INVARIANT: these keys (session_dir + each `sa.state_dir`) must
+            // be byte-identical to the paths built by
+            // `find_subagent_states` (llm-rs/conversation.rs) and by the
+            // recursion in `close_stale_in_dir` — all constructed as
+            // `dir.join(entry.file_name())` with no canonicalization. If any
+            // side canonicalizes, a resumed subagent would fall into the
+            // orphaned-dir branch and mint epoch-0 synthetic ids that could
+            // collide with its persisted legacy ids.
+            let mut stale_close_clients: HashMap<PathBuf, &ConversationClient> = HashMap::new();
+            stale_close_clients.insert(self.session_dir.clone(), client.as_ref());
+            for sa in &resumed_subagents {
+                stale_close_clients.insert(sa.state_dir.clone(), sa.client.as_ref());
+            }
+            close_stale_running_items(&self.session_dir, &stale_close_clients)
                 .await
                 .with_context(|| "Failed to close stale running items on resume")?;
-            if let Some(root_water) = stale_high_waters.get(&self.session_dir) {
-                client.ensure_msg_id_counter_at_least(*root_water);
-            }
 
             // Spawn event writers for resumed subagents (appending to existing files)
             for sa in &resumed_subagents {
                 tracing::info!(conversation_id = %sa.conversation_id, "Resumed subagent conversation");
-                sa.client.ensure_msg_id_counter_at_least(
-                    stale_high_waters.get(&sa.state_dir).copied().unwrap_or(0),
-                );
                 let mgr_clone = Arc::clone(&manager);
                 let sa_events = Box::pin(sa.client.subscribe_new());
                 let sa_display = sa.state_dir.join("display.jsonl");
@@ -1203,13 +1215,13 @@ fn fts_index_target(session_dir: &Path) -> Option<(PathBuf, String)> {
     Some((base, session_id.to_string()))
 }
 
-fn spawn_conversation_saved_index(base: PathBuf, session_id: String, id: i32) {
+fn spawn_conversation_saved_index(base: PathBuf, session_id: String, id: UniqueId) {
     let handle = tokio::task::spawn_blocking(move || {
         if let Err(e) = crate::fts::index_session(&base, &session_id) {
             tracing::warn!(
                 session_id = %session_id,
                 base = %base.display(),
-                id,
+                id = %id,
                 error = %e,
                 "failed to update search index after conversation save"
             );
@@ -2177,7 +2189,7 @@ pub(crate) fn next_tool_display_preview_chunk(
 
 async fn append_display_preview_chunk(
     display_file: &PathBuf,
-    id: i32,
+    id: UniqueId,
     tool_call_id: &str,
     tool_name: &str,
     content_text: &str,
@@ -2225,76 +2237,87 @@ async fn append_event(file: &PathBuf, event: &BroadcastMessage) -> Result<()> {
 /// when the previous session exited. Appends synthetic Cancelled end events
 /// to display.jsonl files and updates status files.
 ///
-/// Returns a map of directory -> high-water id counter value for every
-/// directory processed (the root session dir and each subagent dir). Each
-/// value is the id the conversation's counter must be at least for the next
-/// broadcast to not collide with ids already persisted in that directory.
+/// Synthetic end events reserve their ids from each directory's resumed
+/// conversation client (`clients` maps every dir to the client that owns its
+/// id space: the root client plus every resumed subagent). Subagent dirs
+/// whose conversation was NOT resumed (orphaned dirs, missing/corrupt state)
+/// are never written again, so their synthetic ids come from a fresh local
+/// generator (epoch 0, counter 0) — duplicate ids in an abandoned file are
+/// harmless.
 pub(crate) async fn close_stale_running_items(
     session_dir: &PathBuf,
-) -> Result<HashMap<PathBuf, i32>> {
-    let mut high_waters = HashMap::new();
-    close_stale_in_dir(session_dir, &mut high_waters).await?;
-    Ok(high_waters)
+    clients: &HashMap<PathBuf, &ConversationClient>,
+) -> Result<()> {
+    close_stale_in_dir(session_dir, clients).await
 }
 
-/// Extract the id from a parsed display.jsonl line: the envelope's top-level
-/// `id` for the new wire format, or the legacy variant's `msg_id` field.
-fn value_id(value: &serde_json::Value) -> Option<i32> {
-    if let Some(id) = value.get("id").and_then(serde_json::Value::as_number) {
-        return number_to_i32(id);
-    }
-    if let Some(obj) = value.as_object() {
-        for field in obj.values() {
-            if let Some(id) = field.get("msg_id").and_then(serde_json::Value::as_number) {
-                return number_to_i32(id);
-            }
+/// Minimal wire shape of a display.jsonl envelope, used only by the stale
+/// scan in [`close_stale_in_dir`]. Only the six variants that can open or
+/// close a tool call / subagent are deserialized; every other variant maps
+/// to [`StaleScanMsg::Other`] without materializing its payload.
+#[derive(serde::Deserialize)]
+struct StaleScanEnvelope {
+    msg: StaleScanMsg,
+}
+
+/// The stale-relevant subset of `Message`, matching the externally-tagged
+/// wire format (`{"ToolMessageStart": {...}}`). `Other` catches every
+/// remaining variant (thinking/chunk/arg-chunk events, ~97% of lines) so
+/// the scan never needs the full `Message` type.
+#[derive(serde::Deserialize)]
+enum StaleScanMsg {
+    ToolMessageStart {
+        tool_call_id: String,
+        tool_name: String,
+    },
+    ToolMessageEnd {
+        tool_call_id: String,
+    },
+    SubAgentStart {
+        conversation_id: String,
+    },
+    SubAgentTurnEnd {
+        conversation_id: String,
+    },
+    SubAgentContinue {
+        conversation_id: String,
+    },
+    SubAgentEnd {
+        conversation_id: String,
+    },
+    #[serde(other)]
+    Other,
+}
+
+/// Id source for a directory's synthetic stale-close events: either the
+/// resumed conversation client that owns the dir's id space (mints
+/// epoch-prefixed ids from its generator, non-broadcasting), or a fresh local
+/// generator for an orphaned subagent dir that will never be written again.
+enum StaleCloseIdSource<'a> {
+    Client(&'a ConversationClient),
+    Local(&'a UniqueIdGenerator),
+}
+
+impl StaleCloseIdSource<'_> {
+    fn get_unique_id(&self) -> UniqueId {
+        match self {
+            StaleCloseIdSource::Client(client) => client.get_unique_id(),
+            StaleCloseIdSource::Local(generator) => generator.get_unique_id(),
         }
     }
-    None
 }
 
-/// Convert a JSON number to i32, tolerating i64/u64 forms and integral floats.
-fn number_to_i32(n: &serde_json::Number) -> Option<i32> {
-    if let Some(v) = n.as_i64() {
-        return i32::try_from(v).ok();
-    }
-    if let Some(v) = n.as_u64() {
-        return i32::try_from(v).ok();
-    }
-    if let Some(f) = n.as_f64()
-        && f.fract() == 0.0
-        && f >= i32::MIN as f64
-        && f <= i32::MAX as f64
-    {
-        return Some(f as i32);
-    }
-    None
-}
-
-/// Extract the id from a raw display.jsonl line (see `value_id`).
-fn line_id(line: &str) -> Option<i32> {
-    serde_json::from_str::<serde_json::Value>(line)
-        .ok()
-        .and_then(|value| value_id(&value))
-}
-
-fn track_max_id(max_id: &mut Option<i32>, id: i32) {
-    *max_id = Some(match *max_id {
-        Some(prev) => prev.max(id),
-        None => id,
-    });
-}
-
-/// Process a single directory's display.jsonl, close stale items, recurse into
-/// subagent dirs, and record each directory's high-water id in `high_waters`.
+/// Process a single directory's display.jsonl, close stale items, and recurse
+/// into subagent dirs. Synthetic end events for a resumed dir reserve ids
+/// from that dir's conversation client (`clients`); orphaned subagent dirs
+/// (no resumed conversation) use a fresh local generator (epoch 0).
 fn close_stale_in_dir<'a>(
     dir: &'a PathBuf,
-    high_waters: &'a mut HashMap<PathBuf, i32>,
+    clients: &'a HashMap<PathBuf, &'a ConversationClient>,
 ) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> {
     Box::pin(async move {
         let display_file = dir.join("display.jsonl");
         if !display_file.exists() {
-            high_waters.insert(dir.clone(), 0);
             return Ok(());
         }
 
@@ -2309,30 +2332,28 @@ fn close_stale_in_dir<'a>(
         // true = Running (needs closing), false = Idle (already has turn end)
         let mut subagent_running: HashMap<String, bool> = HashMap::new();
 
-        // Highest id seen across display.jsonl and the per-tool-call files in
-        // this dir; synthetic end events continue from max + 1.
-        let mut max_id: Option<i32> = None;
-
         for line in content.lines() {
             if line.trim().is_empty() {
                 continue;
             }
-            // Parse once, then reuse the Value for both the id scan and the
-            // dual typed parse (new envelope format first, then legacy Message
-            // lines whose unknown msg_id field is dropped by serde).
-            let value: serde_json::Value = match serde_json::from_str(line) {
-                Ok(v) => v,
-                Err(e) => {
-                    tracing::warn!(error = %e, "Skipping unparseable line in display.jsonl");
-                    continue;
-                }
-            };
-            if let Some(id) = value_id(&value) {
-                track_max_id(&mut max_id, id);
+            // Fast path: only the six stale-relevant variants can change the
+            // open-tool / running-subagent state. Skip the ~97% of lines
+            // that are chunk/thinking/arg-chunk events with a substring
+            // check (no JSON parsing at all).
+            if !crate::display_scan::line_mentions_any(
+                line,
+                crate::display_scan::STALE_CLOSE_MARKERS,
+            ) {
+                continue;
             }
-            let msg: Message = match serde_json::from_value::<BroadcastMessage>(value.clone()) {
+            // Minimal typed parse of the stale-relevant subset: the envelope
+            // format first, then the bare legacy Message format for old
+            // sessions (whose unknown msg_id field serde drops). Unknown
+            // variants (e.g. content that merely mentions a marker name)
+            // deserialize to `Other` with no payload materialization.
+            let msg: StaleScanMsg = match serde_json::from_str::<StaleScanEnvelope>(line) {
                 Ok(envelope) => envelope.msg,
-                Err(_) => match serde_json::from_value::<Message>(value) {
+                Err(_) => match serde_json::from_str::<StaleScanMsg>(line) {
                     Ok(m) => m,
                     Err(e) => {
                         tracing::warn!(error = %e, "Skipping unparseable line in display.jsonl");
@@ -2340,97 +2361,62 @@ fn close_stale_in_dir<'a>(
                     }
                 },
             };
-            match &msg {
-                Message::ToolMessageStart {
+            match msg {
+                StaleScanMsg::ToolMessageStart {
                     tool_call_id,
                     tool_name,
-                    ..
                 } => {
-                    open_tools.insert(tool_call_id.clone(), tool_name.clone());
+                    open_tools.insert(tool_call_id, tool_name);
                 }
-                Message::ToolMessageEnd { tool_call_id, .. } => {
-                    open_tools.remove(tool_call_id);
+                StaleScanMsg::ToolMessageEnd { tool_call_id } => {
+                    open_tools.remove(&tool_call_id);
                 }
-                Message::SubAgentStart {
-                    conversation_id, ..
-                } => {
-                    subagent_running.insert(conversation_id.clone(), true);
+                StaleScanMsg::SubAgentStart { conversation_id } => {
+                    subagent_running.insert(conversation_id, true);
                 }
-                Message::SubAgentTurnEnd {
-                    conversation_id, ..
-                } => {
-                    if let Some(running) = subagent_running.get_mut(conversation_id) {
+                StaleScanMsg::SubAgentTurnEnd { conversation_id } => {
+                    if let Some(running) = subagent_running.get_mut(&conversation_id) {
                         *running = false;
                     }
                 }
-                Message::SubAgentContinue {
-                    conversation_id, ..
-                } => {
-                    if let Some(running) = subagent_running.get_mut(conversation_id) {
+                StaleScanMsg::SubAgentContinue { conversation_id } => {
+                    if let Some(running) = subagent_running.get_mut(&conversation_id) {
                         *running = true;
                     }
                 }
-                Message::SubAgentEnd {
-                    conversation_id, ..
-                } => {
-                    subagent_running.remove(conversation_id);
+                StaleScanMsg::SubAgentEnd { conversation_id } => {
+                    subagent_running.remove(&conversation_id);
                 }
-                _ => {}
+                StaleScanMsg::Other => {}
             }
         }
 
-        // Per-tool-call files can carry chunks (e.g. ToolOutputChunk) that
-        // never reach display.jsonl, so scan their ids as well.
-        let mut read_dir = tokio::fs::read_dir(dir)
-            .await
-            .with_context(|| format!("Failed to read directory {:?}", dir))?;
-        while let Some(entry) = read_dir.next_entry().await? {
-            let name = entry.file_name();
-            let name_str = match tcode_encoding::path_to_str(Path::new(&name)) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        path = ?entry.path(),
-                        "Skipping entry with non-UTF-8 name during stale tool-call scan"
-                    );
-                    continue;
-                }
-            };
-            if !name_str.starts_with("tool-call-") || !name_str.ends_with(".jsonl") {
-                continue;
+        // Id source for the synthetic end events below: the dir's resumed
+        // conversation client mints ids from its epoch-prefixed generator
+        // (non-broadcasting — using notify_msg here would push the synthetic
+        // events into msgs history and re-broadcast them into the resume
+        // event writers' subscribe stream, re-appending duplicates to
+        // display.jsonl). An orphaned subagent dir (no resumed conversation,
+        // e.g. missing/corrupt state) is never written again, so a fresh
+        // local generator (epoch 0, counter 0) suffices: duplicate ids in an
+        // abandoned file are harmless, and no future broadcast targets it.
+        // `UniqueIdGenerator::new(None)` never fails (no state dir, no epoch
+        // file protocol).
+        let local_generator;
+        let id_source: StaleCloseIdSource<'_> = match clients.get(dir) {
+            Some(client) => StaleCloseIdSource::Client(client),
+            None => {
+                local_generator = UniqueIdGenerator::new(None)?;
+                StaleCloseIdSource::Local(&local_generator)
             }
-            let tc_path = entry.path();
-            let tc_content = match tokio::fs::read_to_string(&tc_path).await {
-                Ok(c) => c,
-                Err(e) => {
-                    tracing::warn!(
-                        error = %e,
-                        path = %tc_path.display(),
-                        "Failed to read tool-call file for id scan"
-                    );
-                    continue;
-                }
-            };
-            for line in tc_content.lines() {
-                if !line.trim().is_empty()
-                    && let Some(id) = line_id(line)
-                {
-                    track_max_id(&mut max_id, id);
-                }
-            }
-        }
-
-        // Synthetic end events get distinct ids continuing from the max
-        // existing id (max + 1, max + 2, ...).
-        let mut next_synthetic_id = max_id.map_or(0, |m| m + 1);
+        };
 
         // Close stale tool calls
         for tool_call_id in open_tools.keys() {
             tracing::info!(tool_call_id, dir = ?dir, "Closing stale running tool call");
 
             let end_event = BroadcastMessage {
-                id: next_synthetic_id,
+                id: id_source.get_unique_id(),
                 msg: Message::ToolMessageEnd {
                     tool_call_id: tool_call_id.clone(),
                     end_status: MessageEndStatus::Cancelled,
@@ -2438,7 +2424,6 @@ fn close_stale_in_dir<'a>(
                     output_tokens: 0,
                 },
             };
-            next_synthetic_id += 1;
 
             append_event(&display_file, &end_event)
                 .await
@@ -2473,7 +2458,7 @@ fn close_stale_in_dir<'a>(
             tracing::info!(conversation_id, dir = ?dir, "Closing stale running subagent");
 
             let end_event = BroadcastMessage {
-                id: next_synthetic_id,
+                id: id_source.get_unique_id(),
                 msg: Message::SubAgentTurnEnd {
                     conversation_id: conversation_id.clone(),
                     end_status: MessageEndStatus::Cancelled,
@@ -2484,7 +2469,6 @@ fn close_stale_in_dir<'a>(
                     cache_read_input_tokens: 0,
                 },
             };
-            next_synthetic_id += 1;
 
             append_event(&display_file, &end_event)
                 .await
@@ -2506,11 +2490,6 @@ fn close_stale_in_dir<'a>(
             }
         }
 
-        // Record this directory's high-water: the counter value the next id
-        // must be at least for it to exceed every id already in this dir
-        // (existing ids plus the synthetic end events just appended).
-        high_waters.insert(dir.clone(), next_synthetic_id);
-
         // Recurse into subagent directories
         let mut read_dir = tokio::fs::read_dir(dir)
             .await
@@ -2530,7 +2509,7 @@ fn close_stale_in_dir<'a>(
             };
             if name_str.starts_with("subagent-") && entry.file_type().await?.is_dir() {
                 let subdir = entry.path();
-                close_stale_in_dir(&subdir, high_waters)
+                close_stale_in_dir(&subdir, clients)
                     .await
                     .with_context(|| format!("Failed to close stale items in {:?}", subdir))?;
             }

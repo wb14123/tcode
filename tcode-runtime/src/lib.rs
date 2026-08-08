@@ -1,5 +1,6 @@
 pub mod bootstrap;
 pub mod config;
+pub mod display_scan;
 pub mod fts;
 pub mod project;
 pub mod protocol;
@@ -11,6 +12,9 @@ pub use project::project_config_dir;
 
 #[cfg(test)]
 mod bootstrap_tests;
+
+#[cfg(test)]
+mod display_scan_tests;
 
 #[cfg(test)]
 mod project_tests;

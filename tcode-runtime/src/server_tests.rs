@@ -1,9 +1,12 @@
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use llm_rs::conversation::{BroadcastMessage, Message, MessageEndStatus};
+use llm_rs::conversation::{
+    BroadcastMessage, ConversationClient, ConversationManager, Message, MessageEndStatus,
+};
 use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo};
 use llm_rs::permission::{
     KEY_HOSTNAME, PermissionKey, SCOPE_FILE_READ, SCOPE_FILE_WRITE, SCOPE_WEB_FETCH, WILDCARD_VALUE,
@@ -29,6 +32,55 @@ fn temp_dir() -> PathBuf {
     let dir = test_root().join(uuid::Uuid::new_v4().to_string());
     std::fs::create_dir_all(&dir).expect("failed to create test dir");
     dir
+}
+
+/// Per-test temp dir under the workspace target dir; removed on drop
+/// (cleanup runs on success and on panic).
+struct TestDir(PathBuf);
+
+impl TestDir {
+    fn new(module: &str) -> Self {
+        let root =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../target/test-tmp/{module}"));
+        std::fs::create_dir_all(&root).expect("failed to create test root");
+        let dir = root.join(uuid::Uuid::new_v4().to_string());
+        // Cleanup before: remove any stale leftover at this exact path.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("failed to create test dir");
+        Self(dir)
+    }
+
+    fn path(&self) -> &Path {
+        &self.0
+    }
+}
+
+impl Drop for TestDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+/// Create a conversation client whose generator owns `dir`'s id space. A new
+/// conversation runs the epoch-file protocol: read `msg-id-epoch` (missing ->
+/// 0), bump it by one, and start the counter at 0 — before any id is minted.
+async fn test_conversation_client(dir: &Path) -> anyhow::Result<Arc<ConversationClient>> {
+    let permissions_file = dir.join("permissions.json");
+    tokio::fs::write(&permissions_file, "[]").await?;
+    let manager = ConversationManager::new(permissions_file, None);
+    let (_conv_id, client) = manager.new_conversation_with_id(
+        "test-conv".to_string(),
+        Box::new(MockLlm::new()),
+        "test-model",
+        vec![],
+        ChatOptions::default(),
+        true,
+        0,
+        10,
+        Some(dir.to_path_buf()),
+        false,
+    )?;
+    Ok(client)
 }
 
 #[derive(Clone)]
@@ -498,107 +550,10 @@ async fn server_run_removes_stale_socket_inside_startup_path_before_bind() -> an
 }
 #[tokio::test]
 async fn close_stale_running_tool_call_writes_cancelled_status() -> anyhow::Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("server_tests");
     let tool_call_id = "tool-1";
-    let start = BroadcastMessage {
-        id: 5,
-        msg: Message::ToolMessageStart {
-            tool_call_id: tool_call_id.to_string(),
-            created_at: 0,
-            tool_name: "bash".to_string(),
-            tool_args: "{}".to_string(),
-        },
-    };
-    let line = serde_json::to_string(&start)?;
-    tokio::fs::write(dir.join("display.jsonl"), format!("{line}\n")).await?;
-    tokio::fs::write(
-        dir.join(format!("tool-call-{tool_call_id}.jsonl")),
-        format!("{line}\n"),
-    )
-    .await?;
-
-    let high_waters = close_stale_running_items(&dir).await?;
-
-    let status =
-        tokio::fs::read_to_string(dir.join(format!("tool-call-{tool_call_id}-status.txt"))).await?;
-    assert_eq!(status, "Cancelled");
-
-    let display = tokio::fs::read_to_string(dir.join("display.jsonl")).await?;
-    let last_line = display
-        .lines()
-        .last()
-        .expect("display should contain synthetic end event");
-    let end: BroadcastMessage = serde_json::from_str(last_line)?;
-    // Synthetic end continues from the max existing id (5) + 1.
-    assert_eq!(end.id, 6);
-    assert!(matches!(
-        end.msg,
-        Message::ToolMessageEnd {
-            end_status: MessageEndStatus::Cancelled,
-            ..
-        }
-    ));
-
-    // The returned high-water is the id the conversation's counter must be at
-    // least so the next broadcast exceeds all persisted ids (5, plus the
-    // synthetic 6 -> next id 7).
-    assert_eq!(high_waters.get(&dir).copied(), Some(7));
-
-    Ok(())
-}
-
-/// Legacy-format display.jsonl lines (old sessions with `msg_id` inside the
-/// variant) must still be recognized, and the synthetic stale-close event must
-/// continue from the legacy id, written in the new envelope format.
-#[tokio::test]
-async fn close_stale_legacy_format_line_migrates_to_envelope() -> anyhow::Result<()> {
-    let dir = temp_dir();
-    let legacy_line = serde_json::json!({
-        "ToolMessageStart": {
-            "msg_id": 1,
-            "tool_call_id": "tool-1",
-            "created_at": 0,
-            "tool_name": "bash",
-            "tool_args": "{}",
-        }
-    });
-    tokio::fs::write(dir.join("display.jsonl"), format!("{legacy_line}\n")).await?;
-
-    let high_waters = close_stale_running_items(&dir).await?;
-
-    let display = tokio::fs::read_to_string(dir.join("display.jsonl")).await?;
-    let last_line = display
-        .lines()
-        .last()
-        .expect("display should contain synthetic end event");
-    let end: BroadcastMessage = serde_json::from_str(last_line)?;
-    // Legacy msg_id 1 is the max existing id; the synthetic end continues with 2.
-    assert_eq!(end.id, 2);
-    assert!(matches!(
-        end.msg,
-        Message::ToolMessageEnd {
-            end_status: MessageEndStatus::Cancelled,
-            ..
-        }
-    ));
-
-    // High-water continues past the synthetic id: next id must be at least 3.
-    assert_eq!(high_waters.get(&dir).copied(), Some(3));
-
-    Ok(())
-}
-
-/// Per-tool-call files can carry chunks (e.g. ToolOutputChunk) whose ids never
-/// reached display.jsonl; the synthetic stale-close id must continue from the
-/// highest id across BOTH files.
-#[tokio::test]
-async fn close_stale_id_scan_includes_per_tool_call_files() -> anyhow::Result<()> {
-    let dir = temp_dir();
-    let tool_call_id = "tool-1";
-
-    // display.jsonl only carries the start event (id 1)...
     let start = serde_json::json!({
-        "id": 1,
+        "id": 5,
         "msg": {
             "ToolMessageStart": {
                 "tool_call_id": tool_call_id,
@@ -608,36 +563,39 @@ async fn close_stale_id_scan_includes_per_tool_call_files() -> anyhow::Result<()
             }
         }
     });
-    tokio::fs::write(dir.join("display.jsonl"), format!("{start}\n")).await?;
-
-    // ...while the per-tool-call file carries a later chunk (id 10) that never
-    // reached display.jsonl (preview throttling drops many chunks).
-    let chunk = serde_json::json!({
-        "id": 10,
-        "msg": {
-            "ToolOutputChunk": {
-                "tool_call_id": tool_call_id,
-                "tool_name": "bash",
-                "content": "partial output",
-            }
-        }
-    });
+    let line = serde_json::to_string(&start)?;
+    tokio::fs::write(dir.path().join("display.jsonl"), format!("{line}\n")).await?;
     tokio::fs::write(
-        dir.join(format!("tool-call-{tool_call_id}.jsonl")),
-        format!("{chunk}\n"),
+        dir.path().join(format!("tool-call-{tool_call_id}.jsonl")),
+        format!("{line}\n"),
     )
     .await?;
 
-    let high_waters = close_stale_running_items(&dir).await?;
+    // A fresh conversation in this dir runs the epoch-file protocol: the
+    // epoch file is created with 1 and the counter starts at 0.
+    let client = test_conversation_client(dir.path()).await?;
+    let root = dir.path().to_path_buf();
+    let mut clients = HashMap::new();
+    clients.insert(root.clone(), client.as_ref());
 
-    let display = tokio::fs::read_to_string(dir.join("display.jsonl")).await?;
+    close_stale_running_items(&root, &clients).await?;
+
+    let status = tokio::fs::read_to_string(
+        dir.path()
+            .join(format!("tool-call-{tool_call_id}-status.txt")),
+    )
+    .await?;
+    assert_eq!(status, "Cancelled");
+
+    let display = tokio::fs::read_to_string(dir.path().join("display.jsonl")).await?;
     let last_line = display
         .lines()
         .last()
         .expect("display should contain synthetic end event");
     let end: BroadcastMessage = serde_json::from_str(last_line)?;
-    // Synthetic end continues from max(1, 10) + 1 = 11.
-    assert_eq!(end.id, 11);
+    // Synthetic end reserves the first id of epoch 1, above every legacy id
+    // (< 2^32) persisted from earlier runs — no on-disk id scan is needed.
+    assert_eq!(end.id.as_i64(), 1i64 << 32);
     assert!(matches!(
         end.msg,
         Message::ToolMessageEnd {
@@ -647,12 +605,191 @@ async fn close_stale_id_scan_includes_per_tool_call_files() -> anyhow::Result<()
     ));
 
     // The same envelope is appended to the per-tool-call file.
-    let tc = tokio::fs::read_to_string(dir.join(format!("tool-call-{tool_call_id}.jsonl"))).await?;
+    let tc = tokio::fs::read_to_string(dir.path().join(format!("tool-call-{tool_call_id}.jsonl")))
+        .await?;
     let tc_end: BroadcastMessage = serde_json::from_str(tc.lines().last().expect("tool-call end"))?;
-    assert_eq!(tc_end.id, 11);
+    assert_eq!(tc_end.id.as_i64(), 1i64 << 32);
 
-    // High-water continues past the synthetic id: next id must be at least 12.
-    assert_eq!(high_waters.get(&dir).copied(), Some(12));
+    // The client's counter continues past the synthetic id: the next live
+    // broadcast does not collide with the persisted synthetic event.
+    assert_eq!(client.get_unique_id().as_i64(), (1i64 << 32) | 1);
+
+    Ok(())
+}
+
+/// Legacy-format display.jsonl lines (old sessions with `msg_id` inside the
+/// variant) must still be recognized, and the synthetic stale-close event is
+/// written in the new envelope format with an id minted from the resumed
+/// conversation's generator.
+#[tokio::test]
+async fn close_stale_legacy_format_line_migrates_to_envelope() -> anyhow::Result<()> {
+    let dir = TestDir::new("server_tests");
+    let legacy_line = serde_json::json!({
+        "ToolMessageStart": {
+            "msg_id": 1,
+            "tool_call_id": "tool-1",
+            "created_at": 0,
+            "tool_name": "bash",
+            "tool_args": "{}",
+        }
+    });
+    tokio::fs::write(dir.path().join("display.jsonl"), format!("{legacy_line}\n")).await?;
+
+    let client = test_conversation_client(dir.path()).await?;
+    let root = dir.path().to_path_buf();
+    let mut clients = HashMap::new();
+    clients.insert(root.clone(), client.as_ref());
+
+    close_stale_running_items(&root, &clients).await?;
+
+    let display = tokio::fs::read_to_string(dir.path().join("display.jsonl")).await?;
+    let last_line = display
+        .lines()
+        .last()
+        .expect("display should contain synthetic end event");
+    let end: BroadcastMessage = serde_json::from_str(last_line)?;
+    // Legacy msg_id 1 is never scanned; the synthetic end gets the first id
+    // of the resumed run's epoch 1, above every legacy id.
+    assert_eq!(end.id.as_i64(), 1i64 << 32);
+    assert!(matches!(
+        end.msg,
+        Message::ToolMessageEnd {
+            end_status: MessageEndStatus::Cancelled,
+            ..
+        }
+    ));
+
+    Ok(())
+}
+
+/// Synthetic stale-close ids are minted from the dir's conversation client:
+/// the epoch file (pre-bumped here to 5) controls the epoch and the counter
+/// starts at 0 on every run, so synthetic ids never collide with persisted
+/// ids from earlier epochs — no on-disk id scan is needed.
+#[tokio::test]
+async fn close_stale_synthetic_ids_come_from_conversation_epoch() -> anyhow::Result<()> {
+    let dir = TestDir::new("server_tests");
+    // Simulate a session that has already resumed several times.
+    tokio::fs::write(dir.path().join("msg-id-epoch"), "5\n").await?;
+
+    let tool_call_id = "tool-1";
+    let start = serde_json::json!({
+        "id": 5,
+        "msg": {
+            "ToolMessageStart": {
+                "tool_call_id": tool_call_id,
+                "created_at": 0,
+                "tool_name": "bash",
+                "tool_args": "{}",
+            }
+        }
+    });
+    let line = serde_json::to_string(&start)?;
+    tokio::fs::write(dir.path().join("display.jsonl"), format!("{line}\n")).await?;
+
+    // Starting the conversation bumps epoch 5 -> 6.
+    let client = test_conversation_client(dir.path()).await?;
+    assert_eq!(
+        tokio::fs::read_to_string(dir.path().join("msg-id-epoch")).await?,
+        "6\n"
+    );
+
+    let root = dir.path().to_path_buf();
+    let mut clients = HashMap::new();
+    clients.insert(root.clone(), client.as_ref());
+    close_stale_running_items(&root, &clients).await?;
+
+    let display = tokio::fs::read_to_string(dir.path().join("display.jsonl")).await?;
+    let last_line = display
+        .lines()
+        .last()
+        .expect("display should contain synthetic end event");
+    let end: BroadcastMessage = serde_json::from_str(last_line)?;
+    assert_eq!(end.id.as_i64(), 6i64 << 32);
+
+    // The client's counter continues past the synthetic event; no collision.
+    assert_eq!(client.get_unique_id().as_i64(), (6i64 << 32) | 1);
+
+    Ok(())
+}
+
+/// An orphaned subagent dir (present on disk, but its conversation was not
+/// resumed — missing/corrupt state) is never written again, so its synthetic
+/// ids come from a fresh local generator starting at 0; resumed dirs keep
+/// their own generators.
+#[tokio::test]
+async fn close_stale_orphaned_subagent_dir_uses_local_ids() -> anyhow::Result<()> {
+    let dir = TestDir::new("server_tests");
+
+    // Root dir with a resumed client (epoch 1).
+    let root_start = serde_json::json!({
+        "id": 1,
+        "msg": {
+            "ToolMessageStart": {
+                "tool_call_id": "root-tool",
+                "created_at": 0,
+                "tool_name": "bash",
+                "tool_args": "{}",
+            }
+        }
+    });
+    tokio::fs::write(
+        dir.path().join("display.jsonl"),
+        format!("{}\n", serde_json::to_string(&root_start)?),
+    )
+    .await?;
+    let root_client = test_conversation_client(dir.path()).await?;
+
+    // Orphaned subagent dir: display.jsonl exists but the conversation was
+    // never resumed (no client in the map).
+    let orphan = dir.path().join("subagent-orphan");
+    tokio::fs::create_dir_all(&orphan).await?;
+    let orphan_start = serde_json::json!({
+        "id": 7,
+        "msg": {
+            "SubAgentStart": {
+                "tool_call_id": "sa-tool",
+                "conversation_id": "orphan",
+                "description": "orphaned",
+            }
+        }
+    });
+    tokio::fs::write(
+        orphan.join("display.jsonl"),
+        format!("{}\n", serde_json::to_string(&orphan_start)?),
+    )
+    .await?;
+
+    let root = dir.path().to_path_buf();
+    let mut clients = HashMap::new();
+    clients.insert(root.clone(), root_client.as_ref());
+    close_stale_running_items(&root, &clients).await?;
+
+    // Root's synthetic end uses the root client's generator.
+    let root_display = tokio::fs::read_to_string(dir.path().join("display.jsonl")).await?;
+    let root_end: BroadcastMessage =
+        serde_json::from_str(root_display.lines().last().expect("root end"))?;
+    assert_eq!(root_end.id.as_i64(), 1i64 << 32);
+    assert!(matches!(
+        root_end.msg,
+        Message::ToolMessageEnd {
+            end_status: MessageEndStatus::Cancelled,
+            ..
+        }
+    ));
+
+    // Orphan's synthetic end uses a fresh local counter starting at 0.
+    let orphan_display = tokio::fs::read_to_string(orphan.join("display.jsonl")).await?;
+    let orphan_end: BroadcastMessage =
+        serde_json::from_str(orphan_display.lines().last().expect("orphan end"))?;
+    assert_eq!(orphan_end.id.as_i64(), 0);
+    assert!(matches!(
+        orphan_end.msg,
+        Message::SubAgentTurnEnd {
+            end_status: MessageEndStatus::Cancelled,
+            ..
+        }
+    ));
 
     Ok(())
 }

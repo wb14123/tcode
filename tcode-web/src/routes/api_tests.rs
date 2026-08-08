@@ -84,7 +84,6 @@ async fn ensure_session_resumable_accepts_valid_conversation_state() -> anyhow::
             "reasoning_budget": null,
             "exclude_reasoning": false
         },
-        "msg_id_counter": 0,
         "total_input_tokens": 0,
         "total_output_tokens": 0,
         "total_cache_creation_tokens": 0,
@@ -214,7 +213,7 @@ async fn find_subagent_tool_call_id_resolves_legacy_and_envelope_lines() -> anyh
         }
     });
     let envelope = serde_json::json!({
-        "id": 2,
+        "id": 4_294_967_296i64,
         "msg": {
             "SubAgentContinue": {
                 "tool_call_id": "tool-2",
@@ -224,7 +223,7 @@ async fn find_subagent_tool_call_id_resolves_legacy_and_envelope_lines() -> anyh
         }
     });
     let other = serde_json::json!({
-        "id": 3,
+        "id": 4_294_967_297i64,
         "msg": {
             "SubAgentStart": {
                 "tool_call_id": "tool-3",

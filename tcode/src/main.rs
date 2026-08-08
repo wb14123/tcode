@@ -166,7 +166,7 @@ enum Commands {
     /// Branch off a new independent session at a user message (clone history up to, not including, that message)
     Branch {
         /// The display msg_id of the target user message
-        msg_id: i32,
+        msg_id: i64,
     },
     /// Cancel a running tool call
     CancelTool {

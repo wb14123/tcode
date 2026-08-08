@@ -28,11 +28,15 @@ fn temp_dir() -> PathBuf {
 // Fixture builders
 // ---------------------------------------------------------------------------
 
-fn envelope(id: i32, msg: Message) -> BroadcastMessage {
-    BroadcastMessage { id, msg }
+/// Build a `BroadcastMessage` with the given id via serde deserialization:
+/// `UniqueId` has no public constructor by design (reading persisted events is
+/// the sanctioned way to obtain one), so the id is round-tripped through JSON.
+fn envelope(id: i64, msg: Message) -> BroadcastMessage {
+    serde_json::from_value(serde_json::json!({ "id": id, "msg": msg }))
+        .expect("envelope with id deserializes")
 }
 
-fn user_envelope(id: i32, content: &str, media: &[&str]) -> BroadcastMessage {
+fn user_envelope(id: i64, content: &str, media: &[&str]) -> BroadcastMessage {
     envelope(
         id,
         Message::UserMessage {
@@ -43,7 +47,7 @@ fn user_envelope(id: i32, content: &str, media: &[&str]) -> BroadcastMessage {
     )
 }
 
-fn assistant_start_envelope(id: i32) -> BroadcastMessage {
+fn assistant_start_envelope(id: i64) -> BroadcastMessage {
     envelope(id, Message::AssistantMessageStart { created_at: 1 })
 }
 
@@ -75,7 +79,6 @@ fn make_state(llm_msgs: Vec<LLMMessage>) -> ConversationState {
         model: "test-model".to_string(),
         llm_msgs,
         chat_options: ChatOptions::default(),
-        msg_id_counter: 100,
         total_input_tokens: 0,
         total_output_tokens: 0,
         total_cache_creation_tokens: 0,
@@ -112,15 +115,13 @@ fn make_cut(
     ordinal: usize,
     content: &str,
     media: &[&str],
-    retained_ids: Vec<i32>,
-    target_id: i32,
+    retained_ids: Vec<i64>,
+    target_id: i64,
 ) -> DisplayCut {
-    let max_retained_id = retained_ids.iter().copied().max();
     DisplayCut {
         retained_lines: vec![],
         retained_envelopes: vec![],
         retained_ids,
-        max_retained_id,
         target_ordinal: ordinal,
         target: Message::UserMessage {
             created_at: 1,
@@ -209,7 +210,6 @@ fn truncate_display_happy_path() -> Result<()> {
     assert_eq!(cut.target_ordinal, 2);
     assert_eq!(cut.retained_lines, vec![l1, l2]);
     assert_eq!(cut.retained_ids, vec![1, 2]);
-    assert_eq!(cut.max_retained_id, Some(2));
     assert_eq!(cut.target_id, 3);
     match &cut.target {
         Message::UserMessage { content, .. } => {
@@ -295,7 +295,6 @@ fn truncate_display_empty_prefix_when_target_is_first_line() -> Result<()> {
     assert!(cut.retained_lines.is_empty());
     assert!(cut.retained_envelopes.is_empty());
     assert!(cut.retained_ids.is_empty());
-    assert_eq!(cut.max_retained_id, None);
     Ok(())
 }
 
@@ -368,67 +367,6 @@ fn validate_branch_fires_on_media_filenames_mismatch() {
     )
     .unwrap_err();
     assert!(err.to_string().contains("media"), "unexpected error: {err}");
-}
-
-#[test]
-fn validate_branch_fires_on_out_of_order_retained_ids() {
-    let state = make_state(vec![
-        LLMMessage::System("system".to_string()),
-        user_msg("hello", &[]),
-    ]);
-    let cut = make_cut(1, "hello", &[], vec![5, 3], 6);
-    let err = validate_branch(
-        &state,
-        &cut,
-        Path::new("state.json"),
-        Path::new("display.jsonl"),
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("strictly increasing"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn validate_branch_fires_when_retained_id_not_less_than_target() {
-    let state = make_state(vec![
-        LLMMessage::System("system".to_string()),
-        user_msg("hello", &[]),
-    ]);
-    let cut = make_cut(1, "hello", &[], vec![6], 6);
-    let err = validate_branch(
-        &state,
-        &cut,
-        Path::new("state.json"),
-        Path::new("display.jsonl"),
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("strictly less"),
-        "unexpected error: {err}"
-    );
-}
-
-#[test]
-fn validate_branch_fires_when_counter_not_above_max_retained_id() {
-    let mut state = make_state(vec![
-        LLMMessage::System("system".to_string()),
-        user_msg("hello", &[]),
-    ]);
-    state.msg_id_counter = 5;
-    let cut = make_cut(1, "hello", &[], vec![5], 6);
-    let err = validate_branch(
-        &state,
-        &cut,
-        Path::new("state.json"),
-        Path::new("display.jsonl"),
-    )
-    .unwrap_err();
-    assert!(
-        err.to_string().contains("msg_id_counter"),
-        "unexpected error: {err}"
-    );
 }
 
 #[test]
@@ -646,7 +584,6 @@ fn cut_with_envelopes(envelopes: Vec<BroadcastMessage>) -> DisplayCut {
         retained_lines: vec![],
         retained_envelopes: envelopes,
         retained_ids: vec![],
-        max_retained_id: None,
         target_ordinal: 1,
         target: Message::UserMessage {
             created_at: 1,
@@ -688,6 +625,9 @@ fn build_branch_content_writes_core_files_even_when_empty() -> Result<()> {
     );
     // session-meta.json written.
     assert!(staging.join("session-meta.json").is_file());
+    // A legacy source has no msg-id-epoch; none must be created in the staging
+    // dir (the branch's first resume treats missing as 0 and bumps to epoch 1).
+    assert!(!staging.join("msg-id-epoch").exists());
     Ok(())
 }
 
@@ -705,6 +645,8 @@ fn build_branch_content_skips_malicious_subagent_and_tool_call_ids() -> Result<(
             .join("conversation-state.json"),
         "{}",
     )?;
+    // A post-resume source carries its epoch file (content is opaque here).
+    std::fs::write(source.join("msg-id-epoch"), "3\n")?;
     std::fs::create_dir_all(source.join("subagent-x"))?;
     std::fs::create_dir_all(source.join("tool-call-x"))?;
     std::fs::create_dir_all(dir.join("escaped"))?;
@@ -771,8 +713,8 @@ fn build_branch_content_skips_malicious_subagent_and_tool_call_ids() -> Result<(
         dir.join("escaped.jsonl").is_file(),
         "source-side trap must stay untouched"
     );
-    // state, meta, display, media/, subagent-real1
-    assert_eq!(std::fs::read_dir(&staging)?.count(), 5);
+    // state, meta, display, media/, subagent-real1, msg-id-epoch
+    assert_eq!(std::fs::read_dir(&staging)?.count(), 6);
     Ok(())
 }
 
@@ -817,6 +759,89 @@ fn build_branch_content_copies_only_real_media_files() -> Result<()> {
         .collect();
     assert_eq!(copied.len(), 1, "only the real file must be copied");
     assert!(!staging.join("media").join("b.png").exists());
+    Ok(())
+}
+
+#[test]
+fn build_branch_content_copies_msg_id_epoch_and_retained_prefix() -> Result<()> {
+    let dir = temp_dir();
+    let (source, staging) = empty_source_and_staging(&dir);
+    let state = make_state(vec![LLMMessage::System("system".to_string())]);
+
+    // A post-resume source: retained ids from an earlier epoch, a current
+    // epoch file, and a display file that continues past the cut point.
+    let e1 = envelope(
+        (1i64 << 32) | 1,
+        Message::UserMessage {
+            created_at: 1,
+            content: Arc::new("hello".to_string()),
+            media_filenames: vec![],
+        },
+    );
+    let e2 = envelope(
+        (1i64 << 32) | 2,
+        Message::AssistantMessageStart { created_at: 1 },
+    );
+    let l1 = serde_json::to_string(&e1).expect("serialize");
+    let l2 = serde_json::to_string(&e2).expect("serialize");
+    let post_cut = serde_json::to_string(&user_envelope(2, "after", &[])).expect("serialize");
+    let source_display = format!("{l1}\n{l2}\n{post_cut}\n");
+    std::fs::write(source.join("display.jsonl"), &source_display)?;
+    std::fs::write(source.join("msg-id-epoch"), "3\n")?;
+
+    let cut = DisplayCut {
+        retained_lines: vec![l1.clone(), l2.clone()],
+        retained_envelopes: vec![e1, e2],
+        retained_ids: vec![(1i64 << 32) | 1, (1i64 << 32) | 2],
+        target_ordinal: 1,
+        target: Message::UserMessage {
+            created_at: 1,
+            content: Arc::new("hello".to_string()),
+            media_filenames: vec![],
+        },
+        // The cut target is the UserMessage above (retained envelope id 1),
+        // not the AssistantMessageStart that follows it.
+        target_id: (1i64 << 32) | 1,
+    };
+
+    build_branch_content(&source, &staging, &state, &cut)?;
+
+    // msg-id-epoch is copied byte-identically, so the branch's first resume
+    // bumps from the source's current epoch (new ids start one epoch above
+    // every retained id).
+    assert_eq!(
+        std::fs::read(staging.join("msg-id-epoch"))?,
+        std::fs::read(source.join("msg-id-epoch"))?,
+        "msg-id-epoch must be copied byte-identically"
+    );
+    // The retained prefix is byte-identical to the source's prefix; lines
+    // after the cut point are not carried over.
+    let expected_prefix = format!("{l1}\n{l2}\n");
+    assert_eq!(
+        std::fs::read_to_string(staging.join("display.jsonl"))?,
+        expected_prefix,
+        "retained display prefix must be byte-identical"
+    );
+    assert!(
+        !expected_prefix.contains("after"),
+        "post-cut lines must not leak into the branch display"
+    );
+    Ok(())
+}
+
+#[test]
+fn build_branch_content_skips_missing_epoch_file() -> Result<()> {
+    let dir = temp_dir();
+    let (source, staging) = empty_source_and_staging(&dir);
+    let state = make_state(vec![LLMMessage::System("system".to_string())]);
+    let cut = cut_with_envelopes(vec![]);
+
+    build_branch_content(&source, &staging, &state, &cut)?;
+
+    assert!(
+        !staging.join("msg-id-epoch").exists(),
+        "no epoch file must be created for a legacy source"
+    );
     Ok(())
 }
 

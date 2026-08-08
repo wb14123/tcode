@@ -2,6 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::future::Future;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
@@ -56,7 +57,6 @@ pub struct ConversationState {
     pub model: String,
     pub llm_msgs: Vec<LLMMessage>,
     pub chat_options: ChatOptions,
-    pub msg_id_counter: i32,
     pub total_input_tokens: i32,
     pub total_output_tokens: i32,
     #[serde(default)]
@@ -154,7 +154,150 @@ pub fn fill_cancelled_tool_results(llm_msgs: &mut Vec<LLMMessage>) {
     }
 }
 
-type MessageID = i32;
+/// A message id, unique per conversation across resumes.
+///
+/// id = (epoch << 32) | counter. The only ways to obtain a `UniqueId` are
+/// `UniqueIdGenerator::get_unique_id` (minting) and serde deserialization
+/// (reading persisted events); there is deliberately no public constructor.
+///
+/// Uniqueness is by construction: within one epoch the counter never repeats,
+/// and the epoch strictly increases at every conversation start (new or
+/// resumed), so no id is ever issued twice for the same conversation,
+/// regardless of how stale any persisted counter is. Id order is NOT
+/// guaranteed: ids are minted with a Relaxed atomic, so the order in which
+/// ids appear in `msgs`/display.jsonl may differ from minting order. Old
+/// legacy i32 ids are all < 2^32, i.e. implicitly epoch 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct UniqueId(i64);
+
+impl UniqueId {
+    /// Raw i64 value (display, logging, comparing against legacy ids).
+    pub fn as_i64(self) -> i64 {
+        self.0
+    }
+}
+
+impl std::fmt::Display for UniqueId {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+/// Mints ids for one session. Exactly one instance exists per session,
+/// created from the ROOT session dir by
+/// [`ConversationManager::ensure_id_generator`] and shared by the root
+/// conversation and all subagents (every `ConversationClient` holds an `Arc`
+/// to it). The shared Relaxed-atomic counter makes ids globally unique across
+/// the whole session dir. `new(dir)` may also be called with `None` by test
+/// helpers and for orphaned-subagent synthetic ids (epoch 0, no file).
+pub struct UniqueIdGenerator {
+    epoch: u32,         // immutable after construction
+    counter: AtomicU32, // per-run, starts at 0
+}
+
+impl UniqueIdGenerator {
+    /// Read `dir/msg-id-epoch` (missing -> 0), set epoch = value + 1, write
+    /// `dir/msg-id-epoch` with the new epoch (created on first run; tmp +
+    /// fsync + rename + dir fsync), counter 0. All of this completes before
+    /// any id can be minted, which is the ordering invariant: no event with
+    /// epoch E may be written to disk before the epoch file durably reads E.
+    /// `None` (no state dir, e.g. test helper): epoch 0, counter 0, no file.
+    /// On any read/bump/write error, propagate and fail the conversation
+    /// start (do not continue with a stale epoch).
+    pub fn new(dir: Option<&Path>) -> anyhow::Result<Self> {
+        let (epoch, counter) = match dir {
+            Some(dir) => {
+                let saved = read_epoch_file(dir)?;
+                let epoch = saved
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow::anyhow!("msg-id-epoch overflow: saved value {saved}"))?;
+                anyhow::ensure!(
+                    epoch < (1 << 31),
+                    "msg-id-epoch overflow: epoch {epoch} would make ids non-positive"
+                );
+                write_epoch_file(dir, epoch)?;
+                (epoch, AtomicU32::new(0))
+            }
+            None => (0, AtomicU32::new(0)),
+        };
+        Ok(Self { epoch, counter })
+    }
+
+    /// Reserve the next unique id:
+    /// `UniqueId(((self.epoch as i64) << 32) | self.counter.fetch_add(1, Ordering::Relaxed) as i64)`.
+    /// Does NOT push to `msgs` and does NOT broadcast — it only reserves an
+    /// id. This is the single minting point, used by `notify_msg` and by the
+    /// synthetic stale-close events. `Relaxed` is sufficient: uniqueness is
+    /// the only guarantee; id order in `msgs`/display.jsonl is NOT guaranteed
+    /// (concurrent minting may invert it). On counter overflow (unreachable
+    /// at 2^32 per run) panic with a documented invariant — a "saturate"
+    /// would mint duplicate ids.
+    pub fn get_unique_id(&self) -> UniqueId {
+        let counter = self.counter.fetch_add(1, Ordering::Relaxed);
+        assert!(
+            counter != u32::MAX,
+            "UniqueId counter overflow: the 2^32nd mint in one run would \
+             reuse counter u32::MAX after 2^32-1 ids. Ids are \
+             (epoch << 32) | counter and must never repeat within an epoch; \
+             wrapping the counter would mint a duplicate id. Unreachable at \
+             realistic event volumes — resume the conversation to start a \
+             fresh epoch."
+        );
+        UniqueId(((self.epoch as i64) << 32) | counter as i64)
+    }
+
+    /// Current epoch (diagnostics/tests).
+    pub fn epoch(&self) -> u32 {
+        self.epoch
+    }
+}
+
+/// Path of the per-conversation epoch file inside a state dir.
+fn epoch_file_path(dir: &Path) -> PathBuf {
+    dir.join("msg-id-epoch")
+}
+
+/// Read `dir/msg-id-epoch` (missing -> 0). Content is `"{epoch}\n"`;
+/// `trim()` tolerates the trailing newline. Strict UTF-8: an invalid-UTF-8
+/// file is an error, not a lossy read.
+fn read_epoch_file(dir: &Path) -> anyhow::Result<u32> {
+    let path = epoch_file_path(dir);
+    match std::fs::read_to_string(&path) {
+        Ok(content) => {
+            let epoch = content
+                .trim()
+                .parse::<u32>()
+                .with_context(|| format!("invalid msg-id-epoch content in {:?}", path))?;
+            Ok(epoch)
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+        Err(e) => Err(e).with_context(|| format!("failed to read {:?}", path)),
+    }
+}
+
+/// Write `dir/msg-id-epoch` with `"{epoch}\n"`, durably: tmp + fsync +
+/// rename + dir fsync. The fsyncs are mandatory so the epoch write is durable
+/// before any epoch-E event can survive; without them a power loss could
+/// persist an epoch-E append while losing the epoch rename.
+fn write_epoch_file(dir: &Path, epoch: u32) -> anyhow::Result<()> {
+    let target = epoch_file_path(dir);
+    let tmp = dir.join("msg-id-epoch.tmp");
+    let mut file =
+        std::fs::File::create(&tmp).with_context(|| format!("failed to create {:?}", tmp))?;
+    std::io::Write::write_all(&mut file, format!("{epoch}\n").as_bytes())
+        .with_context(|| format!("failed to write {:?}", tmp))?;
+    file.sync_all()
+        .with_context(|| format!("failed to fsync {:?}", tmp))?;
+    std::fs::rename(&tmp, &target)
+        .with_context(|| format!("failed to rename {:?} -> {:?}", tmp, target))?;
+    // fsync the directory so the rename itself is durable.
+    let dir_file =
+        std::fs::File::open(dir).with_context(|| format!("failed to open dir {:?}", dir))?;
+    dir_file
+        .sync_all()
+        .with_context(|| format!("failed to fsync dir {:?}", dir))?;
+    Ok(())
+}
 
 /// Get current timestamp in milliseconds since Unix epoch
 fn now_millis() -> u64 {
@@ -433,12 +576,19 @@ pub enum Message {
     },
 }
 
-/// A broadcast message: a `Message` plus the monotonically increasing id
-/// assigned to it when it was broadcast. The id is unique per conversation
-/// and strictly increasing in broadcast order.
+/// A broadcast message: a `Message` plus the id assigned to it when it was
+/// broadcast. The id is unique per conversation across resumes — it is an
+/// epoch-prefixed counter (`(epoch << 32) | counter`), where the epoch
+/// strictly increases at every conversation start (see [`UniqueId`] and
+/// [`UniqueIdGenerator`]). Id order is NOT guaranteed: ids are minted with a
+/// Relaxed atomic, so concurrent `notify_msg` calls can invert the order in
+/// which ids appear here, in `msgs`, and in display.jsonl. Only uniqueness is
+/// a guarantee; no caller may rely on id order or contiguity (missing/
+/// duplicated event detection belongs to the broadcast channel's `Lagged`
+/// error and per-connection SSE line numbers).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BroadcastMessage {
-    pub id: MessageID,
+    pub id: UniqueId,
     pub msg: Message,
 }
 
@@ -536,17 +686,25 @@ pub fn create_continue_subagent_tool() -> Tool {
     )
 }
 
-/// Prepare tools and channels common to both new and resumed conversations.
-fn prepare_conversation(
-    llm: &mut dyn LLM,
-    tools: Vec<Arc<Tool>>,
-    msg_id_start: i32,
-    summary: ConversationSummary,
-) -> (
+/// Result of [`prepare_conversation`]: the tool map, the input channel
+/// receiver, and the client.
+type PreparedConversation = (
     HashMap<String, Arc<Tool>>,
     mpsc::Receiver<Message>,
     Arc<ConversationClient>,
-) {
+);
+
+/// Prepare tools and channels common to both new and resumed conversations.
+/// The caller supplies the shared session id generator (created by
+/// [`ConversationManager::ensure_id_generator`], which runs the epoch-file
+/// protocol once per session), so ids are globally unique across the root
+/// conversation and all subagents.
+fn prepare_conversation(
+    llm: &mut dyn LLM,
+    tools: Vec<Arc<Tool>>,
+    ids: Arc<UniqueIdGenerator>,
+    summary: ConversationSummary,
+) -> Result<PreparedConversation> {
     llm.register_tools(tools.clone());
     let tools_map = tools.into_iter().map(|t| (t.name.clone(), t)).collect();
     let (input_tx, input_rx) = mpsc::channel(100);
@@ -557,7 +715,8 @@ fn prepare_conversation(
     // backpressured persistence path.
     let (notify_tx, _) = broadcast::channel(10_000);
     let client = Arc::new(ConversationClient {
-        msg_id_counter: parking_lot::Mutex::new(msg_id_start),
+        ids,
+        order_lock: parking_lot::Mutex::new(()),
         msgs: parking_lot::RwLock::new(Vec::new()),
         summary: parking_lot::RwLock::new(summary),
         input_channel_tx: input_tx,
@@ -566,7 +725,7 @@ fn prepare_conversation(
         cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
         children: parking_lot::Mutex::new(HashMap::new()),
     });
-    (tools_map, input_rx, client)
+    Ok((tools_map, input_rx, client))
 }
 
 // ============================================================================
@@ -583,6 +742,12 @@ pub struct ConversationManager {
     /// Optional container configuration for Docker/Podman sandbox mode.
     container_config: Option<Arc<ContainerConfig>>,
     system_prompt_builder: SystemPromptBuilder,
+    /// The single shared session id generator. Created lazily by
+    /// `ensure_id_generator` from the ROOT session dir (which runs the
+    /// epoch-file protocol exactly once per session) and shared by the root
+    /// conversation and all subagents. `None` until the first conversation
+    /// start (new or resumed) requests one.
+    id_generator: parking_lot::Mutex<Option<Arc<UniqueIdGenerator>>>,
 }
 
 /// Manages conversations so that any new client can attach to an existing conversation.
@@ -608,6 +773,7 @@ impl ConversationManager {
             permission_manager,
             container_config: container_config.map(Arc::new),
             system_prompt_builder,
+            id_generator: parking_lot::Mutex::new(None),
         })
     }
 
@@ -618,6 +784,24 @@ impl ConversationManager {
     /// Get the permission manager.
     pub fn permission_manager(&self) -> &Arc<crate::permission::PermissionManager> {
         &self.permission_manager
+    }
+
+    /// Get (creating once) the session's shared id generator.
+    ///
+    /// The epoch-file protocol (read `msg-id-epoch`, bump, tmp + fsync +
+    /// rename + dir fsync) runs exactly once per session, from the ROOT
+    /// session dir (the first caller's `dir`); every later caller reuses the
+    /// same generator, so ids are globally unique across the root
+    /// conversation and all subagents. `dir` is `None` only for
+    /// conversations without a state dir (tests), giving epoch 0, no file.
+    fn ensure_id_generator(&self, dir: Option<&Path>) -> anyhow::Result<Arc<UniqueIdGenerator>> {
+        let mut guard = self.id_generator.lock();
+        if let Some(generator) = guard.as_ref() {
+            return Ok(Arc::clone(generator));
+        }
+        let generator = Arc::new(UniqueIdGenerator::new(dir)?);
+        *guard = Some(Arc::clone(&generator));
+        Ok(generator)
     }
 
     /// Create a new conversation. The new conversation will be kept in the manager's
@@ -709,16 +893,17 @@ impl ConversationManager {
     ) -> Result<(String, Arc<ConversationClient>)> {
         let now = now_millis();
         let llm_clone = Arc::from(llm.clone_box());
+        let ids = self.ensure_id_generator(state_dir.as_deref())?;
         let (tools_map, input_rx, client) = prepare_conversation(
             &mut *llm,
             tools,
-            0,
+            ids,
             ConversationSummary {
                 description: None,
                 created_at: Some(now),
                 last_active_at: Some(now),
             },
-        );
+        )?;
         let system_prompt = self.build_system_prompt(subagent_depth);
         let llm_msgs = vec![LLMMessage::System(system_prompt)];
         let conversation = Conversation {
@@ -857,8 +1042,8 @@ impl ConversationManager {
         let created_at = summary.created_at;
 
         let llm_clone = Arc::from(llm.clone_box());
-        let (tools_map, input_rx, client) =
-            prepare_conversation(&mut *llm, tools, state.msg_id_counter, summary);
+        let ids = self.ensure_id_generator(state_dir.as_deref())?;
+        let (tools_map, input_rx, client) = prepare_conversation(&mut *llm, tools, ids, summary)?;
         let conv_id = state.id.clone();
         let conversation = Conversation {
             id: state.id.clone(),
@@ -919,6 +1104,15 @@ impl ConversationManager {
         state_dir: PathBuf,
         supports_media: bool,
     ) -> Result<(String, Arc<ConversationClient>, Vec<ResumedSubagent>)> {
+        // Ordering invariant: run the epoch-file protocol (read/bump/write,
+        // tmp + fsync + rename + dir fsync) for the ROOT dir up front, before
+        // ANY subagent is resumed, so the new epoch is durable before any
+        // event with it can be written (synthetic stale-close appends happen
+        // after this whole function returns). The single generator is then
+        // shared by the root and every resumed subagent (their resume paths
+        // reuse it via ensure_id_generator).
+        self.ensure_id_generator(Some(&state_dir))?;
+
         // Find all subagent states (depth-first: nested before parent)
         let subagent_states = find_subagent_states(&state_dir);
 
@@ -993,6 +1187,14 @@ pub struct ResumedSubagent {
 ///
 /// Returns entries depth-first (nested subagents before their parents)
 /// so they can be resumed in dependency order.
+///
+/// INVARIANT: the returned `state_dir` paths are constructed as
+/// `dir.join(entry.file_name())` with no canonicalization, byte-identical to
+/// the `subagent-*` paths that `tcode-runtime::server::close_stale_in_dir`
+/// builds when recursing (server.rs). The resume path keys its id-source map
+/// by these exact `PathBuf`s; if either side ever canonicalizes, a resumed
+/// subagent would silently fall into the orphaned-dir branch and mint
+/// epoch-0 synthetic ids that could collide with its persisted legacy ids.
 fn find_subagent_states(dir: &Path) -> Vec<(PathBuf, ConversationState)> {
     let mut results = Vec::new();
     let Ok(entries) = std::fs::read_dir(dir) else {
@@ -1497,7 +1699,6 @@ impl Conversation {
             model: self.model.clone(),
             llm_msgs: self.llm_msgs.clone(),
             chat_options: self.env.chat_options.clone(),
-            msg_id_counter: self.env.client.msg_id_counter_value(),
             total_input_tokens: self.total_input_tokens,
             total_output_tokens: self.total_output_tokens,
             total_cache_creation_tokens: self.total_cache_creation_tokens,
@@ -2710,7 +2911,17 @@ async fn execute_continue_subagent(
 
 /// Use for the client to send chat messages and subscribe to the conversation's messages.
 pub struct ConversationClient {
-    msg_id_counter: parking_lot::Mutex<i32>,
+    /// The session's shared id generator (one per session, see
+    /// `ConversationManager::ensure_id_generator`). All conversations in a
+    /// session — root and subagents — mint from the same Arc, so ids are
+    /// globally unique across the whole session dir.
+    ids: Arc<UniqueIdGenerator>,
+    /// Serializes notify_msg (push-to-msgs + broadcast) against subscribe()
+    /// (history snapshot + channel subscribe) — the replay/live boundary
+    /// guarantee (no dropped/duplicated message at the boundary). Id minting
+    /// is lock-free and unordered (Relaxed atomic); this mutex is separate and
+    /// does NOT impose id order.
+    order_lock: parking_lot::Mutex<()>,
     msgs: parking_lot::RwLock<Vec<Arc<BroadcastMessage>>>,
     summary: parking_lot::RwLock<ConversationSummary>,
     input_channel_tx: mpsc::Sender<Message>,
@@ -2723,19 +2934,10 @@ pub struct ConversationClient {
 }
 
 impl ConversationClient {
-    /// Read the current counter value (for snapshotting state).
-    pub(crate) fn msg_id_counter_value(&self) -> i32 {
-        *self.msg_id_counter.lock()
-    }
-
-    /// Ensure the id counter is at least `min`, so the next assigned id exceeds
-    /// every id already persisted to disk (e.g. after resume-time synthetic
-    /// stale-close events extended a file's id range beyond the saved counter).
-    pub fn ensure_msg_id_counter_at_least(&self, min: i32) {
-        let mut counter = self.msg_id_counter.lock();
-        if *counter < min {
-            *counter = min;
-        }
+    /// Reserve the next unique id without broadcasting. `notify_msg` uses it
+    /// internally; the server uses it for synthetic stale-close events.
+    pub fn get_unique_id(&self) -> UniqueId {
+        self.ids.get_unique_id()
     }
 
     pub fn conversation_summary(&self) -> ConversationSummary {
@@ -2902,10 +3104,13 @@ impl ConversationClient {
     /// Used for conversation to notify a new message if available
     pub fn notify_msg(&self, msg: Message) -> Result<()> {
         self.update_summary_for_message(&msg);
-        let mut counter = self.msg_id_counter.lock();
-        let id = *counter;
-        *counter += 1;
+        // Mint lock-free (Relaxed atomic — id order is not guaranteed), then
+        // hold order_lock across push-to-msgs + broadcast so subscribe()'s
+        // history snapshot + channel subscribe never drops or duplicates a
+        // message at the replay/live boundary.
+        let id = self.get_unique_id();
         let envelope = Arc::new(BroadcastMessage { id, msg });
+        let _guard = self.order_lock.lock();
         self.msgs.write().push(Arc::clone(&envelope));
         self.new_msg_notify_tx.send(envelope).map_err(|e| {
             anyhow::anyhow!("failed to send msg to the notification broadcast: {e}")
@@ -2926,14 +3131,16 @@ impl ConversationClient {
         &self,
     ) -> impl Stream<Item = Result<Arc<BroadcastMessage>, BroadcastStreamRecvError>> + use<> {
         // TODO: handle error and return error in stream
-        // Hold the counter mutex while snapshotting history and subscribing to
+        // Hold the order lock while snapshotting history and subscribing to
         // the live channel. notify_msg pushes to msgs and broadcasts under this
         // same lock, so no broadcast can slip between the two steps: every
         // message is delivered exactly once, either in the replay or on the
         // live channel. Without the lock a concurrent notify_msg could be
         // missed entirely (sent before the subscribe) or delivered twice
-        // (already in the snapshot and again on the channel).
-        let _guard = self.msg_id_counter.lock();
+        // (already in the snapshot and again on the channel). This lock does
+        // NOT impose id order — ids are minted lock-free with a Relaxed
+        // atomic and may appear out of order.
+        let _guard = self.order_lock.lock();
         let msgs = self.msgs.read().clone();
         let tx = self.new_msg_notify_tx.subscribe();
         let stream = BroadcastStream::new(tx);
@@ -3001,7 +3208,11 @@ impl ConversationClient {
         // tests exercise the same lag tolerance for streamed tool output.
         let (notify_tx, _) = broadcast::channel(10_000);
         ConversationClient {
-            msg_id_counter: parking_lot::Mutex::new(0),
+            ids: Arc::new(
+                UniqueIdGenerator::new(None)
+                    .expect("UniqueIdGenerator::new(None) never fails (no state dir)"),
+            ),
+            order_lock: parking_lot::Mutex::new(()),
             msgs: parking_lot::RwLock::new(Vec::new()),
             summary: parking_lot::RwLock::new(ConversationSummary::default()),
             input_channel_tx: input_tx,

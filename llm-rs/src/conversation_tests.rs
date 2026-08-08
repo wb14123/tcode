@@ -23,14 +23,31 @@ mod tests {
         }
     }
 
-    fn test_root() -> PathBuf {
-        Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/conversation")
+    /// Per-test temp dir under the workspace target dir; removed on drop
+    /// (cleanup runs on success and on panic).
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new(module: &str) -> Self {
+            let root =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../target/test-tmp/{module}"));
+            std::fs::create_dir_all(&root).expect("failed to create test root");
+            let dir = root.join(uuid::Uuid::new_v4().to_string());
+            // Cleanup before: remove any stale leftover at this exact path.
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("failed to create test dir");
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
     }
 
-    fn temp_dir() -> anyhow::Result<PathBuf> {
-        let dir = test_root().join(uuid::Uuid::new_v4().to_string());
-        std::fs::create_dir_all(&dir)?;
-        Ok(dir)
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
     }
 
     // ======== Session metadata and mode ========
@@ -64,7 +81,6 @@ mod tests {
                 )]),
             ],
             chat_options: ChatOptions::default(),
-            msg_id_counter: 0,
             total_input_tokens: 0,
             total_output_tokens: 0,
             total_cache_creation_tokens: 0,
@@ -91,9 +107,9 @@ mod tests {
 
     #[test]
     fn conversation_manager_uses_provided_system_prompt_builder() -> anyhow::Result<()> {
-        let dir = temp_dir()?;
+        let dir = TestDir::new("conversation");
         let manager = ConversationManager::new_with_system_prompt_builder(
-            dir.join("permissions.json"),
+            dir.path().join("permissions.json"),
             None,
             std::sync::Arc::new(|context: SystemPromptContext| {
                 format!("custom prompt depth {}", context.subagent_depth)
@@ -164,7 +180,6 @@ mod tests {
                 media_generation_timeout_secs: None,
                 max_retries: None,
             },
-            msg_id_counter: 42,
             total_input_tokens: 1000,
             total_output_tokens: 500,
             total_cache_creation_tokens: 0,
@@ -183,7 +198,6 @@ mod tests {
         assert_eq!(deserialized.id, state.id);
         assert_eq!(deserialized.model, state.model);
         assert_eq!(deserialized.llm_msgs.len(), state.llm_msgs.len());
-        assert_eq!(deserialized.msg_id_counter, 42);
         assert_eq!(deserialized.total_input_tokens, 1000);
         assert_eq!(deserialized.total_output_tokens, 500);
         assert!(!deserialized.single_turn);
@@ -718,7 +732,7 @@ mod tests {
     #[tokio::test]
     async fn retry_timeout_no_content_then_succeeds() -> anyhow::Result<()> {
         use crate::conversation::{Message, MessageEndStatus};
-        let dir = temp_dir()?;
+        let dir = TestDir::new("conversation");
         let mock = MockLlm::new(vec![
             MockResponse::Stall, // attempt 0: timeout
             MockResponse::Stall, // attempt 1: timeout
@@ -742,7 +756,7 @@ mod tests {
             ..Default::default()
         };
 
-        let msgs = drive_conversation(mock, chat_options, &dir).await?;
+        let msgs = drive_conversation(mock, chat_options, dir.path()).await?;
         let variants = msg_variants(&msgs);
 
         assert!(
@@ -796,7 +810,7 @@ mod tests {
     #[tokio::test]
     async fn retry_timeout_no_content_all_exhausted() -> anyhow::Result<()> {
         use crate::conversation::{Message, MessageEndStatus};
-        let dir = temp_dir()?;
+        let dir = TestDir::new("conversation");
         // Always stalls -> timeout on every attempt
         let mock = MockLlm::new(vec![
             MockResponse::Stall,
@@ -810,7 +824,7 @@ mod tests {
             ..Default::default()
         };
 
-        let msgs = drive_conversation(mock, chat_options, &dir).await?;
+        let msgs = drive_conversation(mock, chat_options, dir.path()).await?;
         let variants = msg_variants(&msgs);
 
         assert!(variants.contains(&"AssistantMessageStart".to_string()));
@@ -848,7 +862,7 @@ mod tests {
     #[tokio::test]
     async fn retry_timeout_after_partial_content_no_retry() -> anyhow::Result<()> {
         use crate::conversation::{Message, MessageEndStatus};
-        let dir = temp_dir()?;
+        let dir = TestDir::new("conversation");
         // First call: yields one chunk then stalls (never ends)
         let mock = MockLlm::new(vec![MockResponse::EventsThenStall(vec![
             LLMEvent::TextDelta("Partial".to_string()),
@@ -861,7 +875,7 @@ mod tests {
             ..Default::default()
         };
 
-        let msgs = drive_conversation(mock, chat_options, &dir).await?;
+        let msgs = drive_conversation(mock, chat_options, dir.path()).await?;
         let variants = msg_variants(&msgs);
 
         assert!(variants.contains(&"AssistantMessageStart".to_string()));
@@ -899,7 +913,7 @@ mod tests {
     #[tokio::test]
     async fn retry_error_no_content_retries() -> anyhow::Result<()> {
         use crate::conversation::{Message, MessageEndStatus};
-        let dir = temp_dir()?;
+        let dir = TestDir::new("conversation");
         let mock = MockLlm::new(vec![
             MockResponse::Events(vec![LLMEvent::Error(
                 "500 Internal Server Error".to_string(),
@@ -924,7 +938,7 @@ mod tests {
             ..Default::default()
         };
 
-        let msgs = drive_conversation(mock, chat_options, &dir).await?;
+        let msgs = drive_conversation(mock, chat_options, dir.path()).await?;
         let variants = msg_variants(&msgs);
 
         assert!(variants.contains(&"AssistantMessageStart".to_string()));
@@ -970,7 +984,7 @@ mod tests {
     #[tokio::test]
     async fn retry_cancellation_during_backoff() -> anyhow::Result<()> {
         use crate::conversation::{BroadcastMessage, Message, MessageEndStatus};
-        let dir = temp_dir()?;
+        let dir = TestDir::new("conversation");
         // First call stalls, then the mock will be cancelled
         let mock = MockLlm::new(vec![
             MockResponse::Stall, // attempt 0: timeout
@@ -983,7 +997,7 @@ mod tests {
             ..Default::default()
         };
 
-        let permissions_file = dir.join("permissions.json");
+        let permissions_file = dir.path().join("permissions.json");
         std::fs::write(&permissions_file, "[]")?;
         let manager = ConversationManager::new(permissions_file, None);
 
@@ -996,7 +1010,7 @@ mod tests {
             true,
             0,
             10,
-            Some(dir.to_path_buf()),
+            Some(dir.path().to_path_buf()),
             false,
         )?;
 
@@ -1066,7 +1080,7 @@ mod tests {
     #[tokio::test]
     async fn retry_max_retries_zero_disables_retry() -> anyhow::Result<()> {
         use crate::conversation::{Message, MessageEndStatus};
-        let dir = temp_dir()?;
+        let dir = TestDir::new("conversation");
         let mock = MockLlm::new(vec![MockResponse::Stall]);
 
         let chat_options = ChatOptions {
@@ -1075,7 +1089,7 @@ mod tests {
             ..Default::default()
         };
 
-        let msgs = drive_conversation(mock, chat_options, &dir).await?;
+        let msgs = drive_conversation(mock, chat_options, dir.path()).await?;
         let variants = msg_variants(&msgs);
 
         assert!(variants.contains(&"AssistantMessageStart".to_string()));
@@ -1106,10 +1120,15 @@ mod tests {
     // ----------------------------------------------------------------
     #[test]
     fn broadcast_message_serde_roundtrip() -> anyhow::Result<()> {
-        use crate::conversation::{BroadcastMessage, Message, MessageEndStatus};
+        use crate::conversation::{BroadcastMessage, Message, MessageEndStatus, UniqueId};
+        // UniqueId has no public constructor by design; serde deserialization
+        // (reading persisted events) is the sanctioned way to obtain one.
+        let uid = |n: i64| -> anyhow::Result<UniqueId> {
+            Ok(serde_json::from_value::<UniqueId>(serde_json::json!(n))?)
+        };
         let envelopes = vec![
             BroadcastMessage {
-                id: 7,
+                id: uid(7)?,
                 msg: Message::UserMessage {
                     created_at: 123,
                     content: Arc::new("hello".to_string()),
@@ -1118,15 +1137,16 @@ mod tests {
             },
             // Empty struct variants must survive the envelope round trip too.
             BroadcastMessage {
-                id: 8,
+                id: uid(8)?,
                 msg: Message::ConversationSaved {},
             },
             BroadcastMessage {
-                id: 9,
+                id: uid(9)?,
                 msg: Message::PermissionUpdated {},
             },
+            // A large epoch-prefixed id round-trips exactly (i64).
             BroadcastMessage {
-                id: 10,
+                id: uid((1i64 << 32) | 10)?,
                 msg: Message::AssistantMessageEnd {
                     end_status: MessageEndStatus::Succeeded,
                     error: None,
@@ -1176,12 +1196,17 @@ mod tests {
     }
 
     // ----------------------------------------------------------------
-    // Test: broadcast ids are contiguous, strictly increasing, and the
-    // stream order matches the replay order from get_messages()
+    // Test: broadcast ids are unique (never repeated), stream order matches
+    // the replay order from get_messages()
+    //
+    // Ids are NOT contiguous and NOT ordered: they are minted with a Relaxed
+    // atomic under concurrent workers, so the order in the stream may differ
+    // from minting order. Only uniqueness is guaranteed (plan section 2.1).
     // ----------------------------------------------------------------
     #[tokio::test]
-    async fn broadcast_ids_are_contiguous_and_match_replay_order() -> anyhow::Result<()> {
+    async fn broadcast_ids_are_unique_and_match_replay_order() -> anyhow::Result<()> {
         use crate::conversation::{BroadcastMessage, Message, SystemMessageLevel};
+        use std::collections::HashSet;
         let client = Arc::new(ConversationClient::new_for_test());
         let mut stream = client.subscribe();
 
@@ -1189,8 +1214,7 @@ mod tests {
         let workers = 4usize;
         let total = tasks_per_worker * workers;
 
-        // Spawn several workers broadcasting concurrently. The counter mutex
-        // serializes id assignment, so ids must come out contiguous and ordered.
+        // Spawn several workers broadcasting concurrently.
         let mut tasks = Vec::new();
         for w in 0..workers {
             let client = Arc::clone(&client);
@@ -1226,21 +1250,28 @@ mod tests {
             "stream should yield exactly {total} messages"
         );
 
-        // (a) ids are contiguous 0,1,2,... in the exact order received, and
-        // each envelope's payload matches its id (distinct payloads)
-        for (idx, env) in received.iter().enumerate() {
-            assert_eq!(env.id, idx as i32, "stream ids must be contiguous");
-            let n = env.id as u64;
+        // (a) ids are unique, all in epoch 0 (< 2^32 for new_for_test), and
+        // each envelope's payload matches its created_at (distinct payloads).
+        let mut seen: HashSet<i64> = HashSet::new();
+        for env in &received {
+            let id = env.id.as_i64();
+            assert!(
+                (0..(1 << 32)).contains(&id),
+                "new_for_test uses epoch 0, so ids must be in [0, 2^32), got {id}"
+            );
+            assert!(seen.insert(id), "id {id} minted twice");
             match &env.msg {
                 Message::SystemMessage {
                     created_at,
                     message,
                     ..
                 } => {
-                    assert_eq!(*created_at, n, "payload must correspond to id");
                     assert_eq!(
                         message,
-                        &format!("worker-{}-msg-{n}", n / tasks_per_worker as u64)
+                        &format!(
+                            "worker-{}-msg-{created_at}",
+                            created_at / tasks_per_worker as u64
+                        )
                     );
                 }
                 _ => unreachable!(),
@@ -1250,61 +1281,243 @@ mod tests {
         // (b) get_messages() afterwards yields the same ids in the same order
         let replay = client.get_messages();
         assert_eq!(replay.len(), total);
-        let received_ids: Vec<i32> = received.iter().map(|env| env.id).collect();
-        let replay_ids: Vec<i32> = replay.iter().map(|env| env.id).collect();
+        let received_ids: Vec<i64> = received.iter().map(|env| env.id.as_i64()).collect();
+        let replay_ids: Vec<i64> = replay.iter().map(|env| env.id.as_i64()).collect();
         assert_eq!(
             received_ids, replay_ids,
             "replay order must match stream order"
         );
-        for (idx, env) in replay.iter().enumerate() {
-            assert_eq!(env.id, idx as i32, "replay ids must be contiguous");
-        }
 
         Ok(())
     }
 
-    // ----------------------------------------------------------------
-    // Test: ensure_msg_id_counter_at_least bumps a lagging counter and is a
-    // no-op when the counter is already at or above the requested value.
-    // ----------------------------------------------------------------
+    // ======== UniqueId / UniqueIdGenerator (epoch-prefixed ids) ========
+
     #[test]
-    fn ensure_msg_id_counter_at_least_bumps_or_keeps() -> anyhow::Result<()> {
-        use crate::conversation::{ConversationClient, Message, SystemMessageLevel};
-        let client = Arc::new(ConversationClient::new_for_test());
+    fn unique_id_serde_roundtrip_as_json_number() -> anyhow::Result<()> {
+        use crate::conversation::UniqueId;
+        // UniqueId serializes as a plain JSON number (wire shape unchanged).
+        let id: UniqueId = serde_json::from_str("7")?;
+        assert_eq!(id.as_i64(), 7);
+        assert_eq!(id.to_string(), "7");
+        assert_eq!(serde_json::to_string(&id)?, "7");
+
+        // A large epoch-prefixed id round-trips exactly (i64).
+        let big: UniqueId = serde_json::from_str("4294967298")?; // epoch 1, counter 2
+        assert_eq!(big.as_i64(), (1i64 << 32) | 2);
+        assert_eq!(serde_json::to_string(&big)?, "4294967298");
+
+        // Comparisons are on the raw value.
+        assert!(id < big);
+        assert_ne!(id, big);
+        Ok(())
+    }
+
+    #[test]
+    fn unique_id_generator_none_dir_is_epoch_zero() -> anyhow::Result<()> {
+        use crate::conversation::UniqueIdGenerator;
+        let generator = UniqueIdGenerator::new(None)?;
+        assert_eq!(generator.epoch(), 0);
+        for _ in 0..5 {
+            let id = generator.get_unique_id();
+            assert!(id.as_i64() < (1 << 32), "epoch 0 ids must be < 2^32");
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn unique_id_generator_creates_epoch_file_on_first_run() -> anyhow::Result<()> {
+        use crate::conversation::UniqueIdGenerator;
+        let dir = TestDir::new("conversation");
+
+        let generator = UniqueIdGenerator::new(Some(dir.path()))?;
+        assert_eq!(
+            generator.epoch(),
+            1,
+            "new conversation (no epoch file) starts at epoch 1"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("msg-id-epoch"))?,
+            "1\n"
+        );
+        // No leftover tmp file after the tmp+rename protocol.
+        assert!(!dir.path().join("msg-id-epoch.tmp").exists());
+
+        let ids: Vec<i64> = (0..3).map(|_| generator.get_unique_id().as_i64()).collect();
+        assert!(
+            ids.iter().all(|&id| id >= (1 << 32)),
+            "epoch 1 ids must be >= 2^32"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn resume_twice_bumps_epochs_and_never_repeats_ids() -> anyhow::Result<()> {
+        use crate::conversation::UniqueIdGenerator;
+        let dir = TestDir::new("conversation");
+
+        // Run 1: new conversation -> epoch 1.
+        let gen1 = UniqueIdGenerator::new(Some(dir.path()))?;
+        assert_eq!(gen1.epoch(), 1);
+        let ids1: Vec<i64> = (0..3).map(|_| gen1.get_unique_id().as_i64()).collect();
+
+        // Run 2: first resume -> epoch 2.
+        let gen2 = UniqueIdGenerator::new(Some(dir.path()))?;
+        assert_eq!(gen2.epoch(), 2);
+        let ids2: Vec<i64> = (0..3).map(|_| gen2.get_unique_id().as_i64()).collect();
+
+        // Run 3: second resume -> epoch 3.
+        let gen3 = UniqueIdGenerator::new(Some(dir.path()))?;
+        assert_eq!(gen3.epoch(), 3);
+        let ids3: Vec<i64> = (0..3).map(|_| gen3.get_unique_id().as_i64()).collect();
+
+        // The epoch file now durably reads 3.
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("msg-id-epoch"))?,
+            "3\n"
+        );
+
+        let mut all = ids1.clone();
+        all.extend(ids2.iter().copied());
+        all.extend(ids3.iter().copied());
+        let unique: std::collections::HashSet<i64> = all.iter().copied().collect();
+        assert_eq!(
+            unique.len(),
+            all.len(),
+            "ids must never repeat across epochs"
+        );
+        assert!(
+            all.iter().all(|&id| id >= (1 << 32)),
+            "every minted id must be in epoch 1+"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn legacy_session_without_epoch_file_resumes_to_epoch_1() -> anyhow::Result<()> {
+        use crate::conversation::UniqueIdGenerator;
+        let dir = TestDir::new("conversation");
+        // Legacy session: old i32 ids persisted, no msg-id-epoch file.
+        let old_ids: Vec<i64> = vec![0, 1, 2, 1_000_000]; // all < 2^32
+
+        let generator = UniqueIdGenerator::new(Some(dir.path()))?;
+        assert_eq!(
+            generator.epoch(),
+            1,
+            "legacy (no epoch file) resumes to epoch 1"
+        );
+
+        let new_ids: Vec<i64> = (0..4).map(|_| generator.get_unique_id().as_i64()).collect();
+        for &id in &new_ids {
+            assert!(id >= (1 << 32), "new id {id} must be in epoch 1+");
+            assert!(
+                old_ids.iter().all(|&old| id > old),
+                "new id {id} must exceed every legacy id {old_ids:?}"
+            );
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn synthetic_stale_close_ids_never_collide_with_later_broadcasts() -> anyhow::Result<()> {
+        use crate::conversation::{Message, SystemMessageLevel};
+        let dir = TestDir::new("conversation");
+        // Pre-bump the epoch file to simulate a session that has already
+        // resumed several times (the file is the only thing that matters).
+        std::fs::write(dir.path().join("msg-id-epoch"), "5\n")?;
+
+        let permissions_file = dir.path().join("permissions.json");
+        std::fs::write(&permissions_file, "[]")?;
+        let manager = ConversationManager::new(permissions_file, None);
+        let (_conv_id, client) = manager.new_conversation_with_id(
+            "test-conv".to_string(),
+            Box::new(MockLlm::new(vec![])),
+            "test-model",
+            vec![],
+            ChatOptions::default(),
+            true,
+            0,
+            10,
+            Some(dir.path().to_path_buf()),
+            false,
+        )?;
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("msg-id-epoch"))?,
+            "6\n",
+            "conversation start bumps the pre-written epoch 5 -> 6"
+        );
 
         // Keep a live subscriber so notify_msg's broadcast send doesn't fail.
         let _stream = client.subscribe();
 
-        let system = |n: u64| Message::SystemMessage {
-            created_at: n,
-            level: SystemMessageLevel::Info,
-            message: format!("msg-{n}"),
-        };
+        // Synthetic stale-close events reserve ids directly from the
+        // generator (the server's close_stale path) without broadcasting.
+        let synthetic: Vec<i64> = (0..5).map(|_| client.get_unique_id().as_i64()).collect();
 
-        // Two broadcasts consume ids 0 and 1; the counter is now 2.
-        client.notify_msg(system(0))?;
-        client.notify_msg(system(1))?;
+        // Later live broadcasts continue from the same counter.
+        for i in 0..5 {
+            client.notify_msg(Message::SystemMessage {
+                created_at: i,
+                level: SystemMessageLevel::Info,
+                message: format!("live-{i}"),
+            })?;
+        }
+        let live: Vec<i64> = client
+            .get_messages()
+            .iter()
+            .map(|env| env.id.as_i64())
+            .collect();
 
-        // A resume-time seed that is above the current counter takes effect.
-        client.ensure_msg_id_counter_at_least(10);
-        client.notify_msg(system(2))?;
-        let msgs = client.get_messages();
-        assert_eq!(msgs.len(), 3);
+        let mut all = synthetic.clone();
+        all.extend(live.iter().copied());
+        let unique: std::collections::HashSet<i64> = all.iter().copied().collect();
         assert_eq!(
-            msgs[2].id, 10,
-            "seeded counter must be used for the next id"
+            unique.len(),
+            all.len(),
+            "no id may repeat, synthetic or live"
+        );
+        assert!(
+            all.iter().all(|&id| id >= (6 << 32)),
+            "every minted id must be in epoch 6"
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn crash_epoch_file_ahead_of_disk_skips_epoch_without_collision() -> anyhow::Result<()> {
+        use crate::conversation::UniqueIdGenerator;
+        let dir = TestDir::new("conversation");
+
+        // Run 1: epoch 1, some ids are "written to disk".
+        let gen1 = UniqueIdGenerator::new(Some(dir.path()))?;
+        assert_eq!(gen1.epoch(), 1);
+        let ids1: Vec<i64> = (0..3).map(|_| gen1.get_unique_id().as_i64()).collect();
+
+        // Crash mid-run-2: the epoch file was durably bumped to 2 (step 3 of
+        // the ordering protocol completed) but no epoch-2 events reached disk
+        // (crash before the synthetic appends). Simulate by writing the epoch
+        // file without appending any events.
+        std::fs::write(dir.path().join("msg-id-epoch"), "2\n")?;
+
+        // Next resume reads 2 -> uses epoch 3; epoch 2 is skipped, never
+        // reused, so no id from run 1 can collide.
+        let gen2 = UniqueIdGenerator::new(Some(dir.path()))?;
+        assert_eq!(gen2.epoch(), 3, "epoch 2 must be skipped after the crash");
+        let ids2: Vec<i64> = (0..3).map(|_| gen2.get_unique_id().as_i64()).collect();
+
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("msg-id-epoch"))?,
+            "3\n"
         );
 
-        // Seeding below the current counter is a no-op.
-        client.ensure_msg_id_counter_at_least(5);
-        client.notify_msg(system(3))?;
-        let msgs = client.get_messages();
-        assert_eq!(msgs.len(), 4);
-        assert_eq!(
-            msgs[3].id, 11,
-            "a lower seed must not move the counter back"
+        let mut all = ids1.clone();
+        all.extend(ids2.iter().copied());
+        let unique: std::collections::HashSet<i64> = all.iter().copied().collect();
+        assert_eq!(unique.len(), all.len(), "no id may repeat across the crash");
+        assert!(
+            all.iter().all(|&id| id >= (1 << 32)),
+            "all ids must be epoch-prefixed"
         );
-
         Ok(())
     }
 }

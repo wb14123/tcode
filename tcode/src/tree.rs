@@ -364,6 +364,17 @@ impl TreeState {
             if line.is_empty() {
                 continue;
             }
+            // Fast path: only the tree-relevant variants can change the node
+            // arena. Skip the ~97% of lines that are chunk/thinking/arg-chunk
+            // events with a substring check (no JSON parsing at all). Content
+            // that merely mentions a variant name is a harmless false positive
+            // (the line parses and `process_event` ignores it).
+            if !tcode_runtime::display_scan::line_mentions_any(
+                line,
+                tcode_runtime::display_scan::TREE_MARKERS,
+            ) {
+                continue;
+            }
             // New wire format: {"id": N, "msg": {"Variant": {...}}}; legacy
             // files are {"Variant": {..., "msg_id": N}}. A resumed old session
             // can produce mixed-format lines in one file, so parse per line.
