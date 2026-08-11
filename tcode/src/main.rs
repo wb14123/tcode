@@ -40,6 +40,9 @@ mod oauth_profile_tests;
 #[cfg(test)]
 mod tree_tests;
 
+#[cfg(test)]
+mod lua_tests;
+
 use std::fs;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};

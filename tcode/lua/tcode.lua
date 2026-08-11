@@ -46,6 +46,29 @@ local function ensure_buf_modifiable(buf)
   return true
 end
 
+-- Run fn with the buffer temporarily modifiable, then restore the previous
+-- modifiable state. The restore runs even when fn errors, then the error is
+-- re-raised. Returns nil if the buffer is invalid.
+--
+-- Restoring the *prior* value (rather than hardcoding false) makes nested use
+-- safe: callers already inside a modifiable window (e.g. the JSONL batch
+-- render) see the window stay open, while top-level writers outside any window
+-- (e.g. the 500ms settle flush, the `o` expand/collapse toggles) restore the
+-- read-only display invariant.
+local function with_modifiable(buf, fn)
+  if not vim.api.nvim_buf_is_valid(buf) then return nil end
+  local was_modifiable = vim.bo[buf].modifiable
+  vim.bo[buf].modifiable = true
+  local ok, result = pcall(fn)
+  if vim.api.nvim_buf_is_valid(buf) then
+    vim.bo[buf].modifiable = was_modifiable
+  end
+  if not ok then
+    error(result, 0)
+  end
+  return result
+end
+
 -- Append complete lines to the buffer
 local function append_lines(buf, lines)
   if not ensure_buf_modifiable(buf) then return end
@@ -107,6 +130,7 @@ local thinking_state = {
   start_row = nil,
   content_parts = {},  -- accumulate chunks in a table, concat only when needed
   last_highlighted_row = nil,  -- track last highlighted row to avoid re-highlighting
+  written = false,  -- true once thinking content has been written to the buffer (live stream)
 }
 
 -- Tool call / subagent argument generation state, keyed by tool_call_id
@@ -422,31 +446,46 @@ end
 local function collapse_thinking(buf, ns)
   if not thinking_state.is_thinking then return end
 
-  local start_row = thinking_state.start_row
-  local end_row = vim.api.nvim_buf_line_count(buf) - 1
+  with_modifiable(buf, function()
+    local start_row = thinking_state.start_row
+    -- Compute the collapse range from the thinking block's OWN content, not the
+    -- buffer end. Other blocks (subagent labels, tool output, system messages)
+    -- can be appended below an unterminated thinking block (interrupted or
+    -- attached sessions); collapsing to the buffer end would swallow them.
+    local content = table.concat(thinking_state.content_parts)
+    local content_line_count = #vim.split(content, '\n', { plain = true })
+    local last_content_row = start_row + content_line_count - 1
+    if not thinking_state.written then
+      -- Bulk load deferred the per-chunk buffer writes: the thinking content
+      -- occupies no rows, only the anchor line exists. Collapse that one line.
+      last_content_row = start_row
+    end
+    local end_row = math.min(last_content_row, vim.api.nvim_buf_line_count(buf) - 1)
 
-  -- Replace thinking lines with indicator line + spacer + empty line for subsequent content
-  if end_row >= start_row then
-    vim.api.nvim_buf_set_lines(buf, start_row, end_row + 1, false, { '', '', '' })
-  end
+    -- Replace thinking lines with indicator line + spacer + empty line for subsequent content
+    if end_row >= start_row then
+      vim.api.nvim_buf_set_lines(buf, start_row, end_row + 1, false, { '', '', '' })
+    end
 
-  -- Place indicator extmark
-  local mark_id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
-    virt_text = { { '[Thinking... press o to expand]', 'TCodeTokens' } },
-    virt_text_pos = 'overlay',
-  })
+    -- Place indicator extmark
+    local mark_id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
+      virt_text = { { '[Thinking... press o to expand]', 'TCodeTokens' } },
+      virt_text_pos = 'overlay',
+    })
 
-  -- Store for later expansion
-  thinking_entries[mark_id] = {
-    content = table.concat(thinking_state.content_parts),
-    expanded = false,
-  }
+    -- Store for later expansion
+    thinking_entries[mark_id] = {
+      content = table.concat(thinking_state.content_parts),
+      expanded = false,
+    }
 
-  -- Reset thinking state
-  thinking_state.is_thinking = false
-  thinking_state.content_parts = {}
-  thinking_state.start_row = nil
-  thinking_state.last_highlighted_row = nil
+    -- Reset thinking state
+    thinking_state.is_thinking = false
+    thinking_state.content_parts = {}
+    thinking_state.start_row = nil
+    thinking_state.last_highlighted_row = nil
+    thinking_state.written = false
+  end)
 end
 
 -- Find a thinking extmark at the given buffer line (0-indexed)
@@ -474,40 +513,39 @@ local function toggle_thinking(buf, mark_id)
   local entry = thinking_entries[mark_id]
   if not entry then return end
 
-  vim.bo[buf].modifiable = true
+  with_modifiable(buf, function()
+    local mark = vim.api.nvim_buf_get_extmark_by_id(buf, thinking_ns, mark_id, {})
+    if not mark or not mark[1] then return end  -- extmark gone; nothing to toggle
+    local start_row = mark[1]
+    local content_lines = vim.split(entry.content, '\n', { plain = true })
 
-  local mark = vim.api.nvim_buf_get_extmark_by_id(buf, thinking_ns, mark_id, {})
-  local start_row = mark[1]
-  local content_lines = vim.split(entry.content, '\n', { plain = true })
-
-  if entry.expanded then
-    -- Collapse: replace content lines with single blank indicator line
-    vim.api.nvim_buf_set_lines(buf, start_row, start_row + #content_lines, false, { '' })
-    vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
-      id = mark_id,
-      virt_text = { { '[Thinking... press o to expand]', 'TCodeTokens' } },
-      virt_text_pos = 'overlay',
-    })
-    entry.expanded = false
-  else
-    -- Expand: replace blank indicator line with content
-    vim.api.nvim_buf_set_lines(buf, start_row, start_row + 1, false, content_lines)
-    -- Apply thinking highlight to all expanded lines
-    for i = 0, #content_lines - 1 do
-      vim.api.nvim_buf_add_highlight(buf, thinking_ns, 'TCodeThinking', start_row + i, 0, -1)
+    if entry.expanded then
+      -- Collapse: replace content lines with single blank indicator line
+      vim.api.nvim_buf_set_lines(buf, start_row, start_row + #content_lines, false, { '' })
+      vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
+        id = mark_id,
+        virt_text = { { '[Thinking... press o to expand]', 'TCodeTokens' } },
+        virt_text_pos = 'overlay',
+      })
+      entry.expanded = false
+    else
+      -- Expand: replace blank indicator line with content
+      vim.api.nvim_buf_set_lines(buf, start_row, start_row + 1, false, content_lines)
+      -- Apply thinking highlight to all expanded lines
+      for i = 0, #content_lines - 1 do
+        vim.api.nvim_buf_add_highlight(buf, thinking_ns, 'TCodeThinking', start_row + i, 0, -1)
+      end
+      vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
+        id = mark_id,
+        -- end_row is exclusive: first row after the covered content range.
+        end_row = start_row + #content_lines,
+        end_col = 0,
+        virt_lines = { { { '[Thinking... press o to collapse]', 'TCodeTokens' } } },
+        virt_lines_above = true,
+      })
+      entry.expanded = true
     end
-    vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
-      id = mark_id,
-      -- end_row is exclusive: first row after the covered content range.
-      end_row = start_row + #content_lines,
-      end_col = 0,
-      virt_lines = { { { '[Thinking... press o to collapse]', 'TCodeTokens' } } },
-      virt_lines_above = true,
-    })
-    entry.expanded = true
-  end
-
-  vim.bo[buf].modifiable = false
+  end)
 end
 
 -- Collapse streaming tool call args into a short preview with expand hint
@@ -698,61 +736,56 @@ local function toggle_tool_call_args(buf, mark_id)
   local entry = tool_call_gen_entries[mark_id]
   if not entry then return end
 
-  vim.bo[buf].modifiable = true
+  with_modifiable(buf, function()
+    local pos = vim.api.nvim_buf_get_extmark_by_id(buf, thinking_ns, mark_id, {})
+    if not pos or #pos == 0 then return end  -- extmark gone; nothing to toggle
+    local mark_row = pos[1]
 
-  local pos = vim.api.nvim_buf_get_extmark_by_id(buf, thinking_ns, mark_id, {})
-  if not pos or #pos == 0 then
-    vim.bo[buf].modifiable = false
-    return
-  end
-  local mark_row = pos[1]
+    local content_lines = vim.split(entry.content, '\n', { plain = true })
+    local visual_count = count_visual_lines(buf, content_lines)
 
-  local content_lines = vim.split(entry.content, '\n', { plain = true })
-  local visual_count = count_visual_lines(buf, content_lines)
+    local win = vim.fn.bufwinid(buf)
+    local width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
 
-  local win = vim.fn.bufwinid(buf)
-  local width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
+    if entry.expanded then
+      -- Collapse: replace full content lines with a single truncated preview line
+      local first_line_row = mark_row - #content_lines + 1
+      local keep_chars = width * 2
+      local flat = entry.content:gsub('\n', '\\n')
+      local preview = flat:sub(1, keep_chars)
+      local kept_visual = math.max(1, math.ceil(#preview / width))
+      local hidden_visual = visual_count - kept_visual
 
-  if entry.expanded then
-    -- Collapse: replace full content lines with a single truncated preview line
-    local first_line_row = mark_row - #content_lines + 1
-    local keep_chars = width * 2
-    local flat = entry.content:gsub('\n', '\\n')
-    local preview = flat:sub(1, keep_chars)
-    local kept_visual = math.max(1, math.ceil(#preview / width))
-    local hidden_visual = visual_count - kept_visual
+      vim.api.nvim_buf_set_lines(buf, first_line_row, first_line_row + #content_lines, false, { preview })
+      vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', first_line_row, 0, -1)
 
-    vim.api.nvim_buf_set_lines(buf, first_line_row, first_line_row + #content_lines, false, { preview })
-    vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', first_line_row, 0, -1)
+      vim.api.nvim_buf_set_extmark(buf, thinking_ns, first_line_row, 0, {
+        id = mark_id,
+        virt_lines = { { { '[... press o to expand ' .. hidden_visual .. ' more lines]', 'TCodeTokens' } } },
+      })
 
-    vim.api.nvim_buf_set_extmark(buf, thinking_ns, first_line_row, 0, {
-      id = mark_id,
-      virt_lines = { { { '[... press o to expand ' .. hidden_visual .. ' more lines]', 'TCodeTokens' } } },
-    })
+      entry.expanded = false
+    else
+      -- Expand: replace single preview line with all original content lines
+      -- The extmark is on mark_row (the single preview line when collapsed)
+      local first_line_row = mark_row
+      vim.api.nvim_buf_set_lines(buf, first_line_row, first_line_row + 1, false, content_lines)
 
-    entry.expanded = false
-  else
-    -- Expand: replace single preview line with all original content lines
-    -- The extmark is on mark_row (the single preview line when collapsed)
-    local first_line_row = mark_row
-    vim.api.nvim_buf_set_lines(buf, first_line_row, first_line_row + 1, false, content_lines)
+      -- Highlight all lines
+      for i = 0, #content_lines - 1 do
+        vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', first_line_row + i, 0, -1)
+      end
 
-    -- Highlight all lines
-    for i = 0, #content_lines - 1 do
-      vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', first_line_row + i, 0, -1)
+      -- Update extmark to show collapse hint (on the last line of full content)
+      local last_content_row = first_line_row + #content_lines - 1
+      vim.api.nvim_buf_set_extmark(buf, thinking_ns, last_content_row, 0, {
+        id = mark_id,
+        virt_lines = { { { '[... press o to collapse]', 'TCodeTokens' } } },
+      })
+
+      entry.expanded = true
     end
-
-    -- Update extmark to show collapse hint (on the last line of full content)
-    local last_content_row = first_line_row + #content_lines - 1
-    vim.api.nvim_buf_set_extmark(buf, thinking_ns, last_content_row, 0, {
-      id = mark_id,
-      virt_lines = { { { '[... press o to collapse]', 'TCodeTokens' } } },
-    })
-
-    entry.expanded = true
-  end
-
-  vim.bo[buf].modifiable = false
+  end)
 end
 
 -- Render a single JSONL event into the buffer with extmarks
@@ -766,6 +799,10 @@ local function render_event(buf, ns, event, envelope_id, bulk)
   if not variant then return end
 
   if variant == 'UserMessage' then
+    -- Close any open thinking first (content is appended below). Reachable
+    -- with thinking open when a crashed session resumes: a new user turn can
+    -- be appended before the settle flush collapses the unterminated block.
+    collapse_thinking(buf, ns)
     local label_row = render_label(buf, ns, '► USER', '>>> USER', 'TCodeUser', data)
     local content_lines = vim.split(data.content, '\n', { plain = true })
     append_lines(buf, content_lines)
@@ -779,6 +816,9 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     um_extmark_ids[mark_id] = envelope_id or data.msg_id
 
   elseif variant == 'AssistantMessageStart' then
+    -- Close any open thinking first (content is appended below); see the
+    -- UserMessage handler for the crash/resume flow that reaches this.
+    collapse_thinking(buf, ns)
     render_label(buf, ns, '► ASSISTANT', '>>> ASSISTANT', 'TCodeAssistant', data)
     append_lines(buf, { '' })
 
@@ -788,6 +828,14 @@ local function render_event(buf, ns, event, envelope_id, bulk)
       thinking_state.start_row = vim.api.nvim_buf_line_count(buf) - 1  -- 0-indexed row where append_text writes
       thinking_state.content_parts = {}
       thinking_state.last_highlighted_row = thinking_state.start_row - 1
+      thinking_state.written = not bulk
+    elseif not bulk and not thinking_state.written then
+      -- The block started during the initial bulk load (per-chunk writes were
+      -- deferred, so nothing is in the buffer yet) and is now streaming live.
+      -- The buffer end is still the block's anchor line (no handler appends
+      -- below an open thinking block), so from here on the content IS written
+      -- and the collapse range must account for the rows being added.
+      thinking_state.written = true
     end
     table.insert(thinking_state.content_parts, data.content)
     if not bulk then
@@ -870,6 +918,9 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     tool_call_index_map[tool_call_index] = tool_call_id
 
   elseif variant == 'AssistantToolCallArgChunk' then
+    -- Close any open thinking first (content is appended below); defensive —
+    -- AssistantToolCallStart normally collapses before this can be reached.
+    collapse_thinking(buf, ns)
     local tool_call_index = data.tool_call_index or 0
     local tool_call_id = tool_call_index_map[tool_call_index]
     if tool_call_id and tool_call_gen_state[tool_call_id] then
@@ -902,6 +953,8 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     end
 
   elseif variant == 'ToolMessageStart' then
+    -- Close any open thinking first (content is appended below)
+    collapse_thinking(buf, ns)
     local tool_name = data.tool_name or ''
     local tool_call_id = data.tool_call_id or ''
 
@@ -999,6 +1052,8 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     end
 
   elseif variant == 'ToolOutputChunk' then
+    -- Close any open thinking first (content is appended below)
+    collapse_thinking(buf, ns)
     if data.tool_call_id then
       local end_row = get_tc_extmark_end_row(buf, data.tool_call_id)
       if end_row then
@@ -1014,6 +1069,8 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     end
 
   elseif variant == 'ToolMessageEnd' then
+    -- Close any open thinking first (content is appended below)
+    collapse_thinking(buf, ns)
     local insert_row = nil
     if data.tool_call_id then
       -- Close the fenced code block for tool output
@@ -1062,6 +1119,8 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     end
 
   elseif variant == 'SystemMessage' then
+    -- Close any open thinking first (content is appended below)
+    collapse_thinking(buf, ns)
     -- Display system message with appropriate styling based on level
     local level = data.level or 'Info'
     local prefix = '[' .. level:upper() .. '] '
@@ -1125,6 +1184,9 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     tool_call_index_map[tool_call_index] = tool_call_id
 
   elseif variant == 'SubAgentInputChunk' then
+    -- Close any open thinking first (content is appended below); defensive —
+    -- SubAgentInputStart normally collapses before this can be reached.
+    collapse_thinking(buf, ns)
     -- Same logic as AssistantToolCallArgChunk
     local tool_call_index = data.tool_call_index or 0
     local tool_call_id = tool_call_index_map[tool_call_index]
@@ -1155,6 +1217,8 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     end
 
   elseif variant == 'SubAgentStart' then
+    -- Close any open thinking first (content is appended below)
+    collapse_thinking(buf, ns)
     local description = data.description or ''
     local tool_call_id = data.tool_call_id
     local conv_id = data.conversation_id
@@ -1251,6 +1315,8 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     end
 
   elseif variant == 'SubAgentEnd' then
+    -- Close any open thinking first (content is appended below)
+    collapse_thinking(buf, ns)
     -- Capture sa_end_row before cleaning up extmarks (for error rendering below)
     local sa_end_row = data.conversation_id and get_sa_extmark_end_row(buf, data.conversation_id)
 
@@ -1350,6 +1416,8 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     end
 
   elseif variant == 'SubAgentContinue' then
+    -- Close any open thinking first (content is appended below)
+    collapse_thinking(buf, ns)
     local tool_call_id = data.tool_call_id
     local description = data.description
     -- Fall back to existing stored description if server omits or sends empty
@@ -1478,6 +1546,8 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     -- Status bar updated by server-side status file; nothing to render in buffer.
 
   elseif variant == 'AssistantMediaOutput' then
+    -- Close any open thinking first (content is appended below)
+    collapse_thinking(buf, ns)
     -- Render media as clickable markdown: ![img](file:///absolute/path)
     if not M.display_file then
       return
@@ -1491,6 +1561,8 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     end
 
   elseif variant == 'LLMRetry' then
+    -- Close any open thinking first (content is appended below)
+    collapse_thinking(buf, ns)
     local attempt = data.attempt or 1
     local max_retries = data.max_retries or 0
     local reason = data.reason or ''
@@ -1500,6 +1572,8 @@ local function render_event(buf, ns, event, envelope_id, bulk)
     vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeTokens', line, 0, -1)
 
   elseif variant == 'AssistantRequestEnd' then
+    -- Close any open thinking first (content is appended below)
+    collapse_thinking(buf, ns)
     append_lines(buf, { '► END' })
     local info_line = vim.api.nvim_buf_line_count(buf) - 1
     local text
@@ -1613,12 +1687,20 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
 
   local function flush_deferred()
     if not vim.api.nvim_buf_is_valid(buf) then return end
-    if thinking_state.is_thinking then
-      collapse_thinking(buf, ns)
-    end
-    for tool_call_id, _ in pairs(tool_call_gen_state) do
-      close_args_fence(buf, tool_call_id)
-    end
+    with_modifiable(buf, function()
+      if thinking_state.is_thinking then
+        local ok, err = pcall(collapse_thinking, buf, ns)
+        if not ok then
+          vim.api.nvim_err_writeln('flush_deferred collapse_thinking error: ' .. tostring(err))
+        end
+      end
+      for tool_call_id, _ in pairs(tool_call_gen_state) do
+        local ok, err = pcall(close_args_fence, buf, tool_call_id)
+        if not ok then
+          vim.api.nvim_err_writeln('flush_deferred close_args_fence error: ' .. tostring(err))
+        end
+      end
+    end)
   end
 
   local function arm_flush_timer()
@@ -1667,60 +1749,56 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
         was_at_bottom = (cursor_line >= line_count)
       end
 
-      vim.bo[buf].modifiable = true
-
-      for _, line in ipairs(lines) do
-        if line ~= '' then
-          local ok, event = pcall(vim.json.decode, line)
-          if ok and event then
-            -- Capture the envelope id (pinned reference to this display event)
-            -- BEFORE unwrapping, so `gb` can target the exact user message.
-            -- Legacy lines have no top-level id; envelope_id stays nil.
-            local envelope_id = nil
-            if type(event) == 'table' and event.id ~= nil then
-              envelope_id = event.id
-            end
-            -- New wire format: {"id": N, "msg": {"Variant": {...}}}. Unwrap
-            -- to the legacy {"Variant": {...}} shape the renderers expect.
-            -- Legacy lines have no top-level "msg" key and pass through.
-            if type(event) == 'table' and type(event.msg) == 'table' then
-              event = event.msg
-            end
-            if on_event then
-              local variant, event_data = next(event)
-              local ev_ok, ev_err = pcall(on_event, variant, event_data)
-              if not ev_ok then
-                vim.api.nvim_err_writeln('on_event error: ' .. tostring(ev_err))
+      with_modifiable(buf, function()
+        for _, line in ipairs(lines) do
+          if line ~= '' then
+            local ok, event = pcall(vim.json.decode, line)
+            if ok and event then
+              -- Capture the envelope id (pinned reference to this display event)
+              -- BEFORE unwrapping, so `gb` can target the exact user message.
+              -- Legacy lines have no top-level id; envelope_id stays nil.
+              local envelope_id = nil
+              if type(event) == 'table' and event.id ~= nil then
+                envelope_id = event.id
               end
-            end
-            local render_ok, render_err = pcall(render_event, buf, ns, event, envelope_id, state.is_initial_load)
-            if not render_ok then
-              vim.api.nvim_err_writeln('render_event error: ' .. tostring(render_err))
-              break
+              -- New wire format: {"id": N, "msg": {"Variant": {...}}}. Unwrap
+              -- to the legacy {"Variant": {...}} shape the renderers expect.
+              -- Legacy lines have no top-level "msg" key and pass through.
+              if type(event) == 'table' and type(event.msg) == 'table' then
+                event = event.msg
+              end
+              if on_event then
+                local variant, event_data = next(event)
+                local ev_ok, ev_err = pcall(on_event, variant, event_data)
+                if not ev_ok then
+                  vim.api.nvim_err_writeln('on_event error: ' .. tostring(ev_err))
+                end
+              end
+              local render_ok, render_err = pcall(render_event, buf, ns, event, envelope_id, state.is_initial_load)
+              if not render_ok then
+                vim.api.nvim_err_writeln('render_event error: ' .. tostring(render_err))
+                break
+              end
             end
           end
         end
-      end
-      if state.is_initial_load then
-        state.is_initial_load = false
-        -- No immediate flush here: arm_flush_timer (called on every content
-        -- read above) fires once the file has been quiet for 500 ms, so a
-        -- live session mid-args/mid-thinking keeps its fence open and
-        -- subsequent chunks stream normally, while a static file (idle or
-        -- crashed) materializes deferred content exactly once.
-      end
+        if state.is_initial_load then
+          state.is_initial_load = false
+          -- No immediate flush here: arm_flush_timer (called on every content
+          -- read above) fires once the file has been quiet for 500 ms, so a
+          -- live session mid-args/mid-thinking keeps its fence open and
+          -- subsequent chunks stream normally, while a static file (idle or
+          -- crashed) materializes deferred content exactly once.
+        end
 
-      if win ~= -1 and was_at_bottom then
-        local last_line_nr = vim.api.nvim_buf_line_count(buf)
-        local last_line_text = vim.api.nvim_buf_get_lines(buf, last_line_nr - 1, last_line_nr, false)[1] or ''
-        -- Set cursor to end of last line so viewport scrolls to show the latest
-        -- content even when streaming appends to a long wrapped line.
-        pcall(vim.api.nvim_win_set_cursor, win, { last_line_nr, #last_line_text })
-      end
-
-      if vim.api.nvim_buf_is_valid(buf) then
-        vim.bo[buf].modifiable = false
-      end
+        if win ~= -1 and was_at_bottom then
+          local last_line_nr = vim.api.nvim_buf_line_count(buf)
+          local last_line_text = vim.api.nvim_buf_get_lines(buf, last_line_nr - 1, last_line_nr, false)[1] or ''
+          -- Set cursor to end of last line so viewport scrolls to show the latest
+          -- content even when streaming appends to a long wrapped line.
+          pcall(vim.api.nvim_win_set_cursor, win, { last_line_nr, #last_line_text })
+        end
+      end)
 
       -- Kick render-markdown.nvim once per batch, AFTER all events in this
       -- batch have been applied to the buffer. With debounce overridden to

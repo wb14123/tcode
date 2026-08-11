@@ -1,0 +1,105 @@
+-- End-to-end regression tests for the 500ms settle flush (flush_deferred in
+-- create_jsonl_reader). These drive the REAL reader: a JSONL file on disk,
+-- reader.check() reading it, the real vim.schedule batch render, and the real
+-- uv timer armed by arm_flush_timer. vim.wait pumps the loop so the scheduled
+-- callback and the timer actually fire.
+--
+-- Regression: this is the path that used to raise
+--   vim.schedule callback: ... Buffer is not 'modifiable'
+-- when a session file went quiet with an unterminated thinking block or an
+-- open args fence (interrupted / attached sessions).
+
+local TC_FENCE = string.rep('`', 10)
+
+local function write_jsonl(path, ...)
+  local file = assert(io.open(path, 'w'))
+  for _, line in ipairs({ ... }) do
+    file:write(line, '\n')
+  end
+  file:close()
+end
+
+test('flush: JSONL ending mid-thinking auto-collapses without errors', function()
+  local b = new_buf()
+  T.reset_first_event()
+  seed(b, { '' })
+  clear_errors()
+  local jsonl = tmp_dir .. '/mid-thinking.jsonl'
+  write_jsonl(jsonl,
+    '{"AssistantMessageStart":{}}',
+    '{"AssistantThinkingChunk":{"content":"thinking a\\nb"}}')
+
+  local check_file = T.create_jsonl_reader(jsonl, b, ns, nil)
+  check_file()
+
+  -- Initial bulk render runs in the scheduled batch callback.
+  local loaded = vim.wait(500, function() return T.thinking_state.is_thinking end)
+  -- The 500ms settle timer then collapses the unterminated thinking block.
+  local flushed = vim.wait(1500, function() return not T.thinking_state.is_thinking end)
+  check(loaded, 'initial load rendered the thinking block')
+  check(flushed, 'settle flush collapsed the unterminated thinking block')
+  check(#recorded_errors == 0, 'no error reported during load/flush')
+  local l = lines_of(b)
+  check(l[1] == '► ASSISTANT', 'assistant label rendered')
+  check(l[2] == '' and l[3] == '' and l[4] == '', 'thinking collapsed to indicator rows')
+  local marks = vim.api.nvim_buf_get_extmarks(b, thinking_ns_id, 0, -1, {})
+  check(#marks >= 1, 'thinking indicator extmark present')
+  check(vim.bo[b].modifiable == false, 'buffer non-modifiable after flush')
+  reset_thinking()
+end)
+
+test('flush: JSONL ending with an open args fence gets it closed', function()
+  local b = new_buf()
+  T.reset_first_event()
+  seed(b, { '' })
+  clear_errors()
+  local jsonl = tmp_dir .. '/open-args.jsonl'
+  write_jsonl(jsonl,
+    '{"AssistantMessageStart":{}}',
+    '{"AssistantToolCallStart":{"tool_name":"bash","tool_call_id":"tc1","tool_call_index":1}}',
+    '{"AssistantToolCallArgChunk":{"tool_call_index":1,"content":"a\\nb\\nc\\nd"}}')
+
+  local check_file = T.create_jsonl_reader(jsonl, b, ns, nil)
+  check_file()
+
+  -- Pump the loop: batch render, then the settle flush closes the fence.
+  vim.wait(1000)
+  check(#recorded_errors == 0, 'no error reported during load/flush')
+  local l = lines_of(b)
+  local fence_count = 0
+  for _, line in ipairs(l) do
+    if line == TC_FENCE then
+      fence_count = fence_count + 1
+    end
+  end
+  check(fence_count >= 2, 'args fence opened and closed by the flush')
+  check(vim.bo[b].modifiable == false, 'buffer non-modifiable after flush')
+  reset_thinking()
+end)
+
+test('flush: live append after initial load keeps the modifiable invariant', function()
+  local b = new_buf()
+  T.reset_first_event()
+  seed(b, { '' })
+  clear_errors()
+  local jsonl = tmp_dir .. '/live-append.jsonl'
+  write_jsonl(jsonl, '{"UserMessage":{"content":"hello"}}')
+
+  local check_file = T.create_jsonl_reader(jsonl, b, ns, nil)
+  check_file()
+  vim.wait(300)
+  check(vim.bo[b].modifiable == false, 'buffer non-modifiable after initial load')
+
+  -- Session resumes: new events land in the file and a fresh check() reads them.
+  local file = assert(io.open(jsonl, 'a'))
+  file:write('{"AssistantMessageStart":{}}\n')
+  file:write('{"AssistantMessageChunk":{"content":"hi"}}\n')
+  file:close()
+  check_file()
+  vim.wait(300)
+  check(#recorded_errors == 0, 'no error reported during live append')
+  check(vim.bo[b].modifiable == false, 'buffer non-modifiable after live append')
+  local l = lines_of(b)
+  check(table.concat(l, '\n'):find('hi', 1, true) ~= nil, 'live content rendered')
+  reset_thinking()
+end)
