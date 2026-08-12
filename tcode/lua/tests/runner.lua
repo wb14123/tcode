@@ -123,6 +123,10 @@ local function reset_thinking()
   st.content_parts = {}
   st.last_highlighted_row = nil
   st.written = false
+  st.pending_merge_mark = nil
+  for k in pairs(T.thinking_entries) do
+    T.thinking_entries[k] = nil
+  end
 end
 
 -- Mirrors create_jsonl_reader's batch window: render_event only ever runs

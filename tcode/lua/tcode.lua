@@ -131,6 +131,12 @@ local thinking_state = {
   content_parts = {},  -- accumulate chunks in a table, concat only when needed
   last_highlighted_row = nil,  -- track last highlighted row to avoid re-highlighting
   written = false,  -- true once thinking content has been written to the buffer (live stream)
+  -- Extmark id of the most recently collapsed thinking entry. If the next
+  -- thinking run starts with nothing visible written after it (the 500ms
+  -- settle flush split one continuous reasoning stream at a pause, or the
+  -- model emitted back-to-back thinking blocks), the new run merges into this
+  -- entry instead of creating a second collapsed one.
+  pending_merge_mark = nil,
 }
 
 -- Tool call / subagent argument generation state, keyed by tool_call_id
@@ -478,6 +484,9 @@ local function collapse_thinking(buf, ns)
       content = table.concat(thinking_state.content_parts),
       expanded = false,
     }
+    -- A following thinking run with nothing visible between (see
+    -- try_merge_thinking) merges into this entry.
+    thinking_state.pending_merge_mark = mark_id
 
     -- Reset thinking state
     thinking_state.is_thinking = false
@@ -486,6 +495,62 @@ local function collapse_thinking(buf, ns)
     thinking_state.last_highlighted_row = nil
     thinking_state.written = false
   end)
+end
+
+-- When a new thinking run starts right after the previous one was collapsed
+-- with nothing visible written in between — e.g. the 500ms settle flush fired
+-- during a pause in one continuous reasoning stream (DeepSeek bursts, Claude
+-- back-to-back thinking blocks) — merge the new run into the previous entry
+-- instead of creating a second collapsed entry: delete the old indicator rows,
+-- anchor the new run at the previous entry's position, and prepend its content
+-- so the final collapse yields a single entry with the combined text.
+-- Returns true when the new run continues the previous entry.
+local function try_merge_thinking(buf, bulk)
+  local mark_id = thinking_state.pending_merge_mark
+  if not mark_id then return false end
+  local prev = thinking_entries[mark_id]
+  if not prev then
+    thinking_state.pending_merge_mark = nil
+    return false
+  end
+  local pos = vim.api.nvim_buf_get_extmark_by_id(buf, thinking_ns, mark_id, {})
+  if not pos or not pos[1] then
+    thinking_entries[mark_id] = nil
+    thinking_state.pending_merge_mark = nil
+    return false
+  end
+  local prev_row = pos[1]
+  local current_row = vim.api.nvim_buf_line_count(buf) - 1
+  if current_row < prev_row then
+    thinking_state.pending_merge_mark = nil
+    return false
+  end
+  -- Guard: merge only when nothing visible sits between the previous entry and
+  -- the new run. Any real content (text chunks, tool labels, subagent
+  -- sections) renders non-blank rows, so those cases keep separate entries.
+  -- The last row is included: append_text writes onto it, so a chunk that
+  -- just landed there (e.g. a text block before this thinking run) must block
+  -- the merge.
+  local between = vim.api.nvim_buf_get_lines(buf, prev_row, current_row + 1, false)
+  for _, line in ipairs(between) do
+    if line ~= '' then
+      thinking_state.pending_merge_mark = nil
+      return false
+    end
+  end
+  with_modifiable(buf, function()
+    vim.api.nvim_buf_del_extmark(buf, thinking_ns, mark_id)
+    -- Remove the old indicator (+ spacers) and any blank rows in between so
+    -- the new run streams from the previous entry's position.
+    vim.api.nvim_buf_set_lines(buf, prev_row, current_row, false, {})
+    thinking_state.content_parts = { prev.content }
+    thinking_state.start_row = prev_row
+    thinking_state.last_highlighted_row = prev_row - 1
+    thinking_state.written = not bulk
+  end)
+  thinking_entries[mark_id] = nil
+  thinking_state.pending_merge_mark = nil
+  return true
 end
 
 -- Find a thinking extmark at the given buffer line (0-indexed)
@@ -824,11 +889,17 @@ local function render_event(buf, ns, event, envelope_id, bulk)
 
   elseif variant == 'AssistantThinkingChunk' then
     if not thinking_state.is_thinking then
+      -- Merge into the previous collapsed entry of this turn when nothing
+      -- visible was written between them (settle-flush pauses splitting one
+      -- reasoning stream / back-to-back thinking blocks); otherwise start a
+      -- fresh run.
+      if not try_merge_thinking(buf, bulk) then
+        thinking_state.start_row = vim.api.nvim_buf_line_count(buf) - 1  -- 0-indexed row where append_text writes
+        thinking_state.content_parts = {}
+        thinking_state.last_highlighted_row = thinking_state.start_row - 1
+        thinking_state.written = not bulk
+      end
       thinking_state.is_thinking = true
-      thinking_state.start_row = vim.api.nvim_buf_line_count(buf) - 1  -- 0-indexed row where append_text writes
-      thinking_state.content_parts = {}
-      thinking_state.last_highlighted_row = thinking_state.start_row - 1
-      thinking_state.written = not bulk
     elseif not bulk and not thinking_state.written then
       -- The block started during the initial bulk load (per-chunk writes were
       -- deferred, so nothing is in the buffer yet) and is now streaming live.

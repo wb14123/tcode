@@ -77,6 +77,52 @@ test('flush: JSONL ending with an open args fence gets it closed', function()
   reset_thinking()
 end)
 
+test('flush: pause between reasoning bursts merges into a single thinking entry', function()
+  local b = new_buf()
+  T.reset_first_event()
+  seed(b, { '' })
+  clear_errors()
+  local jsonl = tmp_dir .. '/burst-pause.jsonl'
+  write_jsonl(jsonl,
+    '{"AssistantMessageStart":{}}',
+    '{"AssistantThinkingChunk":{"content":"burst one"}}')
+
+  local check_file = T.create_jsonl_reader(jsonl, b, ns, nil)
+  check_file()
+  -- First burst renders, then the 500ms settle flush collapses it (this is
+  -- the split point: one continuous reasoning stream paused mid-turn).
+  local loaded = vim.wait(500, function() return T.thinking_state.is_thinking end)
+  local collapsed = vim.wait(1500, function() return not T.thinking_state.is_thinking end)
+  check(loaded, 'first burst rendered')
+  check(collapsed, 'first burst collapsed by the settle flush')
+
+  -- The stream resumes: the second burst must merge into the existing entry
+  -- and stream visibly, not open a second collapsed block.
+  local file = assert(io.open(jsonl, 'a'))
+  file:write('{"AssistantThinkingChunk":{"content":"\\nburst two"}}\n')
+  file:close()
+  check_file()
+  local streaming = vim.wait(500, function() return T.thinking_state.is_thinking end)
+  check(streaming, 'second burst merged and streaming')
+  local l = lines_of(b)
+  check(l[2] == '' and l[3] == 'burst two', 'second burst streams visibly at the merged anchor')
+
+  -- Final settle flush collapses the merged run into ONE entry.
+  local done = vim.wait(1500, function() return not T.thinking_state.is_thinking end)
+  check(done, 'merged run collapsed by the settle flush')
+  local marks = vim.api.nvim_buf_get_extmarks(b, thinking_ns_id, 0, -1, {})
+  local ids = {}
+  for _, m in ipairs(marks) do ids[m[1]] = true end
+  local entries = {}
+  for id, entry in pairs(T.thinking_entries) do
+    if ids[id] then entries[#entries + 1] = entry end
+  end
+  check(#entries == 1, 'both bursts merged into a single thinking entry')
+  check(entries[1] and entries[1].content == 'burst one\nburst two', 'merged entry holds both bursts in order')
+  check(#recorded_errors == 0, 'no errors during the merge')
+  reset_thinking()
+end)
+
 test('flush: live append after initial load keeps the modifiable invariant', function()
   local b = new_buf()
   T.reset_first_event()
@@ -101,5 +147,10 @@ test('flush: live append after initial load keeps the modifiable invariant', fun
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable after live append')
   local l = lines_of(b)
   check(table.concat(l, '\n'):find('hi', 1, true) ~= nil, 'live content rendered')
+  -- Wait out the settle timer this check_file armed: leaving it pending would
+  -- fire flush_deferred into the next test and corrupt its global thinking
+  -- state (the flush collapses whatever thinking_state.is_thinking says is
+  -- open, which by then belongs to another buffer).
+  vim.wait(600)
   reset_thinking()
 end)
