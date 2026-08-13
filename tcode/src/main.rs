@@ -1535,13 +1535,20 @@ async fn run_unified_with_session(
         }
     };
 
-    let mut display_child = match Command::new(exe_str)
-        .args([session_arg.as_str(), "display"])
+    // Build argv explicitly: `session_arg` is a shell-command string (correct
+    // for tmux respawn-pane/new-window), but the display child is spawned via
+    // argv with no shell, so `-p <profile>` must be separate elements.
+    let mut display_cmd = Command::new(exe_str);
+    if let Some(p) = profile {
+        display_cmd.arg("-p").arg(p);
+    }
+    display_cmd.arg(format!("--session={}", session_id));
+    display_cmd
+        .arg("display")
         .stdin(stdin)
         .stdout(stdout)
-        .stderr(stderr)
-        .spawn()
-    {
+        .stderr(stderr);
+    let mut display_child = match display_cmd.spawn() {
         Ok(child) => child,
         Err(e) => {
             cleanup_non_display_panes(&panes);
