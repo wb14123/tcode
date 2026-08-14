@@ -15,9 +15,6 @@ mod tool_tests;
 mod llm_tests;
 
 #[cfg(test)]
-mod conversation_tests;
-
-#[cfg(test)]
 mod permission_tests;
 
 #[cfg(test)]

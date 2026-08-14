@@ -323,10 +323,7 @@ pub enum MessageEndStatus {
 /// reason (if any) is already baked into `raw_content` by
 /// `ask_permission_inner`, so this wrapper does not interpolate it
 /// separately. For every other status the raw content parts are returned unchanged.
-///
-/// Kept `pub(crate)` so sibling tests in `conversation_tests.rs` can call it
-/// directly without driving the full conversation loop.
-pub(crate) fn build_tool_result_content(
+fn build_tool_result_content(
     end_status: &MessageEndStatus,
     raw_content: Vec<ContentPart>,
 ) -> Vec<ContentPart> {
@@ -732,11 +729,24 @@ fn prepare_conversation(
 // ConversationManager
 // ============================================================================
 
+/// Subagent → parent mapping data, kept in two directions so both lookups are
+/// O(1). Both maps are updated together at the single registration point
+/// (`register_subagent_parent`).
+struct SubagentParents {
+    /// subagent_conv_id → (parent_conv_id, tool_call_id). A
+    /// `continue_subagent` call re-registers the same subagent with a new
+    /// tool_call_id, so the latest registration wins. Used by the server to
+    /// route `/done` recovery to the correct parent.
+    by_subagent: HashMap<String, (String, String)>,
+    /// (parent_conv_id, tool_call_id) → subagent_conv_id. One tool_call_id
+    /// maps to exactly one subagent (a `continue_subagent` registers its own
+    /// tool_call_id with the same subagent id), so each key is unambiguous.
+    by_tool_call: HashMap<(String, String), String>,
+}
+
 pub struct ConversationManager {
     conversations: parking_lot::RwLock<HashMap<String, (Arc<ConversationClient>, AbortHandle)>>,
-    /// Maps subagent_conv_id → (parent_conv_id, tool_call_id).
-    /// Used by the server to route `/done` recovery to the correct parent.
-    subagent_parents: parking_lot::Mutex<HashMap<String, (String, String)>>,
+    subagent_parents: parking_lot::Mutex<SubagentParents>,
     /// Permission manager shared across all conversations.
     permission_manager: Arc<crate::permission::PermissionManager>,
     /// Optional container configuration for Docker/Podman sandbox mode.
@@ -769,7 +779,10 @@ impl ConversationManager {
             Arc::new(crate::permission::PermissionManager::new(permissions_path));
         Arc::new(Self {
             conversations: parking_lot::RwLock::new(HashMap::new()),
-            subagent_parents: parking_lot::Mutex::new(HashMap::new()),
+            subagent_parents: parking_lot::Mutex::new(SubagentParents {
+                by_subagent: HashMap::new(),
+                by_tool_call: HashMap::new(),
+            }),
             permission_manager,
             container_config: container_config.map(Arc::new),
             system_prompt_builder,
@@ -777,7 +790,7 @@ impl ConversationManager {
         })
     }
 
-    pub(crate) fn build_system_prompt(&self, subagent_depth: usize) -> String {
+    fn build_system_prompt(&self, subagent_depth: usize) -> String {
         (self.system_prompt_builder)(SystemPromptContext { subagent_depth })
     }
 
@@ -1005,22 +1018,52 @@ impl ConversationManager {
         Ok(()) // placeholder
     }
 
-    /// Register a subagent → parent mapping for `/done` recovery.
+    /// Register a subagent → parent mapping for `/done` recovery. A
+    /// `continue_subagent` call registers an additional tool_call_id for the
+    /// same subagent id, so both the original spawn tool call and the continue
+    /// tool call resolve to the same subagent via the reverse lookup.
     pub fn register_subagent_parent(
         &self,
         subagent_conv_id: &str,
         parent_conv_id: &str,
         tool_call_id: &str,
     ) {
-        self.subagent_parents.lock().insert(
+        let mut map = self.subagent_parents.lock();
+        map.by_subagent.insert(
             subagent_conv_id.to_string(),
             (parent_conv_id.to_string(), tool_call_id.to_string()),
         );
+        map.by_tool_call.insert(
+            (parent_conv_id.to_string(), tool_call_id.to_string()),
+            subagent_conv_id.to_string(),
+        );
     }
 
-    /// Look up the parent conversation and tool_call_id for a subagent.
+    /// Look up the most recently registered parent and tool_call_id for a
+    /// subagent (a continue re-registers the same subagent with a new
+    /// tool_call_id, so the latest registration is the active one).
     pub fn get_subagent_parent(&self, subagent_conv_id: &str) -> Option<(String, String)> {
-        self.subagent_parents.lock().get(subagent_conv_id).cloned()
+        self.subagent_parents
+            .lock()
+            .by_subagent
+            .get(subagent_conv_id)
+            .cloned()
+    }
+
+    /// Reverse lookup: find the subagent conversation spawned by a given
+    /// parent's tool call. One `tool_call_id` maps to exactly one subagent
+    /// (a `continue_subagent` call registers its own tool_call_id with the
+    /// same subagent id), so the lookup is unambiguous.
+    pub fn get_subagent_conversation_id(
+        &self,
+        parent_conv_id: &str,
+        tool_call_id: &str,
+    ) -> Option<String> {
+        self.subagent_parents
+            .lock()
+            .by_tool_call
+            .get(&(parent_conv_id.to_string(), tool_call_id.to_string()))
+            .cloned()
     }
 
     /// Resume a conversation from a persisted `ConversationState`.
@@ -1577,6 +1620,25 @@ async fn collect_subagent_response(
     Ok(())
 }
 
+/// Shared wording for a cancelled subagent tool result, used by every site so
+/// the wording cannot drift. `interrupted` selects the user-interrupt variant
+/// (new user message while the subagent runs) vs. the plain cancel variant.
+fn format_cancelled_subagent_result(conversation_id: &str, interrupted: bool) -> String {
+    if interrupted {
+        format!(
+            "[subagent_id: {}]\nSubagent was interrupted because the user sent a new message. \
+             It can be continued with `continue_subagent` (same id) if needed.",
+            conversation_id
+        )
+    } else {
+        format!(
+            "[subagent_id: {}]\nSubagent was cancelled mid-task. \
+             It can be continued with `continue_subagent` (same id) if needed.",
+            conversation_id
+        )
+    }
+}
+
 /// Format a subagent result with the conversation ID prefix.
 pub fn format_subagent_result(
     conversation_id: &str,
@@ -1584,11 +1646,7 @@ pub fn format_subagent_result(
     end_status: &MessageEndStatus,
 ) -> String {
     if matches!(end_status, MessageEndStatus::Cancelled) {
-        format!(
-            "[subagent_id: {}]\nSubagent was cancelled by the user. \
-             Do not retry or continue this subagent unless the user explicitly asks.",
-            conversation_id
-        )
+        format_cancelled_subagent_result(conversation_id, false)
     } else if text.is_empty() {
         format!(
             "[subagent_id: {}]\nSubagent completed but produced no output.",
@@ -2263,7 +2321,24 @@ impl Conversation {
                 .accumulated_tool_content
                 .remove(&id)
                 .unwrap_or_default();
-            let content = if user_interrupted {
+            // Subagent tool calls resolve to their conversation id so the
+            // cancelled result carries the `[subagent_id: ...]` prefix (needed
+            // for resume-time parent mapping reconstruction). Regular tools
+            // keep the generic text.
+            let subagent_conv_id = self
+                .env
+                .conversation_manager
+                .get_subagent_conversation_id(&self.env.conversation_id, &id);
+            let content = if let Some(subagent_conv_id) = subagent_conv_id {
+                let base = format_cancelled_subagent_result(&subagent_conv_id, user_interrupted);
+                if raw.is_empty() {
+                    vec![ContentPart::Text(base)]
+                } else {
+                    let mut parts = vec![ContentPart::Text(format!("{base}\nPartial result:\n"))];
+                    parts.extend(raw);
+                    parts
+                }
+            } else if user_interrupted {
                 if raw.is_empty() {
                     vec![ContentPart::Text(
                         "Tool execution was interrupted because the user sent a new message."
@@ -2944,7 +3019,7 @@ impl ConversationClient {
         self.summary.read().clone()
     }
 
-    pub(crate) fn set_conversation_summary(&self, summary: ConversationSummary) {
+    fn set_conversation_summary(&self, summary: ConversationSummary) {
         *self.summary.write() = summary;
     }
 
@@ -3007,7 +3082,7 @@ impl ConversationClient {
 
     /// Cancel the conversation token and all children, without broadcasting a system message.
     /// Used internally when a user sends a new message while tools are running.
-    pub(crate) fn cancel_silent(&self) {
+    fn cancel_silent(&self) {
         // Cancel our token (idempotent — safe to call multiple times)
         self.cancel_token.lock().cancel();
 
@@ -3035,12 +3110,12 @@ impl ConversationClient {
     }
 
     /// Get a clone of the current cancel token for use in `tokio::select!`.
-    pub(crate) fn current_cancel_token(&self) -> CancellationToken {
+    fn current_cancel_token(&self) -> CancellationToken {
         self.cancel_token.lock().clone()
     }
 
     /// Replace the cancel token with a fresh one so the conversation can accept new work.
-    pub(crate) fn reset_cancel_token(&self) {
+    fn reset_cancel_token(&self) {
         *self.cancel_token.lock() = CancellationToken::new();
     }
 
@@ -3057,7 +3132,7 @@ impl ConversationClient {
 
     /// Register a cancellation token for a tool call. The token is a child of the
     /// conversation-level cancel token, so cancelling the conversation cancels all tools.
-    pub(crate) fn register_tool_token(&self, tool_call_id: &str) -> CancellationToken {
+    fn register_tool_token(&self, tool_call_id: &str) -> CancellationToken {
         let token = self.cancel_token.lock().child_token();
         let clone = token.clone();
         self.tool_cancel_tokens
@@ -3067,7 +3142,7 @@ impl ConversationClient {
     }
 
     /// Remove a tool's cancellation token after it completes.
-    pub(crate) fn unregister_tool_token(&self, tool_call_id: &str) {
+    fn unregister_tool_token(&self, tool_call_id: &str) {
         self.tool_cancel_tokens.lock().remove(tool_call_id);
     }
 
@@ -3199,27 +3274,8 @@ impl ConversationClient {
         let tx = self.new_msg_notify_tx.subscribe();
         BroadcastStream::new(tx)
     }
-
-    /// Create a test-only ConversationClient with dummy channels.
-    #[cfg(test)]
-    pub(crate) fn new_for_test() -> Self {
-        let (input_tx, _input_rx) = mpsc::channel(10);
-        // Keep this in sync with the production broadcast capacity above so
-        // tests exercise the same lag tolerance for streamed tool output.
-        let (notify_tx, _) = broadcast::channel(10_000);
-        ConversationClient {
-            ids: Arc::new(
-                UniqueIdGenerator::new(None)
-                    .expect("UniqueIdGenerator::new(None) never fails (no state dir)"),
-            ),
-            order_lock: parking_lot::Mutex::new(()),
-            msgs: parking_lot::RwLock::new(Vec::new()),
-            summary: parking_lot::RwLock::new(ConversationSummary::default()),
-            input_channel_tx: input_tx,
-            new_msg_notify_tx: notify_tx,
-            tool_cancel_tokens: parking_lot::Mutex::new(HashMap::new()),
-            cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
-            children: parking_lot::Mutex::new(HashMap::new()),
-        }
-    }
 }
+
+#[cfg(test)]
+#[path = "conversation_tests.rs"]
+mod conversation_tests;

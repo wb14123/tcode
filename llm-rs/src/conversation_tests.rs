@@ -1,17 +1,21 @@
 #[cfg(test)]
 mod tests {
     use crate::conversation::{
-        ConversationClient, ConversationManager, ConversationState, ConversationSummary,
-        SystemPromptContext, create_subagent_tool, fill_cancelled_tool_results,
+        Conversation, ConversationClient, ConversationEnv, ConversationManager, ConversationState,
+        ConversationSummary, MessageEndStatus, SystemPromptContext, UniqueIdGenerator,
+        create_subagent_tool, fill_cancelled_tool_results, format_cancelled_subagent_result,
+        format_subagent_result,
     };
     use crate::llm::{
-        ChatOptions, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall,
+        ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall,
     };
     use crate::media::ContentPart;
-    use crate::tool::Tool;
+    use crate::tool::{CancellationToken, Tool};
+    use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
     use std::sync::{Arc, Mutex};
+    use tokio::sync::{broadcast, mpsc};
     use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
     use tokio_stream::{Stream, StreamExt};
 
@@ -47,6 +51,81 @@ mod tests {
     impl Drop for TestDir {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Test-only Conversation wired to the given manager, with the given
+    /// pending-tool state and no state dir (so `save_state` is a no-op for the
+    /// filesystem). Lets tests exercise `fill_remaining_cancelled` directly
+    /// after registering the subagent parent mapping.
+    fn conversation_for_test(
+        manager: Arc<ConversationManager>,
+        conversation_id: &str,
+        llm: Box<dyn LLM>,
+        pending_tools: HashSet<String>,
+        accumulated_tool_content: HashMap<String, Vec<ContentPart>>,
+    ) -> Conversation {
+        let (_, input_rx) = mpsc::channel(10);
+        let client = Arc::new(conversation_client_for_test());
+        Conversation {
+            id: conversation_id.to_string(),
+            llm,
+            model: "test-model".to_string(),
+            llm_msgs: Vec::new(),
+            input_channel_rx: input_rx,
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
+            aggregate_input_tokens: 0,
+            aggregate_output_tokens: 0,
+            aggregate_cache_creation_tokens: 0,
+            aggregate_cache_read_tokens: 0,
+            single_turn: true,
+            pending_tools,
+            cancelled_tools: HashSet::new(),
+            accumulated_tool_content,
+            description: None,
+            created_at: None,
+            env: ConversationEnv {
+                conversation_id: conversation_id.to_string(),
+                client,
+                conversation_manager: Arc::clone(&manager),
+                tools: HashMap::new(),
+                chat_options: ChatOptions::default(),
+                subagent_depth: 0,
+                max_subagent_depth: 10,
+                state_dir: None,
+                session_dir: None,
+                supports_media: false,
+                permission_manager: Arc::clone(manager.permission_manager()),
+                container_config: None,
+                llm: None,
+                model: "test-model".to_string(),
+            },
+        }
+    }
+
+    /// Test-only ConversationClient with dummy channels.
+    fn conversation_client_for_test() -> ConversationClient {
+        let (input_tx, _input_rx) = mpsc::channel(10);
+        // Keep this in sync with the production broadcast capacity in
+        // conversation.rs (10_000) so tests exercise the same lag tolerance
+        // for streamed tool output.
+        let (notify_tx, _) = broadcast::channel(10_000);
+        ConversationClient {
+            ids: Arc::new(
+                UniqueIdGenerator::new(None)
+                    .expect("UniqueIdGenerator::new(None) never fails (no state dir)"),
+            ),
+            order_lock: parking_lot::Mutex::new(()),
+            msgs: parking_lot::RwLock::new(Vec::new()),
+            summary: parking_lot::RwLock::new(ConversationSummary::default()),
+            input_channel_tx: input_tx,
+            new_msg_notify_tx: notify_tx,
+            tool_cancel_tokens: parking_lot::Mutex::new(HashMap::new()),
+            cancel_token: parking_lot::Mutex::new(CancellationToken::new()),
+            children: parking_lot::Mutex::new(HashMap::new()),
         }
     }
 
@@ -341,13 +420,13 @@ mod tests {
 
     #[test]
     fn cancel_tool_unknown_returns_false() {
-        let client = ConversationClient::new_for_test();
+        let client = conversation_client_for_test();
         assert!(!client.cancel_tool("nonexistent"));
     }
 
     #[test]
     fn register_cancel_unregister_workflow() {
-        let client = ConversationClient::new_for_test();
+        let client = conversation_client_for_test();
 
         // Register a token
         let token = client.register_tool_token("tc1");
@@ -366,7 +445,7 @@ mod tests {
 
     #[test]
     fn cancel_one_tool_leaves_others_running() {
-        let client = ConversationClient::new_for_test();
+        let client = conversation_client_for_test();
 
         let token_a = client.register_tool_token("a");
         let token_b = client.register_tool_token("b");
@@ -385,7 +464,7 @@ mod tests {
 
     #[test]
     fn cancel_conversation_cancels_all_tools() {
-        let client = ConversationClient::new_for_test();
+        let client = conversation_client_for_test();
 
         let tool_a = client.register_tool_token("a");
         let tool_b = client.register_tool_token("b");
@@ -405,7 +484,7 @@ mod tests {
 
     #[test]
     fn cancel_tool_does_not_cancel_conversation() {
-        let client = ConversationClient::new_for_test();
+        let client = conversation_client_for_test();
 
         let tool_a = client.register_tool_token("a");
         let tool_b = client.register_tool_token("b");
@@ -424,9 +503,9 @@ mod tests {
     fn cancel_cascades_to_children() {
         use std::sync::Arc;
 
-        let parent = ConversationClient::new_for_test();
-        let child = Arc::new(ConversationClient::new_for_test());
-        let grandchild = Arc::new(ConversationClient::new_for_test());
+        let parent = conversation_client_for_test();
+        let child = Arc::new(conversation_client_for_test());
+        let grandchild = Arc::new(conversation_client_for_test());
 
         // Build parent -> child -> grandchild
         child.register_child("grandchild-1".to_string(), Arc::clone(&grandchild));
@@ -454,7 +533,7 @@ mod tests {
 
     #[test]
     fn cancel_and_resume() {
-        let client = ConversationClient::new_for_test();
+        let client = conversation_client_for_test();
 
         let tool_before = client.register_tool_token("before");
 
@@ -480,7 +559,7 @@ mod tests {
 
     #[test]
     fn cancel_is_idempotent() {
-        let client = ConversationClient::new_for_test();
+        let client = conversation_client_for_test();
         let tool = client.register_tool_token("t1");
 
         // Multiple cancels should not panic
@@ -495,7 +574,7 @@ mod tests {
 
     #[test]
     fn cancel_silent_cancels_tools_without_system_message() {
-        let client = ConversationClient::new_for_test();
+        let client = conversation_client_for_test();
 
         let tool_a = client.register_tool_token("a");
         let tool_b = client.register_tool_token("b");
@@ -518,8 +597,8 @@ mod tests {
     fn cancel_silent_cascades_to_children() {
         use std::sync::Arc;
 
-        let parent = ConversationClient::new_for_test();
-        let child = Arc::new(ConversationClient::new_for_test());
+        let parent = conversation_client_for_test();
+        let child = Arc::new(conversation_client_for_test());
 
         parent.register_child("child-1".to_string(), Arc::clone(&child));
 
@@ -1207,7 +1286,7 @@ mod tests {
     async fn broadcast_ids_are_unique_and_match_replay_order() -> anyhow::Result<()> {
         use crate::conversation::{BroadcastMessage, Message, SystemMessageLevel};
         use std::collections::HashSet;
-        let client = Arc::new(ConversationClient::new_for_test());
+        let client = Arc::new(conversation_client_for_test());
         let mut stream = client.subscribe();
 
         let tasks_per_worker = 25usize;
@@ -1250,14 +1329,14 @@ mod tests {
             "stream should yield exactly {total} messages"
         );
 
-        // (a) ids are unique, all in epoch 0 (< 2^32 for new_for_test), and
+        // (a) ids are unique, all in epoch 0 (< 2^32 for conversation_client_for_test), and
         // each envelope's payload matches its created_at (distinct payloads).
         let mut seen: HashSet<i64> = HashSet::new();
         for env in &received {
             let id = env.id.as_i64();
             assert!(
                 (0..(1 << 32)).contains(&id),
-                "new_for_test uses epoch 0, so ids must be in [0, 2^32), got {id}"
+                "conversation_client_for_test uses epoch 0, so ids must be in [0, 2^32), got {id}"
             );
             assert!(seen.insert(id), "id {id} minted twice");
             match &env.msg {
@@ -1518,6 +1597,721 @@ mod tests {
             all.iter().all(|&id| id >= (1 << 32)),
             "all ids must be epoch-prefixed"
         );
+        Ok(())
+    }
+
+    // ======== get_subagent_conversation_id (reverse lookup) ========
+
+    fn make_manager(dir: &Path) -> anyhow::Result<Arc<ConversationManager>> {
+        let permissions_file = dir.join("permissions.json");
+        std::fs::write(&permissions_file, "[]")?;
+        Ok(ConversationManager::new(permissions_file, None))
+    }
+
+    #[test]
+    fn get_subagent_conversation_id_resolves_registered_parent() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        manager.register_subagent_parent("sub-1", "parent-1", "tc-1");
+
+        assert_eq!(
+            manager
+                .get_subagent_conversation_id("parent-1", "tc-1")
+                .as_deref(),
+            Some("sub-1")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn get_subagent_conversation_id_unknown_returns_none() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        manager.register_subagent_parent("sub-1", "parent-1", "tc-1");
+
+        assert_eq!(
+            manager.get_subagent_conversation_id("parent-x", "tc-1"),
+            None
+        );
+        assert_eq!(
+            manager.get_subagent_conversation_id("parent-1", "tc-x"),
+            None
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn get_subagent_conversation_id_two_subagents_same_parent() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        manager.register_subagent_parent("sub-1", "parent-1", "tc-1");
+        manager.register_subagent_parent("sub-2", "parent-1", "tc-2");
+
+        assert_eq!(
+            manager
+                .get_subagent_conversation_id("parent-1", "tc-1")
+                .as_deref(),
+            Some("sub-1")
+        );
+        assert_eq!(
+            manager
+                .get_subagent_conversation_id("parent-1", "tc-2")
+                .as_deref(),
+            Some("sub-2")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn get_subagent_conversation_id_same_tool_call_different_parents() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        // Same tool_call_id `tc-x` spawned by two different parents: the
+        // reverse lookup is disambiguated by the parent conversation id.
+        manager.register_subagent_parent("sub-1", "parent-1", "tc-x");
+        manager.register_subagent_parent("sub-2", "parent-2", "tc-x");
+
+        assert_eq!(
+            manager
+                .get_subagent_conversation_id("parent-1", "tc-x")
+                .as_deref(),
+            Some("sub-1")
+        );
+        assert_eq!(
+            manager
+                .get_subagent_conversation_id("parent-2", "tc-x")
+                .as_deref(),
+            Some("sub-2")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn get_subagent_conversation_id_continued_subagent_both_tool_calls_resolve()
+    -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        // A `continue_subagent` call registers its own tool_call_id for the
+        // SAME subagent id, so both the original spawn tool call and the
+        // continue tool call must resolve to the same subagent.
+        manager.register_subagent_parent("sub-1", "parent-1", "tc-1");
+        manager.register_subagent_parent("sub-1", "parent-1", "tc-2");
+
+        assert_eq!(
+            manager
+                .get_subagent_conversation_id("parent-1", "tc-1")
+                .as_deref(),
+            Some("sub-1")
+        );
+        assert_eq!(
+            manager
+                .get_subagent_conversation_id("parent-1", "tc-2")
+                .as_deref(),
+            Some("sub-1")
+        );
+        Ok(())
+    }
+
+    // ======== format_cancelled_subagent_result / format_subagent_result ========
+
+    #[test]
+    fn format_cancelled_subagent_result_exact_strings() {
+        assert_eq!(
+            format_cancelled_subagent_result("X", false),
+            "[subagent_id: X]\nSubagent was cancelled mid-task. \
+             It can be continued with `continue_subagent` (same id) if needed."
+        );
+        assert_eq!(
+            format_cancelled_subagent_result("X", true),
+            "[subagent_id: X]\nSubagent was interrupted because the user sent a new message. \
+             It can be continued with `continue_subagent` (same id) if needed."
+        );
+    }
+
+    #[test]
+    fn format_subagent_result_cancelled_uses_uniform_wording() {
+        let result = format_subagent_result("X", "", &MessageEndStatus::Cancelled);
+        assert!(result.starts_with("[subagent_id: X]"));
+        assert!(result.contains("Subagent was cancelled mid-task"));
+        assert!(result.contains("`continue_subagent`"));
+        assert!(!result.contains("Do not retry or continue this subagent"));
+    }
+
+    #[test]
+    fn format_subagent_result_non_cancelled_branches_unchanged() {
+        assert_eq!(
+            format_subagent_result("X", "", &MessageEndStatus::Succeeded),
+            "[subagent_id: X]\nSubagent completed but produced no output."
+        );
+        assert_eq!(
+            format_subagent_result("X", "hello", &MessageEndStatus::Succeeded),
+            "[subagent_id: X]\nhello"
+        );
+        assert_eq!(
+            format_subagent_result("X", "oops", &MessageEndStatus::Failed),
+            "[subagent_id: X]\noops"
+        );
+    }
+
+    // ======== fill_remaining_cancelled (subagent prefix) ========
+
+    /// Join all Text parts of a ToolResult into a single string.
+    fn tool_result_text(msgs: &[LLMMessage], expected_id: &str) -> String {
+        for m in msgs {
+            if let LLMMessage::ToolResult {
+                tool_call_id,
+                content,
+            } = m
+                && tool_call_id == expected_id
+            {
+                return content
+                    .iter()
+                    .filter_map(|p| match p {
+                        ContentPart::Text(t) => Some(t.as_str()),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>()
+                    .join("");
+            }
+        }
+        panic!("no ToolResult with id {expected_id} in {msgs:?}");
+    }
+
+    #[test]
+    fn fill_remaining_cancelled_subagent_not_interrupted() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        manager.register_subagent_parent("sub-1", "test-conv", "tc-1");
+
+        let mut conv = conversation_for_test(
+            Arc::clone(&manager),
+            "test-conv",
+            Box::new(MockLlm::new(vec![])),
+            HashSet::from(["tc-1".to_string()]),
+            HashMap::new(),
+        );
+        conv.fill_remaining_cancelled(false)?;
+
+        let msgs = &conv.llm_msgs;
+        assert_eq!(msgs.len(), 1);
+        let text = tool_result_text(msgs, "tc-1");
+        assert!(text.starts_with("[subagent_id: sub-1]"));
+        assert!(text.contains("Subagent was cancelled mid-task"));
+        assert!(text.contains("`continue_subagent`"));
+        assert!(!text.contains("Tool call was cancelled due to conversation interruption"));
+        Ok(())
+    }
+
+    #[test]
+    fn fill_remaining_cancelled_subagent_interrupted() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        manager.register_subagent_parent("sub-1", "test-conv", "tc-1");
+
+        let mut conv = conversation_for_test(
+            Arc::clone(&manager),
+            "test-conv",
+            Box::new(MockLlm::new(vec![])),
+            HashSet::from(["tc-1".to_string()]),
+            HashMap::new(),
+        );
+        conv.fill_remaining_cancelled(true)?;
+
+        let msgs = &conv.llm_msgs;
+        assert_eq!(msgs.len(), 1);
+        let text = tool_result_text(msgs, "tc-1");
+        assert!(text.starts_with("[subagent_id: sub-1]"));
+        assert!(text.contains("Subagent was interrupted because the user sent a new message"));
+        assert!(text.contains("`continue_subagent`"));
+        Ok(())
+    }
+
+    #[test]
+    fn fill_remaining_cancelled_regular_tool_unchanged() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        // No subagent registration for tc-2.
+        let mut conv = conversation_for_test(
+            Arc::clone(&manager),
+            "test-conv",
+            Box::new(MockLlm::new(vec![])),
+            HashSet::from(["tc-2".to_string()]),
+            HashMap::new(),
+        );
+        conv.fill_remaining_cancelled(false)?;
+
+        let msgs = &conv.llm_msgs;
+        assert_eq!(msgs.len(), 1);
+        let text = tool_result_text(msgs, "tc-2");
+        assert_eq!(
+            text,
+            "Tool call was cancelled due to conversation interruption."
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn fill_remaining_cancelled_partial_content_appended() -> anyhow::Result<()> {
+        // Cover both the plain-cancel wording (false) and the user-message
+        // interruption wording (true); the partial content path is shared.
+        for user_interrupted in [false, true] {
+            let dir = TestDir::new("conversation");
+            let manager = make_manager(dir.path())?;
+            manager.register_subagent_parent("sub-1", "test-conv", "tc-1");
+
+            let mut accumulated = HashMap::new();
+            accumulated.insert(
+                "tc-1".to_string(),
+                vec![ContentPart::Text("partial output".to_string())],
+            );
+            let mut conv = conversation_for_test(
+                Arc::clone(&manager),
+                "test-conv",
+                Box::new(MockLlm::new(vec![])),
+                HashSet::from(["tc-1".to_string()]),
+                accumulated,
+            );
+            conv.fill_remaining_cancelled(user_interrupted)?;
+
+            let msgs = &conv.llm_msgs;
+            assert_eq!(msgs.len(), 1);
+            let text = tool_result_text(msgs, "tc-1");
+            assert!(text.starts_with("[subagent_id: sub-1]"));
+            assert!(text.contains("Partial result:"));
+            assert!(text.ends_with("partial output"));
+            let expected_wording = if user_interrupted {
+                "Subagent was interrupted because the user sent a new message"
+            } else {
+                "Subagent was cancelled mid-task"
+            };
+            assert!(text.contains(expected_wording));
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn fill_remaining_cancelled_unregistered_tool_no_prefix() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        // Register sub-1 for tc-1 but not for tc-3.
+        manager.register_subagent_parent("sub-1", "test-conv", "tc-1");
+        let mut conv = conversation_for_test(
+            Arc::clone(&manager),
+            "test-conv",
+            Box::new(MockLlm::new(vec![])),
+            HashSet::from(["tc-3".to_string()]),
+            HashMap::new(),
+        );
+        conv.fill_remaining_cancelled(true)?;
+
+        let msgs = &conv.llm_msgs;
+        assert_eq!(msgs.len(), 1);
+        let text = tool_result_text(msgs, "tc-3");
+        assert!(!text.contains("[subagent_id:"));
+        assert!(text.contains("interrupted because the user sent a new message"));
+        Ok(())
+    }
+
+    // ======== Cancel -> resume integration ========
+
+    /// Persist a `ConversationState` as `conversation-state.json` in `dir`.
+    fn write_state_file(dir: &Path, state: &ConversationState) -> anyhow::Result<()> {
+        let json = serde_json::to_string_pretty(state)?;
+        std::fs::write(dir.join("conversation-state.json"), json)?;
+        Ok(())
+    }
+
+    /// Build a `ConversationState` with the given messages and depth; all
+    /// token counters zeroed.
+    fn make_resume_state(
+        id: &str,
+        subagent_depth: usize,
+        llm_msgs: Vec<LLMMessage>,
+    ) -> ConversationState {
+        ConversationState {
+            id: id.to_string(),
+            model: "test-model".to_string(),
+            llm_msgs,
+            chat_options: ChatOptions::default(),
+            total_input_tokens: 0,
+            total_output_tokens: 0,
+            total_cache_creation_tokens: 0,
+            total_cache_read_tokens: 0,
+            aggregate_input_tokens: 0,
+            aggregate_output_tokens: 0,
+            aggregate_cache_creation_tokens: 0,
+            aggregate_cache_read_tokens: 0,
+            single_turn: true,
+            subagent_depth,
+        }
+    }
+
+    /// Full path: the root LLM emits a `subagent` tool call, the subagent
+    /// stalls, the root is cancelled, and the persisted root state must
+    /// contain the prefixed cancelled ToolResult.
+    #[tokio::test]
+    async fn cancel_root_with_stalled_subagent_persists_prefixed_result() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+        use anyhow::Context;
+        let dir = TestDir::new("conversation");
+
+        // The mock serves both streams FIFO: response #1 (the `subagent`
+        // tool call) goes to the root; response #2 (a permanent stall) goes
+        // to the subagent until the cascading cancel cuts it short.
+        let tool_call = ToolCall {
+            id: "sa-tc-1".to_string(),
+            name: "subagent".to_string(),
+            arguments: serde_json::json!({
+                "task": "You are a subagent.\nComplete the subtask.",
+                "model": "test-model",
+            })
+            .to_string(),
+        };
+        let mock = MockLlm::new(vec![
+            MockResponse::Events(vec![
+                LLMEvent::ToolCall(tool_call.clone()),
+                LLMEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    input_tokens: 10,
+                    output_tokens: 5,
+                    reasoning_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    raw: None,
+                },
+            ]),
+            MockResponse::Stall,
+        ]);
+
+        let permissions_file = dir.path().join("permissions.json");
+        std::fs::write(&permissions_file, "[]")?;
+        let manager = ConversationManager::new(permissions_file, None);
+
+        let (_conv_id, client) = manager.new_conversation_with_id(
+            "test-conv".to_string(),
+            Box::new(mock),
+            "test-model",
+            vec![],
+            ChatOptions {
+                max_retries: Some(0),
+                request_timeout_secs: Some(300),
+                ..Default::default()
+            },
+            true, // single_turn
+            0,    // subagent_depth
+            10,   // max_subagent_depth
+            Some(dir.path().to_path_buf()),
+            false, // supports_media
+        )?;
+
+        let mut stream = client.subscribe();
+        client.send_chat("Hello").await?;
+
+        // Wait for SubAgentStart (broadcast after the parent mapping is
+        // registered), then cancel the root. The first AssistantMessageEnd
+        // (tool-use turn) precedes SubAgentStart, so the end we break on is
+        // the one broadcast after the cancel.
+        let mut subagent_id: Option<String> = None;
+        let mut spawned_tool_call_id: Option<String> = None;
+        let mut cancelled = false;
+        let mut saw_cancel_end = false;
+
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
+        tokio::pin!(deadline);
+
+        loop {
+            tokio::select! {
+                msg = stream.next() => {
+                    match msg {
+                        Some(Ok(m)) => {
+                            if let Message::SubAgentStart {
+                                conversation_id,
+                                tool_call_id,
+                                ..
+                            } = &m.msg
+                            {
+                                subagent_id = Some(conversation_id.clone());
+                                spawned_tool_call_id = Some(tool_call_id.clone());
+                                if !cancelled {
+                                    cancelled = true;
+                                    client.cancel();
+                                }
+                                continue;
+                            }
+                            if cancelled && matches!(&m.msg, Message::AssistantMessageEnd { .. }) {
+                                saw_cancel_end = true;
+                                break;
+                            }
+                        }
+                        Some(Err(BroadcastStreamRecvError::Lagged(_))) => continue,
+                        None => break,
+                    }
+                }
+                _ = &mut deadline => break,
+            }
+        }
+
+        let subagent_id = subagent_id.expect("no SubAgentStart observed before deadline");
+        let tool_call_id = spawned_tool_call_id.expect("no SubAgentStart observed before deadline");
+        assert!(
+            saw_cancel_end,
+            "expected AssistantMessageEnd after cancelling the root"
+        );
+
+        // The cancelled ToolResult (with the [subagent_id: ...] prefix) must
+        // be persisted in the root's conversation-state.json.
+        let state_json = std::fs::read_to_string(dir.path().join("conversation-state.json"))
+            .with_context(|| format!("missing root state at {:?}", dir.path()))?;
+        let state: ConversationState = serde_json::from_str(&state_json)?;
+
+        let expected_prefix = format!("[subagent_id: {subagent_id}]");
+        // `tool_result_text` joins all Text parts of the matching ToolResult
+        // and panics with a clear message if the ToolResult is absent.
+        let text = tool_result_text(&state.llm_msgs, &tool_call_id);
+        assert!(
+            text.starts_with(&expected_prefix),
+            "ToolResult should start with {expected_prefix:?}, got {text:?}"
+        );
+        assert!(
+            text.contains("Subagent was cancelled mid-task"),
+            "missing cancel wording in {text:?}"
+        );
+        assert!(
+            text.contains("`continue_subagent`"),
+            "missing continue hint in {text:?}"
+        );
+        assert!(
+            !text.contains("Tool call was cancelled due to conversation interruption"),
+            "generic cancel text must not replace the subagent wording: {text:?}"
+        );
+
+        Ok(())
+    }
+
+    /// Resume mapping reconstruction: hand-crafted state matching what the
+    /// live cancel persists. The `[subagent_id: X]` prefix must feed the
+    /// resume-time parent mapping reconstruction and the reverse lookup.
+    #[tokio::test]
+    async fn resume_tree_reconstructs_subagent_mapping() -> anyhow::Result<()> {
+        use anyhow::Context;
+        let dir = TestDir::new("conversation");
+        let session_dir = dir.path().join("session");
+        std::fs::create_dir_all(&session_dir)?;
+
+        let root_id = "root-1".to_string();
+        let sub_id = "sub-x".to_string();
+        let tool_call_id = "tc-1".to_string();
+
+        // Root state: an Assistant message with a `subagent` tool call and a
+        // ToolResult whose content starts with the [subagent_id: ...] prefix.
+        write_state_file(
+            &session_dir,
+            &make_resume_state(
+                &root_id,
+                0,
+                vec![
+                    LLMMessage::User(vec![ContentPart::Text("Hello".to_string())]),
+                    LLMMessage::Assistant {
+                        content: String::new(),
+                        tool_calls: vec![make_tool_call(&tool_call_id, "subagent")],
+                        raw: None,
+                    },
+                    LLMMessage::ToolResult {
+                        tool_call_id: tool_call_id.clone(),
+                        content: vec![ContentPart::Text(format_cancelled_subagent_result(
+                            &sub_id, false,
+                        ))],
+                    },
+                ],
+            ),
+        )?;
+
+        // Subagent state under `subagent-{id}/`.
+        let sub_dir = session_dir.join(format!("subagent-{sub_id}"));
+        std::fs::create_dir_all(&sub_dir)?;
+        write_state_file(
+            &sub_dir,
+            &make_resume_state(
+                &sub_id,
+                1,
+                vec![LLMMessage::User(vec![ContentPart::Text(
+                    "You are a subagent.\nDo the task.".to_string(),
+                )])],
+            ),
+        )?;
+
+        let manager = make_manager(dir.path())?;
+        let root_state: ConversationState = serde_json::from_str(
+            &std::fs::read_to_string(session_dir.join("conversation-state.json"))
+                .with_context(|| "failed to read root state")?,
+        )?;
+
+        let (resumed_root_id, _root_client, resumed_subagents) = manager.resume_conversation_tree(
+            root_state,
+            Box::new(MockLlm::new(vec![])),
+            vec![],
+            10,
+            session_dir.clone(),
+            false,
+        )?;
+
+        assert_eq!(resumed_root_id, root_id);
+        assert_eq!(resumed_subagents.len(), 1);
+        assert_eq!(resumed_subagents[0].conversation_id, sub_id);
+        assert_eq!(
+            resumed_subagents[0].state_dir,
+            session_dir.join(format!("subagent-{sub_id}"))
+        );
+
+        // The subagent is registered in the manager (needed by
+        // `continue_subagent` and `/done` recovery).
+        assert!(
+            manager.get_conversation(&sub_id)?.is_some(),
+            "subagent {sub_id} not registered after resume"
+        );
+
+        // The parent mapping is reconstructed from the [subagent_id: ...]
+        // prefix in the root's llm_msgs.
+        assert_eq!(
+            manager.get_subagent_parent(&sub_id),
+            Some((root_id.clone(), tool_call_id.clone()))
+        );
+
+        // `continue_subagent` can resolve the subagent id from the parent's
+        // tool_call_id.
+        assert_eq!(
+            manager
+                .get_subagent_conversation_id(&root_id, &tool_call_id)
+                .as_deref(),
+            Some(sub_id.as_str())
+        );
+
+        Ok(())
+    }
+
+    /// Nested variant: three-level chain root -> A -> B. Both parent
+    /// mappings must reconstruct, each from the level that spawned it.
+    #[tokio::test]
+    async fn resume_tree_reconstructs_nested_subagent_mapping() -> anyhow::Result<()> {
+        use anyhow::Context;
+        let dir = TestDir::new("conversation");
+        let session_dir = dir.path().join("session");
+        let sub_a_dir = session_dir.join("subagent-A");
+        let sub_b_dir = sub_a_dir.join("subagent-B");
+        std::fs::create_dir_all(&sub_b_dir)?;
+
+        let root_id = "root-1".to_string();
+        let tool_call_a = "tc-a".to_string();
+        let tool_call_b = "tc-b".to_string();
+
+        // root -> A: root's llm_msgs carries the [subagent_id: A] result.
+        write_state_file(
+            &session_dir,
+            &make_resume_state(
+                &root_id,
+                0,
+                vec![
+                    LLMMessage::User(vec![ContentPart::Text("Hello".to_string())]),
+                    LLMMessage::Assistant {
+                        content: String::new(),
+                        tool_calls: vec![make_tool_call(&tool_call_a, "subagent")],
+                        raw: None,
+                    },
+                    LLMMessage::ToolResult {
+                        tool_call_id: tool_call_a.clone(),
+                        content: vec![ContentPart::Text(format_cancelled_subagent_result(
+                            "A", false,
+                        ))],
+                    },
+                ],
+            ),
+        )?;
+
+        // A -> B: A's state carries the [subagent_id: B] result.
+        write_state_file(
+            &sub_a_dir,
+            &make_resume_state(
+                "A",
+                1,
+                vec![
+                    LLMMessage::User(vec![ContentPart::Text(
+                        "You are a subagent.\nDo the task.".to_string(),
+                    )]),
+                    LLMMessage::Assistant {
+                        content: String::new(),
+                        tool_calls: vec![make_tool_call(&tool_call_b, "subagent")],
+                        raw: None,
+                    },
+                    LLMMessage::ToolResult {
+                        tool_call_id: tool_call_b.clone(),
+                        content: vec![ContentPart::Text(format_cancelled_subagent_result(
+                            "B", false,
+                        ))],
+                    },
+                ],
+            ),
+        )?;
+
+        write_state_file(
+            &sub_b_dir,
+            &make_resume_state(
+                "B",
+                2,
+                vec![LLMMessage::User(vec![ContentPart::Text(
+                    "You are a subagent.\nDo the subtask.".to_string(),
+                )])],
+            ),
+        )?;
+
+        let manager = make_manager(dir.path())?;
+        let root_state: ConversationState = serde_json::from_str(
+            &std::fs::read_to_string(session_dir.join("conversation-state.json"))
+                .with_context(|| "failed to read root state")?,
+        )?;
+
+        let (_resumed_root_id, _root_client, resumed_subagents) = manager
+            .resume_conversation_tree(
+                root_state,
+                Box::new(MockLlm::new(vec![])),
+                vec![],
+                10,
+                session_dir.clone(),
+                false,
+            )?;
+
+        let resumed_ids: HashSet<String> = resumed_subagents
+            .iter()
+            .map(|sa| sa.conversation_id.clone())
+            .collect();
+        assert_eq!(
+            resumed_ids,
+            HashSet::from(["A".to_string(), "B".to_string()])
+        );
+
+        // Each level's mapping reconstructs from its own parent's llm_msgs.
+        assert_eq!(
+            manager.get_subagent_parent("A"),
+            Some((root_id.clone(), tool_call_a.clone()))
+        );
+        assert_eq!(
+            manager.get_subagent_parent("B"),
+            Some(("A".to_string(), tool_call_b.clone()))
+        );
+
+        // Reverse lookups resolve at both levels (distinct (parent, tool_call_id) keys).
+        assert_eq!(
+            manager
+                .get_subagent_conversation_id(&root_id, &tool_call_a)
+                .as_deref(),
+            Some("A")
+        );
+        assert_eq!(
+            manager
+                .get_subagent_conversation_id("A", &tool_call_b)
+                .as_deref(),
+            Some("B")
+        );
+
         Ok(())
     }
 }
