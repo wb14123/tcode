@@ -276,15 +276,69 @@ local function new_diff()
 end
 
 -- Append an updated_content entry, coalescing consecutive deltas for the same
--- element into one entry (the renderer appends per entry).
+-- element into one entry (the renderer appends per entry). The entry's text is
+-- held as a PARTS LIST so a long streaming run never re-copies the accumulated
+-- string (each `..` on a growing string is O(n); a 300k-chunk thinking run
+-- would otherwise be quadratic). The renderer materializes with
+-- updated_content_text before writing.
 local function add_updated_content(diff, element, text)
+  -- text may be a plain chunk or an existing parts list (merge_diff forwards
+  -- frag entries verbatim); normalize to a parts list first.
+  local parts
+  if type(text) == 'table' then
+    parts = text
+  else
+    parts = { text }
+  end
   local uc = diff.updated_content
   local last = uc[#uc]
   if last and last[1] == element then
-    last[2] = last[2] .. text
+    local t = last[2]
+    if type(t) ~= 'table' then
+      t = { t }
+      last[2] = t
+    end
+    for i = 1, #parts do t[#t + 1] = parts[i] end
   else
-    uc[#uc + 1] = { element, text }
+    uc[#uc + 1] = { element, parts }
   end
+end
+
+-- Materialize an updated_content entry's parts list into one string.
+local function updated_content_text(entry)
+  local t = entry[2]
+  if type(t) == 'table' then return table.concat(t) end
+  return t
+end
+
+-- Append a streaming chunk to an element's content field. The append is
+-- amortized O(1): chunks accumulate in a parts list and are folded into the
+-- string field by content_of on the next read. Without this, every chunk
+-- re-copies the whole accumulated string (`x = x .. c` is quadratic in this
+-- LuaJIT build) — a single long thinking stream would pin a core.
+local function append_content(el, field, chunk)
+  local parts = el[field .. '_parts']
+  if not parts then
+    parts = {}
+    el[field .. '_parts'] = parts
+  end
+  parts[#parts + 1] = chunk
+end
+
+-- Materialize a streamed content field (fold pending parts into the string
+-- field, clearing the parts list) and return the full text. Idempotent and
+-- safe for whole-set fields (user content, tool_args fallback): when no parts
+-- are pending it just returns the field. Reads go through this helper so the
+-- model field is ALWAYS the complete string at the point of use.
+local function content_of(el, field)
+  local parts = el[field .. '_parts']
+  if parts then
+    local s = (el[field] or '') .. table.concat(parts)
+    el[field] = s
+    el[field .. '_parts'] = nil
+    return s
+  end
+  return el[field] or ''
 end
 
 -- Merge a fragment diff (from a helper) into the main diff.
@@ -435,7 +489,7 @@ local function flush_pending_whitespace(model)
   if not am then
     return frag -- discard: no assistant message to append to
   end
-  am.content = am.content .. pending
+  append_content(am, 'content', pending)
   add_updated_content(frag, am, pending)
   return frag
 end
@@ -460,13 +514,13 @@ local function close_open_elements(model)
   for _, el in ipairs(model.elements) do
     if el.type == 'tool_call' and el.args_open then
       el.args_open = false
-      if visual_lines(el.args) > 2 and not el.full_input then
+      if visual_lines(content_of(el, 'args')) > 2 and not el.full_input then
         el.args_collapsed = true
       end
       diff.updated_all[#diff.updated_all + 1] = el
     elseif el.type == 'subagent' and el.input_open then
       el.input_open = false
-      if visual_lines(el.input) > 2 then
+      if visual_lines(content_of(el, 'input')) > 2 then
         el.input_collapsed = true
       end
       diff.updated_all[#diff.updated_all + 1] = el
@@ -549,13 +603,13 @@ local function apply(model, event, envelope_id)
     local tail = model.tail
     if tail and tail.type == 'thinking_block' and tail.state == 'open' then
       -- Streaming into the open block.
-      tail.content = tail.content .. chunk
+      append_content(tail, 'content', chunk)
       add_updated_content(diff, tail, chunk)
     elseif tail and tail.type == 'thinking_block' and tail.state == 'collapsed' then
       -- Merge: reopen the collapsed block in place. Held whitespace is
       -- discarded (today's merge swallows it). No element is ever removed.
       tail.state = 'open'
-      tail.content = tail.content .. chunk
+      append_content(tail, 'content', chunk)
       model.pending_whitespace = nil
       diff.updated_all[#diff.updated_all + 1] = tail
     else
@@ -580,7 +634,7 @@ local function apply(model, event, envelope_id)
       -- assistant message.
       local sa = find_subagent_by_conversation(model, model.sa_active)
       if sa then
-        sa.output = sa.output .. chunk
+        append_content(sa, 'output', chunk)
         add_updated_content(diff, sa, chunk)
         return diff -- tail unchanged
       end
@@ -599,7 +653,7 @@ local function apply(model, event, envelope_id)
       am = add_element(model, { type = 'assistant_message', content = '' })
       diff.added[#diff.added + 1] = am
     end
-    am.content = am.content .. chunk
+    append_content(am, 'content', chunk)
     add_updated_content(diff, am, chunk)
     model.tail = am
 
@@ -661,7 +715,7 @@ local function apply(model, event, envelope_id)
     local el = find_tool_call_by_index(model, data.tool_call_index or 0)
     if el then
       local content = tostring(data.content)
-      el.args = el.args .. content
+      append_content(el, 'args', content)
       add_updated_content(diff, el, content)
     end
     -- missing mapping -> drop silently
@@ -672,7 +726,7 @@ local function apply(model, event, envelope_id)
     if el then
       -- Close the args fence, collapse long args to a preview, open output.
       el.args_open = false
-      if visual_lines(el.args) > 2 and not el.full_input then
+      if visual_lines(content_of(el, 'args')) > 2 and not el.full_input then
         el.args_collapsed = true
       end
       el.output_started = true
@@ -712,7 +766,7 @@ local function apply(model, event, envelope_id)
     local el = find_tool_call_by_id(model, data.tool_call_id)
     if el then
       local content = tostring(data.content)
-      el.output = el.output .. content
+      append_content(el, 'output', content)
       add_updated_content(diff, el, content)
     else
       -- Fallback: today appends at the buffer tail, which in the model is the
@@ -720,7 +774,7 @@ local function apply(model, event, envelope_id)
       local tail = model.tail
       if tail and tail.type == 'assistant_message' then
         local content = tostring(data.content)
-        tail.content = tail.content .. content
+        append_content(tail, 'content', content)
         add_updated_content(diff, tail, content)
       end
     end
@@ -737,7 +791,7 @@ local function apply(model, event, envelope_id)
       el.status = status_map[data.end_status] or 'done'
       -- Long results auto-collapse to a preview (the detail view keeps them
       -- expanded via full_input).
-      if visual_lines(el.output) > 2 and not el.full_input then
+      if visual_lines(content_of(el, 'output')) > 2 and not el.full_input then
         el.output_collapsed = true
       end
       diff.updated_all[#diff.updated_all + 1] = el
@@ -811,7 +865,7 @@ local function apply(model, event, envelope_id)
     local el = find_subagent_input_by_index(model, data.tool_call_index or 0)
     if el then
       local content = tostring(data.content)
-      el.input = el.input .. content
+      append_content(el, 'input', content)
       add_updated_content(diff, el, content)
     end
     -- missing -> drop silently
@@ -821,7 +875,7 @@ local function apply(model, event, envelope_id)
     local el = find_pending_subagent(model, data.tool_call_id)
     if el then
       el.input_open = false
-      if visual_lines(el.input) > 2 then
+      if visual_lines(content_of(el, 'input')) > 2 then
         el.input_collapsed = true
       end
       el.status = 'running'
@@ -865,7 +919,7 @@ local function apply(model, event, envelope_id)
         description = last and last.description or ''
       end
       el.input_open = false
-      if visual_lines(el.input) > 2 then
+      if visual_lines(content_of(el, 'input')) > 2 then
         el.input_collapsed = true
       end
       el.status = 'continuing'
@@ -935,7 +989,7 @@ local function apply(model, event, envelope_id)
         last.error = data.error
       end
       -- Long streamed output auto-collapses to a preview.
-      if visual_lines(last.output) > 2 then
+      if visual_lines(content_of(last, 'output')) > 2 then
         last.output_collapsed = true
       end
     end
@@ -1370,7 +1424,7 @@ local function render_element(el, ctx)
     return out
   elseif el.type == 'assistant_message' then
     local out = { '► ASSISTANT' }
-    local content = el.content or ''
+    local content = content_of(el, 'content')
     if content == '' then
       out[#out + 1] = ''
     else
@@ -1378,10 +1432,10 @@ local function render_element(el, ctx)
     end
     return out
   elseif el.type == 'thinking_block' then
-    return lines(el.content)
+    return lines(content_of(el, 'content'))
   elseif el.type == 'tool_call' then
     local out = { '► TOOL', TC_FENCE }
-    local args = el.args or ''
+    local args = content_of(el, 'args')
     if el.args_collapsed then
       out[#out + 1] = compute_preview(args, ctx.buf)
     else
@@ -1390,7 +1444,7 @@ local function render_element(el, ctx)
     if not el.args_open then out[#out + 1] = TC_FENCE end
     if el.output_started then
       out[#out + 1] = TC_FENCE
-      local output = el.output or ''
+      local output = content_of(el, 'output')
       if el.output_collapsed then
         out[#out + 1] = compute_preview(output, ctx.buf)
       elseif output == '' then
@@ -1403,7 +1457,7 @@ local function render_element(el, ctx)
     return out
   elseif el.type == 'subagent' then
     local out = { '► SUBAGENT', TC_FENCE }
-    local input = el.input or ''
+    local input = content_of(el, 'input')
     if el.input_collapsed then
       out[#out + 1] = compute_preview(input, ctx.buf)
     else
@@ -1411,7 +1465,7 @@ local function render_element(el, ctx)
     end
     if not el.input_open then
       out[#out + 1] = TC_FENCE
-      local output = el.output or ''
+      local output = content_of(el, 'output')
       if el.output_collapsed then
         out[#out + 1] = compute_preview(output, ctx.buf)
       elseif output == '' then
@@ -1459,7 +1513,7 @@ end
 
 -- Highlight the args rows (or the single preview row) of a tool call region.
 local function apply_args_highlight(state, buf, ns, el, start_row)
-  local args_rows = el.args_collapsed and 1 or #lines(el.args or '')
+  local args_rows = el.args_collapsed and 1 or #lines(content_of(el, 'args'))
   for i = 0, args_rows - 1 do
     add_tracked_highlight(state, el, buf, ns, 'TCodeToolArgs', start_row + 2 + i)
   end
@@ -1467,7 +1521,7 @@ end
 
 -- Highlight the input rows (or the single preview row) of a subagent region.
 local function apply_input_highlight(state, buf, ns, el, start_row)
-  local input_rows = el.input_collapsed and 1 or #lines(el.input or '')
+  local input_rows = el.input_collapsed and 1 or #lines(content_of(el, 'input'))
   for i = 0, input_rows - 1 do
     add_tracked_highlight(state, el, buf, ns, 'TCodeToolArgs', start_row + 2 + i)
   end
@@ -1502,18 +1556,19 @@ end
 -- args_reuse_id / output_reuse_id keep the element's existing mark ids across
 -- rebuilds; hint reuse ids are matched by kind ('args' vs 'output').
 local function apply_tool_hints(state, buf, el, arow, args_reuse_id, output_reuse_id)
-  local args_rows = el.args_collapsed and 1 or #lines(el.args or '')
+  local args = content_of(el, 'args')
+  local args_rows = el.args_collapsed and 1 or #lines(args)
   if el.args_collapsed then
-    local preview, width = compute_preview(el.args, buf)
-    set_preview_hint_mark(state, buf, el, arow + 2, hidden_visual_lines(buf, el.args, preview, width), 'args', args_reuse_id)
-  elseif not el.args_open and el.args and el.args ~= '' then
+    local preview, width = compute_preview(args, buf)
+    set_preview_hint_mark(state, buf, el, arow + 2, hidden_visual_lines(buf, args, preview, width), 'args', args_reuse_id)
+  elseif not el.args_open and args and args ~= '' then
     set_collapse_hint_mark(state, buf, el, arow + 2, args_rows, 'args', args_reuse_id)
   end
   if el.output_started and not el.output_open then
     -- args_open is always false once output_started is set (both ToolMessageStart
     -- paths close the args fence together with opening the output).
     local out_fence_row = arow + 2 + args_rows + 1
-    local output = el.output or ''
+    local output = content_of(el, 'output')
     local output_rows = el.output_collapsed and 1 or #lines(output)
     local output_first_row = out_fence_row + 1
     if el.output_collapsed then
@@ -1527,18 +1582,19 @@ end
 
 -- Same for a subagent region (input + output).
 local function apply_subagent_hints(state, buf, el, arow, input_reuse_id, output_reuse_id)
-  local input_rows = el.input_collapsed and 1 or #lines(el.input or '')
+  local input = content_of(el, 'input')
+  local input_rows = el.input_collapsed and 1 or #lines(input)
   if el.input_collapsed then
-    local preview, width = compute_preview(el.input, buf)
-    set_preview_hint_mark(state, buf, el, arow + 2, hidden_visual_lines(buf, el.input, preview, width), 'input', input_reuse_id)
-  elseif not el.input_open and el.input and el.input ~= '' then
+    local preview, width = compute_preview(input, buf)
+    set_preview_hint_mark(state, buf, el, arow + 2, hidden_visual_lines(buf, input, preview, width), 'input', input_reuse_id)
+  elseif not el.input_open and input and input ~= '' then
     set_collapse_hint_mark(state, buf, el, arow + 2, input_rows, 'input', input_reuse_id)
   end
   if not el.input_open then
     -- input_open is false here (this very condition), so the close-fence
     -- offset is always one row.
     local output_first_row = arow + 2 + input_rows + 1
-    local output = el.output or ''
+    local output = content_of(el, 'output')
     local output_rows = el.output_collapsed and 1 or #lines(output)
     if el.output_collapsed then
       local preview, width = compute_preview(output, buf)
@@ -1559,16 +1615,17 @@ local function render_added(model, el, state, ctx)
     -- Anchor = the pre-append buffer tail row: the row its content streams
     -- onto (append_text consumes it). Bulk defers the write entirely.
     local start_row = vim.api.nvim_buf_line_count(buf) - 1
+    local content = content_of(el, 'content')
     first_event = false
     if not bulk then
-      append_text(buf, el.content)
+      append_text(buf, content)
     end
     -- Default (left) gravity: when a bulk block starts streaming live, the
     -- append lands exactly at the anchor row and must not push the anchor
     -- down — it is the region START, so it tracks the first content row.
     el.anchor = vim.api.nvim_buf_set_extmark(buf, gen_ns, start_row, 0, {})
-    state.heights[el.id] = bulk and 1 or count_lines(el.content)
-    state.mat_len[el.id] = bulk and 0 or #el.content
+    state.heights[el.id] = bulk and 1 or count_lines(content)
+    state.mat_len[el.id] = bulk and 0 or #content
     if not bulk then
       for i = 0, state.heights[el.id] - 1 do
         add_tracked_highlight(state, el, buf, thinking_ns, 'TCodeThinking', start_row + i)
@@ -1654,14 +1711,14 @@ local function render_thinking_update(el, state, ctx, arow)
   if el.state == 'collapsed' then
     vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, { '', '', '' })
     state.heights[el.id] = 3
-    state.mat_len[el.id] = #el.content
+    state.mat_len[el.id] = #content_of(el, 'content')
     set_thinking_collapsed_mark(state, buf, el, arow, reuse_id)
     state.hl_upto[el.id] = arow + 2
   elseif el.state == 'expanded' then
-    local content_lines = lines(el.content)
+    local content_lines = lines(content_of(el, 'content'))
     vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, content_lines)
     state.heights[el.id] = #content_lines
-    state.mat_len[el.id] = #el.content
+    state.mat_len[el.id] = #content_of(el, 'content')
     -- Place the range mark BEFORE the highlight loop so the reuse id is
     -- claimed deterministically (the highlight loop allocates its own ids).
     set_thinking_expanded_mark(state, buf, el, arow, #content_lines, reuse_id)
@@ -1674,11 +1731,12 @@ local function render_thinking_update(el, state, ctx, arow)
     -- (the streamed content was replaced at the collapse), so re-rendering the
     -- full content would make the old run reappear. Render the tail after
     -- mat_len — exactly the content that was never visible in the buffer.
-    local tail = el.content:sub((state.mat_len[el.id] or 0) + 1)
+    local content = content_of(el, 'content')
+    local tail = content:sub((state.mat_len[el.id] or 0) + 1)
     local content_lines = lines(tail)
     vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, content_lines)
     state.heights[el.id] = #content_lines
-    state.mat_len[el.id] = #el.content
+    state.mat_len[el.id] = #content
     for i = 0, #content_lines - 1 do
       add_tracked_highlight(state, el, buf, thinking_ns, 'TCodeThinking', arow + i)
     end
@@ -1782,8 +1840,9 @@ end
 -- write is skipped entirely; the next updated_all materializes it.
 local function render_updated_content(model, entry, state, ctx)
   local buf, ns, bulk = ctx.buf, ctx.ns, ctx.bulk
-  local el, text = entry[1], entry[2]
+  local el = entry[1]
   if bulk then return end
+  local text = updated_content_text(entry)
 
   -- A bulk-started thinking block's first live append lands exactly on its
   -- anchor row and would push the anchor down with the inserted lines; capture

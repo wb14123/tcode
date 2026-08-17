@@ -274,7 +274,7 @@ test('merge: runs split by a pause render only the new chunk, model holds all', 
   apply_render(m, b, { AssistantThinkingChunk = { content = '\nB2' } })
   local l = lines_of(b)
   check(l[1] == '► ASSISTANT' and l[2] == 'B1' and l[3] == 'B2', "buffer ['label','B1','B2'] after merge")
-  check(block.content == 'A1\nA2B1\nB2', 'the MODEL holds the full merged content')
+  check(T.content_of(block, 'content') == 'A1\nA2B1\nB2', 'the MODEL holds the full merged content')
   -- Final collapse yields one indicator.
   render_diff(m, b, T.close_open_elements(m))
   l = lines_of(b)
@@ -488,7 +488,7 @@ test('subagent: post-flush input chunks are absorbed into the input region at Su
     and l[5] == TC_FENCE and l[6] == '', 'flush rows: label + open fence + 2 input rows + close fence + blank')
   -- A chunk arriving after the flush accumulates into el.input.
   apply_render(m, b, { SubAgentInputChunk = { tool_call_index = 0, content = ',"c":3}' } })
-  check(sa.input == '{"a":1,\n"b":2},"c":3}', 'post-flush chunk accumulated into the model')
+  check(T.content_of(sa, 'input') == '{"a":1,\n"b":2},"c":3}', 'post-flush chunk accumulated into the model')
   -- AssistantMessageEnd (as in the real protocol) adds nothing visible.
   apply_render(m, b, { AssistantMessageEnd = {} })
   -- SubAgentStart rebuilds the region from full model state: the post-flush
@@ -787,7 +787,7 @@ test('tool output: long result collapses to a preview at ToolMessageEnd, o toggl
   local tc = m.elements[2]
   apply_render(m, b, { ToolOutputChunk = { tool_call_id = 't1', content = 'o1\n' } })
   apply_render(m, b, { ToolOutputChunk = { tool_call_id = 't1', content = 'o2\no3\no4' } })
-  check(tc.output == 'o1\no2\no3\no4', 'output accumulated while streaming')
+  check(T.content_of(tc, 'output') == 'o1\no2\no3\no4', 'output accumulated while streaming')
   check(tc.output_collapsed == false, 'streaming output is expanded')
 
   -- ToolMessageEnd auto-collapses the 4-line output to a preview row.
@@ -854,7 +854,7 @@ test('subagent output: long result collapses at SubAgentEnd, o toggles', functio
   local sa = m.elements[1]
   apply_render(m, b, { AssistantMessageChunk = { content = 's1\n' } })
   apply_render(m, b, { AssistantMessageChunk = { content = 's2\ns3\ns4' } })
-  check(sa.output == 's1\ns2\ns3\ns4' and sa.output_collapsed == false, 'streaming expanded')
+  check(T.content_of(sa, 'output') == 's1\ns2\ns3\ns4' and sa.output_collapsed == false, 'streaming expanded')
   apply_render(m, b, { SubAgentEnd = { conversation_id = 'c1', end_status = 'Succeeded', input_tokens = 1, output_tokens = 4 } })
   check(sa.output_collapsed == true, 'long output collapsed at SubAgentEnd')
   local l = lines_of(b)

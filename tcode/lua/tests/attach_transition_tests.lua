@@ -98,6 +98,6 @@ test('bulk to live transition: deferred content materializes, collapse covers li
     if el.type == 'assistant_message' then am = el end
   end
   check(block ~= nil and block.state == 'collapsed', 'model block collapsed')
-  check(am ~= nil and am.content == ' reply', 'model assistant message holds the reply')
+  check(am ~= nil and T.content_of(am, 'content') == ' reply', 'model assistant message holds the reply')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)

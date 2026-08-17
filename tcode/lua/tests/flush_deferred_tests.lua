@@ -129,7 +129,7 @@ test('flush: pause between reasoning bursts merges into a single thinking entry'
     end
   end
   check(#entries == 1, 'both bursts merged into a single thinking entry')
-  check(entries[1] and entries[1].content == 'burst one\nburst two', 'merged entry holds both bursts in order')
+  check(entries[1] and T.content_of(entries[1], 'content') == 'burst one\nburst two', 'merged entry holds both bursts in order')
   check(#recorded_errors == 0, 'no errors during the merge')
 end)
 

@@ -21,7 +21,7 @@ local function entry_contents(b)
   local contents = {}
   for _, el in ipairs(T.model.elements) do
     if el.type == 'thinking_block' and el.state ~= 'open' then
-      contents[#contents + 1] = el.content
+      contents[#contents + 1] = T.content_of(el, 'content')
     end
   end
   table.sort(contents)
@@ -119,7 +119,7 @@ test('merge: an expanded previous entry is never merged', function()
     if el.type == 'thinking_block' then blocks[#blocks + 1] = el end
   end
   check(#blocks == 2 and blocks[1].state == 'expanded', 'expanded entry untouched by the new run')
-  check(blocks[1].content == 'A1' and blocks[2].content == 'B1', 'both entries hold their own content')
+  check(T.content_of(blocks[1], 'content') == 'A1' and T.content_of(blocks[2], 'content') == 'B1', 'both entries hold their own content')
   local contents = entry_contents(b)
   check(contents[1] == 'A1' and contents[2] == 'B1', 'both entries hold their own content (sorted)')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
