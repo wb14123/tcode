@@ -1,15 +1,14 @@
 -- Expand/collapse toggles (the `o` keymap): both the thinking indicator and
 -- the tool-args preview must toggle without leaving the display buffer
--- modifiable, even across errors.
+-- modifiable, even across errors. The toggles mutate the model through the
+-- reducer and re-render the element's region.
 
 test('toggle_thinking: expand and collapse roundtrip', function()
   local b = new_buf()
-  seed(b, { 'x', 'L1', 'L2' })
-  local t = T.thinking_state
-  t.is_thinking = true
-  t.start_row = 1
-  t.content_parts = { 'L1\nL2' }
-  t.written = true
+  T.reset_model()
+  seed(b, { '' })
+  windowed_render(b, { AssistantMessageStart = {} }, false)
+  windowed_render(b, { AssistantThinkingChunk = { content = 'L1\nL2' } }, false)
   T.collapse_thinking(b, ns)
   local marks = vim.api.nvim_buf_get_extmarks(b, thinking_ns_id, 0, -1, {})
   local mark_id = marks[1] and marks[1][1]
@@ -24,12 +23,11 @@ test('toggle_thinking: expand and collapse roundtrip', function()
   l = lines_of(b)
   check(l[2] == '', 'collapse back to the indicator line')
   check(vim.bo[b].modifiable == false, 'buffer still non-modifiable after collapse')
-  reset_thinking()
 end)
 
 test('toggle_tool_call_args: expand and collapse roundtrip', function()
   local b = new_buf()
-  T.reset_first_event()
+  T.reset_model()
   seed(b, { '' })
   local steps = {
     { AssistantMessageStart = {} },

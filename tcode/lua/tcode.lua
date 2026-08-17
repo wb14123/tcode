@@ -37,6 +37,14 @@ local function format_time(ts_millis)
   return os.date('%H:%M:%S', math.floor(ts_millis / 1000))
 end
 
+-- Single-quote a value for safe shell interpolation: wraps it in single
+-- quotes and escapes embedded quotes (' -> '\''), so wire-derived strings
+-- (the exe path, session ids, tool call ids, conversation ids) can never be
+-- interpreted as shell syntax by the system() shell-outs.
+local function shquote(s)
+  return "'" .. tostring(s):gsub("'", "'\\''") .. "'"
+end
+
 -- Ensure a buffer is modifiable before writing to it.
 -- Returns false if the buffer is invalid, so caller can bail out.
 -- Note: caller is responsible for resetting modifiable = false when done.
@@ -85,96 +93,30 @@ local function append_text(buf, text)
   vim.api.nvim_buf_set_text(buf, line_count - 1, #last_line, line_count - 1, #last_line, lines)
 end
 
--- Namespace and lookup table for tool-call range extmarks.
--- Maps extmark ID -> tool_call_id so we can find which tool call a cursor line belongs to.
+-- Namespace for tool-call range extmarks (per-element navigation ranges).
 local tc_ns = vim.api.nvim_create_namespace('tcode_tc_id')
-local tc_extmark_ids = {}  -- extmark_id -> tool_call_id
-local tc_tool_names = {}   -- tool_call_id -> tool_name
-local tc_label_marks = {}  -- tool_call_id -> { extmark_id, ns, tool_name }
 
--- Namespace and lookup table for subagent range extmarks.
--- Maps extmark ID -> conversation_id so we can find which subagent a cursor line belongs to.
+-- Namespace for subagent range extmarks (per-element navigation ranges).
 local sa_ns = vim.api.nvim_create_namespace('tcode_sa_id')
-local sa_extmark_ids = {}  -- extmark_id -> conversation_id
--- conversation_id -> { { extmark_id, ns, description, is_continue }, ... }
--- Last entry is the active one (updated by TurnEnd, Permission handlers).
--- SubAgentEnd updates ALL entries.
-local sa_label_marks = {}
-local sa_input_marks = {}  -- tool_call_id -> { extmark_id, ns, tool_name }
-local sa_active_conv = nil -- conversation_id of the subagent currently streaming output
 
--- Namespace and lookup table for user-message range extmarks.
--- Maps extmark ID -> msg_id (the display envelope id) so `gb` can find
--- which user message the cursor is on and branch the session there.
+-- Namespace for user-message range extmarks (`gb` branch targeting).
 local um_ns = vim.api.nvim_create_namespace('tcode_um')
-local um_extmark_ids = {}  -- extmark_id -> msg_id
 
-local tc_full_input = false  -- true in detail view: never collapse tool input
-
--- Namespace for tool-call / subagent generation-state anchor extmarks.
--- These extmarks track where content for an in-progress tool call / subagent
--- lives in the buffer, so that mutations elsewhere (collapse, other tool
--- calls being inserted below, close-fence insertions) don't invalidate
--- position references. Rows are resolved from the extmarks at use time, not
--- stored as stale integers.
+-- Namespace for per-element start-row anchor extmarks. Rows are resolved from
+-- the extmarks at use time, never stored as stale integers.
 local gen_ns = vim.api.nvim_create_namespace('tcode_gen')
 
 -- Flag to handle the initial empty line in Neovim buffers
 local first_event = true
 
--- Thinking token state: track streaming thinking and collapsed entries
+-- Thinking indicator / expand-hint extmark namespace
 local thinking_ns = vim.api.nvim_create_namespace('tcode_thinking')
-local thinking_entries = {}  -- extmark_id -> { content, expanded }
-local thinking_state = {
-  is_thinking = false,
-  start_row = nil,
-  content_parts = {},  -- accumulate chunks in a table, concat only when needed
-  last_highlighted_row = nil,  -- track last highlighted row to avoid re-highlighting
-  written = false,  -- true once thinking content has been written to the buffer (live stream)
-  -- Extmark id of the most recently collapsed thinking entry. If the next
-  -- thinking run starts with nothing visible written after it (the 500ms
-  -- settle flush split one continuous reasoning stream at a pause, or the
-  -- model emitted back-to-back thinking blocks), the new run merges into this
-  -- entry instead of creating a second collapsed one.
-  pending_merge_mark = nil,
-}
-
--- Tool call / subagent argument generation state, keyed by tool_call_id
-local tool_call_gen_state = {}
--- Each entry: {
---   args_open_mark_id  = <gen_ns extmark id>,  -- row of opening TC_FENCE line. Uses
---                                              -- default right_gravity=true so the
---                                              -- mark rides with the fence character
---                                              -- if another tool call's closing fence
---                                              -- is inserted at the same row from above.
---   args_close_mark_id = <gen_ns extmark id>,  -- row of closing TC_FENCE line, set by
---                                              -- close_args_fence. nil until then.
---   content_parts      = {},                   -- accumulated raw arg chunks.
---   last_highlighted_row = nil,                -- last buffer row highlighted during streaming.
---                                              -- Protocol invariant: no handler between
---                                              -- two ArgChunk events for the same id
---                                              -- mutates rows above the active fence, so
---                                              -- an absolute integer is safe here.
---   fence_closed       = false,                -- true once close_args_fence has run.
--- }
---
--- Row positions are ALWAYS resolved via the extmark ids at the moment of use,
--- not stored as stale integers, because edits for adjacent tool calls /
--- collapses / fence insertions can shift rows underneath us.
-
--- Maps tool_call_index -> tool_call_id (to look up state from ArgChunk events)
-local tool_call_index_map = {}
-
--- For expand/collapse after generation is done, keyed by extmark id
-local tool_call_gen_entries = {}
--- Each entry: { content = "full args text", expanded = false }
 
 -- Tool output is wrapped in a long backtick-fenced code block to prevent
 -- markdown/treesitter from interpreting partial HTML, XML, JSON, etc. as
 -- markdown syntax. We use 10 backticks so tool output containing ``` won't
 -- accidentally close the fence.
 local TC_FENCE = '``````````'
-local tc_fence_opened = {}  -- tool_call_id -> true once opening fence has been inserted
 
 --- Show a y/n confirmation popup at the cursor and execute callback on confirm.
 local function confirm_popup(prompt, on_confirm)
@@ -227,411 +169,11 @@ local function confirm_popup(prompt, on_confirm)
   vim.keymap.set('n', '<Esc>', close_popup, { buffer = popup_buf, nowait = true })
 end
 
--- Render a label line with optional timestamp as virtual text
-local function render_label(buf, ns, separator, prefix, hl_group, data)
-  if first_event then
-    first_event = false
-    -- Neovim buffers start with one empty line that can't be deleted.
-    -- Replace it with the first separator instead of appending.
-    vim.api.nvim_buf_set_lines(buf, 0, 1, false, { separator })
-  else
-    append_lines(buf, { separator })
-  end
-  local label_line = vim.api.nvim_buf_line_count(buf) - 1
-  local virt = { { prefix, hl_group } }
-  local ts = format_time(data.created_at)
-  if ts then
-    table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
-  end
-  local extmark_id = vim.api.nvim_buf_set_extmark(buf, ns, label_line, 0, {
-    virt_text = virt,
-    virt_text_pos = 'overlay',
-  })
-  return label_line, extmark_id
-end
-
--- Update a tool call label extmark in-place with a status indicator.
-local function update_tc_label(buf, tool_call_id, status_text, status_hl, show_cancel)
-  local info = tc_label_marks[tool_call_id]
-  if not info then return end
-  local virt = {
-    { '>>> TOOL: ', 'TCodeTool' },
-    { '[' .. status_text .. ']', status_hl },
-    { ' ' .. info.tool_name, 'TCodeTool' },
-  }
-  local ts = format_time(info.created_at)
-  if ts then table.insert(virt, { '  ' .. ts, 'TCodeTokens' }) end
-  if show_cancel then table.insert(virt, { '  [Ctrl-k to cancel]', 'TCodeTokens' }) end
-  local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
-  if mark_pos and mark_pos[1] then
-    vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
-      id = info.extmark_id, virt_text = virt, virt_text_pos = 'overlay',
-    })
-  end
-end
-
---- Insert lines at a specific row (pushing existing content down).
---- Returns the row where insertion started.
-local function insert_lines_at(buf, row, lines)
-  vim.api.nvim_buf_set_lines(buf, row, row, false, lines)
-  return row
-end
-
 --- Insert text at the end of a specific row, supporting multi-line text.
 local function insert_text_at(buf, row, text)
   local cur_line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ''
   local lines = vim.split(text, '\n', { plain = true })
   vim.api.nvim_buf_set_text(buf, row, #cur_line, row, #cur_line, lines)
-end
-
---- Render a token/status info line as virtual text, but errors as real text.
---- If insert_at is provided, inserts at that row instead of appending at buffer end.
----
---- Token semantics (Anthropic API):
----   input_tokens: tokens NOT involved in any cache (not read from, not written to)
----   cache_creation_input_tokens: tokens fully processed AND written to a new cache (1.25x cost)
----   cache_read_input_tokens: tokens served from an existing cache (0.1x cost)
----
---- Display:
----   "in" = input_tokens + cache_creation_input_tokens (all tokens actually processed)
----   "cache read" = cache_read_input_tokens (tokens cheaply served from cache)
----   "out" = output_tokens
-local function render_info(buf, ns, data, token_prefix, insert_at)
-  -- Collect virtual text parts for tokens/status metadata FIRST,
-  -- so we can skip writing the buffer line entirely when there's nothing to show.
-  local virt_parts = {}
-  if data.input_tokens and data.output_tokens then
-    local has_tokens = not token_prefix or (data.input_tokens > 0 or data.output_tokens > 0)
-    if has_tokens then
-      local text
-      -- "in" = input_tokens + cache_creation (all tokens actually processed by the model)
-      -- "cache read" = cache_read_input_tokens (tokens served from cache, not reprocessed)
-      local cache_read = data.cache_read_input_tokens or 0
-      local processed_input = data.input_tokens + (data.cache_creation_input_tokens or 0)
-      if cache_read > 0 then
-        local fmt = token_prefix
-          and string.format('[%s: %%d in / %%d cache read / %%d out tokens]', token_prefix)
-          or '[%d in / %d cache read / %d out tokens]'
-        text = string.format(fmt, processed_input, cache_read, data.output_tokens)
-      else
-        local fmt = token_prefix
-          and string.format('[%s: %%d in / %%d out tokens]', token_prefix)
-          or '[%d in / %d out tokens]'
-        text = string.format(fmt, processed_input, data.output_tokens)
-      end
-      table.insert(virt_parts, { text, 'TCodeTokens' })
-    end
-  end
-  if data.end_status and data.end_status ~= 'Succeeded' then
-    local prefix = token_prefix and ' [' .. string.upper(token_prefix) .. ' ' or ' ['
-    table.insert(virt_parts, { prefix .. data.end_status .. ']', 'TCodeError' })
-  end
-
-  local has_error = type(data.error) == 'string' and data.error ~= ''
-
-  -- Nothing to display: skip writing the buffer line + extmark entirely
-  if #virt_parts == 0 and not has_error then
-    return nil
-  end
-
-  -- Write the separator line to the buffer
-  local info_line
-  if insert_at then
-    insert_lines_at(buf, insert_at, { '► INFO' })
-    info_line = insert_at
-  else
-    append_lines(buf, { '► INFO' })
-    info_line = vim.api.nvim_buf_line_count(buf) - 1
-  end
-
-  -- Render tokens/status as virtual text overlay to conceal separator text
-  vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
-    virt_text = #virt_parts > 0 and virt_parts or { { '► ERROR', 'TCodeError' } },
-    virt_text_pos = 'overlay',
-  })
-
-  -- Render error as real buffer text so it can wrap, be navigated, selected, copied
-  if has_error then
-    if insert_at then
-      insert_lines_at(buf, info_line + 1, { '' })
-      local error_start_line = info_line + 1
-      local error_lines = vim.split('Error: ' .. data.error, '\n', { plain = true })
-      vim.api.nvim_buf_set_lines(buf, error_start_line, error_start_line + 1, false, error_lines)
-      for i = 0, #error_lines - 1 do
-        vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeError', error_start_line + i, 0, -1)
-      end
-    else
-      append_lines(buf, { '' })
-      local error_start_line = vim.api.nvim_buf_line_count(buf) - 1
-      local error_lines = vim.split('Error: ' .. data.error, '\n', { plain = true })
-      vim.api.nvim_buf_set_lines(buf, error_start_line, error_start_line + 1, false, error_lines)
-      for i = 0, #error_lines - 1 do
-        vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeError', error_start_line + i, 0, -1)
-      end
-    end
-  end
-
-  return info_line
-end
-
--- Find and update the range extmark for a tool_call_id to extend to end_row.
--- end_row is exclusive (first row after the covered range).
-local function extend_tc_extmark(buf, tool_call_id, end_row)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, {})
-  for _, mark in ipairs(marks) do
-    if tc_extmark_ids[mark[1]] == tool_call_id then
-      vim.api.nvim_buf_set_extmark(buf, tc_ns, mark[2], mark[3], {
-        id = mark[1],
-        end_row = end_row,
-        end_col = 0,
-      })
-      break
-    end
-  end
-end
-
---- Get the end_row of a tool-call's range extmark. Returns nil if not found.
-local function get_tc_extmark_end_row(buf, tool_call_id)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, { details = true })
-  for _, mark in ipairs(marks) do
-    if tc_extmark_ids[mark[1]] == tool_call_id then
-      local details = mark[4]
-      if details and details.end_row then
-        return details.end_row
-      end
-    end
-  end
-  return nil
-end
-
--- Find and update the range extmark for a conversation_id to extend to end_row.
--- end_row is exclusive (first row after the covered range).
-local function extend_sa_extmark(buf, conversation_id, end_row)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, { details = true })
-  local best_mark = nil
-  local best_end = -1
-  for _, mark in ipairs(marks) do
-    if sa_extmark_ids[mark[1]] == conversation_id then
-      local details = mark[4]
-      local this_end = details and details.end_row or mark[2]
-      if this_end > best_end then
-        best_end = this_end
-        best_mark = mark
-      end
-    end
-  end
-  if best_mark then
-    vim.api.nvim_buf_set_extmark(buf, sa_ns, best_mark[2], best_mark[3], {
-      id = best_mark[1],
-      end_row = end_row,
-      end_col = 0,
-    })
-  end
-end
-
---- Get the end_row of a subagent's range extmark. Returns nil if not found.
-local function get_sa_extmark_end_row(buf, conversation_id)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, { details = true })
-  local best_end = -1
-  for _, mark in ipairs(marks) do
-    if sa_extmark_ids[mark[1]] == conversation_id then
-      local details = mark[4]
-      local this_end = details and details.end_row
-      if this_end ~= nil and this_end > best_end then
-        best_end = this_end
-      end
-    end
-  end
-  if best_end >= 0 then
-    return best_end
-  end
-  return nil
-end
-
--- Collapse streaming thinking content into a single indicator line
-local function collapse_thinking(buf, ns)
-  if not thinking_state.is_thinking then return end
-
-  with_modifiable(buf, function()
-    local start_row = thinking_state.start_row
-    -- Compute the collapse range from the thinking block's OWN content, not the
-    -- buffer end. Other blocks (subagent labels, tool output, system messages)
-    -- can be appended below an unterminated thinking block (interrupted or
-    -- attached sessions); collapsing to the buffer end would swallow them.
-    local content = table.concat(thinking_state.content_parts)
-    local content_line_count = #vim.split(content, '\n', { plain = true })
-    local last_content_row = start_row + content_line_count - 1
-    if not thinking_state.written then
-      -- Bulk load deferred the per-chunk buffer writes: the thinking content
-      -- occupies no rows, only the anchor line exists. Collapse that one line.
-      last_content_row = start_row
-    end
-    local end_row = math.min(last_content_row, vim.api.nvim_buf_line_count(buf) - 1)
-
-    -- Replace thinking lines with indicator line + spacer + empty line for subsequent content
-    if end_row >= start_row then
-      vim.api.nvim_buf_set_lines(buf, start_row, end_row + 1, false, { '', '', '' })
-    end
-
-    -- Place indicator extmark
-    local mark_id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
-      virt_text = { { '[Thinking... press o to expand]', 'TCodeTokens' } },
-      virt_text_pos = 'overlay',
-    })
-
-    -- Store for later expansion
-    thinking_entries[mark_id] = {
-      content = table.concat(thinking_state.content_parts),
-      expanded = false,
-    }
-    -- A following thinking run with nothing visible between (see
-    -- try_merge_thinking) merges into this entry.
-    thinking_state.pending_merge_mark = mark_id
-
-    -- Reset thinking state
-    thinking_state.is_thinking = false
-    thinking_state.content_parts = {}
-    thinking_state.start_row = nil
-    thinking_state.last_highlighted_row = nil
-    thinking_state.written = false
-  end)
-end
-
--- When a new thinking run starts right after the previous one was collapsed
--- with nothing visible written in between — e.g. the 500ms settle flush fired
--- during a pause in one continuous reasoning stream (DeepSeek bursts, Claude
--- back-to-back thinking blocks) — merge the new run into the previous entry
--- instead of creating a second collapsed entry: delete the old indicator rows,
--- anchor the new run at the previous entry's position, and prepend its content
--- so the final collapse yields a single entry with the combined text.
--- Returns true when the new run continues the previous entry.
-local function try_merge_thinking(buf, bulk)
-  local mark_id = thinking_state.pending_merge_mark
-  if not mark_id then return false end
-  local prev = thinking_entries[mark_id]
-  if not prev then
-    thinking_state.pending_merge_mark = nil
-    return false
-  end
-  local pos = vim.api.nvim_buf_get_extmark_by_id(buf, thinking_ns, mark_id, {})
-  if not pos or not pos[1] then
-    thinking_entries[mark_id] = nil
-    thinking_state.pending_merge_mark = nil
-    return false
-  end
-  local prev_row = pos[1]
-  local current_row = vim.api.nvim_buf_line_count(buf) - 1
-  if current_row < prev_row then
-    thinking_state.pending_merge_mark = nil
-    return false
-  end
-  -- Guard: merge only when nothing visible sits between the previous entry and
-  -- the new run. Any real content (text chunks, tool labels, subagent
-  -- sections) renders non-blank rows, so those cases keep separate entries.
-  -- The last row is included: append_text writes onto it, so a chunk that
-  -- just landed there (e.g. a text block before this thinking run) must block
-  -- the merge.
-  local between = vim.api.nvim_buf_get_lines(buf, prev_row, current_row + 1, false)
-  for _, line in ipairs(between) do
-    if line ~= '' then
-      thinking_state.pending_merge_mark = nil
-      return false
-    end
-  end
-  with_modifiable(buf, function()
-    vim.api.nvim_buf_del_extmark(buf, thinking_ns, mark_id)
-    -- Remove the old indicator (+ spacers) and any blank rows in between so
-    -- the new run streams from the previous entry's position.
-    vim.api.nvim_buf_set_lines(buf, prev_row, current_row, false, {})
-    thinking_state.content_parts = { prev.content }
-    thinking_state.start_row = prev_row
-    thinking_state.last_highlighted_row = prev_row - 1
-    thinking_state.written = not bulk
-  end)
-  thinking_entries[mark_id] = nil
-  thinking_state.pending_merge_mark = nil
-  return true
-end
-
--- Find a thinking extmark at the given buffer line (0-indexed)
--- Only returns extmarks that are tracked in thinking_entries (not highlights)
--- Range extmarks use exclusive end_row: first row after the covered range.
-local function find_thinking_at_line(buf, line)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, thinking_ns, 0, -1, { details = true })
-  for _, mark in ipairs(marks) do
-    local mark_id = mark[1]
-    -- Only consider marks that are tracked thinking entries (not highlights)
-    if thinking_entries[mark_id] then
-      local start_row = mark[2]
-      local details = mark[4]
-      local end_row = details.end_row or (start_row + 1)
-      if line >= start_row and line < end_row then
-        return mark_id
-      end
-    end
-  end
-  return nil
-end
-
--- Toggle thinking content expand/collapse inline
-local function toggle_thinking(buf, mark_id)
-  local entry = thinking_entries[mark_id]
-  if not entry then return end
-
-  with_modifiable(buf, function()
-    local mark = vim.api.nvim_buf_get_extmark_by_id(buf, thinking_ns, mark_id, {})
-    if not mark or not mark[1] then return end  -- extmark gone; nothing to toggle
-    local start_row = mark[1]
-    local content_lines = vim.split(entry.content, '\n', { plain = true })
-
-    if entry.expanded then
-      -- Collapse: replace content lines with single blank indicator line
-      vim.api.nvim_buf_set_lines(buf, start_row, start_row + #content_lines, false, { '' })
-      vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
-        id = mark_id,
-        virt_text = { { '[Thinking... press o to expand]', 'TCodeTokens' } },
-        virt_text_pos = 'overlay',
-      })
-      entry.expanded = false
-    else
-      -- Expand: replace blank indicator line with content
-      vim.api.nvim_buf_set_lines(buf, start_row, start_row + 1, false, content_lines)
-      -- Apply thinking highlight to all expanded lines
-      for i = 0, #content_lines - 1 do
-        vim.api.nvim_buf_add_highlight(buf, thinking_ns, 'TCodeThinking', start_row + i, 0, -1)
-      end
-      vim.api.nvim_buf_set_extmark(buf, thinking_ns, start_row, 0, {
-        id = mark_id,
-        -- end_row is exclusive: first row after the covered content range.
-        end_row = start_row + #content_lines,
-        end_col = 0,
-        virt_lines = { { { '[Thinking... press o to collapse]', 'TCodeTokens' } } },
-        virt_lines_above = true,
-      })
-      entry.expanded = true
-    end
-  end)
-end
-
--- Collapse streaming tool call args into a short preview with expand hint
--- Count visual (displayed) lines for a set of buffer lines, accounting for wrap.
-local function count_visual_lines(buf, lines)
-  local win = vim.fn.bufwinid(buf)
-  local width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
-  local total = 0
-  for _, line in ipairs(lines) do
-    total = total + math.max(1, math.ceil(#line / width))
-  end
-  return total
-end
-
--- Resolve a gen_ns extmark id to its current 0-indexed buffer row, or nil if
--- the mark has been deleted or never existed.
-local function get_gen_mark_row(buf, mark_id)
-  if not mark_id then return nil end
-  local pos = vim.api.nvim_buf_get_extmark_by_id(buf, gen_ns, mark_id, {})
-  if pos and pos[1] then return pos[1] end
-  return nil
 end
 
 -- Force render-markdown.nvim to repaint this buffer NOW.
@@ -683,987 +225,1792 @@ local function set_render_markdown_debounce(buf, ms)
   end)
 end
 
-local function collapse_tool_call_args(buf, tool_call_id)
-  local state = tool_call_gen_state[tool_call_id]
-  if not state then return end
+-- ============================================================================
+-- MODEL
+-- ============================================================================
+-- Pure in-memory representation of the display pane: a flat ordered list of
+-- elements plus the bookkeeping the reducer needs. The reducer is the only
+-- writer; the renderer projects elements onto the buffer. This layer never
+-- touches a buffer, an extmark, or vim.*.
 
-  -- In the tool detail view, always show full input without collapsing.
-  if tc_full_input then return end
-
-  local full_content = table.concat(state.content_parts)
-  local content_lines = vim.split(full_content, '\n', { plain = true })
-  local line_count = #content_lines
-
-  -- Decide based on visual (wrapped) line count, not raw buffer lines.
-  local visual_count = count_visual_lines(buf, content_lines)
-  if visual_count <= 2 then return end
-
-  -- Resolve the current opening-fence row via extmark. It may have shifted
-  -- since the mark was placed (other tool calls / fences being inserted).
-  local args_open_row = get_gen_mark_row(buf, state.args_open_mark_id)
-  if not args_open_row then return end  -- anchor lost; skip collapse
-
-  -- The args content spans rows [args_open_row + 1, args_open_row + line_count].
-  local args_start = args_open_row + 1
-  local args_end = args_start + line_count - 1
-
-  -- Compute how much text fits in ~2 visual rows
-  local win = vim.fn.bufwinid(buf)
-  local width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
-  local keep_chars = width * 2
-
-  -- Build the truncated preview: take characters up to keep_chars, on a single line
-  local flat = full_content:gsub('\n', '\\n')
-  local preview = flat:sub(1, keep_chars)
-  local kept_visual = math.max(1, math.ceil(#preview / width))
-  local hidden_visual = visual_count - kept_visual
-
-  -- Replace all content lines with the single truncated preview line.
-  -- args_close_mark_id (if already set by close_args_fence) sits at the end
-  -- boundary of the replaced range. With its default right_gravity, nvim
-  -- treats it as "after the replace" and shifts it by (1 - line_count),
-  -- keeping it pointed at the closing-fence row after collapse.
-  vim.api.nvim_buf_set_lines(buf, args_start, args_end + 1, false, { preview })
-  vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', args_start, 0, -1)
-
-  local mark_id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, args_start, 0, {
-    virt_lines = { { { '[... press o to expand ' .. hidden_visual .. ' more lines]', 'TCodeTokens' } } },
-  })
-
-  -- Store for expand/collapse toggle
-  tool_call_gen_entries[mark_id] = {
-    content = full_content,
-    expanded = false,
+-- Fresh empty model. `tail` is the element whose content is currently at the
+-- buffer tail (nil when none); `sa_active` is the conversation_id of the
+-- subagent whose output is streaming; `pending_whitespace` holds
+-- whitespace-only assistant text awaiting flush (see the reducer);
+-- `full_input` is set by the tool-call detail view so args are never collapsed.
+local function new_model()
+  return {
+    elements = {},            -- ordered list of elements
+    by_id = {},               -- id -> element
+    tail = nil,               -- element whose content is at the buffer tail
+    sa_active = nil,          -- conversation_id of the streaming subagent
+    pending_whitespace = nil, -- whitespace-only text awaiting flush
+    full_input = false,       -- detail view: never collapse tool args
+    next_id = 0,              -- id mint counter
   }
 end
 
--- Close the args fenced code block for a tool call / subagent gen_state
--- entry. Idempotent: returns early if fence_closed is already true.
---
--- Uses args_open_mark_id to locate the correct row — NOT end of buffer — so
--- the closing fence lands inside this tool call's own region even when other
--- tool calls / content exist below it. After insertion, args_close_mark_id
--- is set so that subsequent ToolMessageStart / SubAgentStart handlers can
--- find the row via extmark.
-local function close_args_fence(buf, tool_call_id)
-  local state = tool_call_gen_state[tool_call_id]
-  if not state or state.fence_closed then return end
+local model = new_model()
 
-  if not ensure_buf_modifiable(buf) then return end
-
-  local args_open_row = get_gen_mark_row(buf, state.args_open_mark_id)
-  local close_row
-  if args_open_row == nil then
-    -- Anchor lost (buffer invalidated or mark deleted). Fall back to append.
-    if state.content_deferred then
-      append_lines(buf, vim.split(table.concat(state.content_parts), '\n', { plain = true }))
-      state.content_deferred = false
-    end
-    append_lines(buf, { TC_FENCE })
-    close_row = vim.api.nvim_buf_line_count(buf) - 1
-  else
-    -- Compute where the closing fence goes: immediately after the streamed
-    -- args content. The content occupies `content_line_count` rows starting
-    -- at args_open_row + 1 (the row just after the opening fence).
-    local full_content = table.concat(state.content_parts)
-    local content_line_count = #vim.split(full_content, '\n', { plain = true })
-    -- Bulk load deferred the per-chunk appends; materialize the full content
-    -- in one insert so the fence math below sees the content rows it expects.
-    if state.content_deferred then
-      insert_lines_at(buf, args_open_row + 1, vim.split(full_content, '\n', { plain = true }))
-      state.content_deferred = false
-    end
-    close_row = args_open_row + 1 + math.max(content_line_count, 1)
-    insert_lines_at(buf, close_row, { TC_FENCE })
-  end
-
-  state.args_close_mark_id = vim.api.nvim_buf_set_extmark(buf, gen_ns, close_row, 0, {})
-
-  -- Collapse has to run AFTER setting args_close_mark_id so that the extmark
-  -- can shift along with the replaced content region.
-  collapse_tool_call_args(buf, tool_call_id)
-  state.fence_closed = true
+-- Mint an id, register the element in by_id, append it to the ordered list.
+-- Callers set model.tail explicitly after each transition.
+local function add_element(model, element)
+  model.next_id = model.next_id + 1
+  element.id = model.next_id
+  table.insert(model.elements, element)
+  model.by_id[element.id] = element
+  return element
 end
 
--- Find a tool call args extmark at the given buffer line (0-indexed)
-local function find_tool_args_at_line(buf, line)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, thinking_ns, { line, 0 }, { line, -1 }, {})
-  for _, mark in ipairs(marks) do
-    if tool_call_gen_entries[mark[1]] then
-      return mark[1]
+-- ============================================================================
+-- REDUCER
+-- ============================================================================
+-- Pure transition functions. apply(model, event, envelope_id) -> diff where
+-- diff = { added = {element,...}, updated_all = {element,...},
+--          updated_content = {{element, text}, ...} }. The diff IS the change
+-- tracking: the reducer just mutated the model, so it tags exactly what it
+-- did. `bulk` is not a reducer concern. No buffer / extmark / vim.* access.
+
+local function new_diff()
+  return { added = {}, updated_all = {}, updated_content = {} }
+end
+
+-- Append an updated_content entry, coalescing consecutive deltas for the same
+-- element into one entry (the renderer appends per entry).
+local function add_updated_content(diff, element, text)
+  local uc = diff.updated_content
+  local last = uc[#uc]
+  if last and last[1] == element then
+    last[2] = last[2] .. text
+  else
+    uc[#uc + 1] = { element, text }
+  end
+end
+
+-- Merge a fragment diff (from a helper) into the main diff.
+local function merge_diff(diff, frag)
+  if not frag then return diff end
+  for _, el in ipairs(frag.added) do
+    diff.added[#diff.added + 1] = el
+  end
+  for _, el in ipairs(frag.updated_all) do
+    diff.updated_all[#diff.updated_all + 1] = el
+  end
+  for _, entry in ipairs(frag.updated_content) do
+    add_updated_content(diff, entry[1], entry[2])
+  end
+  return diff
+end
+
+-- True when the text splits on '\n' into only empty lines (a pure equivalent
+-- of vim.split(text, '\n', {plain = true}) with every line empty): the chunk
+-- is whitespace-only and belongs in pending_whitespace, not in the message.
+local function is_whitespace_only(text)
+  for i = 1, #text do
+    if text:byte(i) ~= 10 then -- any char that is not '\n'
+      return false
+    end
+  end
+  return true
+end
+
+-- Number of lines the text splits into on '\n' (pure equivalent of
+-- #vim.split(text, '\n', {plain = true})).
+local function count_lines(text)
+  if text == '' then return 1 end
+  local n = 1
+  for i = 1, #text do
+    if text:byte(i) == 10 then
+      n = n + 1
+    end
+  end
+  return n
+end
+
+-- Estimated number of wrapped rows the text occupies at a reference width.
+-- A pure proxy for the old width-aware visual check: tool/subagent args
+-- arrive as single-logical-line JSON with escaped newlines, so a plain line
+-- count would never collapse them even when they span many wrapped rows.
+local ARGS_REF_WIDTH = 80
+
+local function visual_lines(text)
+  local total = 0
+  local pos = 1
+  while true do
+    local finish = text:find('\n', pos, true)
+    local line = finish and text:sub(pos, finish - 1) or text:sub(pos)
+    total = total + math.max(1, math.ceil(#line / ARGS_REF_WIDTH))
+    if not finish then break end
+    pos = finish + 1
+  end
+  return total
+end
+
+-- Last element of a given type in the model.
+local function last_element_of_type(model, type_)
+  for i = #model.elements, 1, -1 do
+    local el = model.elements[i]
+    if el.type == type_ then return el end
+  end
+  return nil
+end
+
+-- Lookup helpers. Scans run backwards so the most recently added element wins;
+-- parallel tool calls / subagent sections may share a tool_call_index, hence
+-- the type filter.
+local function find_tool_call_by_id(model, tool_call_id)
+  if not tool_call_id then return nil end
+  local by = model.by_id[tool_call_id]
+  if by and by.type == 'tool_call' then return by end
+  for i = #model.elements, 1, -1 do
+    local el = model.elements[i]
+    if el.type == 'tool_call' and el.tool_call_id == tool_call_id then
+      return el
     end
   end
   return nil
 end
 
--- Toggle tool call args expand/collapse inline
-local function toggle_tool_call_args(buf, mark_id)
-  local entry = tool_call_gen_entries[mark_id]
-  if not entry then return end
-
-  with_modifiable(buf, function()
-    local pos = vim.api.nvim_buf_get_extmark_by_id(buf, thinking_ns, mark_id, {})
-    if not pos or #pos == 0 then return end  -- extmark gone; nothing to toggle
-    local mark_row = pos[1]
-
-    local content_lines = vim.split(entry.content, '\n', { plain = true })
-    local visual_count = count_visual_lines(buf, content_lines)
-
-    local win = vim.fn.bufwinid(buf)
-    local width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
-
-    if entry.expanded then
-      -- Collapse: replace full content lines with a single truncated preview line
-      local first_line_row = mark_row - #content_lines + 1
-      local keep_chars = width * 2
-      local flat = entry.content:gsub('\n', '\\n')
-      local preview = flat:sub(1, keep_chars)
-      local kept_visual = math.max(1, math.ceil(#preview / width))
-      local hidden_visual = visual_count - kept_visual
-
-      vim.api.nvim_buf_set_lines(buf, first_line_row, first_line_row + #content_lines, false, { preview })
-      vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', first_line_row, 0, -1)
-
-      vim.api.nvim_buf_set_extmark(buf, thinking_ns, first_line_row, 0, {
-        id = mark_id,
-        virt_lines = { { { '[... press o to expand ' .. hidden_visual .. ' more lines]', 'TCodeTokens' } } },
-      })
-
-      entry.expanded = false
-    else
-      -- Expand: replace single preview line with all original content lines
-      -- The extmark is on mark_row (the single preview line when collapsed)
-      local first_line_row = mark_row
-      vim.api.nvim_buf_set_lines(buf, first_line_row, first_line_row + 1, false, content_lines)
-
-      -- Highlight all lines
-      for i = 0, #content_lines - 1 do
-        vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', first_line_row + i, 0, -1)
-      end
-
-      -- Update extmark to show collapse hint (on the last line of full content)
-      local last_content_row = first_line_row + #content_lines - 1
-      vim.api.nvim_buf_set_extmark(buf, thinking_ns, last_content_row, 0, {
-        id = mark_id,
-        virt_lines = { { { '[... press o to collapse]', 'TCodeTokens' } } },
-      })
-
-      entry.expanded = true
+local function find_tool_call_by_index(model, tool_call_index)
+  for i = #model.elements, 1, -1 do
+    local el = model.elements[i]
+    if el.type == 'tool_call' and el.tool_call_index == tool_call_index then
+      return el
     end
-  end)
+  end
+  return nil
 end
 
--- Render a single JSONL event into the buffer with extmarks
--- Serde externally-tagged enums: {"VariantName": {fields...}}
--- `bulk` is true during the initial load of an existing session: per-chunk
--- buffer writes for content that is immediately collapsed are skipped (the
--- collapse point materializes it), and per-chunk highlight passes are
--- deferred to the collapse. Live streaming always passes false.
-local function render_event(buf, ns, event, envelope_id, bulk)
+local function find_subagent_input_by_index(model, tool_call_index)
+  for i = #model.elements, 1, -1 do
+    local el = model.elements[i]
+    -- A pending subagent has conversation_id == nil until SubAgentStart /
+    -- SubAgentContinue (exactly like find_pending_subagent). The settle flush
+    -- closes the input fence mid-stream, so input_open alone would drop all
+    -- later chunks: match pending subagents whose fence was already closed.
+    if el.type == 'subagent' and el.tool_call_index == tool_call_index
+      and (el.input_open or el.conversation_id == nil) then
+      return el
+    end
+  end
+  return nil
+end
+
+-- A subagent awaiting SubAgentStart/SubAgentContinue has no conversation_id
+-- yet. AssistantMessageEnd may already have closed its input fence, so the
+-- pending test is conversation_id == nil, not input_open.
+local function find_pending_subagent(model, tool_call_id)
+  if not tool_call_id then return nil end
+  for i = #model.elements, 1, -1 do
+    local el = model.elements[i]
+    if el.type == 'subagent' and el.tool_call_id == tool_call_id and el.conversation_id == nil then
+      return el
+    end
+  end
+  return nil
+end
+
+local function find_subagent_by_conversation(model, conversation_id)
+  if not conversation_id then return nil end
+  for i = #model.elements, 1, -1 do
+    local el = model.elements[i]
+    if el.type == 'subagent' and el.conversation_id == conversation_id then
+      return el
+    end
+  end
+  return nil
+end
+
+-- Flush held whitespace onto the (last) assistant message. When no assistant
+-- message exists the whitespace has nowhere to land: discard it rather than
+-- materialize a phantom '► ASSISTANT' block (a stray whitespace-only chunk
+-- flushed at UserMessage / AssistantRequestEnd must not render). Returns a
+-- diff fragment.
+local function flush_pending_whitespace(model)
+  local pending = model.pending_whitespace
+  if not pending then return new_diff() end
+  model.pending_whitespace = nil
+  local am = last_element_of_type(model, 'assistant_message')
+  local frag = new_diff()
+  if not am then
+    return frag -- discard: no assistant message to append to
+  end
+  am.content = am.content .. pending
+  add_updated_content(frag, am, pending)
+  return frag
+end
+
+-- Collapse the open thinking block (structurally always the tail) to
+-- 'collapsed'. Returns a full diff, empty when nothing was open.
+local function collapse_open_thinking(model)
+  local diff = new_diff()
+  local tail = model.tail
+  if tail and tail.type == 'thinking_block' and tail.state == 'open' then
+    tail.state = 'collapsed'
+    diff.updated_all[#diff.updated_all + 1] = tail
+  end
+  return diff
+end
+
+-- Settle-flush operation: close every open element (open thinking block, open
+-- args/input fences), producing updated_all per element. Long args/input are
+-- collapsed to a preview at the same time (matches the old flush behavior).
+local function close_open_elements(model)
+  local diff = merge_diff(new_diff(), collapse_open_thinking(model))
+  for _, el in ipairs(model.elements) do
+    if el.type == 'tool_call' and el.args_open then
+      el.args_open = false
+      if visual_lines(el.args) > 2 and not el.full_input then
+        el.args_collapsed = true
+      end
+      diff.updated_all[#diff.updated_all + 1] = el
+    elseif el.type == 'subagent' and el.input_open then
+      el.input_open = false
+      if visual_lines(el.input) > 2 then
+        el.input_collapsed = true
+      end
+      diff.updated_all[#diff.updated_all + 1] = el
+    end
+  end
+  return diff
+end
+
+-- `o` toggle on a thinking block: collapsed <-> expanded.
+local function toggle_thinking_element(model, element)
+  local diff = new_diff()
+  if element and element.type == 'thinking_block'
+    and (element.state == 'collapsed' or element.state == 'expanded') then
+    element.state = element.state == 'collapsed' and 'expanded' or 'collapsed'
+    diff.updated_all[#diff.updated_all + 1] = element
+  end
+  return diff
+end
+
+-- `o` toggle on a tool call (args preview) or a subagent (input preview):
+-- flip the preview flag.
+local function toggle_tool_call_args_element(model, element)
+  local diff = new_diff()
+  if element and element.type == 'tool_call' then
+    element.args_collapsed = not element.args_collapsed
+    diff.updated_all[#diff.updated_all + 1] = element
+  elseif element and element.type == 'subagent' then
+    element.input_collapsed = not element.input_collapsed
+    diff.updated_all[#diff.updated_all + 1] = element
+  end
+  return diff
+end
+
+-- `o` toggle on a tool/subagent OUTPUT preview: flip the flag.
+local function toggle_tool_output_element(model, element)
+  local diff = new_diff()
+  if element and (element.type == 'tool_call' or element.type == 'subagent') then
+    element.output_collapsed = not element.output_collapsed
+    diff.updated_all[#diff.updated_all + 1] = element
+  end
+  return diff
+end
+
+-- Apply one display event (an unwrapped msg table) to the model and return the
+-- diff. Events arrive in wire order; the model appends in event order.
+local function apply(model, event, envelope_id)
+  local diff = new_diff()
+  if not event then return diff end
   local variant, data = next(event)
-  if not variant then return end
+  if not variant then return diff end
+  data = data or {}
 
   if variant == 'UserMessage' then
-    -- Close any open thinking first (content is appended below). Reachable
-    -- with thinking open when a crashed session resumes: a new user turn can
-    -- be appended before the settle flush collapses the unterminated block.
-    collapse_thinking(buf, ns)
-    local label_row = render_label(buf, ns, '► USER', '>>> USER', 'TCodeUser', data)
-    local content_lines = vim.split(data.content, '\n', { plain = true })
-    append_lines(buf, content_lines)
-    -- Range extmark covering the label row through the end of the content so
-    -- `gb` can map a cursor line back to this user message's envelope id.
-    -- end_row is exclusive.
-    local end_row = label_row + 1 + #content_lines
-    local mark_id = vim.api.nvim_buf_set_extmark(buf, um_ns, label_row, 0, {
-      end_row = end_row, end_col = 0,
+    merge_diff(diff, flush_pending_whitespace(model))
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = add_element(model, {
+      type = 'user_message',
+      msg_id = envelope_id or data.msg_id,
+      content = data.content,
+      media_filenames = data.media_filenames,
+      created_at = data.created_at,
     })
-    um_extmark_ids[mark_id] = envelope_id or data.msg_id
+    diff.added[#diff.added + 1] = el
+    model.tail = el
 
   elseif variant == 'AssistantMessageStart' then
-    -- Close any open thinking first (content is appended below); see the
-    -- UserMessage handler for the crash/resume flow that reaches this.
-    collapse_thinking(buf, ns)
-    render_label(buf, ns, '► ASSISTANT', '>>> ASSISTANT', 'TCodeAssistant', data)
-    append_lines(buf, { '' })
+    merge_diff(diff, flush_pending_whitespace(model))
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = add_element(model, {
+      type = 'assistant_message',
+      content = '',
+      created_at = data.created_at,
+    })
+    diff.added[#diff.added + 1] = el
+    model.tail = el
 
   elseif variant == 'AssistantThinkingChunk' then
-    if not thinking_state.is_thinking then
-      -- Merge into the previous collapsed entry of this turn when nothing
-      -- visible was written between them (settle-flush pauses splitting one
-      -- reasoning stream / back-to-back thinking blocks); otherwise start a
-      -- fresh run.
-      if not try_merge_thinking(buf, bulk) then
-        thinking_state.start_row = vim.api.nvim_buf_line_count(buf) - 1  -- 0-indexed row where append_text writes
-        thinking_state.content_parts = {}
-        thinking_state.last_highlighted_row = thinking_state.start_row - 1
-        thinking_state.written = not bulk
-      end
-      thinking_state.is_thinking = true
-    elseif not bulk and not thinking_state.written then
-      -- The block started during the initial bulk load (per-chunk writes were
-      -- deferred, so nothing is in the buffer yet) and is now streaming live.
-      -- The buffer end is still the block's anchor line (no handler appends
-      -- below an open thinking block), so from here on the content IS written
-      -- and the collapse range must account for the rows being added.
-      thinking_state.written = true
-    end
-    table.insert(thinking_state.content_parts, data.content)
-    if not bulk then
-      append_text(buf, data.content)
-      -- Only highlight newly added lines (avoid O(n²) re-highlighting)
-      local end_line = vim.api.nvim_buf_line_count(buf) - 1
-      local from = thinking_state.last_highlighted_row + 1
-      for i = from, end_line do
-        vim.api.nvim_buf_add_highlight(buf, thinking_ns, 'TCodeThinking', i, 0, -1)
-      end
-      thinking_state.last_highlighted_row = end_line
+    local chunk = data.content or ''
+    if chunk == '' then return diff end -- never reopen/erase on an empty chunk
+    local tail = model.tail
+    if tail and tail.type == 'thinking_block' and tail.state == 'open' then
+      -- Streaming into the open block.
+      tail.content = tail.content .. chunk
+      add_updated_content(diff, tail, chunk)
+    elseif tail and tail.type == 'thinking_block' and tail.state == 'collapsed' then
+      -- Merge: reopen the collapsed block in place. Held whitespace is
+      -- discarded (today's merge swallows it). No element is ever removed.
+      tail.state = 'open'
+      tail.content = tail.content .. chunk
+      model.pending_whitespace = nil
+      diff.updated_all[#diff.updated_all + 1] = tail
+    else
+      -- New run: collapse any open thinking first, then open a fresh block.
+      merge_diff(diff, collapse_open_thinking(model))
+      local el = add_element(model, {
+        type = 'thinking_block',
+        content = chunk,
+        state = 'open',
+      })
+      diff.added[#diff.added + 1] = el
+      model.tail = el
     end
 
   elseif variant == 'AssistantMessageChunk' then
-    if thinking_state.is_thinking then
-      collapse_thinking(buf, ns)
+    local chunk = data.content or ''
+    merge_diff(diff, collapse_open_thinking(model))
+    if chunk == '' then return diff end
+    if model.sa_active then
+      -- Subagent output streams through AssistantMessageChunk after
+      -- SubAgentStart: append to the active subagent's output, not the
+      -- assistant message.
+      local sa = find_subagent_by_conversation(model, model.sa_active)
+      if sa then
+        sa.output = sa.output .. chunk
+        add_updated_content(diff, sa, chunk)
+        return diff -- tail unchanged
+      end
     end
-    append_text(buf, data.content)
-    -- Extend the active subagent's sa_ns range extmark as content streams
-    if sa_active_conv then
-      extend_sa_extmark(buf, sa_active_conv, vim.api.nvim_buf_line_count(buf))
+    if is_whitespace_only(chunk) then
+      -- Hold whitespace-only text: it must not move the tail away from a
+      -- collapsed thinking block (the merge guard).
+      model.pending_whitespace = (model.pending_whitespace or '') .. chunk
+      return diff -- no diff entries for the chunk itself
     end
+    merge_diff(diff, flush_pending_whitespace(model))
+    local am = last_element_of_type(model, 'assistant_message')
+    if not am then
+      -- Defensive: AssistantMessageStart normally precedes, but a bare text
+      -- chunk must still land somewhere.
+      am = add_element(model, { type = 'assistant_message', content = '' })
+      diff.added[#diff.added + 1] = am
+    end
+    am.content = am.content .. chunk
+    add_updated_content(diff, am, chunk)
+    model.tail = am
 
   elseif variant == 'AssistantMessageEnd' then
-    -- Close the args fence on any still-generating tool calls. Uses per-entry
-    -- extmark anchors so parallel tool calls each get their fence inserted at
-    -- the right mid-buffer position (not stacked at end of buffer). State is
-    -- kept around so the following ToolMessageStart / SubAgentStart can still
-    -- find args_close_mark_id and the label extmark.
-    for tool_call_id, _ in pairs(tool_call_gen_state) do
-      close_args_fence(buf, tool_call_id)
+    merge_diff(diff, flush_pending_whitespace(model))
+    -- Close every still-open args/input fence first, then collapse any open
+    -- thinking (today's order).
+    for _, el in ipairs(model.elements) do
+      if el.type == 'tool_call' and el.args_open then
+        el.args_open = false
+        diff.updated_all[#diff.updated_all + 1] = el
+      elseif el.type == 'subagent' and el.input_open then
+        el.input_open = false
+        diff.updated_all[#diff.updated_all + 1] = el
+      end
     end
-    -- Do NOT clear tool_call_gen_state here — ToolMessageStart still needs it.
-    -- It will be cleaned up per-entry inside the ToolMessageStart handler.
-    if thinking_state.is_thinking then
-      collapse_thinking(buf, ns)
-    end
-    render_info(buf, ns, data, nil)
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = add_element(model, {
+      type = 'end_info',
+      token_prefix = nil,
+      tokens = {
+        input_tokens = data.input_tokens,
+        output_tokens = data.output_tokens,
+        cache_creation_input_tokens = data.cache_creation_input_tokens,
+        cache_read_input_tokens = data.cache_read_input_tokens,
+      },
+      end_status = data.end_status,
+      error = data.error,
+    })
+    diff.added[#diff.added + 1] = el
+    model.tail = el
 
   elseif variant == 'AssistantToolCallStart' then
-    -- Close any open thinking first
-    collapse_thinking(buf, ns)
-
-    local tool_name = data.tool_name or ''
-    local tool_call_id = data.tool_call_id or ''
-    local tool_call_index = data.tool_call_index or 0
-
-    -- Render the tool label line
-    local _, label_extmark = render_label(buf, ns, '► TOOL', '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
-
-    -- Store label info for status updates
-    tc_tool_names[tool_call_id] = tool_name
-    tc_label_marks[tool_call_id] = {
-      extmark_id = label_extmark, ns = ns,
-      tool_name = tool_name, created_at = data.created_at,
-    }
-
-    -- Show [generating] status with cancel hint
-    update_tc_label(buf, tool_call_id, 'generating', 'TCodeTool', true)
-
-    -- Open args fenced code block. Anchor an extmark to the OPENING fence row
-    -- so we can locate the args region later even after other tool calls /
-    -- collapses shift things around. Default right_gravity=true so that if
-    -- another tool call's closing fence is inserted at this exact row from
-    -- above (sibling close colliding with our open), the mark rides with the
-    -- original fence character down to its new row instead of being left
-    -- behind pointing at the sibling's close fence.
-    append_lines(buf, { TC_FENCE, '' })
-    local open_fence_row = vim.api.nvim_buf_line_count(buf) - 2
-    local args_open_mark_id = vim.api.nvim_buf_set_extmark(buf, gen_ns, open_fence_row, 0, {})
-
-    -- Store generation state (row positions resolved via extmarks, not stored)
-    tool_call_gen_state[tool_call_id] = {
-      args_open_mark_id = args_open_mark_id,
-      args_close_mark_id = nil,
-      content_parts = {},
-      last_highlighted_row = nil,
-      fence_closed = false,
-    }
-    tool_call_index_map[tool_call_index] = tool_call_id
+    merge_diff(diff, flush_pending_whitespace(model))
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = add_element(model, {
+      type = 'tool_call',
+      tool_call_id = data.tool_call_id,
+      tool_name = data.tool_name or '',
+      tool_call_index = data.tool_call_index or 0,
+      created_at = data.created_at,
+      args = '',
+      args_open = true,
+      args_collapsed = false,
+      output_started = false,
+      output_open = false,
+      output = '',
+      output_collapsed = false,
+      status = 'generating',
+      full_input = model.full_input,
+      error = nil,
+    })
+    diff.added[#diff.added + 1] = el
+    model.tail = el
 
   elseif variant == 'AssistantToolCallArgChunk' then
-    -- Close any open thinking first (content is appended below); defensive —
-    -- AssistantToolCallStart normally collapses before this can be reached.
-    collapse_thinking(buf, ns)
-    local tool_call_index = data.tool_call_index or 0
-    local tool_call_id = tool_call_index_map[tool_call_index]
-    if tool_call_id and tool_call_gen_state[tool_call_id] then
-      local state = tool_call_gen_state[tool_call_id]
+    -- Defensive collapse matches today's handler.
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = find_tool_call_by_index(model, data.tool_call_index or 0)
+    if el then
       local content = tostring(data.content)
-
-      -- Bulk load: accumulate content without per-chunk buffer writes;
-      -- close_args_fence materializes it in one insert.
-      if bulk then
-        state.content_deferred = true
-        table.insert(state.content_parts, content)
-        return
-      end
-
-      -- Append text to buffer (streams into the open fence block)
-      append_text(buf, content)
-      table.insert(state.content_parts, content)
-
-      -- Highlight new lines with TCodeToolArgs (same pattern as thinking chunks).
-      -- Resolve the current args start row via extmark so that preceding
-      -- edits (other tool calls above) don't invalidate the highlight range.
-      local current_last_row = vim.api.nvim_buf_line_count(buf) - 1
-      local args_open_row = get_gen_mark_row(buf, state.args_open_mark_id)
-      local args_start_row = args_open_row and (args_open_row + 1) or current_last_row
-      local start_hl = state.last_highlighted_row and (state.last_highlighted_row + 1) or args_start_row
-      for row = start_hl, current_last_row do
-        vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', row, 0, -1)
-      end
-      state.last_highlighted_row = current_last_row
+      el.args = el.args .. content
+      add_updated_content(diff, el, content)
     end
+    -- missing mapping -> drop silently
 
   elseif variant == 'ToolMessageStart' then
-    -- Close any open thinking first (content is appended below)
-    collapse_thinking(buf, ns)
-    local tool_name = data.tool_name or ''
-    local tool_call_id = data.tool_call_id or ''
-
-    -- Check if we already have a generating state for this tool call
-    local gen_state = tool_call_gen_state[tool_call_id]
-
-    if gen_state then
-      -- We were streaming args — close the args fence (idempotent — already
-      -- handled by AssistantMessageEnd in most cases) and transition to
-      -- [running].
-      close_args_fence(buf, tool_call_id)
-
-      -- Update label from [generating] to [running]
-      update_tc_label(buf, tool_call_id, 'running', 'TCodeTool', true)
-
-      -- Insert the tool-output opening fence + an empty output content row
-      -- immediately after the closing args fence. NOT at end of buffer: with
-      -- parallel tool calls this tool's region may be mid-buffer.
-      local args_close_row = get_gen_mark_row(buf, gen_state.args_close_mark_id)
-      local output_fence_row
-      if args_close_row then
-        output_fence_row = args_close_row + 1
-        insert_lines_at(buf, output_fence_row, { TC_FENCE, '' })
-      else
-        -- Anchor lost — fall back to append at end of buffer.
-        append_lines(buf, { TC_FENCE, '' })
-        output_fence_row = vim.api.nvim_buf_line_count(buf) - 2
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = find_tool_call_by_id(model, data.tool_call_id)
+    if el then
+      -- Close the args fence, collapse long args to a preview, open output.
+      el.args_open = false
+      if visual_lines(el.args) > 2 and not el.full_input then
+        el.args_collapsed = true
       end
-      tc_fence_opened[tool_call_id] = true
-
-      -- Resolve the label row via tc_label_marks extmark — the label may
-      -- have shifted down since it was first rendered if other tool calls
-      -- were inserted below, or since close_args_fence added a line.
-      local label_info = tc_label_marks[tool_call_id]
-      local label_row
-      if label_info then
-        local pos = vim.api.nvim_buf_get_extmark_by_id(buf, label_info.ns, label_info.extmark_id, {})
-        label_row = pos and pos[1]
-      end
-      if not label_row then
-        label_row = output_fence_row  -- degraded fallback
-      end
-
-      -- Navigation extmark: from the label row through the (empty) output
-      -- content row so that ToolOutputChunk's extmark-based append finds
-      -- the correct insert row. end_row is exclusive (first row after the
-      -- covered range), so nav_end_row is one past the empty content row.
-      local nav_end_row = output_fence_row + 2
-      local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, label_row, 0, {
-        end_row = nav_end_row, end_col = 0,
-      })
-      tc_extmark_ids[mark_id] = tool_call_id
-
-      -- Clean up gen state
-      tool_call_gen_state[tool_call_id] = nil
+      el.output_started = true
+      el.status = 'running'
+      el.output_open = true
+      diff.updated_all[#diff.updated_all + 1] = el
+      model.tail = el
     else
-      -- Fallback: no streaming args (provider doesn't support it or missed events)
-      -- Keep the original behavior
-      local label_line, label_extmark = render_label(buf, ns, '► TOOL', '>>> TOOL: ' .. tool_name, 'TCodeTool', data)
-      if data.tool_call_id then
-        tc_tool_names[data.tool_call_id] = tool_name
-        tc_label_marks[data.tool_call_id] = {
-          extmark_id = label_extmark, ns = ns,
-          tool_name = tool_name, created_at = data.created_at,
-        }
-        update_tc_label(buf, data.tool_call_id, 'running', 'TCodeTool', true)
-      end
+      -- Resumed-session fallback: no streamed args were seen. Render label +
+      -- args fence (from tool_args when present) + open output fence.
+      merge_diff(diff, flush_pending_whitespace(model))
+      local new_el = add_element(model, {
+        type = 'tool_call',
+        tool_call_id = data.tool_call_id,
+        tool_name = data.tool_name or '',
+        tool_call_index = nil,
+        created_at = data.created_at,
+        args = '',
+        args_open = false,
+        args_collapsed = false,
+        output_started = true,
+        output_open = true,
+        output = '',
+        output_collapsed = false,
+        status = 'running',
+        full_input = model.full_input,
+        error = nil,
+      })
       if data.tool_args and data.tool_args ~= '' and data.tool_args ~= '{}' then
-        -- Render tool input as real text lines (not virtual text) so the full
-        -- content is visible and scrollable, wrapped in a fenced code block.
-        local args_lines = vim.split(data.tool_args, '\n', { plain = true })
-        append_lines(buf, { TC_FENCE })
-        append_lines(buf, args_lines)
-        -- Highlight the args lines with TCodeToolArgs
-        local args_end = vim.api.nvim_buf_line_count(buf) - 1
-        local args_start = args_end - #args_lines + 1
-        for row = args_start, args_end do
-          vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', row, 0, -1)
-        end
-        append_lines(buf, { TC_FENCE })
+        new_el.args = data.tool_args
       end
-      -- Wrap tool output in a fenced code block to prevent markdown parser from
-      -- interpreting partial HTML/XML, JSON, etc. as markdown syntax.
-      append_lines(buf, { TC_FENCE, '' })
-      -- Place a range extmark covering label through current last line
-      if data.tool_call_id then
-        tc_fence_opened[data.tool_call_id] = true
-        local last_line = vim.api.nvim_buf_line_count(buf) - 1
-        local mark_id = vim.api.nvim_buf_set_extmark(buf, tc_ns, label_line, 0, {
-          end_row = last_line + 1,
-          end_col = 0,
-        })
-        tc_extmark_ids[mark_id] = data.tool_call_id
-      end
+      diff.added[#diff.added + 1] = new_el
+      model.tail = new_el
     end
 
   elseif variant == 'ToolOutputChunk' then
-    -- Close any open thinking first (content is appended below)
-    collapse_thinking(buf, ns)
-    if data.tool_call_id then
-      local end_row = get_tc_extmark_end_row(buf, data.tool_call_id)
-      if end_row then
-        local lines_before = vim.api.nvim_buf_line_count(buf)
-        insert_text_at(buf, end_row - 1, data.content)
-        local lines_added = vim.api.nvim_buf_line_count(buf) - lines_before
-        extend_tc_extmark(buf, data.tool_call_id, end_row + lines_added)
-      else
-        append_text(buf, data.content)
-      end
+    local el = find_tool_call_by_id(model, data.tool_call_id)
+    if el then
+      local content = tostring(data.content)
+      el.output = el.output .. content
+      add_updated_content(diff, el, content)
     else
-      append_text(buf, data.content)
+      -- Fallback: today appends at the buffer tail, which in the model is the
+      -- assistant message when it is the tail; otherwise drop.
+      local tail = model.tail
+      if tail and tail.type == 'assistant_message' then
+        local content = tostring(data.content)
+        tail.content = tail.content .. content
+        add_updated_content(diff, tail, content)
+      end
     end
 
   elseif variant == 'ToolMessageEnd' then
-    -- Close any open thinking first (content is appended below)
-    collapse_thinking(buf, ns)
-    local insert_row = nil
-    if data.tool_call_id then
-      -- Close the fenced code block for tool output
-      if tc_fence_opened[data.tool_call_id] then
-        local end_row = get_tc_extmark_end_row(buf, data.tool_call_id)
-        if end_row then
-          insert_lines_at(buf, end_row, { TC_FENCE })
-          extend_tc_extmark(buf, data.tool_call_id, end_row + 1)
-        end
-        tc_fence_opened[data.tool_call_id] = nil
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = find_tool_call_by_id(model, data.tool_call_id)
+    if el then
+      el.output_open = false
+      local status_map = {
+        Succeeded = 'done', Failed = 'failed', Cancelled = 'cancelled',
+        Timeout = 'failed', UserDenied = 'denied',
+      }
+      el.status = status_map[data.end_status] or 'done'
+      -- Long results auto-collapse to a preview (the detail view keeps them
+      -- expanded via full_input).
+      if visual_lines(el.output) > 2 and not el.full_input then
+        el.output_collapsed = true
       end
-      -- Find the row *after* the closing fence to insert info outside the code block
-      local end_row = get_tc_extmark_end_row(buf, data.tool_call_id)
-      if end_row then
-        insert_row = end_row
-      end
-      -- Update label with final status
-      if tc_label_marks[data.tool_call_id] then
-        local status_map = {
-          Succeeded = { text = 'done', hl = 'TCodeSuccess' },
-          Failed    = { text = 'failed', hl = 'TCodeError' },
-          Cancelled = { text = 'cancelled', hl = 'TCodeError' },
-          Timeout   = { text = 'failed', hl = 'TCodeError' },
-          UserDenied = { text = 'denied', hl = 'TCodeError' },
-        }
-        local s = status_map[data.end_status] or { text = 'done', hl = 'TCodeSuccess' }
-        update_tc_label(buf, data.tool_call_id, s.text, s.hl, false)
-        tc_label_marks[data.tool_call_id] = nil
-      end
+      diff.updated_all[#diff.updated_all + 1] = el
+      local info = add_element(model, {
+        type = 'end_info',
+        token_prefix = 'TOOL',
+        tokens = {
+          input_tokens = data.input_tokens,
+          output_tokens = data.output_tokens,
+          cache_creation_input_tokens = nil,
+          cache_read_input_tokens = nil,
+        },
+        end_status = data.end_status,
+        error = data.error,
+      })
+      diff.added[#diff.added + 1] = info
+      model.tail = info
     end
-    local lines_before = vim.api.nvim_buf_line_count(buf)
-    render_info(buf, ns, data, 'TOOL', insert_row)
-    if data.tool_call_id and insert_row then
-      local lines_added = vim.api.nvim_buf_line_count(buf) - lines_before
-      extend_tc_extmark(buf, data.tool_call_id, insert_row + lines_added)
-    end
+    -- element not found -> no-op
 
   elseif variant == 'ToolRequestPermission' then
-    if data.tool_call_id then
-      update_tc_label(buf, data.tool_call_id, 'permission', 'TCodePermission', false)
+    local el = find_tool_call_by_id(model, data.tool_call_id)
+    if el then
+      el.status = 'permission'
+      diff.updated_all[#diff.updated_all + 1] = el
     end
 
   elseif variant == 'ToolPermissionApproved' then
-    if data.tool_call_id then
-      update_tc_label(buf, data.tool_call_id, 'running', 'TCodeTool', true)
+    local el = find_tool_call_by_id(model, data.tool_call_id)
+    if el then
+      el.status = 'running'
+      diff.updated_all[#diff.updated_all + 1] = el
     end
 
   elseif variant == 'SystemMessage' then
-    -- Close any open thinking first (content is appended below)
-    collapse_thinking(buf, ns)
-    -- Display system message with appropriate styling based on level
-    local level = data.level or 'Info'
-    local prefix = '[' .. level:upper() .. '] '
-    local hl_group = 'TCodeSystemInfo'
-    local notify_level = vim.log.levels.INFO
-    if level == 'Warning' then
-      hl_group = 'TCodeSystemWarning'
-      notify_level = vim.log.levels.WARN
-    elseif level == 'Error' then
-      hl_group = 'TCodeSystemError'
-      notify_level = vim.log.levels.ERROR
-    end
-    -- Show as nvim notification (ephemeral)
-    vim.notify(data.message or '', notify_level, { title = 'TCode' })
-    -- Also show in main display (persistent)
-    append_lines(buf, { '► SYSTEM' })
-    local sep_line = vim.api.nvim_buf_line_count(buf) - 1
-    vim.api.nvim_buf_set_extmark(buf, ns, sep_line, 0, {
-      virt_text = { { prefix, hl_group } },
-      virt_text_pos = 'overlay',
+    merge_diff(diff, flush_pending_whitespace(model))
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = add_element(model, {
+      type = 'system_message',
+      level = data.level or 'Info',
+      message = data.message,
     })
-    local msg_lines = vim.split(data.message or '', '\n', { plain = true })
-    append_lines(buf, msg_lines)
-    local start_row = vim.api.nvim_buf_line_count(buf) - #msg_lines
-    for i = 0, #msg_lines - 1 do
-      vim.api.nvim_buf_add_highlight(buf, ns, hl_group, start_row + i, 0, -1)
-    end
+    diff.added[#diff.added + 1] = el
+    model.tail = el
 
   elseif variant == 'SubAgentInputStart' then
-    -- Close any open thinking first
-    collapse_thinking(buf, ns)
-
-    local tool_name = data.tool_name or ''
-    local tool_call_id = data.tool_call_id or ''
-    local tool_call_index = data.tool_call_index or 0
-
-    -- Render the subagent label line (same style as SubAgentStart but with [generating])
-    local _, label_extmark = render_label(buf, ns, '► SUBAGENT', '>>> SUB-AGENT: [generating]', 'TCodeTool', data)
-
-    -- Store in a pending map keyed by tool_call_id
-    sa_input_marks[tool_call_id] = {
-      extmark_id = label_extmark, ns = ns,
-      tool_name = tool_name,
-    }
-
-    -- Open args fenced code block and anchor an extmark to the opening fence
-    -- row (same pattern as AssistantToolCallStart — default right_gravity so
-    -- the mark rides with the fence character on sibling mid-row inserts).
-    append_lines(buf, { TC_FENCE, '' })
-    local open_fence_row = vim.api.nvim_buf_line_count(buf) - 2
-    local args_open_mark_id = vim.api.nvim_buf_set_extmark(buf, gen_ns, open_fence_row, 0, {})
-
-    -- Store generation state (reuse tool_call_gen_state keyed by tool_call_id)
-    tool_call_gen_state[tool_call_id] = {
-      args_open_mark_id = args_open_mark_id,
-      args_close_mark_id = nil,
-      content_parts = {},
-      last_highlighted_row = nil,
-      fence_closed = false,
-    }
-    tool_call_index_map[tool_call_index] = tool_call_id
+    merge_diff(diff, flush_pending_whitespace(model))
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = add_element(model, {
+      type = 'subagent',
+      tool_call_id = data.tool_call_id,
+      tool_call_index = data.tool_call_index or 0,
+      conversation_id = nil,
+      created_at = data.created_at,
+      description = '',
+      input = '',
+      input_open = true,
+      input_collapsed = false,
+      output = '',
+      output_collapsed = false,
+      status = 'generating',
+      is_continue = false,
+      error = nil,
+    })
+    diff.added[#diff.added + 1] = el
+    model.tail = el
 
   elseif variant == 'SubAgentInputChunk' then
-    -- Close any open thinking first (content is appended below); defensive —
-    -- SubAgentInputStart normally collapses before this can be reached.
-    collapse_thinking(buf, ns)
-    -- Same logic as AssistantToolCallArgChunk
-    local tool_call_index = data.tool_call_index or 0
-    local tool_call_id = tool_call_index_map[tool_call_index]
-    if tool_call_id and tool_call_gen_state[tool_call_id] then
-      local state = tool_call_gen_state[tool_call_id]
+    -- Defensive collapse matches today's handler.
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = find_subagent_input_by_index(model, data.tool_call_index or 0)
+    if el then
       local content = tostring(data.content)
-
-      -- Bulk load: accumulate content without per-chunk buffer writes;
-      -- close_args_fence materializes it in one insert.
-      if bulk then
-        state.content_deferred = true
-        table.insert(state.content_parts, content)
-        return
-      end
-
-      append_text(buf, content)
-      table.insert(state.content_parts, content)
-      -- Highlight with TCodeToolArgs. Resolve the current args start row via
-      -- extmark so it's correct even if preceding edits shifted rows.
-      local current_last_row = vim.api.nvim_buf_line_count(buf) - 1
-      local args_open_row = get_gen_mark_row(buf, state.args_open_mark_id)
-      local args_start_row = args_open_row and (args_open_row + 1) or current_last_row
-      local start_hl = state.last_highlighted_row and (state.last_highlighted_row + 1) or args_start_row
-      for row = start_hl, current_last_row do
-        vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeToolArgs', row, 0, -1)
-      end
-      state.last_highlighted_row = current_last_row
+      el.input = el.input .. content
+      add_updated_content(diff, el, content)
     end
+    -- missing -> drop silently
 
   elseif variant == 'SubAgentStart' then
-    -- Close any open thinking first (content is appended below)
-    collapse_thinking(buf, ns)
-    local description = data.description or ''
-    local tool_call_id = data.tool_call_id
-    local conv_id = data.conversation_id
-
-    -- Check if we have a pending input label from SubAgentInputStart
-    local pending = tool_call_id and sa_input_marks[tool_call_id]
-    if pending then
-      -- Close the args fence from SubAgentInputStart if still open. This is
-      -- idempotent — AssistantMessageEnd may have already closed it. Uses
-      -- extmark anchors so the closing fence lands mid-buffer at the right
-      -- row even with other parallel tool calls below.
-      local gen_state = tool_call_id and tool_call_gen_state[tool_call_id]
-      if gen_state then
-        close_args_fence(buf, tool_call_id)
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = find_pending_subagent(model, data.tool_call_id)
+    if el then
+      el.input_open = false
+      if visual_lines(el.input) > 2 then
+        el.input_collapsed = true
       end
-
-      -- Update existing label from [generating] to [running] description.
-      -- Resolve the label row via the pending extmark (shifts with edits).
-      local virt = {
-        { '>>> SUB-AGENT: ', 'TCodeTool' },
-        { '[running]', 'TCodeTool' },
-        { ' ' .. description, 'TCodeTool' },
-      }
-      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, pending.ns, pending.extmark_id, {})
-      local label_row = mark_pos and mark_pos[1]
-      if label_row then
-        vim.api.nvim_buf_set_extmark(buf, pending.ns, label_row, mark_pos[2], {
-          id = pending.extmark_id,
-          virt_text = virt,
-          virt_text_pos = 'overlay',
-        })
-      end
-
-      -- Transfer to sa_label_marks for future updates (SubAgentTurnEnd, SubAgentEnd, etc.)
-      if conv_id then
-        if not sa_label_marks[conv_id] then
-          sa_label_marks[conv_id] = {}
-        end
-        table.insert(sa_label_marks[conv_id], {
-          extmark_id = pending.extmark_id,
-          ns = pending.ns,
-          description = description,
-          is_continue = false,
-        })
-      end
-      sa_input_marks[tool_call_id] = nil
-
-      -- Insert a blank line for subagent output content. Subagent content
-      -- is NOT wrapped in an output fence (only the input args are fenced),
-      -- so we just insert a single empty row immediately after the closing
-      -- args fence.
-      local args_close_row = gen_state and get_gen_mark_row(buf, gen_state.args_close_mark_id)
-      local blank_row
-      if args_close_row then
-        blank_row = args_close_row + 1
-        insert_lines_at(buf, blank_row, { '' })
-      else
-        append_lines(buf, { '' })
-        blank_row = vim.api.nvim_buf_line_count(buf) - 1
-      end
-
-      -- Clean up gen state (args_close_mark_id no longer needed).
-      if tool_call_id then tool_call_gen_state[tool_call_id] = nil end
-
-      -- Set up the sa_ns range extmark spanning label through the new blank row.
-      if conv_id and label_row then
-        local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_row, 0, {
-          end_row = blank_row + 1, end_col = 0,
-        })
-        sa_extmark_ids[mark_id] = conv_id
-        sa_active_conv = conv_id
-      end
+      el.status = 'running'
+      el.description = data.description or ''
+      el.conversation_id = data.conversation_id
+      diff.updated_all[#diff.updated_all + 1] = el
+      model.tail = el
     else
-      -- No pending input (e.g., resumed session) — create label from scratch (existing logic)
-      local label_line, label_extmark = render_label(buf, ns, '► SUBAGENT', '>>> SUB-AGENT: [running] ' .. description, 'TCodeTool', data)
-      append_lines(buf, { '' })
-      if conv_id then
-        if not sa_label_marks[conv_id] then
-          sa_label_marks[conv_id] = {}
-        end
-        table.insert(sa_label_marks[conv_id], {
-          extmark_id = label_extmark,
-          ns = ns,
-          description = description,
-          is_continue = false,
-        })
-        local last_line = vim.api.nvim_buf_line_count(buf) - 1
-        local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_line, 0, {
-          end_row = last_line + 1, end_col = 0,
-        })
-        sa_extmark_ids[mark_id] = conv_id
-        sa_active_conv = conv_id
+      -- Resumed session: no pending input element was streamed.
+      merge_diff(diff, flush_pending_whitespace(model))
+      local new_el = add_element(model, {
+        type = 'subagent',
+        tool_call_id = data.tool_call_id,
+        tool_call_index = nil,
+        conversation_id = data.conversation_id,
+        created_at = data.created_at,
+        description = data.description or '',
+        input = '',
+        input_open = false,
+        input_collapsed = false,
+        output = '',
+        output_collapsed = false,
+        status = 'running',
+        is_continue = false,
+        error = nil,
+      })
+      diff.added[#diff.added + 1] = new_el
+      model.tail = new_el
+    end
+    model.sa_active = data.conversation_id
+
+  elseif variant == 'SubAgentContinue' then
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = find_pending_subagent(model, data.tool_call_id)
+    if el then
+      -- The pending input element transforms in place into the continue
+      -- section (one element per continue).
+      local description = data.description
+      if not description or description == '' then
+        local last = find_subagent_by_conversation(model, data.conversation_id)
+        description = last and last.description or ''
       end
+      el.input_open = false
+      if visual_lines(el.input) > 2 then
+        el.input_collapsed = true
+      end
+      el.status = 'continuing'
+      el.is_continue = true
+      el.description = description
+      el.conversation_id = data.conversation_id
+      diff.updated_all[#diff.updated_all + 1] = el
+      model.tail = el
+    else
+      -- No pending input (resumed session): add a fresh continue element.
+      merge_diff(diff, flush_pending_whitespace(model))
+      local description = data.description
+      if not description or description == '' then
+        local last = find_subagent_by_conversation(model, data.conversation_id)
+        description = last and last.description or ''
+      end
+      local new_el = add_element(model, {
+        type = 'subagent',
+        tool_call_id = data.tool_call_id,
+        tool_call_index = nil,
+        conversation_id = data.conversation_id,
+        created_at = data.created_at,
+        description = description,
+        input = '',
+        input_open = false,
+        input_collapsed = false,
+        output = '',
+        output_collapsed = false,
+        status = 'continuing',
+        is_continue = true,
+        error = nil,
+      })
+      diff.added[#diff.added + 1] = new_el
+      model.tail = new_el
+    end
+    model.sa_active = data.conversation_id
+
+  elseif variant == 'SubAgentTurnEnd' then
+    local el = find_subagent_by_conversation(model, data.conversation_id)
+    if el then
+      el.status = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'turn ended'
+      -- today's last-entry label shows [%d in / %d out]
+      el.input_tokens = data.input_tokens
+      el.output_tokens = data.output_tokens
+      diff.updated_all[#diff.updated_all + 1] = el
+    end
+    if model.sa_active == data.conversation_id then
+      model.sa_active = nil
     end
 
   elseif variant == 'SubAgentEnd' then
-    -- Close any open thinking first (content is appended below)
-    collapse_thinking(buf, ns)
-    -- Capture sa_end_row before cleaning up extmarks (for error rendering below)
-    local sa_end_row = data.conversation_id and get_sa_extmark_end_row(buf, data.conversation_id)
-
-    -- Update all subagent labels in-place to show completion
-    local entries = data.conversation_id and sa_label_marks[data.conversation_id]
-    if entries then
-      local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'done'
-      local status_hl = (data.end_status and data.end_status ~= 'Succeeded') and 'TCodeError' or 'TCodeSuccess'
-      for _, info in ipairs(entries) do
-        local virt = {
-          { '>>> SUB-AGENT: ', 'TCodeTool' },
-          { '[' .. status_text .. ']', status_hl },
-        }
-        local ts = format_time(data.created_at)
-        if ts then
-          table.insert(virt, { '  ' .. ts, 'TCodeTokens' })
-        end
-        if data.input_tokens and data.output_tokens then
-          table.insert(virt, {
-            string.format('  [%d in / %d out]', data.input_tokens, data.output_tokens),
-            'TCodeTokens',
-          })
-        end
-        table.insert(virt, { ' ' .. info.description, 'TCodeTool' })
-        local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
-        if mark_pos and mark_pos[1] then
-          vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
-            id = info.extmark_id,
-            virt_text = virt,
-            virt_text_pos = 'overlay',
-          })
-        end
-      end
-      sa_label_marks[data.conversation_id] = nil
-      -- Clean up sa_ns range extmarks and their ID mappings for this conversation
-      for mark_id, conv_id in pairs(sa_extmark_ids) do
-        if conv_id == data.conversation_id then
-          vim.api.nvim_buf_del_extmark(buf, sa_ns, mark_id)
-          sa_extmark_ids[mark_id] = nil
-        end
+    merge_diff(diff, collapse_open_thinking(model))
+    local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'done'
+    for _, el in ipairs(model.elements) do
+      if el.type == 'subagent' and el.conversation_id == data.conversation_id then
+        el.status = status_text
+        -- today's label renders [%d in / %d out] on every entry of the
+        -- conversation, so the totals live on each element
+        el.input_tokens = data.input_tokens
+        el.output_tokens = data.output_tokens
+        diff.updated_all[#diff.updated_all + 1] = el
       end
     end
-    -- Clear active subagent tracking if this is the currently streaming one
-    if sa_active_conv == data.conversation_id then
-      sa_active_conv = nil
-    end
-    -- Render error as real text if present (needs to be visible/copyable)
-    if type(data.error) == 'string' and data.error ~= '' then
-      if sa_end_row then
-        insert_lines_at(buf, sa_end_row - 1, { '' })
-        local error_start_line = sa_end_row - 1
-        local error_lines = vim.split('Error: ' .. data.error, '\n', { plain = true })
-        vim.api.nvim_buf_set_lines(buf, error_start_line, error_start_line + 1, false, error_lines)
-        for i = 0, #error_lines - 1 do
-          vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeError', error_start_line + i, 0, -1)
-        end
-      else
-        append_lines(buf, { '' })
-        local error_start_line = vim.api.nvim_buf_line_count(buf) - 1
-        local error_lines = vim.split('Error: ' .. data.error, '\n', { plain = true })
-        vim.api.nvim_buf_set_lines(buf, error_start_line, error_start_line + 1, false, error_lines)
-        for i = 0, #error_lines - 1 do
-          vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeError', error_start_line + i, 0, -1)
-        end
+    local last = find_subagent_by_conversation(model, data.conversation_id)
+    if last then
+      if type(data.error) == 'string' and data.error ~= '' then
+        last.error = data.error
+      end
+      -- Long streamed output auto-collapses to a preview.
+      if visual_lines(last.output) > 2 then
+        last.output_collapsed = true
       end
     end
-
-  elseif variant == 'SubAgentTurnEnd' then
-    -- Update the active (last) label to show turn ended status
-    local entries = data.conversation_id and sa_label_marks[data.conversation_id]
-    if entries and #entries > 0 then
-      local info = entries[#entries]
-      local status_hl = (data.end_status and data.end_status ~= 'Succeeded') and 'TCodeError' or 'TCodeTokens'
-      local status_text = (data.end_status and data.end_status ~= 'Succeeded') and data.end_status or 'turn ended'
-      local virt = {
-        { '>>> SUB-AGENT: ', 'TCodeTool' },
-        { '[' .. status_text .. ']', status_hl },
-      }
-      if data.input_tokens and data.output_tokens then
-        table.insert(virt, {
-          string.format('  [%d in / %d out]', data.input_tokens, data.output_tokens),
-          'TCodeTokens',
-        })
-      end
-      table.insert(virt, { ' ' .. info.description, 'TCodeTool' })
-      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
-      if mark_pos and mark_pos[1] then
-        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
-          id = info.extmark_id,
-          virt_text = virt,
-          virt_text_pos = 'overlay',
-        })
-      end
-    end
-    if sa_active_conv == data.conversation_id then
-      sa_active_conv = nil
-    end
-
-  elseif variant == 'SubAgentContinue' then
-    -- Close any open thinking first (content is appended below)
-    collapse_thinking(buf, ns)
-    local tool_call_id = data.tool_call_id
-    local description = data.description
-    -- Fall back to existing stored description if server omits or sends empty
-    if not description or description == '' then
-      local existing = sa_label_marks[data.conversation_id]
-      if existing and #existing > 0 then
-        description = existing[#existing].description
-      end
-    end
-    description = description or ''
-
-    if tool_call_id and sa_input_marks[tool_call_id] then
-      -- Close the args fence
-      if tool_call_gen_state[tool_call_id] then
-        close_args_fence(buf, tool_call_id)
-      end
-
-      -- Transfer to sa_label_marks as a new continue entry (only if conversation_id and label_row are valid)
-      if data.conversation_id then
-        local pending = sa_input_marks[tool_call_id]
-        local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, pending.ns, pending.extmark_id, {})
-        local label_row = mark_pos and mark_pos[1]
-        if label_row then
-          -- Update the pending label from [generating] to [continuing]
-          local virt = {
-            { '>>> SUB-AGENT: ', 'TCodeTool' },
-            { '[continuing]', 'TCodeTool' },
-            { ' ' .. description, 'TCodeTool' },
-          }
-          vim.api.nvim_buf_set_extmark(buf, pending.ns, label_row, mark_pos[2], {
-            id = pending.extmark_id,
-            virt_text = virt,
-            virt_text_pos = 'overlay',
-          })
-
-          if not sa_label_marks[data.conversation_id] then
-            sa_label_marks[data.conversation_id] = {}
-          end
-          table.insert(sa_label_marks[data.conversation_id], {
-            extmark_id = pending.extmark_id,
-            ns = pending.ns,
-            description = description,
-            is_continue = true,
-          })
-          -- Set up sa_ns range extmark from label row to current buffer end
-          local current_last_line = vim.api.nvim_buf_line_count(buf) - 1
-          local mark_id = vim.api.nvim_buf_set_extmark(buf, sa_ns, label_row, 0, {
-            end_row = current_last_line + 1, end_col = 0,
-          })
-          sa_extmark_ids[mark_id] = data.conversation_id
-          sa_active_conv = data.conversation_id
-        end
-      end
-
-      -- Clean up pending input state. tool_call_gen_state may already be nil if
-      -- the args fence was closed earlier by AssistantMessageEnd.
-      sa_input_marks[tool_call_id] = nil
-      tool_call_gen_state[tool_call_id] = nil
-    else
-      local entries = data.conversation_id and sa_label_marks[data.conversation_id]
-      if entries and #entries > 0 then
-        local info = entries[#entries]
-        info.is_continue = true
-        if data.description and data.description ~= '' then
-          info.description = data.description
-        end
-        local virt = {
-          { '>>> SUB-AGENT: ', 'TCodeTool' },
-          { '[continuing]', 'TCodeTool' },
-          { ' ' .. (info.description or ''), 'TCodeTool' },
-        }
-        local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
-        if mark_pos and mark_pos[1] then
-          vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
-            id = info.extmark_id,
-            virt_text = virt,
-            virt_text_pos = 'overlay',
-          })
-        end
-        sa_active_conv = data.conversation_id
-      end
+    if model.sa_active == data.conversation_id then
+      model.sa_active = nil
     end
 
   elseif variant == 'SubAgentWaitingPermission' then
-    local entries = data.conversation_id and sa_label_marks[data.conversation_id]
-    if entries and #entries > 0 then
-      local info = entries[#entries]
-      local virt = {
-        { '>>> SUB-AGENT: ', 'TCodeTool' },
-        { '[permission]', 'TCodePermission' },
-        { ' ' .. info.description, 'TCodeTool' },
-      }
-      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
-      if mark_pos and mark_pos[1] then
-        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
-          id = info.extmark_id,
-          virt_text = virt,
-          virt_text_pos = 'overlay',
-        })
-      end
+    local el = find_subagent_by_conversation(model, data.conversation_id)
+    if el then
+      el.status = 'permission'
+      diff.updated_all[#diff.updated_all + 1] = el
     end
 
-  -- Both Approved and Denied resolve a pending permission request and restore
-  -- the subagent label to its previous state ([running] or [continuing]).
   elseif variant == 'SubAgentPermissionApproved' or variant == 'SubAgentPermissionDenied' then
-    local entries = data.conversation_id and sa_label_marks[data.conversation_id]
-    if entries and #entries > 0 then
-      local info = entries[#entries]
-      local status_text = info.is_continue and 'continuing' or 'running'
-      local virt = {
-        { '>>> SUB-AGENT: ', 'TCodeTool' },
-        { '[' .. status_text .. ']', 'TCodeTool' },
-        { ' ' .. info.description, 'TCodeTool' },
-      }
-      local mark_pos = vim.api.nvim_buf_get_extmark_by_id(buf, info.ns, info.extmark_id, {})
-      if mark_pos and mark_pos[1] then
-        vim.api.nvim_buf_set_extmark(buf, info.ns, mark_pos[1], mark_pos[2], {
-          id = info.extmark_id,
-          virt_text = virt,
-          virt_text_pos = 'overlay',
-        })
-      end
+    local el = find_subagent_by_conversation(model, data.conversation_id)
+    if el then
+      el.status = el.is_continue and 'continuing' or 'running'
+      diff.updated_all[#diff.updated_all + 1] = el
     end
 
   elseif variant == 'AssistantMediaGenerating' then
-    -- Status bar updated by server-side status file; nothing to render in buffer.
+    -- nothing to render in the model
 
   elseif variant == 'AssistantMediaOutput' then
-    -- Close any open thinking first (content is appended below)
-    collapse_thinking(buf, ns)
-    -- Render media as clickable markdown: ![img](file:///absolute/path)
-    if not M.display_file then
-      return
-    end
-    local session_dir = vim.fn.fnamemodify(M.display_file, ':h')
-    local rel_path = data.media and data.media.relative_path
-    if rel_path then
-      local abs_path = session_dir .. '/media/' .. rel_path
-      local encoded = vim.uri_encode(abs_path)
-      append_lines(buf, { '', '![img](file://' .. encoded .. ')' })
+    merge_diff(diff, flush_pending_whitespace(model))
+    merge_diff(diff, collapse_open_thinking(model))
+    if data.media and data.media.relative_path then
+      local el = add_element(model, {
+        type = 'media',
+        relative_path = data.media.relative_path,
+      })
+      diff.added[#diff.added + 1] = el
+      model.tail = el
     end
 
   elseif variant == 'LLMRetry' then
-    -- Close any open thinking first (content is appended below)
-    collapse_thinking(buf, ns)
-    local attempt = data.attempt or 1
-    local max_retries = data.max_retries or 0
-    local reason = data.reason or ''
-    local msg = string.format('[Retrying... (attempt %d/%d) -- %s]', attempt, max_retries, reason)
-    append_lines(buf, { msg })
-    local line = vim.api.nvim_buf_line_count(buf) - 1
-    vim.api.nvim_buf_add_highlight(buf, -1, 'TCodeTokens', line, 0, -1)
+    merge_diff(diff, flush_pending_whitespace(model))
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = add_element(model, {
+      type = 'retry',
+      attempt = data.attempt or 1,
+      max_retries = data.max_retries or 0,
+      reason = data.reason or '',
+    })
+    diff.added[#diff.added + 1] = el
+    model.tail = el
 
   elseif variant == 'AssistantRequestEnd' then
-    -- Close any open thinking first (content is appended below)
-    collapse_thinking(buf, ns)
-    append_lines(buf, { '► END' })
-    local info_line = vim.api.nvim_buf_line_count(buf) - 1
-    local text
-    -- Same semantics as render_info: "in" = processed, "cache read" = served from cache
-    local total_cache_read = data.total_cache_read_tokens or 0
-    local total_processed_input = (data.total_input_tokens or 0) + (data.total_cache_creation_tokens or 0)
-    local total_output = data.total_output_tokens or 0
-    if total_cache_read > 0 then
-      text = string.format('[Total: %d in / %d cache read / %d out tokens]',
-        total_processed_input, total_cache_read, total_output)
-    else
-      text = string.format('[Total: %d in / %d out tokens]',
-        total_processed_input, total_output)
+    merge_diff(diff, flush_pending_whitespace(model))
+    merge_diff(diff, collapse_open_thinking(model))
+    local el = add_element(model, {
+      type = 'end_marker',
+      tokens = {
+        total_input_tokens = data.total_input_tokens,
+        total_cache_creation_tokens = data.total_cache_creation_tokens,
+        total_cache_read_tokens = data.total_cache_read_tokens,
+        total_output_tokens = data.total_output_tokens,
+      },
+    })
+    diff.added[#diff.added + 1] = el
+    model.tail = el
+
+  elseif variant == 'UserRequestEnd' or variant == 'PermissionUpdated' then
+    -- no-op
+  end
+
+  return diff
+end
+
+-- ============================================================================
+-- RENDERER
+-- ============================================================================
+-- The ONLY layer that touches the buffer / extmark / highlight APIs. Consumes
+-- the reducer's diff contract: { added = {el,...}, updated_all = {el,...},
+-- updated_content = {{el, text},...} } and projects the model onto the buffer.
+-- render(model, diff, ctx) is the single entry point; ctx = { buf, ns, bulk }.
+
+-- Renderer-owned bookkeeping keyed per model (weak keys: a discarded model
+-- releases its state). heights = element region height in buffer rows;
+-- mat_len = materialized content length (chars) for streaming thinking blocks;
+-- nav/thinking = per-element extmark id maps for the navigation ranges and the
+-- thinking indicator/expand-hint marks, with *_ids as the reverse (id -> el_id)
+-- indexes so later phases can map a cursor line back to the element;
+-- hl = per-element list of { ns, id } highlight extmarks owned by the rebuilt
+-- element kinds (thinking_block / tool_call / subagent) so a rebuild can delete
+-- them (see del_hl_marks); hl_upto = last highlighted row per element so
+-- streaming never re-highlights an already-highlighted row (see
+-- render_updated_content).
+local renderer_state = setmetatable({}, { __mode = 'k' })
+
+local function get_renderer_state(model)
+  local st = renderer_state[model]
+  if not st then
+    st = { heights = {}, mat_len = {}, nav = {}, nav_ids = {}, thinking = {}, thinking_ids = {}, thinking_kinds = {}, labels = {}, hl = {}, hl_upto = {} }
+    renderer_state[model] = st
+  end
+  return st
+end
+
+-- Split text on '\n' into buffer rows. lines('') = { '' } (one empty row):
+-- the streaming blank that content chunks consume.
+local function lines(text)
+  return vim.split(text or '', '\n', { plain = true })
+end
+
+-- Resolve an element's start-row anchor extmark to its current 0-indexed row,
+-- or nil when the mark is gone (defensive: the update is skipped).
+local function anchor_row(buf, el)
+  if not el.anchor then return nil end
+  local pos = vim.api.nvim_buf_get_extmark_by_id(buf, gen_ns, el.anchor, {})
+  if pos and pos[1] then return pos[1] end
+  return nil
+end
+
+-- Set a label row's virt_text overlay (the label overlay convention: prefix +
+-- optional timestamp) without touching the buffer's real rows. Reuses the
+-- element's existing overlay mark id (reuse_id) so repeated status updates
+-- move one mark instead of stacking new ones on the row.
+local function set_label_overlay(buf, ns, row, virt, reuse_id)
+  local id = vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {
+    id = reuse_id,
+    virt_text = virt,
+    virt_text_pos = 'overlay',
+  })
+  return id
+end
+
+-- Plain label virt text: prefix + '  HH:MM:SS' timestamp.
+local function label_virt(prefix, hl_group, created_at)
+  local virt = { { prefix, hl_group } }
+  local ts = format_time(created_at)
+  if ts then table.insert(virt, { '  ' .. ts, 'TCodeTokens' }) end
+  return virt
+end
+
+-- Collapse embedded newlines in wire-derived overlay text: virt_text rows
+-- must stay on one line, so any '\n' in a status / name / description is
+-- replaced with a space (nil-safe).
+local function single_line(s)
+  return tostring(s or ''):gsub('\n', ' ')
+end
+
+-- The width-dependent truncated args/input preview: flat text cut to width*2
+-- chars; the width comes from the display window, defaulting to 80.
+local function compute_preview(text, buf)
+  local win = vim.fn.bufwinid(buf)
+  local width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
+  local flat = text:gsub('\n', '\\n')
+  return flat:sub(1, width * 2), width
+end
+
+-- Hidden visual line count for the '[... press o to expand N more lines]' hint.
+local function hidden_visual_lines(buf, text, preview, width)
+  local win = vim.fn.bufwinid(buf)
+  local w = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
+  local visual_count = 0
+  for _, line in ipairs(lines(text)) do
+    visual_count = visual_count + math.max(1, math.ceil(#line / w))
+  end
+  local kept_visual = math.max(1, math.ceil(#preview / width))
+  return visual_count - kept_visual
+end
+
+-- Re-derive (create or update) a navigation range extmark for an element.
+-- end_row is EXCLUSIVE. The mark id is indexed per element in the renderer
+-- state so later phases can map a cursor line back to the element. Nav marks
+-- carry no virt text. The reverse index is keyed by NAMESPACE because extmark
+-- ids are namespace-local: um_ns / tc_ns / sa_ns each allocate id 1, so a
+-- bare id cannot identify a mark across namespaces.
+local function set_nav_extmark(state, buf, nav_ns, el, start_row, end_row)
+  local nav_id = state.nav[el.id]
+  if nav_id then
+    local pos = vim.api.nvim_buf_get_extmark_by_id(buf, nav_ns, nav_id, {})
+    if pos and pos[1] then
+      -- Move the mark to the region start: region rebuilds shift the mark
+      -- inside the replaced range, so the stored position is stale.
+      vim.api.nvim_buf_set_extmark(buf, nav_ns, start_row, 0, {
+        id = nav_id, end_row = end_row, end_col = 0,
+      })
+      return
     end
-    vim.api.nvim_buf_set_extmark(buf, ns, info_line, 0, {
-      virt_text = { { text, 'TCodeTokens' } },
-      virt_text_pos = 'overlay',
+    -- The mark was deleted by a region rebuild; drop the stale index entry.
+    state.nav[el.id] = nil
+    state.nav_ids[nav_ns][nav_id] = nil
+  end
+  local id = vim.api.nvim_buf_set_extmark(buf, nav_ns, start_row, 0, {
+    end_row = end_row, end_col = 0,
+  })
+  state.nav[el.id] = id
+  if not state.nav_ids[nav_ns] then state.nav_ids[nav_ns] = {} end
+  state.nav_ids[nav_ns][id] = el.id
+end
+
+-- Delete the thinking_ns indicator / preview-hint extmarks belonging to an
+-- element (via the per-element index) before a rebuild replaces its region.
+-- An element may own several marks (e.g. an args preview and an output
+-- preview), so the index holds a list per element. The id -> element maps
+-- ARE cleared here: preview/collapse hint marks are re-created with the SAME
+-- ids after the rebuild (see set_preview_hint_mark / set_collapse_hint_mark),
+-- so a captured mark id keeps resolving through element_for_mark while the
+-- maps stay free of entries for marks that no longer exist.
+local function del_thinking_marks(state, buf, el_id)
+  local list = state.thinking[el_id]
+  if list then
+    for _, mark_id in ipairs(list) do
+      pcall(vim.api.nvim_buf_del_extmark, buf, thinking_ns, mark_id)
+      state.thinking_ids[mark_id] = nil
+      state.thinking_kinds[mark_id] = nil
+    end
+    state.thinking[el_id] = nil
+  end
+end
+
+local function add_thinking_mark(state, el_id, mark_id, kind)
+  local list = state.thinking[el_id]
+  if not list then list = {}; state.thinking[el_id] = list end
+  list[#list + 1] = mark_id
+  state.thinking_ids[mark_id] = el_id
+  state.thinking_kinds[mark_id] = kind
+end
+
+-- Place a full-row highlight extmark for a rebuilt element kind and track its
+-- id in state.hl so a later rebuild can delete it. nvim_buf_add_highlight
+-- returns no usable id on this build (its return value is not the created
+-- extmark id), so the region element kinds place highlights with
+-- nvim_buf_set_extmark instead. The mark shape (end_row = row + 1, end_col = 0)
+-- matches nvim_buf_add_highlight's full-row highlight exactly; this build
+-- rejects end_col = -1.
+local function add_tracked_highlight(state, el, buf, ns, group, row)
+  local id = vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {
+    hl_group = group, end_row = row + 1, end_col = 0,
+  })
+  local list = state.hl[el.id]
+  if not list then list = {}; state.hl[el.id] = list end
+  list[#list + 1] = { ns, id }
+  return id
+end
+
+-- Delete every highlight extmark an element owns (pcall'd: a mark may already
+-- be gone if the buffer was replaced wholesale) and clear the tracking list.
+-- Called BEFORE the rebuild's set_lines: on this build replaced-region marks
+-- are not deleted, they slide to the row past the region end, so leaving them
+-- would accumulate an unbounded stack of stale highlights across rebuilds.
+local function del_hl_marks(state, buf, el_id)
+  local list = state.hl[el_id]
+  if list then
+    for _, entry in ipairs(list) do
+      pcall(vim.api.nvim_buf_del_extmark, buf, entry[1], entry[2])
+    end
+    state.hl[el_id] = nil
+  end
+end
+
+-- Collapsed thinking indicator: virt overlay at the anchor row. Reuses the
+-- element's existing mark id (reuse_id) so toggles holding a captured id
+-- keep resolving after a collapse/expand cycle.
+local function set_thinking_collapsed_mark(state, buf, el, mark_row, reuse_id)
+  local id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, mark_row, 0, {
+    id = reuse_id,
+    virt_text = { { '[Thinking... press o to expand]', 'TCodeTokens' } },
+    virt_text_pos = 'overlay',
+  })
+  state.thinking[el.id] = { id }
+  state.thinking_ids[id] = el.id
+  state.thinking_kinds[id] = 'thinking'
+end
+
+-- Expanded thinking: range mark with a collapse hint line above it.
+local function set_thinking_expanded_mark(state, buf, el, mark_row, content_row_count, reuse_id)
+  local id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, mark_row, 0, {
+    id = reuse_id,
+    end_row = mark_row + content_row_count,
+    end_col = 0,
+    virt_lines = { { { '[Thinking... press o to collapse]', 'TCodeTokens' } } },
+    virt_lines_above = true,
+  })
+  state.thinking[el.id] = { id }
+  state.thinking_ids[id] = el.id
+  state.thinking_kinds[id] = 'thinking'
+end
+
+-- Collapsed args/input/output preview hint: virt line below the preview row.
+-- reuse_id (optional) keeps the element's existing mark id across rebuilds so
+-- a captured id stays valid (the mark is recreated with the same id).
+local function set_preview_hint_mark(state, buf, el, preview_row, hidden_visual, kind, reuse_id)
+  local id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, preview_row, 0, {
+    id = reuse_id,
+    virt_lines = { { { '[... press o to expand ' .. hidden_visual .. ' more lines]', 'TCodeTokens' } } },
+  })
+  add_thinking_mark(state, el.id, id, kind)
+end
+
+-- Expanded args/input/output content hint: virt line above the content span;
+-- `o` anywhere in the content (end_row covers it) collapses it again.
+-- reuse_id (optional) keeps the element's existing mark id across rebuilds.
+local function set_collapse_hint_mark(state, buf, el, mark_row, content_row_count, kind, reuse_id)
+  local id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, mark_row, 0, {
+    id = reuse_id,
+    end_row = mark_row + content_row_count,
+    end_col = 0,
+    virt_lines = { { { '[... press o to collapse]', 'TCodeTokens' } } },
+    virt_lines_above = true,
+  })
+  add_thinking_mark(state, el.id, id, kind)
+end
+
+-- Tool-call label status overlay (status + timestamp + cancel hint).
+local TC_STATUS = {
+  generating = { text = 'generating', hl = 'TCodeTool', cancel = true },
+  running = { text = 'running', hl = 'TCodeTool', cancel = true },
+  permission = { text = 'permission', hl = 'TCodePermission' },
+  done = { text = 'done', hl = 'TCodeSuccess' },
+  failed = { text = 'failed', hl = 'TCodeError' },
+  cancelled = { text = 'cancelled', hl = 'TCodeError' },
+  denied = { text = 'denied', hl = 'TCodeError' },
+}
+
+local function tool_label_virt(el)
+  local s = TC_STATUS[el.status] or { text = 'done', hl = 'TCodeSuccess' }
+  local virt = {
+    { '>>> TOOL: ', 'TCodeTool' },
+    { '[' .. s.text .. ']', s.hl },
+    -- tool_name is wire-derived and rendered as overlay virt_text, which must
+    -- stay on one line: collapse any embedded newlines defensively (same
+    -- pattern as the subagent description).
+    { ' ' .. single_line(el.tool_name), 'TCodeTool' },
+  }
+  local ts = format_time(el.created_at)
+  if ts then table.insert(virt, { '  ' .. ts, 'TCodeTokens' }) end
+  if s.cancel then table.insert(virt, { '  [Ctrl-k to cancel]', 'TCodeTokens' }) end
+  return virt
+end
+
+-- Subagent label overlay: status + optional timestamp/tokens + description.
+local function subagent_label_virt(el)
+  local status_text, status_hl
+  if el.status == 'generating' then
+    status_text, status_hl = 'generating', 'TCodeTool'
+  elseif el.status == 'running' then
+    status_text, status_hl = 'running', 'TCodeTool'
+  elseif el.status == 'continuing' then
+    status_text, status_hl = 'continuing', 'TCodeTool'
+  elseif el.status == 'permission' then
+    status_text, status_hl = 'permission', 'TCodePermission'
+  elseif el.status == 'turn ended' then
+    status_text, status_hl = 'turn ended', 'TCodeTokens'
+  elseif el.status == 'done' then
+    status_text, status_hl = 'done', 'TCodeSuccess'
+  else
+    -- Unknown statuses are wire-derived and can contain '\n': collapse any
+    -- embedded newlines so the overlay stays on one line.
+    status_text, status_hl = single_line(el.status or 'done'), 'TCodeError'
+  end
+  local virt = {
+    { '>>> SUB-AGENT: ', 'TCodeTool' },
+    { '[' .. status_text .. ']', status_hl },
+  }
+  local ts = format_time(el.created_at)
+  if ts then table.insert(virt, { '  ' .. ts, 'TCodeTokens' }) end
+  if el.input_tokens and el.output_tokens then
+    table.insert(virt, {
+      string.format('  [%d in / %d out]', el.input_tokens, el.output_tokens),
+      'TCodeTokens',
     })
   end
+  -- Descriptions are rendered as overlay virt_text, which must stay on one
+  -- line: collapse any embedded newlines defensively.
+  local desc = single_line(el.description)
+  table.insert(virt, { ' ' .. desc, 'TCodeTool' })
+  return virt
+end
+
+local function system_message_hl(level)
+  if level == 'Warning' then return 'TCodeSystemWarning' end
+  if level == 'Error' then return 'TCodeSystemError' end
+  return 'TCodeSystemInfo'
+end
+
+-- Virtual-text parts for an end_info row (tokens + status). Mirrors the
+-- old token/status line semantics exactly.
+local function end_info_virt_parts(el)
+  local virt_parts = {}
+  local tokens = el.tokens or {}
+  local token_prefix = el.token_prefix
+  if tokens.input_tokens and tokens.output_tokens then
+    local has_tokens = not token_prefix or (tokens.input_tokens > 0 or tokens.output_tokens > 0)
+    if has_tokens then
+      local cache_read = tokens.cache_read_input_tokens or 0
+      local processed_input = tokens.input_tokens + (tokens.cache_creation_input_tokens or 0)
+      local text
+      if cache_read > 0 then
+        local fmt = token_prefix
+          and string.format('[%s: %%d in / %%d cache read / %%d out tokens]', token_prefix)
+          or '[%d in / %d cache read / %d out tokens]'
+        text = string.format(fmt, processed_input, cache_read, tokens.output_tokens)
+      else
+        local fmt = token_prefix
+          and string.format('[%s: %%d in / %%d out tokens]', token_prefix)
+          or '[%d in / %d out tokens]'
+        text = string.format(fmt, processed_input, tokens.output_tokens)
+      end
+      table.insert(virt_parts, { text, 'TCodeTokens' })
+    end
+  end
+  if el.end_status and el.end_status ~= 'Succeeded' then
+    local prefix = token_prefix and ' [' .. string.upper(token_prefix) .. ' ' or ' ['
+    table.insert(virt_parts, { prefix .. single_line(el.end_status) .. ']', 'TCodeError' })
+  end
+  return virt_parts
+end
+
+-- '► END' token-total overlay text (mirrors the AssistantRequestEnd handler).
+local function end_marker_text(el)
+  local tokens = el.tokens or {}
+  local total_cache_read = tokens.total_cache_read_tokens or 0
+  local total_processed = (tokens.total_input_tokens or 0) + (tokens.total_cache_creation_tokens or 0)
+  local total_output = tokens.total_output_tokens or 0
+  if total_cache_read > 0 then
+    return string.format('[Total: %d in / %d cache read / %d out tokens]',
+      total_processed, total_cache_read, total_output)
+  end
+  return string.format('[Total: %d in / %d out tokens]', total_processed, total_output)
+end
+
+-- Pure projection: the element's buffer rows derived ENTIRELY from model state.
+-- Rendering the same state twice yields the same rows.
+local function render_element(el, ctx)
+  if el.type == 'user_message' then
+    local out = { '► USER' }
+    for _, l in ipairs(lines(el.content)) do out[#out + 1] = l end
+    return out
+  elseif el.type == 'assistant_message' then
+    local out = { '► ASSISTANT' }
+    local content = el.content or ''
+    if content == '' then
+      out[#out + 1] = ''
+    else
+      for _, l in ipairs(lines(content)) do out[#out + 1] = l end
+    end
+    return out
+  elseif el.type == 'thinking_block' then
+    return lines(el.content)
+  elseif el.type == 'tool_call' then
+    local out = { '► TOOL', TC_FENCE }
+    local args = el.args or ''
+    if el.args_collapsed then
+      out[#out + 1] = compute_preview(args, ctx.buf)
+    else
+      for _, l in ipairs(lines(args)) do out[#out + 1] = l end
+    end
+    if not el.args_open then out[#out + 1] = TC_FENCE end
+    if el.output_started then
+      out[#out + 1] = TC_FENCE
+      local output = el.output or ''
+      if el.output_collapsed then
+        out[#out + 1] = compute_preview(output, ctx.buf)
+      elseif output == '' then
+        out[#out + 1] = ''
+      else
+        for _, l in ipairs(lines(output)) do out[#out + 1] = l end
+      end
+      if not el.output_open then out[#out + 1] = TC_FENCE end
+    end
+    return out
+  elseif el.type == 'subagent' then
+    local out = { '► SUBAGENT', TC_FENCE }
+    local input = el.input or ''
+    if el.input_collapsed then
+      out[#out + 1] = compute_preview(input, ctx.buf)
+    else
+      for _, l in ipairs(lines(input)) do out[#out + 1] = l end
+    end
+    if not el.input_open then
+      out[#out + 1] = TC_FENCE
+      local output = el.output or ''
+      if el.output_collapsed then
+        out[#out + 1] = compute_preview(output, ctx.buf)
+      elseif output == '' then
+        out[#out + 1] = ''
+      else
+        for _, l in ipairs(lines(output)) do out[#out + 1] = l end
+      end
+      if el.error then
+        out[#out + 1] = ''
+        for _, l in ipairs(lines('Error: ' .. el.error)) do out[#out + 1] = l end
+      end
+    end
+    return out
+  elseif el.type == 'system_message' then
+    local out = { '► SYSTEM' }
+    for _, l in ipairs(lines(el.message)) do out[#out + 1] = l end
+    return out
+  elseif el.type == 'media' then
+    if not M.display_file then return nil end
+    local session_dir = vim.fn.fnamemodify(M.display_file, ':h')
+    local abs_path = session_dir .. '/media/' .. el.relative_path
+    return { '', '![img](file://' .. vim.uri_encode(abs_path) .. ')' }
+  elseif el.type == 'retry' then
+    -- The reason may be a multi-line message (e.g. a JSON error body); split
+    -- it so no buffer row carries an embedded newline.
+    local reason_lines = lines(el.reason or '')
+    local out = { string.format('[Retrying... (attempt %d/%d) -- %s]', el.attempt, el.max_retries, reason_lines[1]) }
+    for i = 2, #reason_lines do out[#out + 1] = reason_lines[i] end
+    return out
+  elseif el.type == 'end_info' then
+    local has_error = type(el.error) == 'string' and el.error ~= ''
+    if #end_info_virt_parts(el) == 0 and not has_error then
+      return {} -- nothing to display: the row is skipped entirely
+    end
+    local out = { '► INFO' }
+    if has_error then
+      for _, l in ipairs(lines('Error: ' .. el.error)) do out[#out + 1] = l end
+    end
+    return out
+  elseif el.type == 'end_marker' then
+    return { '► END' }
+  end
+  return {}
+end
+
+-- Highlight the args rows (or the single preview row) of a tool call region.
+local function apply_args_highlight(state, buf, ns, el, start_row)
+  local args_rows = el.args_collapsed and 1 or #lines(el.args or '')
+  for i = 0, args_rows - 1 do
+    add_tracked_highlight(state, el, buf, ns, 'TCodeToolArgs', start_row + 2 + i)
+  end
+end
+
+-- Highlight the input rows (or the single preview row) of a subagent region.
+local function apply_input_highlight(state, buf, ns, el, start_row)
+  local input_rows = el.input_collapsed and 1 or #lines(el.input or '')
+  for i = 0, input_rows - 1 do
+    add_tracked_highlight(state, el, buf, ns, 'TCodeToolArgs', start_row + 2 + i)
+  end
+end
+
+-- Resolve the existing hint-mark ids for a tool/subagent element by KIND:
+-- the args/input hint id and the output hint id. Scanning the per-element
+-- mark list via the kinds map (not list position) keeps the ids stable when
+-- only one hint exists — e.g. an args-less tool streams only output, so the
+-- output mark must always come back as the SECOND return, never as the
+-- (unused) args slot, or every rebuild would hand the output a fresh id.
+-- Call BEFORE del_thinking_marks: that clears the id -> element/kind maps.
+local function hint_reuse_ids(state, el)
+  local args_input_id, output_id
+  local list = state.thinking[el.id]
+  if list then
+    for _, mark_id in ipairs(list) do
+      local kind = state.thinking_kinds[mark_id]
+      if kind == 'args' or kind == 'input' then
+        args_input_id = mark_id
+      elseif kind == 'output' then
+        output_id = mark_id
+      end
+    end
+  end
+  return args_input_id, output_id
+end
+
+-- Place the `o` preview/collapse hint marks of a tool-call region. Collapsed
+-- args/output get an 'expand N more lines' hint on the preview row; expanded
+-- non-empty content gets a 'press o to collapse' hint spanning its rows.
+-- args_reuse_id / output_reuse_id keep the element's existing mark ids across
+-- rebuilds; hint reuse ids are matched by kind ('args' vs 'output').
+local function apply_tool_hints(state, buf, el, arow, args_reuse_id, output_reuse_id)
+  local args_rows = el.args_collapsed and 1 or #lines(el.args or '')
+  if el.args_collapsed then
+    local preview, width = compute_preview(el.args, buf)
+    set_preview_hint_mark(state, buf, el, arow + 2, hidden_visual_lines(buf, el.args, preview, width), 'args', args_reuse_id)
+  elseif not el.args_open and el.args and el.args ~= '' then
+    set_collapse_hint_mark(state, buf, el, arow + 2, args_rows, 'args', args_reuse_id)
+  end
+  if el.output_started and not el.output_open then
+    -- args_open is always false once output_started is set (both ToolMessageStart
+    -- paths close the args fence together with opening the output).
+    local out_fence_row = arow + 2 + args_rows + 1
+    local output = el.output or ''
+    local output_rows = el.output_collapsed and 1 or #lines(output)
+    local output_first_row = out_fence_row + 1
+    if el.output_collapsed then
+      local preview, width = compute_preview(output, buf)
+      set_preview_hint_mark(state, buf, el, output_first_row, hidden_visual_lines(buf, output, preview, width), 'output', output_reuse_id)
+    elseif output ~= '' then
+      set_collapse_hint_mark(state, buf, el, output_first_row, output_rows, 'output', output_reuse_id)
+    end
+  end
+end
+
+-- Same for a subagent region (input + output).
+local function apply_subagent_hints(state, buf, el, arow, input_reuse_id, output_reuse_id)
+  local input_rows = el.input_collapsed and 1 or #lines(el.input or '')
+  if el.input_collapsed then
+    local preview, width = compute_preview(el.input, buf)
+    set_preview_hint_mark(state, buf, el, arow + 2, hidden_visual_lines(buf, el.input, preview, width), 'input', input_reuse_id)
+  elseif not el.input_open and el.input and el.input ~= '' then
+    set_collapse_hint_mark(state, buf, el, arow + 2, input_rows, 'input', input_reuse_id)
+  end
+  if not el.input_open then
+    -- input_open is false here (this very condition), so the close-fence
+    -- offset is always one row.
+    local output_first_row = arow + 2 + input_rows + 1
+    local output = el.output or ''
+    local output_rows = el.output_collapsed and 1 or #lines(output)
+    if el.output_collapsed then
+      local preview, width = compute_preview(output, buf)
+      set_preview_hint_mark(state, buf, el, output_first_row, hidden_visual_lines(buf, output, preview, width), 'output', output_reuse_id)
+    elseif output ~= '' then
+      set_collapse_hint_mark(state, buf, el, output_first_row, output_rows, 'output', output_reuse_id)
+    end
+  end
+end
+
+-- Apply one `added` entry: render the element's region at the buffer tail
+-- (replacing the initial un-deletable empty row on first_event), place the
+-- start anchor and navigation extmarks, and apply per-row highlights.
+local function render_added(model, el, state, ctx)
+  local buf, ns, bulk = ctx.buf, ctx.ns, ctx.bulk
+
+  if el.type == 'thinking_block' then
+    -- Anchor = the pre-append buffer tail row: the row its content streams
+    -- onto (append_text consumes it). Bulk defers the write entirely.
+    local start_row = vim.api.nvim_buf_line_count(buf) - 1
+    first_event = false
+    if not bulk then
+      append_text(buf, el.content)
+    end
+    -- Default (left) gravity: when a bulk block starts streaming live, the
+    -- append lands exactly at the anchor row and must not push the anchor
+    -- down — it is the region START, so it tracks the first content row.
+    el.anchor = vim.api.nvim_buf_set_extmark(buf, gen_ns, start_row, 0, {})
+    state.heights[el.id] = bulk and 1 or count_lines(el.content)
+    state.mat_len[el.id] = bulk and 0 or #el.content
+    if not bulk then
+      for i = 0, state.heights[el.id] - 1 do
+        add_tracked_highlight(state, el, buf, thinking_ns, 'TCodeThinking', start_row + i)
+      end
+      state.hl_upto[el.id] = start_row + state.heights[el.id] - 1
+    end
+    return
+  end
+
+  local el_lines = render_element(el, ctx)
+  if not el_lines or #el_lines == 0 then return end -- e.g. an empty end_info
+
+  local start_row
+  if first_event and vim.api.nvim_buf_line_count(buf) == 1 then
+    first_event = false
+    vim.api.nvim_buf_set_lines(buf, 0, 1, false, el_lines)
+    start_row = 0
+  else
+    first_event = false
+    start_row = vim.api.nvim_buf_line_count(buf)
+    append_lines(buf, el_lines)
+  end
+
+  el.anchor = vim.api.nvim_buf_set_extmark(buf, gen_ns, start_row, 0, { right_gravity = true })
+  state.heights[el.id] = #el_lines
+
+  if el.type == 'user_message' then
+    set_label_overlay(buf, ns, start_row, label_virt('>>> USER', 'TCodeUser', el.created_at))
+    set_nav_extmark(state, buf, um_ns, el, start_row, start_row + #el_lines)
+  elseif el.type == 'assistant_message' then
+    set_label_overlay(buf, ns, start_row, label_virt('>>> ASSISTANT', 'TCodeAssistant', el.created_at))
+  elseif el.type == 'tool_call' then
+    state.labels[el.id] = set_label_overlay(buf, ns, start_row, tool_label_virt(el))
+    apply_args_highlight(state, buf, ns, el, start_row)
+    set_nav_extmark(state, buf, tc_ns, el, start_row, start_row + #el_lines)
+    -- A freshly added element has no pre-existing hint marks: no reuse ids.
+    apply_tool_hints(state, buf, el, start_row, nil, nil)
+    state.hl_upto[el.id] = start_row + #el_lines - 1
+  elseif el.type == 'subagent' then
+    state.labels[el.id] = set_label_overlay(buf, ns, start_row, subagent_label_virt(el))
+    apply_input_highlight(state, buf, ns, el, start_row)
+    set_nav_extmark(state, buf, sa_ns, el, start_row, start_row + #el_lines)
+    -- A freshly added element has no pre-existing hint marks: no reuse ids.
+    apply_subagent_hints(state, buf, el, start_row, nil, nil)
+    state.hl_upto[el.id] = start_row + #el_lines - 1
+  elseif el.type == 'system_message' then
+    local hl = system_message_hl(el.level)
+    set_label_overlay(buf, ns, start_row, { { '[' .. (el.level or 'Info'):upper() .. '] ', hl } })
+    for i = 1, #el_lines - 1 do
+      vim.api.nvim_buf_add_highlight(buf, ns, hl, start_row + i, 0, -1)
+    end
+  elseif el.type == 'retry' then
+    for i = 0, #el_lines - 1 do
+      vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeTokens', start_row + i, 0, -1)
+    end
+  elseif el.type == 'end_info' then
+    local virt_parts = end_info_virt_parts(el)
+    local has_error = type(el.error) == 'string' and el.error ~= ''
+    set_label_overlay(buf, ns, start_row,
+      #virt_parts > 0 and virt_parts or { { '► ERROR', 'TCodeError' } })
+    if has_error then
+      for i = 1, #el_lines - 1 do
+        vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeError', start_row + i, 0, -1)
+      end
+    end
+  elseif el.type == 'end_marker' then
+    set_label_overlay(buf, ns, start_row, { { end_marker_text(el), 'TCodeTokens' } })
+  end
+end
+
+-- Apply one `updated_all` entry for a thinking block. Collapse -> indicator
+-- rows; expand -> full content + collapse hint; open -> the merge reopen,
+-- which renders ONLY the un-materialized content tail (see mat_len below).
+local function render_thinking_update(el, state, ctx, arow)
+  local buf = ctx.buf
+  local old_height = state.heights[el.id] or 0
+  -- Preserve the element's mark id across state flips so captured ids (e.g.
+  -- a test's indicator mark) keep resolving after a toggle.
+  local existing = state.thinking[el.id]
+  local reuse_id = existing and existing[1]
+  del_thinking_marks(state, buf, el.id)
+  del_hl_marks(state, buf, el.id)
+  if el.state == 'collapsed' then
+    vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, { '', '', '' })
+    state.heights[el.id] = 3
+    state.mat_len[el.id] = #el.content
+    set_thinking_collapsed_mark(state, buf, el, arow, reuse_id)
+    state.hl_upto[el.id] = arow + 2
+  elseif el.state == 'expanded' then
+    local content_lines = lines(el.content)
+    vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, content_lines)
+    state.heights[el.id] = #content_lines
+    state.mat_len[el.id] = #el.content
+    -- Place the range mark BEFORE the highlight loop so the reuse id is
+    -- claimed deterministically (the highlight loop allocates its own ids).
+    set_thinking_expanded_mark(state, buf, el, arow, #content_lines, reuse_id)
+    for i = 0, #content_lines - 1 do
+      add_tracked_highlight(state, el, buf, thinking_ns, 'TCodeThinking', arow + i)
+    end
+    state.hl_upto[el.id] = arow + #content_lines - 1
+  else
+    -- 'open' via merge: the region's rows hold only the collapse indicator
+    -- (the streamed content was replaced at the collapse), so re-rendering the
+    -- full content would make the old run reappear. Render the tail after
+    -- mat_len — exactly the content that was never visible in the buffer.
+    local tail = el.content:sub((state.mat_len[el.id] or 0) + 1)
+    local content_lines = lines(tail)
+    vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, content_lines)
+    state.heights[el.id] = #content_lines
+    state.mat_len[el.id] = #el.content
+    for i = 0, #content_lines - 1 do
+      add_tracked_highlight(state, el, buf, thinking_ns, 'TCodeThinking', arow + i)
+    end
+    state.hl_upto[el.id] = arow + #content_lines - 1
+  end
+end
+
+-- Apply one `updated_all` entry for a region element (tool_call / subagent):
+-- rebuild the region [anchor, anchor + height) from full model state — this is
+-- the ONLY path that materializes bulk-deferred content in one shot.
+local function render_region_update(el, state, ctx, arow)
+  local buf, ns = ctx.buf, ctx.ns
+  local old_height = state.heights[el.id] or 0
+  -- Capture the element's existing hint-mark ids BEFORE deleting them so the
+  -- rebuilt marks keep the same ids (captured ids stay valid across toggles).
+  -- Kind-based resolution (hint_reuse_ids) must run before del_thinking_marks:
+  -- that clears the id -> kind map the resolution reads.
+  local args_reuse, output_reuse = hint_reuse_ids(state, el)
+  del_thinking_marks(state, buf, el.id)
+  del_hl_marks(state, buf, el.id)
+  local el_lines = render_element(el, ctx)
+  vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, el_lines)
+  state.heights[el.id] = #el_lines
+
+  if el.type == 'tool_call' then
+    state.labels[el.id] = set_label_overlay(buf, ns, arow, tool_label_virt(el), state.labels[el.id])
+    apply_args_highlight(state, buf, ns, el, arow)
+    set_nav_extmark(state, buf, tc_ns, el, arow, arow + #el_lines)
+    apply_tool_hints(state, buf, el, arow, args_reuse, output_reuse)
+  else -- subagent
+    state.labels[el.id] = set_label_overlay(buf, ns, arow, subagent_label_virt(el), state.labels[el.id])
+    apply_input_highlight(state, buf, ns, el, arow)
+    set_nav_extmark(state, buf, sa_ns, el, arow, arow + #el_lines)
+    apply_subagent_hints(state, buf, el, arow, args_reuse, output_reuse)
+    if el.error then
+      local err_lines = lines('Error: ' .. el.error)
+      local err_start = arow + #el_lines - #err_lines
+      for i = 0, #err_lines - 1 do
+        add_tracked_highlight(state, el, buf, ns, 'TCodeError', err_start + i)
+      end
+    end
+  end
+  state.hl_upto[el.id] = arow + #el_lines - 1
+end
+
+local append_only_types = {
+  user_message = true, assistant_message = true, system_message = true,
+  media = true, retry = true, end_info = true, end_marker = true,
+}
+
+local function model_next_element(model, el)
+  for i, e in ipairs(model.elements) do
+    if e == el then return model.elements[i + 1] end
+  end
+  return nil
+end
+
+-- Highlight the rows a streaming chunk introduced for a region element kind
+-- (thinking_block / tool_call / subagent). Only NEW rows are highlighted —
+-- rows at or below hl_upto already carry a mark, and a chunk without a
+-- trailing newline joins the last content row (append_row), so re-highlighting
+-- that row would stack one duplicate mark per chunk.
+--
+-- One exception: when a chunk containing a newline is inserted into a
+-- ZERO-LENGTH join row (join_col == 0), the join row's right-gravity mark
+-- slides onto a later row — the insert lands at col 0, the mark's own
+-- position — leaving the join row unhighlighted and a dead mark past it.
+-- Delete every slid mark and re-highlight the join row plus all new rows so
+-- each keeps exactly one mark.
+local function highlight_appended_rows(state, el, buf, ns, group, append_row, new_rows, join_col)
+  local upto = state.hl_upto[el.id] or -1
+  local start = math.max(append_row, upto + 1)
+  local last = append_row + new_rows - 1
+  if upto >= append_row and join_col == 0 and new_rows > 1 then
+    local list = state.hl[el.id]
+    if list then
+      for j = #list, 1, -1 do
+        local entry = list[j]
+        if entry[1] == ns then
+          local pos = vim.api.nvim_buf_get_extmark_by_id(buf, ns, entry[2], {})
+          if pos and pos[1] > append_row then
+            pcall(vim.api.nvim_buf_del_extmark, buf, ns, entry[2])
+            table.remove(list, j)
+          end
+        end
+      end
+    end
+    start = append_row
+    last = append_row + new_rows - 1
+  end
+  for i = start, last do
+    add_tracked_highlight(state, el, buf, ns, group, i)
+  end
+  state.hl_upto[el.id] = append_row + new_rows - 1
+end
+
+-- Apply one `updated_content` entry ({element, text}): append the delta at the
+-- element's append point — the buffer tail when the element is the tail or
+-- append-only, otherwise the row just above the NEXT element's anchor (the
+-- anchor rides the insert, so repeated appends land in order). Under bulk the
+-- write is skipped entirely; the next updated_all materializes it.
+local function render_updated_content(model, entry, state, ctx)
+  local buf, ns, bulk = ctx.buf, ctx.ns, ctx.bulk
+  local el, text = entry[1], entry[2]
+  if bulk then return end
+
+  -- A bulk-started thinking block's first live append lands exactly on its
+  -- anchor row and would push the anchor down with the inserted lines; capture
+  -- the region start so it can be pinned back after the write.
+  local pre_anchor = (el.type == 'thinking_block') and anchor_row(buf, el)
+
+  local append_row
+  local insert_below = false
+  if el == model.tail or append_only_types[el.type] then
+    append_row = vim.api.nvim_buf_line_count(buf) - 1
+  else
+    local next_el = model_next_element(model, el)
+    local next_row = next_el and anchor_row(buf, next_el)
+    if next_row then
+      append_row = next_row - 1
+      insert_below = true
+    else
+      append_row = vim.api.nvim_buf_line_count(buf) - 1
+    end
+  end
+  -- Pre-append length of the join row, captured BEFORE the write: the streaming
+  -- highlight dedup needs it to detect a newline chunk landing on a zero-length
+  -- row (see highlight_appended_rows).
+  local join_col
+  if el.type == 'thinking_block' or el.type == 'tool_call' or el.type == 'subagent' then
+    join_col = #(vim.api.nvim_buf_get_lines(buf, append_row, append_row + 1, false)[1] or '')
+  end
+  if insert_below then
+    insert_text_at(buf, append_row, text)
+  else
+    append_text(buf, text)
+  end
+
+  local new_rows = count_lines(text)
+  if state.heights[el.id] then
+    state.heights[el.id] = state.heights[el.id] + (new_rows - 1)
+  end
+
+  if el.type == 'thinking_block' then
+    if pre_anchor then
+      pcall(vim.api.nvim_buf_del_extmark, buf, gen_ns, el.anchor)
+      el.anchor = vim.api.nvim_buf_set_extmark(buf, gen_ns, pre_anchor, 0, {})
+    end
+    state.mat_len[el.id] = (state.mat_len[el.id] or 0) + #text
+    highlight_appended_rows(state, el, buf, thinking_ns, 'TCodeThinking', append_row, new_rows, join_col)
+  elseif el.type == 'tool_call' then
+    if el.args_open then
+      highlight_appended_rows(state, el, buf, ns, 'TCodeToolArgs', append_row, new_rows, join_col)
+    end
+    local arow = anchor_row(buf, el)
+    if arow then set_nav_extmark(state, buf, tc_ns, el, arow, arow + state.heights[el.id]) end
+  elseif el.type == 'subagent' then
+    if el.input_open then
+      highlight_appended_rows(state, el, buf, ns, 'TCodeToolArgs', append_row, new_rows, join_col)
+    end
+    local arow = anchor_row(buf, el)
+    if arow then set_nav_extmark(state, buf, sa_ns, el, arow, arow + state.heights[el.id]) end
+  end
+end
+
+-- Apply ONE diff to the buffer: order updated_all -> updated_content -> added.
+-- A single event's diff never has two kinds touching the same element, so the
+-- order is exact. Callers are responsible for the modifiable window.
+local function apply_diff(model, diff, ctx)
+  if not diff then return end
+  local buf = ctx.buf
+  if not vim.api.nvim_buf_is_valid(buf) then return end
+  local state = get_renderer_state(model)
+  for _, el in ipairs(diff.updated_all) do
+    local arow = anchor_row(buf, el)
+    if arow then
+      if el.type == 'thinking_block' then
+        render_thinking_update(el, state, ctx, arow)
+      elseif el.type == 'tool_call' or el.type == 'subagent' then
+        render_region_update(el, state, ctx, arow)
+      else
+        arow = nil -- nothing rebuilt; no anchor re-pin
+      end
+      -- The region rebuild shifts the start anchor to the end of the
+      -- replaced range (right_gravity); pin it back to the region start.
+      if arow then
+        if el.anchor then
+          pcall(vim.api.nvim_buf_del_extmark, buf, gen_ns, el.anchor)
+        end
+        el.anchor = vim.api.nvim_buf_set_extmark(buf, gen_ns, arow, 0, { right_gravity = true })
+      end
+    end
+  end
+  for _, entry in ipairs(diff.updated_content) do
+    render_updated_content(model, entry, state, ctx)
+  end
+  for _, el in ipairs(diff.added) do
+    render_added(model, el, state, ctx)
+  end
+end
+
+-- Render a single diff inside one modifiable window (nested-safe: callers may
+-- already be inside a window). No auto-scroll, no force_render_markdown —
+-- render_batch owns those.
+local function render(model, diff, ctx)
+  if not diff then return end
+  local buf = ctx.buf
+  if not vim.api.nvim_buf_is_valid(buf) then return end
+  with_modifiable(buf, function()
+    apply_diff(model, diff, ctx)
+  end)
+end
+
+-- Apply an ORDERED LIST of per-event diffs (one apply per event) in a single
+-- modifiable window. Computes was_at_bottom BEFORE any writes; after the
+-- window, if the cursor was at the bottom, moves it to the end of the last
+-- line so the viewport follows the stream. Kicks force_render_markdown once
+-- per batch. A failing diff stops the batch (reported, not raised).
+local function render_batch(model, diffs, ctx)
+  if not diffs or #diffs == 0 then return end
+  local buf = ctx.buf
+  if not vim.api.nvim_buf_is_valid(buf) then return end
+
+  local win = vim.fn.bufwinid(buf)
+  local was_at_bottom = false
+  if win ~= -1 then
+    local cursor_line = vim.api.nvim_win_get_cursor(win)[1]
+    local line_count = vim.api.nvim_buf_line_count(buf)
+    was_at_bottom = cursor_line >= line_count
+  end
+
+  with_modifiable(buf, function()
+    for _, diff in ipairs(diffs) do
+      local ok, err = pcall(apply_diff, model, diff, ctx)
+      if not ok then
+        vim.api.nvim_err_writeln('render error: ' .. tostring(err))
+        break
+      end
+    end
+  end)
+
+  if win ~= -1 and was_at_bottom then
+    local last_line_nr = vim.api.nvim_buf_line_count(buf)
+    local last_line_text = vim.api.nvim_buf_get_lines(buf, last_line_nr - 1, last_line_nr, false)[1] or ''
+    pcall(vim.api.nvim_win_set_cursor, win, { last_line_nr, #last_line_text })
+  end
+
+  force_render_markdown(buf)
+end
+
+-- Resolve the element whose collapsed/expanded thinking or args/input preview
+-- mark covers the given buffer row (0-indexed). The renderer registers these
+-- marks with the element id in its thinking id map; marks are ordered, first
+-- match wins.
+local function find_marked_element_at(model, buf, row)
+  local state = get_renderer_state(model)
+  local marks = vim.api.nvim_buf_get_extmarks(buf, thinking_ns, 0, -1, { details = true })
+  for _, mark in ipairs(marks) do
+    local mark_id = mark[1]
+    local el_id = state.thinking_ids[mark_id]
+    if el_id then
+      local start_row = mark[2]
+      local details = mark[4]
+      local end_row = details and details.end_row
+      local matches = (end_row and start_row <= row and row < end_row)
+        or (not end_row and start_row == row)
+      if matches then
+        return model.by_id[el_id], state.thinking_kinds[mark_id]
+      end
+    end
+  end
+  return nil, nil
+end
+
+-- Resolve the element whose region covers the given buffer row (0-indexed),
+-- scanning the model from the END (the most recent element wins). Height comes
+-- from the renderer's per-element region height; elements without a resolved
+-- anchor are skipped.
+local function element_at_row(model, buf, row)
+  local state = get_renderer_state(model)
+  for i = #model.elements, 1, -1 do
+    local el = model.elements[i]
+    local anchor = anchor_row(buf, el)
+    if anchor then
+      local height = state.heights[el.id] or 1
+      if row >= anchor and row < anchor + height then
+        return el
+      end
+    end
+  end
+  return nil
+end
+
+-- Compat helpers (test suites call these with the old signatures). Each one
+-- resolves the target element and routes through the reducer + renderer.
+
+-- Resolve a thinking_ns mark id (indicator or preview hint) to its element.
+local function element_for_mark(model, mark_id)
+  local state = get_renderer_state(model)
+  local el_id = state.thinking_ids[mark_id]
+  if el_id then return model.by_id[el_id] end
+  return nil
+end
+
+local function collapse_thinking(buf, ns)
+  local d = collapse_open_thinking(model)
+  if #d.updated_all > 0 then
+    render(model, d, { buf = buf, ns = ns, bulk = false })
+  end
+end
+
+local function toggle_thinking(buf, mark_id)
+  local el = element_for_mark(model, mark_id)
+  if el and el.type == 'thinking_block' then
+    local d = toggle_thinking_element(model, el)
+    render(model, d, { buf = buf, ns = ns, bulk = false })
+  end
+end
+
+local function toggle_tool_call_args(buf, mark_id)
+  local el = element_for_mark(model, mark_id)
+  if el and (el.type == 'tool_call' or el.type == 'subagent') then
+    local d = toggle_tool_call_args_element(model, el)
+    render(model, d, { buf = buf, ns = ns, bulk = false })
+  end
+end
+
+-- Apply one display event through the model + renderer. Kept as a thin
+-- compat wrapper (the reader and keymaps now call apply/render directly).
+local function render_event(buf, ns, event, envelope_id, bulk)
+  local diff = apply(model, event, envelope_id)
+  render(model, diff, { buf = buf, ns = ns, bulk = bulk })
 end
 
 -- Set up highlight groups used by all display buffers
@@ -1758,20 +2105,17 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
 
   local function flush_deferred()
     if not vim.api.nvim_buf_is_valid(buf) then return end
-    with_modifiable(buf, function()
-      if thinking_state.is_thinking then
-        local ok, err = pcall(collapse_thinking, buf, ns)
-        if not ok then
-          vim.api.nvim_err_writeln('flush_deferred collapse_thinking error: ' .. tostring(err))
-        end
-      end
-      for tool_call_id, _ in pairs(tool_call_gen_state) do
-        local ok, err = pcall(close_args_fence, buf, tool_call_id)
-        if not ok then
-          vim.api.nvim_err_writeln('flush_deferred close_args_fence error: ' .. tostring(err))
-        end
-      end
+    -- Reducer-level "close open elements" (collapse open thinking, close open
+    -- args/input fences), rendered by render_batch (its own modifiable window,
+    -- scroll, and markdown kick). The updated_all rebuilds materialize any
+    -- bulk-deferred content from model state in one shot.
+    local ok, err = pcall(function()
+      local diff = close_open_elements(model)
+      render_batch(model, { diff }, { buf = buf, ns = ns, bulk = false })
     end)
+    if not ok then
+      vim.api.nvim_err_writeln('flush_deferred render error: ' .. tostring(err))
+    end
   end
 
   local function arm_flush_timer()
@@ -1812,71 +2156,54 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
     vim.schedule(function()
       if not vim.api.nvim_buf_is_valid(buf) then return end
 
-      local was_at_bottom = true
-      local win = vim.fn.bufwinid(buf)
-      if win ~= -1 then
-        local cursor_line = vim.api.nvim_win_get_cursor(win)[1]
-        local line_count = vim.api.nvim_buf_line_count(buf)
-        was_at_bottom = (cursor_line >= line_count)
-      end
-
-      with_modifiable(buf, function()
-        for _, line in ipairs(lines) do
-          if line ~= '' then
-            local ok, event = pcall(vim.json.decode, line)
-            if ok and event then
-              -- Capture the envelope id (pinned reference to this display event)
-              -- BEFORE unwrapping, so `gb` can target the exact user message.
-              -- Legacy lines have no top-level id; envelope_id stays nil.
-              local envelope_id = nil
-              if type(event) == 'table' and event.id ~= nil then
-                envelope_id = event.id
-              end
-              -- New wire format: {"id": N, "msg": {"Variant": {...}}}. Unwrap
-              -- to the legacy {"Variant": {...}} shape the renderers expect.
-              -- Legacy lines have no top-level "msg" key and pass through.
-              if type(event) == 'table' and type(event.msg) == 'table' then
-                event = event.msg
-              end
-              if on_event then
-                local variant, event_data = next(event)
-                local ev_ok, ev_err = pcall(on_event, variant, event_data)
-                if not ev_ok then
-                  vim.api.nvim_err_writeln('on_event error: ' .. tostring(ev_err))
-                end
-              end
-              local render_ok, render_err = pcall(render_event, buf, ns, event, envelope_id, state.is_initial_load)
-              if not render_ok then
-                vim.api.nvim_err_writeln('render_event error: ' .. tostring(render_err))
-                break
+      -- Apply each event to the model, collecting the per-event diffs in
+      -- order; a failing apply stops the rest of this batch.
+      local diffs = {}
+      for _, line in ipairs(lines) do
+        if line ~= '' then
+          local ok, event = pcall(vim.json.decode, line)
+          if ok and event then
+            -- Capture the envelope id (pinned reference to this display event)
+            -- BEFORE unwrapping, so `gb` can target the exact user message.
+            -- Legacy lines have no top-level id; envelope_id stays nil.
+            local envelope_id = nil
+            if type(event) == 'table' and event.id ~= nil then
+              envelope_id = event.id
+            end
+            -- New wire format: {"id": N, "msg": {"Variant": {...}}}. Unwrap
+            -- to the legacy {"Variant": {...}} shape the renderers expect.
+            -- Legacy lines have no top-level "msg" key and pass through.
+            if type(event) == 'table' and type(event.msg) == 'table' then
+              event = event.msg
+            end
+            if on_event then
+              local variant, event_data = next(event)
+              local ev_ok, ev_err = pcall(on_event, variant, event_data)
+              if not ev_ok then
+                vim.api.nvim_err_writeln('on_event error: ' .. tostring(ev_err))
               end
             end
+            local a_ok, diff = pcall(apply, model, event, envelope_id)
+            if not a_ok then
+              vim.api.nvim_err_writeln('apply error: ' .. tostring(diff))
+              break
+            end
+            diffs[#diffs + 1] = diff
           end
         end
-        if state.is_initial_load then
-          state.is_initial_load = false
-          -- No immediate flush here: arm_flush_timer (called on every content
-          -- read above) fires once the file has been quiet for 500 ms, so a
-          -- live session mid-args/mid-thinking keeps its fence open and
-          -- subsequent chunks stream normally, while a static file (idle or
-          -- crashed) materializes deferred content exactly once.
-        end
+      end
 
-        if win ~= -1 and was_at_bottom then
-          local last_line_nr = vim.api.nvim_buf_line_count(buf)
-          local last_line_text = vim.api.nvim_buf_get_lines(buf, last_line_nr - 1, last_line_nr, false)[1] or ''
-          -- Set cursor to end of last line so viewport scrolls to show the latest
-          -- content even when streaming appends to a long wrapped line.
-          pcall(vim.api.nvim_win_set_cursor, win, { last_line_nr, #last_line_text })
-        end
-      end)
-
-      -- Kick render-markdown.nvim once per batch, AFTER all events in this
-      -- batch have been applied to the buffer. With debounce overridden to
-      -- 0 in setup_display, this schedules an immediate repaint that sees
-      -- the post-batch buffer state and applies fence conceals before the
-      -- user's eyes can notice the raw backticks.
-      force_render_markdown(buf)
+      -- Render the whole batch inside render_batch's single modifiable window
+      -- (bulk defers per-chunk content writes; the settle flush materializes).
+      render_batch(model, diffs, { buf = buf, ns = ns, bulk = state.is_initial_load })
+      if state.is_initial_load then
+        state.is_initial_load = false
+        -- No immediate flush here: arm_flush_timer (called on every content
+        -- read above) fires once the file has been quiet for 500 ms, so a
+        -- live session mid-args/mid-thinking keeps its fence open and
+        -- subsequent chunks stream normally, while a static file (idle or
+        -- crashed) materializes deferred content exactly once.
+      end
     end)
   end
 
@@ -1910,7 +2237,7 @@ local function open_pending_approvals()
     return
   end
   local result = vim.fn.system(string.format(
-    '%s --session=%s approve-next', M.exe_path, M.session_id))
+    '%s --session=%s approve-next', shquote(M.exe_path), shquote(M.session_id)))
   local trimmed = vim.trim(result)
   if trimmed ~= '' then
     last_approval_msg = trimmed
@@ -1983,9 +2310,9 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   --     here against that plugin's API.
   set_render_markdown_debounce(buf, 0)
 
-  -- Reset first_event flag for this display session
+  -- Reset the model and first_event flag for this display session.
+  model = new_model()
   first_event = true
-  um_extmark_ids = {}
 
   -- Register tcode tree-sitter parser and start highlighting
   if parser_path and parser_path ~= '' then
@@ -2086,64 +2413,62 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     end, { buffer = true, silent = true, desc = 'Quit' })
   end
 
-  -- Context-aware 'o' keybinding: toggle thinking or open tool call detail
+  -- Context-aware 'o' keybinding: toggle thinking / tool args / input /
+  -- output previews, or open the subagent / tool-call detail view from the
+  -- element's label line only.
   vim.keymap.set('n', 'o', function()
     local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
 
-    -- Check for thinking extmark first
-    local thinking_mark = find_thinking_at_line(buf, cursor_line)
-    if thinking_mark then
-      toggle_thinking(buf, thinking_mark)
+    -- Step 1: a marked element under the cursor (thinking indicator, a
+    -- collapsed preview hint, or expanded content) -> toggle it through the
+    -- reducer. Expanded content carries its own collapse hint, so `o` there
+    -- collapses instead of opening the detail view.
+    local el, kind = find_marked_element_at(model, buf, cursor_line)
+    if el then
+      local d
+      if kind == 'thinking' then
+        d = toggle_thinking_element(model, el)
+      elseif kind == 'args' or kind == 'input' then
+        d = toggle_tool_call_args_element(model, el)
+      elseif kind == 'output' then
+        d = toggle_tool_output_element(model, el)
+      end
+      if d and #d.updated_all > 0 then
+        render(model, d, { buf = buf, ns = ns, bulk = false })
+      end
       return
     end
 
-    -- Priority 2: tool call args extmark → toggle expand/collapse
-    local tool_args_mark = find_tool_args_at_line(buf, cursor_line)
-    if tool_args_mark then
-      toggle_tool_call_args(buf, tool_args_mark)
-      return
-    end
-
-    -- Check for subagent extmark (end_row is exclusive: first row after the covered range)
-    if M.exe_path and M.session_id then
-      local sa_marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, { details = true })
-      for _, mark in ipairs(sa_marks) do
-        local start_row = mark[2]
-        local details = mark[4]
-        local end_row = details.end_row or (start_row + 1)
-        if cursor_line >= start_row and cursor_line < end_row and sa_extmark_ids[mark[1]] then
-          local conv_id = sa_extmark_ids[mark[1]]
+    -- Step 2: the detail view opens only from the element's LABEL row (the
+    -- anchor row), not from anywhere in its content region.
+    el = element_at_row(model, buf, cursor_line)
+    if el and (el.type == 'subagent' or el.type == 'tool_call') then
+      local arow = anchor_row(buf, el)
+      if arow == cursor_line then
+        if el.type == 'subagent' and el.conversation_id then
+          if not M.exe_path or not M.session_id then
+            vim.notify('Session info not available', vim.log.levels.ERROR)
+            return
+          end
           vim.fn.system(string.format('%s --session=%s open-subagent %s',
-            M.exe_path, M.session_id, conv_id))
+            shquote(M.exe_path), shquote(M.session_id), shquote(el.conversation_id)))
+          return
+        end
+        if el.type == 'tool_call' and el.tool_call_id then
+          if not M.exe_path or not M.session_id then
+            vim.notify('Session info not available', vim.log.levels.ERROR)
+            return
+          end
+          vim.fn.system(string.format('%s --session=%s open-tool-call %s',
+            shquote(M.exe_path), shquote(M.session_id), shquote(el.tool_call_id)))
           return
         end
       end
     end
-
-    -- Fall through to tool call detail
-    if not M.exe_path or not M.session_id then
-      vim.notify('Session info not available', vim.log.levels.ERROR)
-      return
-    end
-    local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, { details = true })
-    local tool_call_id = nil
-    for _, mark in ipairs(marks) do
-      local start_row = mark[2]
-      local details = mark[4]
-      local end_row = details.end_row or (start_row + 1)
-      if cursor_line >= start_row and cursor_line < end_row and tc_extmark_ids[mark[1]] then
-        tool_call_id = tc_extmark_ids[mark[1]]
-        break
-      end
-    end
-    if not tool_call_id then
-      return
-    end
-    vim.fn.system(string.format('%s --session=%s open-tool-call %s', M.exe_path, M.session_id, tool_call_id))
-  end, { buffer = true, silent = true, desc = 'Open tool call detail' })
+    -- Otherwise nothing under the cursor to act on.
+  end, { buffer = true, silent = true, desc = 'Toggle preview or open detail' })
 
   -- Cancel tool or subagent with confirmation popup (Ctrl-k)
-  -- Checks subagent first, then tool call.
   vim.keymap.set('n', '<C-k>', function()
     if not M.exe_path or not M.session_id then
       vim.notify('Session info not available', vim.log.levels.ERROR)
@@ -2151,59 +2476,44 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     end
 
     local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
-
-    -- Check for subagent under cursor first
-    local sa_marks = vim.api.nvim_buf_get_extmarks(buf, sa_ns, 0, -1, { details = true })
-    for _, mark in ipairs(sa_marks) do
-      local start_row = mark[2]
-      local details = mark[4]
-      local end_row = details.end_row or (start_row + 1)
-      if cursor_line >= start_row and cursor_line < end_row and sa_extmark_ids[mark[1]] then
-        local conv_id = sa_extmark_ids[mark[1]]
-        local sa_entries = sa_label_marks[conv_id]
-        if not sa_entries or #sa_entries == 0 then
-          vim.notify('Subagent already finished', vim.log.levels.INFO)
-          return
-        end
-        local desc = sa_entries[#sa_entries].description or conv_id
-        confirm_popup("Cancel subagent '" .. desc .. "'? (y/n)", function()
-          local cmd = string.format('%s --session=%s cancel-conversation %s', M.exe_path, M.session_id, conv_id)
-          local result = vim.fn.system(cmd)
-          vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
-        end)
-        return
-      end
-    end
-
-    -- Fall through to tool call cancel
-    local marks = vim.api.nvim_buf_get_extmarks(buf, tc_ns, 0, -1, { details = true })
-    local tool_call_id = nil
-    for _, mark in ipairs(marks) do
-      local start_row = mark[2]
-      local details = mark[4]
-      local end_row = details.end_row or (start_row + 1)
-      if cursor_line >= start_row and cursor_line < end_row and tc_extmark_ids[mark[1]] then
-        tool_call_id = tc_extmark_ids[mark[1]]
-        break
-      end
-    end
-
-    if not tool_call_id then
+    local el = element_at_row(model, buf, cursor_line)
+    if not el then
       vim.notify('No tool call or subagent under cursor', vim.log.levels.WARN)
       return
     end
 
-    if not tc_label_marks[tool_call_id] then
-      vim.notify('Tool call already finished', vim.log.levels.INFO)
-      return
+    if el.type == 'subagent' and el.conversation_id then
+      local final = el.status == 'done' or el.status == 'failed'
+        or el.status == 'cancelled' or el.status == 'denied'
+      if final then
+        vim.notify('Subagent already finished', vim.log.levels.INFO)
+        return
+      end
+      -- desc is wire-derived and can contain '\n', which confirm_popup cannot
+      -- write as one buffer line: collapse newlines before building the prompt.
+      local desc = single_line(el.description or el.conversation_id)
+      confirm_popup("Cancel subagent '" .. desc .. "'? (y/n)", function()
+        local cmd = string.format('%s --session=%s cancel-conversation %s',
+          shquote(M.exe_path), shquote(M.session_id), shquote(el.conversation_id))
+        local result = vim.fn.system(cmd)
+        vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
+      end)
+    elseif el.type == 'tool_call' and el.tool_call_id then
+      local final = el.status == 'done' or el.status == 'failed'
+        or el.status == 'cancelled' or el.status == 'denied'
+      if final then
+        vim.notify('Tool call already finished', vim.log.levels.INFO)
+        return
+      end
+      confirm_popup("Cancel tool '" .. single_line(el.tool_name or 'unknown') .. "'? (y/n)", function()
+        local cmd = string.format('%s --session=%s cancel-tool %s',
+          shquote(M.exe_path), shquote(M.session_id), shquote(el.tool_call_id))
+        local result = vim.fn.system(cmd)
+        vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
+      end)
+    else
+      vim.notify('No tool call or subagent under cursor', vim.log.levels.WARN)
     end
-
-    local tool_name = tc_tool_names[tool_call_id] or 'unknown'
-    confirm_popup("Cancel tool '" .. tool_name .. "'? (y/n)", function()
-      local cmd = string.format('%s --session=%s cancel-tool %s', M.exe_path, M.session_id, tool_call_id)
-      local result = vim.fn.system(cmd)
-      vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
-    end)
   end, { buffer = true, silent = true, desc = 'Cancel tool or subagent' })
 
   -- Cancel entire conversation with confirmation popup (Ctrl-C)
@@ -2231,7 +2541,8 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     local conv_id = data.id
 
     confirm_popup("Cancel conversation? (y/n)", function()
-      local cmd = string.format('%s --session=%s cancel-conversation %s', M.exe_path, M.session_id, conv_id)
+      local cmd = string.format('%s --session=%s cancel-conversation %s',
+        shquote(M.exe_path), shquote(M.session_id), shquote(conv_id))
       local result = vim.fn.system(cmd)
       vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
     end)
@@ -2249,18 +2560,8 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
         return
       end
       local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
-      local marks = vim.api.nvim_buf_get_extmarks(buf, um_ns, 0, -1, { details = true })
-      local msg_id = nil
-      for _, mark in ipairs(marks) do
-        local start_row = mark[2]
-        local details = mark[4]
-        local end_row = details.end_row or (start_row + 1)
-        if cursor_line >= start_row and cursor_line < end_row and um_extmark_ids[mark[1]] then
-          msg_id = um_extmark_ids[mark[1]]
-          break
-        end
-      end
-      if not msg_id then
+      local el = element_at_row(model, buf, cursor_line)
+      if not (el and el.type == 'user_message' and el.msg_id) then
         vim.notify('not on a user message', vim.log.levels.WARN)
         return
       end
@@ -2268,10 +2569,10 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
       if M.profile and M.profile ~= '' then
         -- Single-quote-escape so a profile with shell metacharacters is never
         -- interpreted by the shell that runs the CLI command.
-        profile_part = " -p '" .. M.profile:gsub("'", "'\\''") .. "'"
+        profile_part = ' -p ' .. shquote(M.profile)
       end
       local cmd = string.format('%s%s --session=%s branch %s',
-        M.exe_path, profile_part, M.session_id, tostring(msg_id))
+        shquote(M.exe_path), profile_part, shquote(M.session_id), shquote(el.msg_id))
       local result = vim.fn.system(cmd)
       local trimmed = vim.trim(result)
       if trimmed ~= '' then
@@ -2288,7 +2589,10 @@ end
 function M.setup_tool_call_display(tool_call_file, status_file)
   M.tc_file = tool_call_file
   M.tc_status_file = status_file
-  tc_full_input = true  -- Never collapse tool input in the detail view
+  -- Fresh model with full_input set: the detail view never collapses args.
+  model = new_model()
+  model.full_input = true
+  first_event = true
 
   vim.g.tcode_tc_status = 'Waiting...'
 
@@ -2322,7 +2626,6 @@ function M.setup_tool_call_display(tool_call_file, status_file)
     callback = function()
       if M.tc_watcher then M.tc_watcher.stop(); M.tc_watcher = nil end
       if M.tc_status_watcher then M.tc_status_watcher.stop(); M.tc_status_watcher = nil end
-      tc_full_input = false
     end,
   })
 

@@ -8,8 +8,8 @@
 -- Suite files are plain Lua chunks that register tests via the globals
 -- provided here: `test(name, fn)`, `check(cond, msg)`, `T` (module internals),
 -- `ns` / `thinking_ns_id`, and the helpers `new_buf`, `seed`, `lines_of`,
--- `reset_thinking`, `windowed_render`, `clear_errors`, `recorded_errors`,
--- `tmp_dir`.
+-- `windowed_render`, `clear_errors`, `recorded_errors`, `tmp_dir`.
+-- `T.reset_model()` rebinds the model and first_event for a fresh test.
 --
 -- Exit code is 0 only when every assertion passes; the final line always has
 -- the shape `TOTAL: <N> passed, <M> failed` so callers can parse it.
@@ -26,15 +26,30 @@ assert(src:find('return M', 1, true), 'tcode.lua must end with `return M` for th
 
 local accessors = [[
 M.__test = {
-  collapse_thinking = collapse_thinking,
   with_modifiable = with_modifiable,
-  thinking_state = thinking_state,
-  thinking_entries = thinking_entries,
   render_event = render_event,
+  collapse_thinking = collapse_thinking,
   toggle_thinking = toggle_thinking,
   toggle_tool_call_args = toggle_tool_call_args,
   create_jsonl_reader = create_jsonl_reader,
-  reset_first_event = function() first_event = true end,
+  model = model,
+  apply = apply,
+  render = render,
+  render_batch = render_batch,
+  element_at_row = element_at_row,
+  get_renderer_state = get_renderer_state,
+  close_open_elements = close_open_elements,
+  toggle_thinking_element = toggle_thinking_element,
+  toggle_tool_call_args_element = toggle_tool_call_args_element,
+  toggle_tool_output_element = toggle_tool_output_element,
+  find_marked_element_at = find_marked_element_at,
+  shquote = shquote,
+  reset_model = function()
+    model = new_model()
+    first_event = true
+    M.__test.model = model
+    return model
+  end,
 }
 return M
 ]]
@@ -116,19 +131,6 @@ local function lines_of(b)
   return vim.api.nvim_buf_get_lines(b, 0, -1, false)
 end
 
-local function reset_thinking()
-  local st = T.thinking_state
-  st.is_thinking = false
-  st.start_row = nil
-  st.content_parts = {}
-  st.last_highlighted_row = nil
-  st.written = false
-  st.pending_merge_mark = nil
-  for k in pairs(T.thinking_entries) do
-    T.thinking_entries[k] = nil
-  end
-end
-
 -- Mirrors create_jsonl_reader's batch window: render_event only ever runs
 -- inside a modifiable window in production, so direct calls wrap the same way.
 local function windowed_render(b, event, bulk)
@@ -182,7 +184,6 @@ local function main()
   _G.new_buf = new_buf
   _G.seed = seed
   _G.lines_of = lines_of
-  _G.reset_thinking = reset_thinking
   _G.windowed_render = windowed_render
   _G.clear_errors = clear_errors
   _G.recorded_errors = recorded_errors
