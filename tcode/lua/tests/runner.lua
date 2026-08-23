@@ -7,9 +7,10 @@
 --
 -- Suite files are plain Lua chunks that register tests via the globals
 -- provided here: `test(name, fn)`, `check(cond, msg)`, `T` (module internals),
--- `ns` / `thinking_ns_id`, and the helpers `new_buf`, `seed`, `lines_of`,
--- `windowed_render`, `clear_errors`, `recorded_errors`, `tmp_dir`.
--- `T.reset_model()` rebinds the model and first_event for a fresh test.
+-- `ns`, and the helpers `new_buf`, `seed`, `lines_of`, `windowed_render`,
+-- `clear_errors`, `recorded_errors`, `tmp_dir`.
+-- `T.reset_model()` rebinds the model (and its per-model renderer state) for a
+-- fresh test.
 --
 -- Exit code is 0 only when every assertion passes; the final line always has
 -- the shape `TOTAL: <N> passed, <M> failed` so callers can parse it.
@@ -30,7 +31,6 @@ M.__test = {
   render_event = render_event,
   collapse_thinking = collapse_thinking,
   toggle_thinking = toggle_thinking,
-  toggle_tool_call_args = toggle_tool_call_args,
   create_jsonl_reader = create_jsonl_reader,
   model = model,
   apply = apply,
@@ -38,17 +38,34 @@ M.__test = {
   render_batch = render_batch,
   content_of = content_of,
   updated_content_text = updated_content_text,
-  element_at_row = element_at_row,
+  -- element_at_row returns the element only (single return) so suites that
+  -- compare directly (`T.element_at_row(m, buf, row) == el`) keep working;
+  -- the tuple (element, offset) is exposed as element_at_row_full.
+  element_at_row = function(model, buf, row)
+    return select(1, element_at_row(model, buf, row))
+  end,
+  element_at_row_full = element_at_row,
+  -- Keymap handler bodies (what the `o` / `<C-k>` / `gb` keymaps invoke).
+  keymap_o = keymap_o,
+  keymap_ck = keymap_ck,
+  keymap_gb = keymap_gb,
   get_renderer_state = get_renderer_state,
+  project_element = project_element,
+  action_at = action_at,
+  element_chrome_spans = element_chrome_spans,
+  element_layout = element_layout,
+  tail_lines = tail_lines,
+  row_element_at = row_element_at,
+  element_row = element_row,
+  set_element_row = set_element_row,
   close_open_elements = close_open_elements,
   toggle_thinking_element = toggle_thinking_element,
-  toggle_tool_call_args_element = toggle_tool_call_args_element,
-  toggle_tool_output_element = toggle_tool_output_element,
-  find_marked_element_at = find_marked_element_at,
   shquote = shquote,
   reset_model = function()
     model = new_model()
-    first_event = true
+    -- Belt and suspenders: a fresh model already gets a fresh weak-keyed
+    -- renderer state with first_event = true; reset it explicitly anyway.
+    get_renderer_state(model).first_event = true
     M.__test.model = model
     return model
   end,
@@ -113,7 +130,6 @@ end
 
 -- ------------------------------------------------------------------- helpers
 local ns = vim.api.nvim_create_namespace('tcode_lua_tests')
-local thinking_ns_id = vim.api.nvim_get_namespaces()['tcode_thinking']
 
 local function new_buf()
   -- Scratch buffer, content seeded modifiable then locked read-only (matches
@@ -182,7 +198,6 @@ local function main()
   _G.T = T
   _G.M = M
   _G.ns = ns
-  _G.thinking_ns_id = thinking_ns_id
   _G.new_buf = new_buf
   _G.seed = seed
   _G.lines_of = lines_of

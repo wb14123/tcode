@@ -84,34 +84,6 @@ local function append_lines(buf, lines)
   vim.api.nvim_buf_set_lines(buf, line_count, line_count, false, lines)
 end
 
--- Append text continuing from current buffer position (for streaming chunks)
-local function append_text(buf, text)
-  if not ensure_buf_modifiable(buf) then return end
-  local line_count = vim.api.nvim_buf_line_count(buf)
-  local last_line = vim.api.nvim_buf_get_lines(buf, line_count - 1, line_count, false)[1] or ''
-  local lines = vim.split(text, '\n', { plain = true })
-  vim.api.nvim_buf_set_text(buf, line_count - 1, #last_line, line_count - 1, #last_line, lines)
-end
-
--- Namespace for tool-call range extmarks (per-element navigation ranges).
-local tc_ns = vim.api.nvim_create_namespace('tcode_tc_id')
-
--- Namespace for subagent range extmarks (per-element navigation ranges).
-local sa_ns = vim.api.nvim_create_namespace('tcode_sa_id')
-
--- Namespace for user-message range extmarks (`gb` branch targeting).
-local um_ns = vim.api.nvim_create_namespace('tcode_um')
-
--- Namespace for per-element start-row anchor extmarks. Rows are resolved from
--- the extmarks at use time, never stored as stale integers.
-local gen_ns = vim.api.nvim_create_namespace('tcode_gen')
-
--- Flag to handle the initial empty line in Neovim buffers
-local first_event = true
-
--- Thinking indicator / expand-hint extmark namespace
-local thinking_ns = vim.api.nvim_create_namespace('tcode_thinking')
-
 -- Tool output is wrapped in a long backtick-fenced code block to prevent
 -- markdown/treesitter from interpreting partial HTML, XML, JSON, etc. as
 -- markdown syntax. We use 10 backticks so tool output containing ``` won't
@@ -169,8 +141,35 @@ local function confirm_popup(prompt, on_confirm)
   vim.keymap.set('n', '<Esc>', close_popup, { buffer = popup_buf, nowait = true })
 end
 
+-- Replace every NUL byte (0x00) with the two-byte display escape '\0'
+-- (backslash + '0'). Byte-level by design: the Lua pattern engine treats a
+-- NUL as a C-string terminator, so pattern-based replacement of '\0' is not
+-- reliable (`gsub('\0', ...)` sees an EMPTY pattern and inserts between every
+-- character). The plain find fast path returns the input unchanged when no
+-- NUL is present (the common case — no allocation).
+local function escape_nul(s)
+  if not s:find('\0', 1, true) then return s end
+  local out = {}
+  local pos = 1
+  while true do
+    local b = s:find('\0', pos, true)
+    if not b then
+      out[#out + 1] = s:sub(pos)
+      break
+    end
+    out[#out + 1] = s:sub(pos, b - 1)
+    out[#out + 1] = '\\0'
+    pos = b + 1
+  end
+  return table.concat(out)
+end
+
 --- Insert text at the end of a specific row, supporting multi-line text.
 local function insert_text_at(buf, row, text)
+  -- A NUL byte is an internal line break to nvim's buffer API; escape it
+  -- (\0 -> \\0) so a projected row never becomes multiple buffer rows and
+  -- desyncs the row map. Display-only: the model keeps the raw bytes.
+  text = escape_nul(tostring(text))
   local cur_line = vim.api.nvim_buf_get_lines(buf, row, row + 1, false)[1] or ''
   local lines = vim.split(text, '\n', { plain = true })
   vim.api.nvim_buf_set_text(buf, row, #cur_line, row, #cur_line, lines)
@@ -381,25 +380,6 @@ local function count_lines(text)
   return n
 end
 
--- Estimated number of wrapped rows the text occupies at a reference width.
--- A pure proxy for the old width-aware visual check: tool/subagent args
--- arrive as single-logical-line JSON with escaped newlines, so a plain line
--- count would never collapse them even when they span many wrapped rows.
-local ARGS_REF_WIDTH = 80
-
-local function visual_lines(text)
-  local total = 0
-  local pos = 1
-  while true do
-    local finish = text:find('\n', pos, true)
-    local line = finish and text:sub(pos, finish - 1) or text:sub(pos)
-    total = total + math.max(1, math.ceil(#line / ARGS_REF_WIDTH))
-    if not finish then break end
-    pos = finish + 1
-  end
-  return total
-end
-
 -- Last element of a given type in the model.
 local function last_element_of_type(model, type_)
   for i = #model.elements, 1, -1 do
@@ -507,22 +487,15 @@ local function collapse_open_thinking(model)
 end
 
 -- Settle-flush operation: close every open element (open thinking block, open
--- args/input fences), producing updated_all per element. Long args/input are
--- collapsed to a preview at the same time (matches the old flush behavior).
+-- args/input fences), producing updated_all per element.
 local function close_open_elements(model)
   local diff = merge_diff(new_diff(), collapse_open_thinking(model))
   for _, el in ipairs(model.elements) do
     if el.type == 'tool_call' and el.args_open then
       el.args_open = false
-      if visual_lines(content_of(el, 'args')) > 2 and not el.full_input then
-        el.args_collapsed = true
-      end
       diff.updated_all[#diff.updated_all + 1] = el
     elseif el.type == 'subagent' and el.input_open then
       el.input_open = false
-      if visual_lines(content_of(el, 'input')) > 2 then
-        el.input_collapsed = true
-      end
       diff.updated_all[#diff.updated_all + 1] = el
     end
   end
@@ -535,30 +508,6 @@ local function toggle_thinking_element(model, element)
   if element and element.type == 'thinking_block'
     and (element.state == 'collapsed' or element.state == 'expanded') then
     element.state = element.state == 'collapsed' and 'expanded' or 'collapsed'
-    diff.updated_all[#diff.updated_all + 1] = element
-  end
-  return diff
-end
-
--- `o` toggle on a tool call (args preview) or a subagent (input preview):
--- flip the preview flag.
-local function toggle_tool_call_args_element(model, element)
-  local diff = new_diff()
-  if element and element.type == 'tool_call' then
-    element.args_collapsed = not element.args_collapsed
-    diff.updated_all[#diff.updated_all + 1] = element
-  elseif element and element.type == 'subagent' then
-    element.input_collapsed = not element.input_collapsed
-    diff.updated_all[#diff.updated_all + 1] = element
-  end
-  return diff
-end
-
--- `o` toggle on a tool/subagent OUTPUT preview: flip the flag.
-local function toggle_tool_output_element(model, element)
-  local diff = new_diff()
-  if element and (element.type == 'tool_call' or element.type == 'subagent') then
-    element.output_collapsed = not element.output_collapsed
     diff.updated_all[#diff.updated_all + 1] = element
   end
   return diff
@@ -614,11 +563,16 @@ local function apply(model, event, envelope_id)
       diff.updated_all[#diff.updated_all + 1] = tail
     else
       -- New run: collapse any open thinking first, then open a fresh block.
+      -- A run that starts while the model tail is an assistant_message is
+      -- ATTACHED to that am: the renderer places its rows INSIDE the am's
+      -- region at the arrival position, so the display order matches the
+      -- wire order (thinking before response).
       merge_diff(diff, collapse_open_thinking(model))
       local el = add_element(model, {
         type = 'thinking_block',
         content = chunk,
         state = 'open',
+        attach_to = tail and tail.type == 'assistant_message' and tail.id or nil,
       })
       diff.added[#diff.added + 1] = el
       model.tail = el
@@ -697,11 +651,9 @@ local function apply(model, event, envelope_id)
       created_at = data.created_at,
       args = '',
       args_open = true,
-      args_collapsed = false,
       output_started = false,
       output_open = false,
       output = '',
-      output_collapsed = false,
       status = 'generating',
       full_input = model.full_input,
       error = nil,
@@ -724,11 +676,8 @@ local function apply(model, event, envelope_id)
     merge_diff(diff, collapse_open_thinking(model))
     local el = find_tool_call_by_id(model, data.tool_call_id)
     if el then
-      -- Close the args fence, collapse long args to a preview, open output.
+      -- Close the args fence, open output.
       el.args_open = false
-      if visual_lines(content_of(el, 'args')) > 2 and not el.full_input then
-        el.args_collapsed = true
-      end
       el.output_started = true
       el.status = 'running'
       el.output_open = true
@@ -746,11 +695,9 @@ local function apply(model, event, envelope_id)
         created_at = data.created_at,
         args = '',
         args_open = false,
-        args_collapsed = false,
         output_started = true,
         output_open = true,
         output = '',
-        output_collapsed = false,
         status = 'running',
         full_input = model.full_input,
         error = nil,
@@ -789,11 +736,6 @@ local function apply(model, event, envelope_id)
         Timeout = 'failed', UserDenied = 'denied',
       }
       el.status = status_map[data.end_status] or 'done'
-      -- Long results auto-collapse to a preview (the detail view keeps them
-      -- expanded via full_input).
-      if visual_lines(content_of(el, 'output')) > 2 and not el.full_input then
-        el.output_collapsed = true
-      end
       diff.updated_all[#diff.updated_all + 1] = el
       local info = add_element(model, {
         type = 'end_info',
@@ -849,9 +791,7 @@ local function apply(model, event, envelope_id)
       description = '',
       input = '',
       input_open = true,
-      input_collapsed = false,
       output = '',
-      output_collapsed = false,
       status = 'generating',
       is_continue = false,
       error = nil,
@@ -875,9 +815,6 @@ local function apply(model, event, envelope_id)
     local el = find_pending_subagent(model, data.tool_call_id)
     if el then
       el.input_open = false
-      if visual_lines(content_of(el, 'input')) > 2 then
-        el.input_collapsed = true
-      end
       el.status = 'running'
       el.description = data.description or ''
       el.conversation_id = data.conversation_id
@@ -895,9 +832,7 @@ local function apply(model, event, envelope_id)
         description = data.description or '',
         input = '',
         input_open = false,
-        input_collapsed = false,
         output = '',
-        output_collapsed = false,
         status = 'running',
         is_continue = false,
         error = nil,
@@ -919,9 +854,6 @@ local function apply(model, event, envelope_id)
         description = last and last.description or ''
       end
       el.input_open = false
-      if visual_lines(content_of(el, 'input')) > 2 then
-        el.input_collapsed = true
-      end
       el.status = 'continuing'
       el.is_continue = true
       el.description = description
@@ -945,9 +877,7 @@ local function apply(model, event, envelope_id)
         description = description,
         input = '',
         input_open = false,
-        input_collapsed = false,
         output = '',
-        output_collapsed = false,
         status = 'continuing',
         is_continue = true,
         error = nil,
@@ -987,10 +917,6 @@ local function apply(model, event, envelope_id)
     if last then
       if type(data.error) == 'string' and data.error ~= '' then
         last.error = data.error
-      end
-      -- Long streamed output auto-collapses to a preview.
-      if visual_lines(content_of(last, 'output')) > 2 then
-        last.output_collapsed = true
       end
     end
     if model.sa_active == data.conversation_id then
@@ -1066,150 +992,54 @@ end
 -- The ONLY layer that touches the buffer / extmark / highlight APIs. Consumes
 -- the reducer's diff contract: { added = {el,...}, updated_all = {el,...},
 -- updated_content = {{el, text},...} } and projects the model onto the buffer.
--- render(model, diff, ctx) is the single entry point; ctx = { buf, ns, bulk }.
+-- render(model, diff, ctx) / render_batch(model, diffs, ctx) are the entry
+-- points; ctx = { buf, ns, bulk, width, media_root, sa_active }. Element
+-- positions are plain integers in the row map, maintained by three
+-- incremental operations (append / stream / rebuild) — never extmark
+-- anchors, never a full-buffer rebuild in the live path. Extmarks are
+-- decoration only (per-row / per-col-range highlights).
 
 -- Renderer-owned bookkeeping keyed per model (weak keys: a discarded model
--- releases its state). heights = element region height in buffer rows;
--- mat_len = materialized content length (chars) for streaming thinking blocks;
--- nav/thinking = per-element extmark id maps for the navigation ranges and the
--- thinking indicator/expand-hint marks, with *_ids as the reverse (id -> el_id)
--- indexes so later phases can map a cursor line back to the element;
--- hl = per-element list of { ns, id } highlight extmarks owned by the rebuilt
--- element kinds (thinking_block / tool_call / subagent) so a rebuild can delete
--- them (see del_hl_marks); hl_upto = last highlighted row per element so
--- streaming never re-highlights an already-highlighted row (see
--- render_updated_content).
+-- releases its state). rows = el.id -> { start_row = <int or nil>, height =
+-- <int> }, the integer row map maintained by the render operations (a
+-- zero-height element — media without a root, empty end_info — has no
+-- start_row and is skipped by row lookup and shift arithmetic); hl =
+-- el.id -> list of { ns, id } highlight extmarks the element owns, deleted
+-- before a rebuild re-applies them; first_event = true until the first
+-- projection replaces the buffer's initial single empty line.
 local renderer_state = setmetatable({}, { __mode = 'k' })
 
 local function get_renderer_state(model)
   local st = renderer_state[model]
   if not st then
-    st = { heights = {}, mat_len = {}, nav = {}, nav_ids = {}, thinking = {}, thinking_ids = {}, thinking_kinds = {}, labels = {}, hl = {}, hl_upto = {} }
+    -- rows: element id -> { start_row, height }; attach: am id -> ordered
+    -- list of attached block ids; host: block id -> owning am id.
+    st = { rows = {}, hl = {}, attach = {}, host = {}, first_event = true }
     renderer_state[model] = st
   end
   return st
 end
 
 -- Split text on '\n' into buffer rows. lines('') = { '' } (one empty row):
--- the streaming blank that content chunks consume.
+-- the streaming blank that content chunks consume. A NUL byte is an internal
+-- line break to nvim's buffer API, so each returned line also escapes every
+-- \0 as the two-byte display form '\0' — a projected row must stay one
+-- buffer row or the row map desyncs. Display-only: the model keeps the raw
+-- bytes.
 local function lines(text)
-  return vim.split(text or '', '\n', { plain = true })
+  local out = vim.split(text or '', '\n', { plain = true })
+  for i = 1, #out do
+    out[i] = escape_nul(out[i])
+  end
+  return out
 end
 
--- Resolve an element's start-row anchor extmark to its current 0-indexed row,
--- or nil when the mark is gone (defensive: the update is skipped).
-local function anchor_row(buf, el)
-  if not el.anchor then return nil end
-  local pos = vim.api.nvim_buf_get_extmark_by_id(buf, gen_ns, el.anchor, {})
-  if pos and pos[1] then return pos[1] end
-  return nil
-end
-
--- Set a label row's virt_text overlay (the label overlay convention: prefix +
--- optional timestamp) without touching the buffer's real rows. Reuses the
--- element's existing overlay mark id (reuse_id) so repeated status updates
--- move one mark instead of stacking new ones on the row.
-local function set_label_overlay(buf, ns, row, virt, reuse_id)
-  local id = vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {
-    id = reuse_id,
-    virt_text = virt,
-    virt_text_pos = 'overlay',
-  })
-  return id
-end
-
--- Plain label virt text: prefix + '  HH:MM:SS' timestamp.
-local function label_virt(prefix, hl_group, created_at)
-  local virt = { { prefix, hl_group } }
-  local ts = format_time(created_at)
-  if ts then table.insert(virt, { '  ' .. ts, 'TCodeTokens' }) end
-  return virt
-end
-
--- Collapse embedded newlines in wire-derived overlay text: virt_text rows
--- must stay on one line, so any '\n' in a status / name / description is
--- replaced with a space (nil-safe).
+-- Collapse embedded newlines in wire-derived text: a '\n' in a status / name /
+-- description must stay on one buffer row (nil-safe). NUL bytes are escaped
+-- the same way as lines() so single_line'd chrome text can never inject an
+-- internal buffer line break.
 local function single_line(s)
-  return tostring(s or ''):gsub('\n', ' ')
-end
-
--- The width-dependent truncated args/input preview: flat text cut to width*2
--- chars; the width comes from the display window, defaulting to 80.
-local function compute_preview(text, buf)
-  local win = vim.fn.bufwinid(buf)
-  local width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
-  local flat = text:gsub('\n', '\\n')
-  return flat:sub(1, width * 2), width
-end
-
--- Hidden visual line count for the '[... press o to expand N more lines]' hint.
-local function hidden_visual_lines(buf, text, preview, width)
-  local win = vim.fn.bufwinid(buf)
-  local w = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
-  local visual_count = 0
-  for _, line in ipairs(lines(text)) do
-    visual_count = visual_count + math.max(1, math.ceil(#line / w))
-  end
-  local kept_visual = math.max(1, math.ceil(#preview / width))
-  return visual_count - kept_visual
-end
-
--- Re-derive (create or update) a navigation range extmark for an element.
--- end_row is EXCLUSIVE. The mark id is indexed per element in the renderer
--- state so later phases can map a cursor line back to the element. Nav marks
--- carry no virt text. The reverse index is keyed by NAMESPACE because extmark
--- ids are namespace-local: um_ns / tc_ns / sa_ns each allocate id 1, so a
--- bare id cannot identify a mark across namespaces.
-local function set_nav_extmark(state, buf, nav_ns, el, start_row, end_row)
-  local nav_id = state.nav[el.id]
-  if nav_id then
-    local pos = vim.api.nvim_buf_get_extmark_by_id(buf, nav_ns, nav_id, {})
-    if pos and pos[1] then
-      -- Move the mark to the region start: region rebuilds shift the mark
-      -- inside the replaced range, so the stored position is stale.
-      vim.api.nvim_buf_set_extmark(buf, nav_ns, start_row, 0, {
-        id = nav_id, end_row = end_row, end_col = 0,
-      })
-      return
-    end
-    -- The mark was deleted by a region rebuild; drop the stale index entry.
-    state.nav[el.id] = nil
-    state.nav_ids[nav_ns][nav_id] = nil
-  end
-  local id = vim.api.nvim_buf_set_extmark(buf, nav_ns, start_row, 0, {
-    end_row = end_row, end_col = 0,
-  })
-  state.nav[el.id] = id
-  if not state.nav_ids[nav_ns] then state.nav_ids[nav_ns] = {} end
-  state.nav_ids[nav_ns][id] = el.id
-end
-
--- Delete the thinking_ns indicator / preview-hint extmarks belonging to an
--- element (via the per-element index) before a rebuild replaces its region.
--- An element may own several marks (e.g. an args preview and an output
--- preview), so the index holds a list per element. The id -> element maps
--- ARE cleared here: preview/collapse hint marks are re-created with the SAME
--- ids after the rebuild (see set_preview_hint_mark / set_collapse_hint_mark),
--- so a captured mark id keeps resolving through element_for_mark while the
--- maps stay free of entries for marks that no longer exist.
-local function del_thinking_marks(state, buf, el_id)
-  local list = state.thinking[el_id]
-  if list then
-    for _, mark_id in ipairs(list) do
-      pcall(vim.api.nvim_buf_del_extmark, buf, thinking_ns, mark_id)
-      state.thinking_ids[mark_id] = nil
-      state.thinking_kinds[mark_id] = nil
-    end
-    state.thinking[el_id] = nil
-  end
-end
-
-local function add_thinking_mark(state, el_id, mark_id, kind)
-  local list = state.thinking[el_id]
-  if not list then list = {}; state.thinking[el_id] = list end
-  list[#list + 1] = mark_id
-  state.thinking_ids[mark_id] = el_id
-  state.thinking_kinds[mark_id] = kind
+  return escape_nul(tostring(s or ''):gsub('\n', ' '))
 end
 
 -- Place a full-row highlight extmark for a rebuilt element kind and track its
@@ -1222,6 +1052,22 @@ end
 local function add_tracked_highlight(state, el, buf, ns, group, row)
   local id = vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {
     hl_group = group, end_row = row + 1, end_col = 0,
+  })
+  local list = state.hl[el.id]
+  if not list then list = {}; state.hl[el.id] = list end
+  list[#list + 1] = { ns, id }
+  return id
+end
+
+-- Place a COL-RANGE highlight extmark (decoration only) for a chrome line
+-- part and track its id in state.hl. Priority 150 beats the treesitter
+-- @comment highlight (default priority 100) that the tcode grammar applies
+-- to '► ' separator lines, so the per-part chrome colors win. Columns are
+-- byte offsets; end_col is exclusive. The row text and the ranges come from
+-- the same parts builder, so they can never disagree.
+local function add_tracked_col_highlight(state, el, buf, ns, group, row, start_col, end_col)
+  local id = vim.api.nvim_buf_set_extmark(buf, ns, row, start_col, {
+    hl_group = group, end_row = row, end_col = end_col, priority = 150,
   })
   local list = state.hl[el.id]
   if not list then list = {}; state.hl[el.id] = list end
@@ -1244,60 +1090,8 @@ local function del_hl_marks(state, buf, el_id)
   end
 end
 
--- Collapsed thinking indicator: virt overlay at the anchor row. Reuses the
--- element's existing mark id (reuse_id) so toggles holding a captured id
--- keep resolving after a collapse/expand cycle.
-local function set_thinking_collapsed_mark(state, buf, el, mark_row, reuse_id)
-  local id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, mark_row, 0, {
-    id = reuse_id,
-    virt_text = { { '[Thinking... press o to expand]', 'TCodeTokens' } },
-    virt_text_pos = 'overlay',
-  })
-  state.thinking[el.id] = { id }
-  state.thinking_ids[id] = el.id
-  state.thinking_kinds[id] = 'thinking'
-end
-
--- Expanded thinking: range mark with a collapse hint line above it.
-local function set_thinking_expanded_mark(state, buf, el, mark_row, content_row_count, reuse_id)
-  local id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, mark_row, 0, {
-    id = reuse_id,
-    end_row = mark_row + content_row_count,
-    end_col = 0,
-    virt_lines = { { { '[Thinking... press o to collapse]', 'TCodeTokens' } } },
-    virt_lines_above = true,
-  })
-  state.thinking[el.id] = { id }
-  state.thinking_ids[id] = el.id
-  state.thinking_kinds[id] = 'thinking'
-end
-
--- Collapsed args/input/output preview hint: virt line below the preview row.
--- reuse_id (optional) keeps the element's existing mark id across rebuilds so
--- a captured id stays valid (the mark is recreated with the same id).
-local function set_preview_hint_mark(state, buf, el, preview_row, hidden_visual, kind, reuse_id)
-  local id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, preview_row, 0, {
-    id = reuse_id,
-    virt_lines = { { { '[... press o to expand ' .. hidden_visual .. ' more lines]', 'TCodeTokens' } } },
-  })
-  add_thinking_mark(state, el.id, id, kind)
-end
-
--- Expanded args/input/output content hint: virt line above the content span;
--- `o` anywhere in the content (end_row covers it) collapses it again.
--- reuse_id (optional) keeps the element's existing mark id across rebuilds.
-local function set_collapse_hint_mark(state, buf, el, mark_row, content_row_count, kind, reuse_id)
-  local id = vim.api.nvim_buf_set_extmark(buf, thinking_ns, mark_row, 0, {
-    id = reuse_id,
-    end_row = mark_row + content_row_count,
-    end_col = 0,
-    virt_lines = { { { '[... press o to collapse]', 'TCodeTokens' } } },
-    virt_lines_above = true,
-  })
-  add_thinking_mark(state, el.id, id, kind)
-end
-
--- Tool-call label status overlay (status + timestamp + cancel hint).
+-- Tool-call label status (status text + cancel hint) rendered by
+-- project_element.
 local TC_STATUS = {
   generating = { text = 'generating', hl = 'TCodeTool', cancel = true },
   running = { text = 'running', hl = 'TCodeTool', cancel = true },
@@ -1308,628 +1102,797 @@ local TC_STATUS = {
   denied = { text = 'denied', hl = 'TCodeError' },
 }
 
-local function tool_label_virt(el)
-  local s = TC_STATUS[el.status] or { text = 'done', hl = 'TCodeSuccess' }
-  local virt = {
-    { '>>> TOOL: ', 'TCodeTool' },
-    { '[' .. s.text .. ']', s.hl },
-    -- tool_name is wire-derived and rendered as overlay virt_text, which must
-    -- stay on one line: collapse any embedded newlines defensively (same
-    -- pattern as the subagent description).
-    { ' ' .. single_line(el.tool_name), 'TCodeTool' },
-  }
-  local ts = format_time(el.created_at)
-  if ts then table.insert(virt, { '  ' .. ts, 'TCodeTokens' }) end
-  if s.cancel then table.insert(virt, { '  [Ctrl-k to cancel]', 'TCodeTokens' }) end
-  return virt
-end
-
--- Subagent label overlay: status + optional timestamp/tokens + description.
-local function subagent_label_virt(el)
-  local status_text, status_hl
-  if el.status == 'generating' then
-    status_text, status_hl = 'generating', 'TCodeTool'
-  elseif el.status == 'running' then
-    status_text, status_hl = 'running', 'TCodeTool'
-  elseif el.status == 'continuing' then
-    status_text, status_hl = 'continuing', 'TCodeTool'
-  elseif el.status == 'permission' then
-    status_text, status_hl = 'permission', 'TCodePermission'
-  elseif el.status == 'turn ended' then
-    status_text, status_hl = 'turn ended', 'TCodeTokens'
-  elseif el.status == 'done' then
-    status_text, status_hl = 'done', 'TCodeSuccess'
-  else
-    -- Unknown statuses are wire-derived and can contain '\n': collapse any
-    -- embedded newlines so the overlay stays on one line.
-    status_text, status_hl = single_line(el.status or 'done'), 'TCodeError'
-  end
-  local virt = {
-    { '>>> SUB-AGENT: ', 'TCodeTool' },
-    { '[' .. status_text .. ']', status_hl },
-  }
-  local ts = format_time(el.created_at)
-  if ts then table.insert(virt, { '  ' .. ts, 'TCodeTokens' }) end
-  if el.input_tokens and el.output_tokens then
-    table.insert(virt, {
-      string.format('  [%d in / %d out]', el.input_tokens, el.output_tokens),
-      'TCodeTokens',
-    })
-  end
-  -- Descriptions are rendered as overlay virt_text, which must stay on one
-  -- line: collapse any embedded newlines defensively.
-  local desc = single_line(el.description)
-  table.insert(virt, { ' ' .. desc, 'TCodeTool' })
-  return virt
-end
-
 local function system_message_hl(level)
   if level == 'Warning' then return 'TCodeSystemWarning' end
   if level == 'Error' then return 'TCodeSystemError' end
   return 'TCodeSystemInfo'
 end
 
--- Virtual-text parts for an end_info row (tokens + status). Mirrors the
--- old token/status line semantics exactly.
-local function end_info_virt_parts(el)
-  local virt_parts = {}
-  local tokens = el.tokens or {}
-  local token_prefix = el.token_prefix
-  if tokens.input_tokens and tokens.output_tokens then
-    local has_tokens = not token_prefix or (tokens.input_tokens > 0 or tokens.output_tokens > 0)
-    if has_tokens then
-      local cache_read = tokens.cache_read_input_tokens or 0
-      local processed_input = tokens.input_tokens + (tokens.cache_creation_input_tokens or 0)
-      local text
-      if cache_read > 0 then
-        local fmt = token_prefix
-          and string.format('[%s: %%d in / %%d cache read / %%d out tokens]', token_prefix)
-          or '[%d in / %d cache read / %d out tokens]'
-        text = string.format(fmt, processed_input, cache_read, tokens.output_tokens)
+-- Tail display: the last at most n REAL lines of a content blob. A single
+-- trailing empty row left by a trailing '\n' is trimmed so 'a\n' counts as
+-- one line; empty content yields {} (callers render the one-empty-line
+-- placeholder where a section requires one).
+local function tail_lines(content, n)
+  if content == '' then return {} end
+  local ls = lines(content)
+  if #ls > 1 and ls[#ls] == '' then table.remove(ls) end
+  if #ls <= n then return ls end
+  local tail = {}
+  for i = #ls - n + 1, #ls do tail[#tail + 1] = ls[i] end
+  return tail
+end
+
+-- Tail display with a DISPLAY-SPACE cap: the last at most n real lines AND at
+-- most width*n bytes, so a section never renders more than n visual rows of a
+-- full-width window regardless of line length (a single very long line is cut
+-- to its last width*n bytes instead of wrapping indefinitely). Tail-biased:
+-- the newest content wins — slice to the LAST width*n bytes, then take the
+-- last n lines of that slice. Byte-based, consistent with the other width
+-- approximations (Lua # and string sub are byte-based); a slice that starts
+-- mid-line is fine for a tail view. A byte slice CAN cut a multi-byte UTF-8
+-- character in half, so after slicing any leading UTF-8 continuation bytes
+-- (0x80-0xBF, at most 3) are dropped: the slice then starts at a complete
+-- character. The slice END is the content's real end, so only the start needs
+-- fixing (pure best-effort: valid UTF-8 always yields a clean slice).
+local function tail_capped(content, width, n)
+  if content == '' then return {} end
+  local char_cap = math.max(1, (width or 80) * n)
+  if #content > char_cap then
+    content = content:sub(-char_cap)
+    local i = 1
+    while i <= 3 do
+      local b = content:byte(i)
+      if b and b >= 0x80 and b <= 0xBF then
+        i = i + 1
       else
-        local fmt = token_prefix
-          and string.format('[%s: %%d in / %%d out tokens]', token_prefix)
-          or '[%d in / %d out tokens]'
-        text = string.format(fmt, processed_input, tokens.output_tokens)
+        break
       end
-      table.insert(virt_parts, { text, 'TCodeTokens' })
     end
+    if i > 1 then content = content:sub(i) end
   end
-  if el.end_status and el.end_status ~= 'Succeeded' then
-    local prefix = token_prefix and ' [' .. string.upper(token_prefix) .. ' ' or ' ['
-    table.insert(virt_parts, { prefix .. single_line(el.end_status) .. ']', 'TCodeError' })
-  end
-  return virt_parts
+  return tail_lines(content, n)
 end
 
--- '► END' token-total overlay text (mirrors the AssistantRequestEnd handler).
-local function end_marker_text(el)
-  local tokens = el.tokens or {}
-  local total_cache_read = tokens.total_cache_read_tokens or 0
-  local total_processed = (tokens.total_input_tokens or 0) + (tokens.total_cache_creation_tokens or 0)
-  local total_output = tokens.total_output_tokens or 0
-  if total_cache_read > 0 then
-    return string.format('[Total: %d in / %d cache read / %d out tokens]',
-      total_processed, total_cache_read, total_output)
-  end
-  return string.format('[Total: %d in / %d out tokens]', total_processed, total_output)
+-- Subagent label status: status text + highlight group (the old pre-rewrite
+-- label colors). Wire-derived end_status strings (anything not in the map)
+-- fall through to TCodeError.
+local function subagent_status_parts(status)
+  local map = {
+    generating = { 'generating', 'TCodeTool' },
+    running = { 'running', 'TCodeTool' },
+    continuing = { 'continuing', 'TCodeTool' },
+    permission = { 'permission', 'TCodePermission' },
+    ['turn ended'] = { 'turn ended', 'TCodeTokens' },
+    done = { 'done', 'TCodeSuccess' },
+  }
+  local key = status or 'done'
+  local entry = map[key]
+  if entry then return entry[1], entry[2] end
+  return single_line(key), 'TCodeError'
 end
 
--- Pure projection: the element's buffer rows derived ENTIRELY from model state.
--- Rendering the same state twice yields the same rows.
-local function render_element(el, ctx)
+-- Concatenate one chrome row's { text, group } parts into
+-- { text, spans } where spans is the list of { start_col, end_col, group }
+-- byte-column ranges (end_col exclusive, non-overlapping — the parts tile
+-- the line contiguously). Columns are bytes ('►' is 3 bytes; #s is bytes).
+local function chrome_row(parts)
+  local text = {}
+  local spans = {}
+  local col = 0
+  for _, part in ipairs(parts) do
+    text[#text + 1] = part[1]
+    spans[#spans + 1] = { col, col + #part[1], part[2] }
+    col = col + #part[1]
+  end
+  return { text = table.concat(text), spans = spans }
+end
+
+-- Project one element to its FULL layout: a list of { text, spans } rows in
+-- buffer order. spans (nil for content rows) carries the col-range chrome
+-- highlight parts. This is the single source of truth for project_element
+-- (which concatenates the texts) and element_chrome_spans (which maps the
+-- ranges to element-relative rows), so the chrome text and its colors can
+-- never drift. Every chrome line starts with '► '; content lines (fences,
+-- message/tool/subagent data) carry no prefix. Fences stay content and the
+-- new section headers sit outside the fence pairs. ctx = { width,
+-- media_root, sa_active } carries only read-only rendering inputs: the
+-- media URI root and the streaming-subagent signal. No buffer / extmark /
+-- navigation state.
+local function element_layout(el, ctx)
+  local function c_row(text)
+    return { text = text }
+  end
+  local width = (ctx and ctx.width) or 80
   if el.type == 'user_message' then
-    local out = { '► USER' }
-    for _, l in ipairs(lines(el.content)) do out[#out + 1] = l end
+    local ts = format_time(el.created_at)
+    local parts = { { '► USER', 'TCodeUser' } }
+    if ts then parts[#parts + 1] = { '  ' .. ts, 'TCodeTokens' } end
+    local out = { chrome_row(parts) }
+    local content = content_of(el, 'content')
+    if content ~= '' then
+      for _, l in ipairs(lines(content)) do out[#out + 1] = c_row(l) end
+    end
     return out
   elseif el.type == 'assistant_message' then
-    local out = { '► ASSISTANT' }
+    local ts = format_time(el.created_at)
+    local parts = { { '► ASSISTANT', 'TCodeAssistant' } }
+    if ts then parts[#parts + 1] = { '  ' .. ts, 'TCodeTokens' } end
+    local out = { chrome_row(parts) }
     local content = content_of(el, 'content')
-    if content == '' then
-      out[#out + 1] = ''
-    else
-      for _, l in ipairs(lines(content)) do out[#out + 1] = l end
+    if content ~= '' then
+      for _, l in ipairs(lines(content)) do out[#out + 1] = c_row(l) end
     end
     return out
   elseif el.type == 'thinking_block' then
-    return lines(content_of(el, 'content'))
-  elseif el.type == 'tool_call' then
-    local out = { '► TOOL', TC_FENCE }
-    local args = content_of(el, 'args')
-    if el.args_collapsed then
-      out[#out + 1] = compute_preview(args, ctx.buf)
-    else
-      for _, l in ipairs(lines(args)) do out[#out + 1] = l end
+    if el.state == 'collapsed' then
+      return { chrome_row({ { '► [Thinking... press o to expand]', 'TCodeTokens' } }) }
+    elseif el.state == 'expanded' then
+      local out = { chrome_row({ { '► [Thinking... press o to collapse]', 'TCodeTokens' } }) }
+      for _, l in ipairs(lines(content_of(el, 'content'))) do out[#out + 1] = c_row(l) end
+      return out
     end
-    if not el.args_open then out[#out + 1] = TC_FENCE end
+    -- open (streaming or merge-reopened): full content, no chrome
+    local out = {}
+    for _, l in ipairs(lines(content_of(el, 'content'))) do out[#out + 1] = c_row(l) end
+    return out
+  elseif el.type == 'tool_call' then
+    local s = TC_STATUS[el.status] or { text = 'done', hl = 'TCodeSuccess' }
+    local parts = { { '► TOOL:', 'TCodeTool' }, { ' [' .. s.text .. ']', s.hl } }
+    if el.tool_name and el.tool_name ~= '' then
+      parts[#parts + 1] = { ' ' .. single_line(el.tool_name), 'TCodeTool' }
+    end
+    local ts = format_time(el.created_at)
+    if ts then parts[#parts + 1] = { '  ' .. ts, 'TCodeTokens' } end
+    if s.cancel then parts[#parts + 1] = { '  [Ctrl-k to cancel]', 'TCodeTokens' } end
+    local out = { chrome_row(parts) }
+    local function section_lines(text)
+      -- Display window: a 5-line / width*5-byte tail window. Detail view
+      -- (full_input): the complete content, never truncated.
+      if el.full_input then return lines(text) end
+      return tail_capped(text, width, 5)
+    end
+    local args = content_of(el, 'args')
+    if args ~= '' then
+      out[#out + 1] = chrome_row({ { '► Param', 'TCodeTokens' } })
+      out[#out + 1] = c_row(TC_FENCE)
+      for _, l in ipairs(section_lines(args)) do out[#out + 1] = c_row(l) end
+      if not el.args_open then out[#out + 1] = c_row(TC_FENCE) end
+    end
     if el.output_started then
-      out[#out + 1] = TC_FENCE
-      local output = content_of(el, 'output')
-      if el.output_collapsed then
-        out[#out + 1] = compute_preview(output, ctx.buf)
-      elseif output == '' then
-        out[#out + 1] = ''
+      out[#out + 1] = chrome_row({ { '► Result', 'TCodeTokens' } })
+      out[#out + 1] = c_row(TC_FENCE)
+      local out_lines = section_lines(content_of(el, 'output'))
+      if #out_lines == 0 then
+        out[#out + 1] = c_row('')
       else
-        for _, l in ipairs(lines(output)) do out[#out + 1] = l end
+        for _, l in ipairs(out_lines) do out[#out + 1] = c_row(l) end
       end
-      if not el.output_open then out[#out + 1] = TC_FENCE end
+      if not el.output_open then out[#out + 1] = c_row(TC_FENCE) end
     end
     return out
   elseif el.type == 'subagent' then
-    local out = { '► SUBAGENT', TC_FENCE }
+    local status_text, status_hl = subagent_status_parts(el.status)
+    local parts = { { '► SUB-AGENT:', 'TCodeTool' }, { ' [' .. status_text .. ']', status_hl } }
+    local ts = format_time(el.created_at)
+    if ts then parts[#parts + 1] = { '  ' .. ts, 'TCodeTokens' } end
+    if el.input_tokens and el.output_tokens then
+      parts[#parts + 1] = { string.format('  [%d in / %d out]', el.input_tokens, el.output_tokens), 'TCodeTokens' }
+    end
+    local desc = single_line(el.description)
+    if desc ~= '' then parts[#parts + 1] = { '  ' .. desc, 'TCodeTool' } end
+    local out = { chrome_row(parts) }
+    local function section_lines(text)
+      -- Display window: a 5-line / width*5-byte tail window. Detail view
+      -- (full_input): the complete content, never truncated.
+      if el.full_input then return lines(text) end
+      return tail_capped(text, width, 5)
+    end
     local input = content_of(el, 'input')
-    if el.input_collapsed then
-      out[#out + 1] = compute_preview(input, ctx.buf)
-    else
-      for _, l in ipairs(lines(input)) do out[#out + 1] = l end
+    if input ~= '' then
+      out[#out + 1] = chrome_row({ { '► Input', 'TCodeTokens' } })
+      out[#out + 1] = c_row(TC_FENCE)
+      for _, l in ipairs(section_lines(input)) do out[#out + 1] = c_row(l) end
+      if not el.input_open then out[#out + 1] = c_row(TC_FENCE) end
     end
     if not el.input_open then
-      out[#out + 1] = TC_FENCE
-      local output = content_of(el, 'output')
-      if el.output_collapsed then
-        out[#out + 1] = compute_preview(output, ctx.buf)
-      elseif output == '' then
-        out[#out + 1] = ''
+      out[#out + 1] = chrome_row({ { '► Output', 'TCodeTokens' } })
+      out[#out + 1] = c_row(TC_FENCE)
+      local out_lines = section_lines(content_of(el, 'output'))
+      if #out_lines == 0 then
+        out[#out + 1] = c_row('')
       else
-        for _, l in ipairs(lines(output)) do out[#out + 1] = l end
+        for _, l in ipairs(out_lines) do out[#out + 1] = c_row(l) end
       end
       if el.error then
-        out[#out + 1] = ''
-        for _, l in ipairs(lines('Error: ' .. el.error)) do out[#out + 1] = l end
+        out[#out + 1] = c_row('')
+        for _, l in ipairs(lines('Error: ' .. el.error)) do out[#out + 1] = c_row(l) end
       end
+      -- Fenced output: the close fence appears once the subagent stops
+      -- streaming (sa_active moves past this element).
+      local streaming = ctx and ctx.sa_active ~= nil and ctx.sa_active == el.conversation_id
+      if not streaming then out[#out + 1] = c_row(TC_FENCE) end
     end
     return out
   elseif el.type == 'system_message' then
-    local out = { '► SYSTEM' }
-    for _, l in ipairs(lines(el.message)) do out[#out + 1] = l end
+    local level = single_line(el.level or 'Info')
+    local out = { chrome_row({ { '► SYSTEM [' .. level .. ']', system_message_hl(el.level) } }) }
+    for _, l in ipairs(lines(el.message)) do out[#out + 1] = c_row(l) end
     return out
   elseif el.type == 'media' then
-    if not M.display_file then return nil end
-    local session_dir = vim.fn.fnamemodify(M.display_file, ':h')
-    local abs_path = session_dir .. '/media/' .. el.relative_path
-    return { '', '![img](file://' .. vim.uri_encode(abs_path) .. ')' }
+    local media_root = ctx and ctx.media_root
+    if not media_root or not el.relative_path or el.relative_path == '' then
+      return {}
+    end
+    return { c_row(''), c_row(escape_nul('![img](file://' .. media_root .. el.relative_path .. ')')) }
   elseif el.type == 'retry' then
     -- The reason may be a multi-line message (e.g. a JSON error body); split
     -- it so no buffer row carries an embedded newline.
     local reason_lines = lines(el.reason or '')
-    local out = { string.format('[Retrying... (attempt %d/%d) -- %s]', el.attempt, el.max_retries, reason_lines[1]) }
-    for i = 2, #reason_lines do out[#out + 1] = reason_lines[i] end
+    local out = {
+      chrome_row({ { '► [' .. string.format('Retrying... (attempt %d/%d) -- %s]', el.attempt or 1, el.max_retries or 0, reason_lines[1]), 'TCodeTokens' } }),
+    }
+    for i = 2, #reason_lines do out[#out + 1] = c_row(reason_lines[i]) end
     return out
   elseif el.type == 'end_info' then
-    local has_error = type(el.error) == 'string' and el.error ~= ''
-    if #end_info_virt_parts(el) == 0 and not has_error then
-      return {} -- nothing to display: the row is skipped entirely
+    local tokens = el.tokens or {}
+    local token_prefix = el.token_prefix
+    local token_line
+    if tokens.input_tokens and tokens.output_tokens then
+      local has_tokens = not token_prefix or (tokens.input_tokens > 0 or tokens.output_tokens > 0)
+      if has_tokens then
+        local cache_read = tokens.cache_read_input_tokens or 0
+        local processed = tokens.input_tokens + (tokens.cache_creation_input_tokens or 0)
+        local seg = cache_read > 0
+          and (processed .. ' in / ' .. cache_read .. ' cache read / ' .. tokens.output_tokens .. ' out tokens')
+          or (processed .. ' in / ' .. tokens.output_tokens .. ' out tokens')
+        token_line = '[' .. (token_prefix and (token_prefix .. ': ') or '') .. seg .. ']'
+      end
     end
-    local out = { '► INFO' }
-    if has_error then
-      for _, l in ipairs(lines('Error: ' .. el.error)) do out[#out + 1] = l end
+    local status_text = (el.end_status and el.end_status ~= 'Succeeded')
+      and single_line(el.end_status) or nil
+    local out = {}
+    if token_line and status_text then
+      out[#out + 1] = chrome_row({
+        { '► ' .. token_line, 'TCodeTokens' },
+        { ' [' .. status_text .. ']', 'TCodeError' },
+      })
+    elseif token_line then
+      out[#out + 1] = chrome_row({ { '► ' .. token_line, 'TCodeTokens' } })
+    elseif status_text then
+      out[#out + 1] = chrome_row({ { '► [' .. status_text .. ']', 'TCodeError' } })
+    end
+    if type(el.error) == 'string' and el.error ~= '' then
+      for _, l in ipairs(lines('Error: ' .. el.error)) do out[#out + 1] = c_row(l) end
     end
     return out
   elseif el.type == 'end_marker' then
-    return { '► END' }
+    local tokens = el.tokens or {}
+    local total_cache_read = tokens.total_cache_read_tokens or 0
+    local total_processed = (tokens.total_input_tokens or 0) + (tokens.total_cache_creation_tokens or 0)
+    local total_output = tokens.total_output_tokens or 0
+    if total_cache_read > 0 then
+      return {
+        chrome_row({ { '► ' .. string.format('[Total: %d in / %d cache read / %d out tokens]', total_processed, total_cache_read, total_output), 'TCodeTokens' } }),
+      }
+    end
+    return { chrome_row({ { '► ' .. string.format('[Total: %d in / %d out tokens]', total_processed, total_output), 'TCodeTokens' } }) }
   end
   return {}
 end
 
--- Highlight the args rows (or the single preview row) of a tool call region.
-local function apply_args_highlight(state, buf, ns, el, start_row)
-  local args_rows = el.args_collapsed and 1 or #lines(content_of(el, 'args'))
-  for i = 0, args_rows - 1 do
-    add_tracked_highlight(state, el, buf, ns, 'TCodeToolArgs', start_row + 2 + i)
-  end
+-- Project one element to its real buffer lines (possibly empty). Pure with
+-- respect to element state + ctx: no buffer / extmark / navigation state.
+-- Derives the text from the shared element_layout so the chrome text always
+-- matches the col-range highlights of element_chrome_spans.
+local function project_element(el, ctx)
+  local layout = element_layout(el, ctx)
+  local out = {}
+  for _, row in ipairs(layout) do out[#out + 1] = row.text end
+  return out
 end
 
--- Highlight the input rows (or the single preview row) of a subagent region.
-local function apply_input_highlight(state, buf, ns, el, start_row)
-  local input_rows = el.input_collapsed and 1 or #lines(content_of(el, 'input'))
-  for i = 0, input_rows - 1 do
-    add_tracked_highlight(state, el, buf, ns, 'TCodeToolArgs', start_row + 2 + i)
-  end
-end
-
--- Resolve the existing hint-mark ids for a tool/subagent element by KIND:
--- the args/input hint id and the output hint id. Scanning the per-element
--- mark list via the kinds map (not list position) keeps the ids stable when
--- only one hint exists — e.g. an args-less tool streams only output, so the
--- output mark must always come back as the SECOND return, never as the
--- (unused) args slot, or every rebuild would hand the output a fresh id.
--- Call BEFORE del_thinking_marks: that clears the id -> element/kind maps.
-local function hint_reuse_ids(state, el)
-  local args_input_id, output_id
-  local list = state.thinking[el.id]
-  if list then
-    for _, mark_id in ipairs(list) do
-      local kind = state.thinking_kinds[mark_id]
-      if kind == 'args' or kind == 'input' then
-        args_input_id = mark_id
-      elseif kind == 'output' then
-        output_id = mark_id
+-- Pure chrome-span lookup: element-relative { row, start_col, end_col, group }
+-- byte-column highlight ranges for the element's chrome lines, derived from
+-- the SAME layout builder as project_element so text and colors cannot
+-- drift. Columns are bytes ('►' is 3 bytes); spans are non-overlapping per
+-- row. Content rows contribute no spans — they get the full-row content
+-- highlights in apply_element_highlights.
+local function element_chrome_spans(el, ctx)
+  local layout = element_layout(el, ctx)
+  local spans = {}
+  for r, row in ipairs(layout) do
+    if row.spans then
+      for _, sp in ipairs(row.spans) do
+        spans[#spans + 1] = { row = r - 1, start_col = sp[1], end_col = sp[2], group = sp[3] }
       end
     end
   end
-  return args_input_id, output_id
+  return spans
 end
 
--- Place the `o` preview/collapse hint marks of a tool-call region. Collapsed
--- args/output get an 'expand N more lines' hint on the preview row; expanded
--- non-empty content gets a 'press o to collapse' hint spanning its rows.
--- args_reuse_id / output_reuse_id keep the element's existing mark ids across
--- rebuilds; hint reuse ids are matched by kind ('args' vs 'output').
-local function apply_tool_hints(state, buf, el, arow, args_reuse_id, output_reuse_id)
-  local args = content_of(el, 'args')
-  local args_rows = el.args_collapsed and 1 or #lines(args)
-  if el.args_collapsed then
-    local preview, width = compute_preview(args, buf)
-    set_preview_hint_mark(state, buf, el, arow + 2, hidden_visual_lines(buf, args, preview, width), 'args', args_reuse_id)
-  elseif not el.args_open and args and args ~= '' then
-    set_collapse_hint_mark(state, buf, el, arow + 2, args_rows, 'args', args_reuse_id)
-  end
-  if el.output_started and not el.output_open then
-    -- args_open is always false once output_started is set (both ToolMessageStart
-    -- paths close the args fence together with opening the output).
-    local out_fence_row = arow + 2 + args_rows + 1
-    local output = content_of(el, 'output')
-    local output_rows = el.output_collapsed and 1 or #lines(output)
-    local output_first_row = out_fence_row + 1
-    if el.output_collapsed then
-      local preview, width = compute_preview(output, buf)
-      set_preview_hint_mark(state, buf, el, output_first_row, hidden_visual_lines(buf, output, preview, width), 'output', output_reuse_id)
-    elseif output ~= '' then
-      set_collapse_hint_mark(state, buf, el, output_first_row, output_rows, 'output', output_reuse_id)
-    end
-  end
-end
-
--- Same for a subagent region (input + output).
-local function apply_subagent_hints(state, buf, el, arow, input_reuse_id, output_reuse_id)
-  local input = content_of(el, 'input')
-  local input_rows = el.input_collapsed and 1 or #lines(input)
-  if el.input_collapsed then
-    local preview, width = compute_preview(input, buf)
-    set_preview_hint_mark(state, buf, el, arow + 2, hidden_visual_lines(buf, input, preview, width), 'input', input_reuse_id)
-  elseif not el.input_open and input and input ~= '' then
-    set_collapse_hint_mark(state, buf, el, arow + 2, input_rows, 'input', input_reuse_id)
-  end
-  if not el.input_open then
-    -- input_open is false here (this very condition), so the close-fence
-    -- offset is always one row.
-    local output_first_row = arow + 2 + input_rows + 1
-    local output = content_of(el, 'output')
-    local output_rows = el.output_collapsed and 1 or #lines(output)
-    if el.output_collapsed then
-      local preview, width = compute_preview(output, buf)
-      set_preview_hint_mark(state, buf, el, output_first_row, hidden_visual_lines(buf, output, preview, width), 'output', output_reuse_id)
-    elseif output ~= '' then
-      set_collapse_hint_mark(state, buf, el, output_first_row, output_rows, 'output', output_reuse_id)
-    end
-  end
-end
-
--- Apply one `added` entry: render the element's region at the buffer tail
--- (replacing the initial un-deletable empty row on first_event), place the
--- start anchor and navigation extmarks, and apply per-row highlights.
-local function render_added(model, el, state, ctx)
-  local buf, ns, bulk = ctx.buf, ctx.ns, ctx.bulk
-
+-- Pure navigation intent: what `o` does on a row offset (0-indexed within
+-- the element) of the layout element_layout produces. 'thinking' toggles a
+-- thinking block (its collapsed line, or any expanded row); 'detail' opens
+-- the tool-call / subagent detail view from EVERY row of a tool_call or
+-- subagent element (label, section headers, and content rows — the
+-- expand/collapse sections are gone, so nothing else toggles); nil means
+-- nothing under the cursor. The tool_call_id / conversation_id guards on
+-- 'detail' belong to the keymap caller, not this lookup.
+local function action_at(el, offset)
+  if not el then return nil end
   if el.type == 'thinking_block' then
-    -- Anchor = the pre-append buffer tail row: the row its content streams
-    -- onto (append_text consumes it). Bulk defers the write entirely.
-    local start_row = vim.api.nvim_buf_line_count(buf) - 1
-    local content = content_of(el, 'content')
-    first_event = false
-    if not bulk then
-      append_text(buf, content)
+    if el.state == 'collapsed' then
+      return offset == 0 and 'thinking' or nil
+    elseif el.state == 'expanded' then
+      return 'thinking'
     end
-    -- Default (left) gravity: when a bulk block starts streaming live, the
-    -- append lands exactly at the anchor row and must not push the anchor
-    -- down — it is the region START, so it tracks the first content row.
-    el.anchor = vim.api.nvim_buf_set_extmark(buf, gen_ns, start_row, 0, {})
-    state.heights[el.id] = bulk and 1 or count_lines(content)
-    state.mat_len[el.id] = bulk and 0 or #content
-    if not bulk then
-      for i = 0, state.heights[el.id] - 1 do
-        add_tracked_highlight(state, el, buf, thinking_ns, 'TCodeThinking', start_row + i)
-      end
-      state.hl_upto[el.id] = start_row + state.heights[el.id] - 1
-    end
-    return
-  end
-
-  local el_lines = render_element(el, ctx)
-  if not el_lines or #el_lines == 0 then return end -- e.g. an empty end_info
-
-  local start_row
-  if first_event and vim.api.nvim_buf_line_count(buf) == 1 then
-    first_event = false
-    vim.api.nvim_buf_set_lines(buf, 0, 1, false, el_lines)
-    start_row = 0
-  else
-    first_event = false
-    start_row = vim.api.nvim_buf_line_count(buf)
-    append_lines(buf, el_lines)
-  end
-
-  el.anchor = vim.api.nvim_buf_set_extmark(buf, gen_ns, start_row, 0, { right_gravity = true })
-  state.heights[el.id] = #el_lines
-
-  if el.type == 'user_message' then
-    set_label_overlay(buf, ns, start_row, label_virt('>>> USER', 'TCodeUser', el.created_at))
-    set_nav_extmark(state, buf, um_ns, el, start_row, start_row + #el_lines)
-  elseif el.type == 'assistant_message' then
-    set_label_overlay(buf, ns, start_row, label_virt('>>> ASSISTANT', 'TCodeAssistant', el.created_at))
-  elseif el.type == 'tool_call' then
-    state.labels[el.id] = set_label_overlay(buf, ns, start_row, tool_label_virt(el))
-    apply_args_highlight(state, buf, ns, el, start_row)
-    set_nav_extmark(state, buf, tc_ns, el, start_row, start_row + #el_lines)
-    -- A freshly added element has no pre-existing hint marks: no reuse ids.
-    apply_tool_hints(state, buf, el, start_row, nil, nil)
-    state.hl_upto[el.id] = start_row + #el_lines - 1
-  elseif el.type == 'subagent' then
-    state.labels[el.id] = set_label_overlay(buf, ns, start_row, subagent_label_virt(el))
-    apply_input_highlight(state, buf, ns, el, start_row)
-    set_nav_extmark(state, buf, sa_ns, el, start_row, start_row + #el_lines)
-    -- A freshly added element has no pre-existing hint marks: no reuse ids.
-    apply_subagent_hints(state, buf, el, start_row, nil, nil)
-    state.hl_upto[el.id] = start_row + #el_lines - 1
-  elseif el.type == 'system_message' then
-    local hl = system_message_hl(el.level)
-    set_label_overlay(buf, ns, start_row, { { '[' .. (el.level or 'Info'):upper() .. '] ', hl } })
-    for i = 1, #el_lines - 1 do
-      vim.api.nvim_buf_add_highlight(buf, ns, hl, start_row + i, 0, -1)
-    end
-  elseif el.type == 'retry' then
-    for i = 0, #el_lines - 1 do
-      vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeTokens', start_row + i, 0, -1)
-    end
-  elseif el.type == 'end_info' then
-    local virt_parts = end_info_virt_parts(el)
-    local has_error = type(el.error) == 'string' and el.error ~= ''
-    set_label_overlay(buf, ns, start_row,
-      #virt_parts > 0 and virt_parts or { { '► ERROR', 'TCodeError' } })
-    if has_error then
-      for i = 1, #el_lines - 1 do
-        vim.api.nvim_buf_add_highlight(buf, ns, 'TCodeError', start_row + i, 0, -1)
-      end
-    end
-  elseif el.type == 'end_marker' then
-    set_label_overlay(buf, ns, start_row, { { end_marker_text(el), 'TCodeTokens' } })
-  end
-end
-
--- Apply one `updated_all` entry for a thinking block. Collapse -> indicator
--- rows; expand -> full content + collapse hint; open -> the merge reopen,
--- which renders ONLY the un-materialized content tail (see mat_len below).
-local function render_thinking_update(el, state, ctx, arow)
-  local buf = ctx.buf
-  local old_height = state.heights[el.id] or 0
-  -- Preserve the element's mark id across state flips so captured ids (e.g.
-  -- a test's indicator mark) keep resolving after a toggle.
-  local existing = state.thinking[el.id]
-  local reuse_id = existing and existing[1]
-  del_thinking_marks(state, buf, el.id)
-  del_hl_marks(state, buf, el.id)
-  if el.state == 'collapsed' then
-    vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, { '', '', '' })
-    state.heights[el.id] = 3
-    state.mat_len[el.id] = #content_of(el, 'content')
-    set_thinking_collapsed_mark(state, buf, el, arow, reuse_id)
-    state.hl_upto[el.id] = arow + 2
-  elseif el.state == 'expanded' then
-    local content_lines = lines(content_of(el, 'content'))
-    vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, content_lines)
-    state.heights[el.id] = #content_lines
-    state.mat_len[el.id] = #content_of(el, 'content')
-    -- Place the range mark BEFORE the highlight loop so the reuse id is
-    -- claimed deterministically (the highlight loop allocates its own ids).
-    set_thinking_expanded_mark(state, buf, el, arow, #content_lines, reuse_id)
-    for i = 0, #content_lines - 1 do
-      add_tracked_highlight(state, el, buf, thinking_ns, 'TCodeThinking', arow + i)
-    end
-    state.hl_upto[el.id] = arow + #content_lines - 1
-  else
-    -- 'open' via merge: the region's rows hold only the collapse indicator
-    -- (the streamed content was replaced at the collapse), so re-rendering the
-    -- full content would make the old run reappear. Render the tail after
-    -- mat_len — exactly the content that was never visible in the buffer.
-    local content = content_of(el, 'content')
-    local tail = content:sub((state.mat_len[el.id] or 0) + 1)
-    local content_lines = lines(tail)
-    vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, content_lines)
-    state.heights[el.id] = #content_lines
-    state.mat_len[el.id] = #content
-    for i = 0, #content_lines - 1 do
-      add_tracked_highlight(state, el, buf, thinking_ns, 'TCodeThinking', arow + i)
-    end
-    state.hl_upto[el.id] = arow + #content_lines - 1
-  end
-end
-
--- Apply one `updated_all` entry for a region element (tool_call / subagent):
--- rebuild the region [anchor, anchor + height) from full model state — this is
--- the ONLY path that materializes bulk-deferred content in one shot.
-local function render_region_update(el, state, ctx, arow)
-  local buf, ns = ctx.buf, ctx.ns
-  local old_height = state.heights[el.id] or 0
-  -- Capture the element's existing hint-mark ids BEFORE deleting them so the
-  -- rebuilt marks keep the same ids (captured ids stay valid across toggles).
-  -- Kind-based resolution (hint_reuse_ids) must run before del_thinking_marks:
-  -- that clears the id -> kind map the resolution reads.
-  local args_reuse, output_reuse = hint_reuse_ids(state, el)
-  del_thinking_marks(state, buf, el.id)
-  del_hl_marks(state, buf, el.id)
-  local el_lines = render_element(el, ctx)
-  vim.api.nvim_buf_set_lines(buf, arow, arow + old_height, false, el_lines)
-  state.heights[el.id] = #el_lines
-
-  if el.type == 'tool_call' then
-    state.labels[el.id] = set_label_overlay(buf, ns, arow, tool_label_virt(el), state.labels[el.id])
-    apply_args_highlight(state, buf, ns, el, arow)
-    set_nav_extmark(state, buf, tc_ns, el, arow, arow + #el_lines)
-    apply_tool_hints(state, buf, el, arow, args_reuse, output_reuse)
-  else -- subagent
-    state.labels[el.id] = set_label_overlay(buf, ns, arow, subagent_label_virt(el), state.labels[el.id])
-    apply_input_highlight(state, buf, ns, el, arow)
-    set_nav_extmark(state, buf, sa_ns, el, arow, arow + #el_lines)
-    apply_subagent_hints(state, buf, el, arow, args_reuse, output_reuse)
-    if el.error then
-      local err_lines = lines('Error: ' .. el.error)
-      local err_start = arow + #el_lines - #err_lines
-      for i = 0, #err_lines - 1 do
-        add_tracked_highlight(state, el, buf, ns, 'TCodeError', err_start + i)
-      end
-    end
-  end
-  state.hl_upto[el.id] = arow + #el_lines - 1
-end
-
-local append_only_types = {
-  user_message = true, assistant_message = true, system_message = true,
-  media = true, retry = true, end_info = true, end_marker = true,
-}
-
-local function model_next_element(model, el)
-  for i, e in ipairs(model.elements) do
-    if e == el then return model.elements[i + 1] end
+    return nil
+  elseif el.type == 'tool_call' or el.type == 'subagent' then
+    return 'detail'
   end
   return nil
 end
 
--- Highlight the rows a streaming chunk introduced for a region element kind
--- (thinking_block / tool_call / subagent). Only NEW rows are highlighted —
--- rows at or below hl_upto already carry a mark, and a chunk without a
--- trailing newline joins the last content row (append_row), so re-highlighting
--- that row would stack one duplicate mark per chunk.
---
--- One exception: when a chunk containing a newline is inserted into a
--- ZERO-LENGTH join row (join_col == 0), the join row's right-gravity mark
--- slides onto a later row — the insert lands at col 0, the mark's own
--- position — leaving the join row unhighlighted and a dead mark past it.
--- Delete every slid mark and re-highlight the join row plus all new rows so
--- each keeps exactly one mark.
-local function highlight_appended_rows(state, el, buf, ns, group, append_row, new_rows, join_col)
-  local upto = state.hl_upto[el.id] or -1
-  local start = math.max(append_row, upto + 1)
-  local last = append_row + new_rows - 1
-  if upto >= append_row and join_col == 0 and new_rows > 1 then
-    local list = state.hl[el.id]
-    if list then
-      for j = #list, 1, -1 do
-        local entry = list[j]
-        if entry[1] == ns then
-          local pos = vim.api.nvim_buf_get_extmark_by_id(buf, ns, entry[2], {})
-          if pos and pos[1] > append_row then
-            pcall(vim.api.nvim_buf_del_extmark, buf, ns, entry[2])
-            table.remove(list, j)
+-- Row-map entry for an element: { start_row = <int or nil>, height = <int> }.
+-- Zero-height elements carry no start_row so row lookup skips them.
+local function element_row(state, el)
+  return state.rows[el.id]
+end
+
+local function set_element_row(state, el, start_row, height)
+  state.rows[el.id] = { start_row = start_row, height = height }
+end
+
+-- Fill in the read-only rendering inputs a caller may omit: the display width
+-- (live window width, default 80 — kept for API stability; the tail-cap
+-- projection no longer truncates), the media root precomputed once per batch
+-- from M.display_file (the uri-encoded absolute session media dir), and the
+-- streaming-subagent signal (model.sa_active) used by the subagent output
+-- fence decision.
+local function fill_ctx(ctx)
+  if not ctx.width then
+    local win = vim.fn.bufwinid(ctx.buf)
+    ctx.width = (win ~= -1) and vim.api.nvim_win_get_width(win) or 80
+  end
+  if ctx.media_root == nil and M.display_file then
+    local session_dir = vim.fn.fnamemodify(M.display_file, ':h')
+    ctx.media_root = vim.uri_encode(session_dir .. '/media/')
+  end
+  ctx.sa_active = model.sa_active
+end
+
+-- Per-row highlight decoration for an element's projected lines. Chrome rows
+-- get col-range marks from element_chrome_spans (priority 150, beating the
+-- treesitter @comment default of 100); content rows keep the full-row logic:
+-- the element's group (subagent error rows get TCodeError; the whole retry
+-- block is TCodeTokens). Every mark is tracked in state.hl so a rebuild can
+-- delete and re-apply them. Extmarks are decoration only — they never carry
+-- position, text, or navigation data.
+local function apply_element_highlights(state, buf, ns, el, ctx, start_row, el_lines)
+  -- Structural chrome-row set: element-relative indices of the layout's
+  -- chrome rows (from the SAME layout builder that produced el_lines), so
+  -- content classification never matches the content text — a content row
+  -- that itself starts with '► ' is still content.
+  local chrome = {}
+  for _, sp in ipairs(element_chrome_spans(el, ctx)) do
+    chrome[sp.row] = true
+    add_tracked_col_highlight(state, el, buf, ctx.ns, sp.group, start_row + sp.row, sp.start_col, sp.end_col)
+  end
+  local function is_content(i)
+    -- Every non-chrome row except fence rows is content (i is 1-based; the
+    -- chrome set is keyed by 0-based element-relative row).
+    return not chrome[i - 1] and el_lines[i] ~= TC_FENCE
+  end
+  local group
+  if el.type == 'thinking_block' then
+    group = 'TCodeThinking'
+  elseif el.type == 'tool_call' then
+    group = 'TCodeToolArgs'
+  elseif el.type == 'system_message' then
+    group = system_message_hl(el.level)
+  elseif el.type == 'end_info' then
+    group = 'TCodeError'
+  end
+  for i = 1, #el_lines do
+    local line = el_lines[i]
+    local g
+    if el.type == 'subagent' then
+      if line:match('^Error: ') then
+        g = 'TCodeError'
+      elseif is_content(i) then
+        g = 'TCodeToolArgs'
+      end
+    elseif el.type == 'retry' then
+      g = 'TCodeTokens'
+    elseif group and is_content(i) then
+      g = group
+    end
+    if g then
+      add_tracked_highlight(state, el, buf, ns, g, start_row + i - 1)
+    end
+  end
+end
+
+-- Shift every element AFTER el in the model by delta rows: only start_row
+-- moves (the buffer rows themselves were already moved by the write).
+-- Zero-height elements have no start_row and are skipped. Elements ATTACHED
+-- to el (state.host[e.id] == el.id) are skipped too: an am's attached blocks
+-- live INSIDE the am's region, so when the am's own rows grow below them
+-- (e.g. streamed content) they must not move; they move only via their own
+-- rebuilds (which shift later elements, including sibling attached blocks).
+local function shift_later_elements(model, state, el, delta)
+  if delta == 0 then return end
+  local past = false
+  for _, e in ipairs(model.elements) do
+    if past then
+      if state.host[e.id] ~= el.id then
+        local entry = state.rows[e.id]
+        if entry and entry.start_row then
+          entry.start_row = entry.start_row + delta
+        end
+      end
+    elseif e == el then
+      past = true
+    end
+  end
+end
+
+-- Operation 1 (append): render a newly added element. The first element
+-- replaces the buffer's initial single empty line (start_row = 0); later
+-- elements append at the buffer tail. Zero-height projections (media without
+-- a root, an empty end_info) are recorded with height 0 and no start_row.
+-- A thinking block tagged attach_to (created while the model tail was an
+-- assistant_message) is inserted INSIDE its host am's region at the am's
+-- current region end — the block's arrival position — so the display order
+-- matches the wire order (thinking before response). The am's region then
+-- spans [label] + attached blocks + content, contiguous.
+local function render_added(model, el, state, ctx)
+  local buf = ctx.buf
+  local el_lines = project_element(el, ctx)
+  if not el_lines or #el_lines == 0 then
+    -- Zero-height (media without a root, empty end_info): recorded but
+    -- never written. first_event must SURVIVE here: this branch does not
+    -- touch the buffer, so the initial single empty line is still waiting
+    -- to be replaced by the first real projection.
+    set_element_row(state, el, nil, 0)
+    return
+  end
+  if el.attach_to then
+    local am = model.by_id[el.attach_to]
+    local am_entry = am and state.rows[am.id]
+    if am_entry and am_entry.start_row ~= nil then
+      local ins = am_entry.start_row + am_entry.height
+      vim.api.nvim_buf_set_lines(buf, ins, ins, false, el_lines)
+      set_element_row(state, el, ins, #el_lines)
+      state.host[el.id] = el.attach_to
+      local list = state.attach[el.attach_to]
+      if not list then list = {}; state.attach[el.attach_to] = list end
+      list[#list + 1] = el.id
+      am_entry.height = am_entry.height + #el_lines
+      shift_later_elements(model, state, am, #el_lines)
+      apply_element_highlights(state, buf, ctx.ns, el, ctx, ins, el_lines)
+      return
+    end
+    -- Defensive fall-through: the am has no row entry (never rendered or
+    -- zero-height); treat this block as a normal append below.
+  end
+  local start_row
+  if state.first_event and vim.api.nvim_buf_line_count(buf) == 1 then
+    state.first_event = false
+    vim.api.nvim_buf_set_lines(buf, 0, 1, false, el_lines)
+    start_row = 0
+  else
+    state.first_event = false
+    start_row = vim.api.nvim_buf_line_count(buf)
+    append_lines(buf, el_lines)
+  end
+  set_element_row(state, el, start_row, #el_lines)
+  apply_element_highlights(state, buf, ctx.ns, el, ctx, start_row, el_lines)
+end
+
+-- Forward declaration: operation 3 (render_rebuild) is defined below but the
+-- stream operation delegates to it for tool / subagent elements, so the
+-- local must exist at the call site.
+local render_rebuild
+
+-- Operation 2 (stream): append a content delta onto element E's OWN rows
+-- (never "the buffer tail" — the bug-2 fix). tool_call / subagent elements
+-- delegate to render_rebuild instead: their 5-line tail cap bounds the whole
+-- element to O(cap) rows, so a bounded in-place rebuild per streaming chunk
+-- keeps the fences / headers / row map exact and never touches other
+-- elements or the whole buffer. Assistant / thinking keep the append path:
+-- the chrome/content split is STRUCTURAL — E "has content rows" iff its
+-- height exceeds the chrome rows (1 label for an assistant_message, 0 for
+-- open thinking) plus the heights of its attached blocks. With no content
+-- rows yet the delta inserts as new rows at the region end (after the am
+-- label, or below the last attached block — the wire order
+-- thinking-then-response maps to block rows then content rows); with content
+-- rows the delta appends onto E's last content row at E.start_row +
+-- E.height - 1: the delta's first line joins it and subsequent lines insert
+-- below (a leading newline in the delta joins nothing, so the result always
+-- matches a full projection of the appended content). The decision never
+-- matches the content text, so content that itself starts with '► ' joins
+-- correctly. Then added_rows = count_lines(delta) - 1, E.height grows by it,
+-- every later element's start_row shifts by it, and the new rows get
+-- highlighted. An attached thinking block's growth also grows its host am's
+-- region.
+local function render_updated_content(model, entry, state, ctx)
+  local buf = ctx.buf
+  local el = entry[1]
+  local text = updated_content_text(entry)
+  if text == '' then return end
+  if el.type == 'tool_call' or el.type == 'subagent' then
+    render_rebuild(model, el, state, ctx)
+    return
+  end
+  local row_entry = state.rows[el.id]
+  if not row_entry or row_entry.start_row == nil then return end
+  local target_row = row_entry.start_row + row_entry.height - 1
+  local join_col = #(vim.api.nvim_buf_get_lines(buf, target_row, target_row + 1, false)[1] or '')
+  local added_rows
+  -- Structural chrome/content decision: the element "has content rows" iff
+  -- its region height exceeds the chrome rows (1 label for an
+  -- assistant_message, 0 for open thinking) plus the heights of its attached
+  -- blocks. The am's trailing case stays structural too: when the region
+  -- ENDS with an attached block (or holds only the label), the delta starts
+  -- a fresh segment below it — the wire order thinking-then-response — it
+  -- never joins onto the block. Never decided by matching the content text,
+  -- so content that itself starts with '► ' still joins correctly.
+  local chrome_rows = el.type == 'assistant_message' and 1 or 0
+  local attached_sum = 0
+  local trailing_block = false
+  if el.type == 'assistant_message' then
+    local region_end = row_entry.start_row + row_entry.height
+    local attached = state.attach[el.id]
+    if attached then
+      for _, bid in ipairs(attached) do
+        local be = state.rows[bid]
+        if be and be.height then
+          attached_sum = attached_sum + be.height
+          if bid == attached[#attached] and be.start_row
+            and be.start_row + be.height == region_end then
+            trailing_block = true
           end
         end
       end
     end
-    start = append_row
-    last = append_row + new_rows - 1
   end
-  for i = start, last do
-    add_tracked_highlight(state, el, buf, ns, group, i)
+  if el.type == 'assistant_message' and (trailing_block or row_entry.height <= chrome_rows + attached_sum) then
+    -- No content rows below the region end (the region ends with an
+    -- attached block, or holds only the label): insert the delta as new
+    -- rows at the region end — the wire order thinking-then-response.
+    local region_end = row_entry.start_row + row_entry.height
+    vim.api.nvim_buf_set_lines(buf, region_end, region_end, false, lines(text))
+    added_rows = count_lines(text)
+  else
+    -- Content rows exist (non-am elements always have them: a zero-height
+    -- element was skipped above): join the delta onto the last content row
+    -- (its first line joins, subsequent lines insert below).
+    insert_text_at(buf, target_row, text)
+    added_rows = count_lines(text) - 1
   end
-  state.hl_upto[el.id] = append_row + new_rows - 1
+  row_entry.height = row_entry.height + added_rows
+  shift_later_elements(model, state, el, added_rows)
+  if el.type == 'thinking_block' and state.host[el.id] then
+    -- An attached block's growth grows its host am's region with it.
+    local host_entry = state.rows[state.host[el.id]]
+    if host_entry then host_entry.height = host_entry.height + added_rows end
+  end
+  if added_rows > 0 and el.type == 'thinking_block' then
+    -- A multi-line delta inserted into a ZERO-LENGTH join row slides the
+    -- join row's own right-gravity highlight mark onto the inserted block;
+    -- delete every slid mark and re-place the join row's so each row keeps
+    -- exactly one.
+    if join_col == 0 then
+      local list = state.hl[el.id]
+      if list then
+        for j = #list, 1, -1 do
+          local entry = list[j]
+          local pos = vim.api.nvim_buf_get_extmark_by_id(buf, entry[1], entry[2], {})
+          if pos and pos[1] > target_row then
+            pcall(vim.api.nvim_buf_del_extmark, buf, entry[1], entry[2])
+            table.remove(list, j)
+          end
+        end
+      end
+      add_tracked_highlight(state, el, buf, ctx.ns, 'TCodeThinking', target_row)
+    end
+    for i = target_row + 1, target_row + added_rows do
+      add_tracked_highlight(state, el, buf, ctx.ns, 'TCodeThinking', i)
+    end
+  end
 end
 
--- Apply one `updated_content` entry ({element, text}): append the delta at the
--- element's append point — the buffer tail when the element is the tail or
--- append-only, otherwise the row just above the NEXT element's anchor (the
--- anchor rides the insert, so repeated appends land in order). Under bulk the
--- write is skipped entirely; the next updated_all materializes it.
-local function render_updated_content(model, entry, state, ctx)
-  local buf, ns, bulk = ctx.buf, ctx.ns, ctx.bulk
-  local el = entry[1]
-  if bulk then return end
-  local text = updated_content_text(entry)
+-- Fold an assistant_message's attached blocks into its projection at their
+-- arrival position: [label] + <each attached block's lines, in model order>
+-- + <the am's content lines>. Returns (lines, block_entries) where
+-- block_entries[b_id] = { start_row, height } gives each block's sub-entry
+-- RELATIVE to the am's region start. Blocks are located by attach_to (they
+-- are the elements whose attach_to == am.id; the am always precedes them).
+-- The model stores the am's content as one field, so an interleaved
+-- content/block split cannot be reconstructed — blocks group before content
+-- (matches the common case exactly: thinking runs precede the response).
+local function fold_am_blocks(model, ctx, am)
+  local layout = element_layout(am, ctx)
+  local out = { layout[1].text }
+  local block_entries = {}
+  local row = 1
+  for _, e in ipairs(model.elements) do
+    if e.attach_to == am.id then
+      local blk_lines = project_element(e, ctx) or {}
+      block_entries[e.id] = { start_row = row, height = #blk_lines }
+      for _, l in ipairs(blk_lines) do out[#out + 1] = l end
+      row = row + #blk_lines
+    end
+  end
+  for i = 2, #layout do out[#out + 1] = layout[i].text end
+  return out, block_entries
+end
 
-  -- A bulk-started thinking block's first live append lands exactly on its
-  -- anchor row and would push the anchor down with the inserted lines; capture
-  -- the region start so it can be pinned back after the write.
-  local pre_anchor = (el.type == 'thinking_block') and anchor_row(buf, el)
+-- Rebuild an assistant_message that carries attached blocks: fold the
+-- blocks back into the am's region (label + blocks + content, contiguous)
+-- and re-place every sub-entry. Used ONLY as a defensive guard — the
+-- reducer never tags an am as updated_all (ams stream via updated_content),
+-- so the normal path cannot corrupt an attached-block region.
+local function render_am_rebuild(model, el, state, ctx)
+  local buf = ctx.buf
+  local row_entry = state.rows[el.id]
+  if not row_entry or row_entry.start_row == nil then return end
+  local start_row = row_entry.start_row
+  local old_height = row_entry.height or 0
+  del_hl_marks(state, buf, el.id)
+  for _, bid in ipairs(state.attach[el.id]) do
+    del_hl_marks(state, buf, bid)
+  end
+  local all_lines, block_entries = fold_am_blocks(model, ctx, el)
+  if #all_lines == 0 then
+    -- Defensive: nothing to project; remove the whole region.
+    vim.api.nvim_buf_set_lines(buf, start_row, start_row + old_height, false, {})
+    set_element_row(state, el, nil, 0)
+    for bid in pairs(block_entries) do
+      set_element_row(state, model.by_id[bid], nil, 0)
+    end
+    shift_later_elements(model, state, el, -old_height)
+    return
+  end
+  vim.api.nvim_buf_set_lines(buf, start_row, start_row + old_height, false, all_lines)
+  set_element_row(state, el, start_row, #all_lines)
+  for bid, info in pairs(block_entries) do
+    set_element_row(state, model.by_id[bid], start_row + info.start_row, info.height)
+  end
+  shift_later_elements(model, state, el, #all_lines - old_height)
+  -- Re-apply the am's chrome (the label) and each block's full highlights.
+  for _, sp in ipairs(element_chrome_spans(el, ctx)) do
+    add_tracked_col_highlight(state, el, buf, ctx.ns, sp.group, start_row + sp.row, sp.start_col, sp.end_col)
+  end
+  for bid, info in pairs(block_entries) do
+    apply_element_highlights(state, buf, ctx.ns, model.by_id[bid], ctx,
+      start_row + info.start_row, project_element(model.by_id[bid], ctx))
+  end
+end
 
-  local append_row
-  local insert_below = false
-  if el == model.tail or append_only_types[el.type] then
-    append_row = vim.api.nvim_buf_line_count(buf) - 1
-  else
-    local next_el = model_next_element(model, el)
-    local next_row = next_el and anchor_row(buf, next_el)
-    if next_row then
-      append_row = next_row - 1
-      insert_below = true
+-- Operation 3 (rebuild): replace element E's region in place from full model
+-- state (updated_all: toggle / collapse / expand / status change / fence
+-- close / merge reopen). Delete E's tracked highlight extmarks, project fresh
+-- lines, replace E's region, shift later elements by the height delta, set
+-- E's new height, and re-apply the highlights. An attached block's rebuild
+-- also grows/shrinks its host am's region with it.
+render_rebuild = function(model, el, state, ctx)
+  local buf = ctx.buf
+  local row_entry = state.rows[el.id]
+  if not row_entry or row_entry.start_row == nil then return end
+  -- Defensive guard: an am with attached blocks is rebuilt by folding the
+  -- blocks back into the region (never silently dropping them).
+  if el.type == 'assistant_message' and state.attach[el.id] and #state.attach[el.id] > 0 then
+    render_am_rebuild(model, el, state, ctx)
+    return
+  end
+  local start_row = row_entry.start_row
+  local old_height = row_entry.height or 0
+  del_hl_marks(state, buf, el.id)
+  local new_lines = project_element(el, ctx) or {}
+  if #new_lines == 0 then
+    -- Defensive: the element now projects no rows; remove its region.
+    vim.api.nvim_buf_set_lines(buf, start_row, start_row + old_height, false, {})
+    set_element_row(state, el, nil, 0)
+    shift_later_elements(model, state, el, -old_height)
+    if state.host[el.id] then
+      local host_entry = state.rows[state.host[el.id]]
+      if host_entry then host_entry.height = host_entry.height - old_height end
+    end
+    return
+  end
+  vim.api.nvim_buf_set_lines(buf, start_row, start_row + old_height, false, new_lines)
+  local delta = #new_lines - old_height
+  set_element_row(state, el, start_row, #new_lines)
+  shift_later_elements(model, state, el, delta)
+  if state.host[el.id] then
+    -- An attached block's rebuild grows/shrinks its host am's region with it.
+    local host_entry = state.rows[state.host[el.id]]
+    if host_entry then host_entry.height = host_entry.height + delta end
+  end
+  apply_element_highlights(state, buf, ctx.ns, el, ctx, start_row, new_lines)
+end
+
+-- One-time initial load: project the whole model into the buffer with a
+-- single set_lines and build the complete row map. Live batches after this
+-- are incremental (the three operations above). An assistant_message with
+-- attached blocks is folded at its arrival position — label, then each
+-- attached block's lines in order, then the am's content — with sub-entries
+-- for every block (blocks are skipped by the outer loop). The model stores
+-- the am's content as one field, so an interleaved content/block split
+-- cannot be reconstructed at load time; the fold matches the common case
+-- exactly (thinking runs precede the response text).
+local function render_full_projection(model, state, ctx)
+  local buf = ctx.buf
+  local all_lines = {}
+  local row = 0
+  for _, el in ipairs(model.elements) do
+    if state.host[el.id] then
+      -- Attached block: already folded into its am's region above (the am
+      -- always precedes its blocks in the model).
     else
-      append_row = vim.api.nvim_buf_line_count(buf) - 1
+      local el_lines
+      if el.type == 'assistant_message' then
+        local block_entries
+        el_lines, block_entries = fold_am_blocks(model, ctx, el)
+        set_element_row(state, el, row, #el_lines)
+        if next(block_entries) then
+          local list = state.attach[el.id]
+          if not list then list = {}; state.attach[el.id] = list end
+          for bid, info in pairs(block_entries) do
+            set_element_row(state, model.by_id[bid], row + info.start_row, info.height)
+            state.host[bid] = el.id
+            list[#list + 1] = bid
+          end
+        end
+      else
+        el_lines = project_element(el, ctx)
+        if not el_lines or #el_lines == 0 then
+          set_element_row(state, el, nil, 0)
+        else
+          set_element_row(state, el, row, #el_lines)
+        end
+      end
+      if el_lines and #el_lines > 0 then
+        for _, l in ipairs(el_lines) do
+          all_lines[#all_lines + 1] = l
+        end
+        row = row + #el_lines
+      end
     end
   end
-  -- Pre-append length of the join row, captured BEFORE the write: the streaming
-  -- highlight dedup needs it to detect a newline chunk landing on a zero-length
-  -- row (see highlight_appended_rows).
-  local join_col
-  if el.type == 'thinking_block' or el.type == 'tool_call' or el.type == 'subagent' then
-    join_col = #(vim.api.nvim_buf_get_lines(buf, append_row, append_row + 1, false)[1] or '')
-  end
-  if insert_below then
-    insert_text_at(buf, append_row, text)
-  else
-    append_text(buf, text)
-  end
-
-  local new_rows = count_lines(text)
-  if state.heights[el.id] then
-    state.heights[el.id] = state.heights[el.id] + (new_rows - 1)
-  end
-
-  if el.type == 'thinking_block' then
-    if pre_anchor then
-      pcall(vim.api.nvim_buf_del_extmark, buf, gen_ns, el.anchor)
-      el.anchor = vim.api.nvim_buf_set_extmark(buf, gen_ns, pre_anchor, 0, {})
+  if #all_lines > 0 then
+    vim.api.nvim_buf_set_lines(buf, 0, -1, false, all_lines)
+    state.first_event = false
+    for _, el in ipairs(model.elements) do
+      local entry = state.rows[el.id]
+      if entry and entry.start_row then
+        if el.type == 'assistant_message' and state.attach[el.id] and #state.attach[el.id] > 0 then
+          -- Folded am: only its chrome (the label) is highlighted here; each
+          -- attached block is highlighted at its own sub-entry in this loop.
+          for _, sp in ipairs(element_chrome_spans(el, ctx)) do
+            add_tracked_col_highlight(state, el, buf, ctx.ns, sp.group, entry.start_row + sp.row, sp.start_col, sp.end_col)
+          end
+        else
+          apply_element_highlights(state, buf, ctx.ns, el, ctx, entry.start_row, project_element(el, ctx))
+        end
+      end
     end
-    state.mat_len[el.id] = (state.mat_len[el.id] or 0) + #text
-    highlight_appended_rows(state, el, buf, thinking_ns, 'TCodeThinking', append_row, new_rows, join_col)
-  elseif el.type == 'tool_call' then
-    if el.args_open then
-      highlight_appended_rows(state, el, buf, ns, 'TCodeToolArgs', append_row, new_rows, join_col)
-    end
-    local arow = anchor_row(buf, el)
-    if arow then set_nav_extmark(state, buf, tc_ns, el, arow, arow + state.heights[el.id]) end
-  elseif el.type == 'subagent' then
-    if el.input_open then
-      highlight_appended_rows(state, el, buf, ns, 'TCodeToolArgs', append_row, new_rows, join_col)
-    end
-    local arow = anchor_row(buf, el)
-    if arow then set_nav_extmark(state, buf, sa_ns, el, arow, arow + state.heights[el.id]) end
   end
 end
 
 -- Apply ONE diff to the buffer: order updated_all -> updated_content -> added.
 -- A single event's diff never has two kinds touching the same element, so the
--- order is exact. Callers are responsible for the modifiable window.
+-- order is exact. Callers are responsible for the modifiable window and for
+-- fill_ctx (render / render_batch do both).
 local function apply_diff(model, diff, ctx)
   if not diff then return end
   local buf = ctx.buf
   if not vim.api.nvim_buf_is_valid(buf) then return end
   local state = get_renderer_state(model)
   for _, el in ipairs(diff.updated_all) do
-    local arow = anchor_row(buf, el)
-    if arow then
-      if el.type == 'thinking_block' then
-        render_thinking_update(el, state, ctx, arow)
-      elseif el.type == 'tool_call' or el.type == 'subagent' then
-        render_region_update(el, state, ctx, arow)
-      else
-        arow = nil -- nothing rebuilt; no anchor re-pin
-      end
-      -- The region rebuild shifts the start anchor to the end of the
-      -- replaced range (right_gravity); pin it back to the region start.
-      if arow then
-        if el.anchor then
-          pcall(vim.api.nvim_buf_del_extmark, buf, gen_ns, el.anchor)
-        end
-        el.anchor = vim.api.nvim_buf_set_extmark(buf, gen_ns, arow, 0, { right_gravity = true })
-      end
-    end
+    render_rebuild(model, el, state, ctx)
   end
   for _, entry in ipairs(diff.updated_content) do
     render_updated_content(model, entry, state, ctx)
@@ -1941,13 +1904,20 @@ end
 
 -- Render a single diff inside one modifiable window (nested-safe: callers may
 -- already be inside a window). No auto-scroll, no force_render_markdown —
--- render_batch owns those.
+-- render_batch owns those. A bulk context performs the one-time full
+-- projection (the initial load batch).
 local function render(model, diff, ctx)
   if not diff then return end
   local buf = ctx.buf
   if not vim.api.nvim_buf_is_valid(buf) then return end
+  fill_ctx(ctx)
   with_modifiable(buf, function()
-    apply_diff(model, diff, ctx)
+    local state = get_renderer_state(model)
+    if ctx.bulk and state.first_event then
+      render_full_projection(model, state, ctx)
+    else
+      apply_diff(model, diff, ctx)
+    end
   end)
 end
 
@@ -1955,7 +1925,9 @@ end
 -- modifiable window. Computes was_at_bottom BEFORE any writes; after the
 -- window, if the cursor was at the bottom, moves it to the end of the last
 -- line so the viewport follows the stream. Kicks force_render_markdown once
--- per batch. A failing diff stops the batch (reported, not raised).
+-- per batch. A failing diff stops the batch (reported, not raised). The first
+-- batch (bulk = true) performs the one-time full projection instead of
+-- incremental applies.
 local function render_batch(model, diffs, ctx)
   if not diffs or #diffs == 0 then return end
   local buf = ctx.buf
@@ -1969,12 +1941,18 @@ local function render_batch(model, diffs, ctx)
     was_at_bottom = cursor_line >= line_count
   end
 
+  fill_ctx(ctx)
   with_modifiable(buf, function()
-    for _, diff in ipairs(diffs) do
-      local ok, err = pcall(apply_diff, model, diff, ctx)
-      if not ok then
-        vim.api.nvim_err_writeln('render error: ' .. tostring(err))
-        break
+    local state = get_renderer_state(model)
+    if ctx.bulk and state.first_event then
+      render_full_projection(model, state, ctx)
+    else
+      for _, diff in ipairs(diffs) do
+        local ok, err = pcall(apply_diff, model, diff, ctx)
+        if not ok then
+          vim.api.nvim_err_writeln('render error: ' .. tostring(err))
+          break
+        end
       end
     end
   end)
@@ -1988,88 +1966,57 @@ local function render_batch(model, diffs, ctx)
   force_render_markdown(buf)
 end
 
--- Resolve the element whose collapsed/expanded thinking or args/input preview
--- mark covers the given buffer row (0-indexed). The renderer registers these
--- marks with the element id in its thinking id map; marks are ordered, first
--- match wins.
-local function find_marked_element_at(model, buf, row)
+-- Resolve the element whose projected region covers the given 0-indexed row:
+-- scan elements from the END (the most recent element wins), skip zero-height
+-- elements, return (element, offset) with offset = row - start_row. Pure
+-- integer lookup on the row map.
+local function row_element_at(model, row)
   local state = get_renderer_state(model)
-  local marks = vim.api.nvim_buf_get_extmarks(buf, thinking_ns, 0, -1, { details = true })
-  for _, mark in ipairs(marks) do
-    local mark_id = mark[1]
-    local el_id = state.thinking_ids[mark_id]
-    if el_id then
-      local start_row = mark[2]
-      local details = mark[4]
-      local end_row = details and details.end_row
-      local matches = (end_row and start_row <= row and row < end_row)
-        or (not end_row and start_row == row)
-      if matches then
-        return model.by_id[el_id], state.thinking_kinds[mark_id]
+  for i = #model.elements, 1, -1 do
+    local el = model.elements[i]
+    local entry = state.rows[el.id]
+    local start_row = entry and entry.start_row
+    if start_row then
+      local height = entry.height or 1
+      if row >= start_row and row < start_row + height then
+        return el, row - start_row
       end
     end
   end
   return nil, nil
 end
 
--- Resolve the element whose region covers the given buffer row (0-indexed),
--- scanning the model from the END (the most recent element wins). Height comes
--- from the renderer's per-element region height; elements without a resolved
--- anchor are skipped.
+-- Resolve the element under a buffer row as (element, offset) via the integer
+-- row map. `buf` is unused — kept for signature stability with callers that
+-- predate the row map.
 local function element_at_row(model, buf, row)
-  local state = get_renderer_state(model)
-  for i = #model.elements, 1, -1 do
-    local el = model.elements[i]
-    local anchor = anchor_row(buf, el)
-    if anchor then
-      local height = state.heights[el.id] or 1
-      if row >= anchor and row < anchor + height then
-        return el
-      end
-    end
-  end
-  return nil
+  return row_element_at(model, row)
 end
 
--- Compat helpers (test suites call these with the old signatures). Each one
--- resolves the target element and routes through the reducer + renderer.
-
--- Resolve a thinking_ns mark id (indicator or preview hint) to its element.
-local function element_for_mark(model, mark_id)
-  local state = get_renderer_state(model)
-  local el_id = state.thinking_ids[mark_id]
-  if el_id then return model.by_id[el_id] end
-  return nil
-end
-
-local function collapse_thinking(buf, ns)
+-- Compat wrappers for the reducer toggles. These are test-facing; each one
+-- applies the reducer operation and renders the resulting diff into buf.
+-- Phase 5's migrated suites call them with (model, element, buf, ns).
+local function collapse_thinking(model, el, buf, ns)
   local d = collapse_open_thinking(model)
   if #d.updated_all > 0 then
     render(model, d, { buf = buf, ns = ns, bulk = false })
   end
 end
 
-local function toggle_thinking(buf, mark_id)
-  local el = element_for_mark(model, mark_id)
+local function toggle_thinking(model, el, buf, ns)
   if el and el.type == 'thinking_block' then
     local d = toggle_thinking_element(model, el)
     render(model, d, { buf = buf, ns = ns, bulk = false })
   end
 end
 
-local function toggle_tool_call_args(buf, mark_id)
-  local el = element_for_mark(model, mark_id)
-  if el and (el.type == 'tool_call' or el.type == 'subagent') then
-    local d = toggle_tool_call_args_element(model, el)
-    render(model, d, { buf = buf, ns = ns, bulk = false })
-  end
-end
-
--- Apply one display event through the model + renderer. Kept as a thin
--- compat wrapper (the reader and keymaps now call apply/render directly).
+-- Apply one display event through the model + renderer: build the render ctx
+-- (width + media_root) and dispatch to render_batch (its own modifiable
+-- window, scroll follow, and markdown kick). Kept as a thin compat wrapper
+-- (the reader and keymaps now call apply/render_batch directly).
 local function render_event(buf, ns, event, envelope_id, bulk)
   local diff = apply(model, event, envelope_id)
-  render(model, diff, { buf = buf, ns = ns, bulk = bulk })
+  render_batch(model, { diff }, { buf = buf, ns = ns, bulk = bulk })
 end
 
 -- Set up highlight groups used by all display buffers
@@ -2147,8 +2094,8 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
   local state = { last_size = 0, line_buffer = '', is_initial_load = true }
 
   -- One-shot settle timer used to flush content deferred during the initial
-  -- bulk load (thinking blocks / open args fences that never hit a collapse
-  -- point, e.g. a crashed session). It is re-armed on every content read, so
+  -- bulk load (thinking blocks / open args fences that never got closed, e.g.
+  -- a crashed session). It is re-armed on every content read, so
   -- it only fires after the file has been quiet for SETTLE_MS — a live
   -- session keeps streaming and never flushes prematurely, while a static
   -- file (idle/crashed) materializes its deferred content once.
@@ -2304,6 +2251,128 @@ local function open_pending_approvals()
   end
 end
 
+-- Keymap handler bodies, factored out of setup_display so the test runner can
+-- invoke the exact production logic. Each takes the display's (model, buf,
+-- ns); the keymap closures below delegate to them, so behavior is identical.
+
+-- `o`: toggle a thinking block, or open the subagent / tool-call detail view
+-- from ANY row of a tool / subagent element. Rows resolve through the
+-- integer row map (element_at_row) and the pure action_at lookup.
+local function keymap_o(model, buf, ns)
+  local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
+
+  local el, offset = element_at_row(model, buf, cursor_line)
+  if not el then return end
+  local kind = action_at(el, offset)
+
+  if kind == 'thinking' then
+    local d = toggle_thinking_element(model, el)
+    if #d.updated_all > 0 then
+      render(model, d, { buf = buf, ns = ns, bulk = false })
+    end
+    return
+  elseif kind == 'detail' then
+    -- The detail view opens from any row of the element. A pending subagent
+    -- (nil conversation_id) is a silent no-op.
+    if el.type == 'subagent' then
+      if not el.conversation_id then return end
+      if not M.exe_path or not M.session_id then
+        vim.notify('Session info not available', vim.log.levels.ERROR)
+        return
+      end
+      vim.fn.system(string.format('%s --session=%s open-subagent %s',
+        shquote(M.exe_path), shquote(M.session_id), shquote(el.conversation_id)))
+      return
+    end
+    if el.type == 'tool_call' and el.tool_call_id then
+      if not M.exe_path or not M.session_id then
+        vim.notify('Session info not available', vim.log.levels.ERROR)
+        return
+      end
+      vim.fn.system(string.format('%s --session=%s open-tool-call %s',
+        shquote(M.exe_path), shquote(M.session_id), shquote(el.tool_call_id)))
+      return
+    end
+  end
+  -- Otherwise nothing under the cursor to act on.
+end
+
+-- `<C-k>`: cancel tool or subagent with confirmation popup.
+local function keymap_ck(model, buf)
+  if not M.exe_path or not M.session_id then
+    vim.notify('Session info not available', vim.log.levels.ERROR)
+    return
+  end
+
+  local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
+  local el, _ = element_at_row(model, buf, cursor_line)
+  if not el then
+    vim.notify('No tool call or subagent under cursor', vim.log.levels.WARN)
+    return
+  end
+
+  if el.type == 'subagent' and el.conversation_id then
+    local final = el.status == 'done' or el.status == 'failed'
+      or el.status == 'cancelled' or el.status == 'denied'
+    if final then
+      vim.notify('Subagent already finished', vim.log.levels.INFO)
+      return
+    end
+    -- desc is wire-derived and can contain '\n', which confirm_popup cannot
+    -- write as one buffer line: collapse newlines before building the prompt.
+    local desc = single_line(el.description or el.conversation_id)
+    confirm_popup("Cancel subagent '" .. desc .. "'? (y/n)", function()
+      local cmd = string.format('%s --session=%s cancel-conversation %s',
+        shquote(M.exe_path), shquote(M.session_id), shquote(el.conversation_id))
+      local result = vim.fn.system(cmd)
+      vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
+    end)
+  elseif el.type == 'tool_call' and el.tool_call_id then
+    local final = el.status == 'done' or el.status == 'failed'
+      or el.status == 'cancelled' or el.status == 'denied'
+    if final then
+      vim.notify('Tool call already finished', vim.log.levels.INFO)
+      return
+    end
+    confirm_popup("Cancel tool '" .. single_line(el.tool_name or 'unknown') .. "'? (y/n)", function()
+      local cmd = string.format('%s --session=%s cancel-tool %s',
+        shquote(M.exe_path), shquote(M.session_id), shquote(el.tool_call_id))
+      local result = vim.fn.system(cmd)
+      vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
+    end)
+  else
+    vim.notify('No tool call or subagent under cursor', vim.log.levels.WARN)
+  end
+end
+
+-- `gb`: branch the conversation at the user message under the cursor.
+local function keymap_gb(model, buf)
+  if not M.exe_path or not M.session_id then
+    vim.notify('Session info not available', vim.log.levels.ERROR)
+    return
+  end
+  local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
+  local el, _ = element_at_row(model, buf, cursor_line)
+  if not (el and el.type == 'user_message' and el.msg_id) then
+    vim.notify('not on a user message', vim.log.levels.WARN)
+    return
+  end
+  local profile_part = ''
+  if M.profile and M.profile ~= '' then
+    -- Single-quote-escape so a profile with shell metacharacters is never
+    -- interpreted by the shell that runs the CLI command.
+    profile_part = ' -p ' .. shquote(M.profile)
+  end
+  local cmd = string.format('%s%s --session=%s branch %s',
+    shquote(M.exe_path), profile_part, shquote(M.session_id), shquote(el.msg_id))
+  local result = vim.fn.system(cmd)
+  local trimmed = vim.trim(result)
+  if trimmed ~= '' then
+    local level = vim.v.shell_error ~= 0 and vim.log.levels.ERROR or vim.log.levels.INFO
+    vim.notify(trimmed, level, { title = 'TCode' })
+  end
+end
+
 -- Setup display window for viewing conversation
 -- @param display_file: Path to file where display content is written (JSONL)
 -- @param status_file: Path to file where status messages are written
@@ -2369,9 +2438,11 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   --     here against that plugin's API.
   set_render_markdown_debounce(buf, 0)
 
-  -- Reset the model and first_event flag for this display session.
+  -- Reset the model for this display session (the fresh weak-keyed renderer
+  -- state starts with first_event = true; the explicit reset is belt and
+  -- suspenders).
   model = new_model()
-  first_event = true
+  get_renderer_state(model).first_event = true
 
   -- Register tcode tree-sitter parser and start highlighting
   if parser_path and parser_path ~= '' then
@@ -2472,107 +2543,17 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     end, { buffer = true, silent = true, desc = 'Quit' })
   end
 
-  -- Context-aware 'o' keybinding: toggle thinking / tool args / input /
-  -- output previews, or open the subagent / tool-call detail view from the
-  -- element's label line only.
+  -- Context-aware 'o' keybinding: toggle a thinking block, or open the
+  -- subagent / tool-call detail view from any row of a tool / subagent
+  -- element. Rows resolve through the integer row map (element_at_row) and
+  -- the pure action_at lookup (see keymap_o).
   vim.keymap.set('n', 'o', function()
-    local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
+    keymap_o(model, buf, ns)
+  end, { buffer = true, silent = true, desc = 'Toggle thinking or open detail' })
 
-    -- Step 1: a marked element under the cursor (thinking indicator, a
-    -- collapsed preview hint, or expanded content) -> toggle it through the
-    -- reducer. Expanded content carries its own collapse hint, so `o` there
-    -- collapses instead of opening the detail view.
-    local el, kind = find_marked_element_at(model, buf, cursor_line)
-    if el then
-      local d
-      if kind == 'thinking' then
-        d = toggle_thinking_element(model, el)
-      elseif kind == 'args' or kind == 'input' then
-        d = toggle_tool_call_args_element(model, el)
-      elseif kind == 'output' then
-        d = toggle_tool_output_element(model, el)
-      end
-      if d and #d.updated_all > 0 then
-        render(model, d, { buf = buf, ns = ns, bulk = false })
-      end
-      return
-    end
-
-    -- Step 2: the detail view opens only from the element's LABEL row (the
-    -- anchor row), not from anywhere in its content region.
-    el = element_at_row(model, buf, cursor_line)
-    if el and (el.type == 'subagent' or el.type == 'tool_call') then
-      local arow = anchor_row(buf, el)
-      if arow == cursor_line then
-        if el.type == 'subagent' and el.conversation_id then
-          if not M.exe_path or not M.session_id then
-            vim.notify('Session info not available', vim.log.levels.ERROR)
-            return
-          end
-          vim.fn.system(string.format('%s --session=%s open-subagent %s',
-            shquote(M.exe_path), shquote(M.session_id), shquote(el.conversation_id)))
-          return
-        end
-        if el.type == 'tool_call' and el.tool_call_id then
-          if not M.exe_path or not M.session_id then
-            vim.notify('Session info not available', vim.log.levels.ERROR)
-            return
-          end
-          vim.fn.system(string.format('%s --session=%s open-tool-call %s',
-            shquote(M.exe_path), shquote(M.session_id), shquote(el.tool_call_id)))
-          return
-        end
-      end
-    end
-    -- Otherwise nothing under the cursor to act on.
-  end, { buffer = true, silent = true, desc = 'Toggle preview or open detail' })
-
-  -- Cancel tool or subagent with confirmation popup (Ctrl-k)
+  -- Cancel tool or subagent with confirmation popup (Ctrl-k) — see keymap_ck.
   vim.keymap.set('n', '<C-k>', function()
-    if not M.exe_path or not M.session_id then
-      vim.notify('Session info not available', vim.log.levels.ERROR)
-      return
-    end
-
-    local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
-    local el = element_at_row(model, buf, cursor_line)
-    if not el then
-      vim.notify('No tool call or subagent under cursor', vim.log.levels.WARN)
-      return
-    end
-
-    if el.type == 'subagent' and el.conversation_id then
-      local final = el.status == 'done' or el.status == 'failed'
-        or el.status == 'cancelled' or el.status == 'denied'
-      if final then
-        vim.notify('Subagent already finished', vim.log.levels.INFO)
-        return
-      end
-      -- desc is wire-derived and can contain '\n', which confirm_popup cannot
-      -- write as one buffer line: collapse newlines before building the prompt.
-      local desc = single_line(el.description or el.conversation_id)
-      confirm_popup("Cancel subagent '" .. desc .. "'? (y/n)", function()
-        local cmd = string.format('%s --session=%s cancel-conversation %s',
-          shquote(M.exe_path), shquote(M.session_id), shquote(el.conversation_id))
-        local result = vim.fn.system(cmd)
-        vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
-      end)
-    elseif el.type == 'tool_call' and el.tool_call_id then
-      local final = el.status == 'done' or el.status == 'failed'
-        or el.status == 'cancelled' or el.status == 'denied'
-      if final then
-        vim.notify('Tool call already finished', vim.log.levels.INFO)
-        return
-      end
-      confirm_popup("Cancel tool '" .. single_line(el.tool_name or 'unknown') .. "'? (y/n)", function()
-        local cmd = string.format('%s --session=%s cancel-tool %s',
-          shquote(M.exe_path), shquote(M.session_id), shquote(el.tool_call_id))
-        local result = vim.fn.system(cmd)
-        vim.notify(vim.trim(result), vim.log.levels.INFO, { title = 'TCode' })
-      end)
-    else
-      vim.notify('No tool call or subagent under cursor', vim.log.levels.WARN)
-    end
+    keymap_ck(model, buf)
   end, { buffer = true, silent = true, desc = 'Cancel tool or subagent' })
 
   -- Cancel entire conversation with confirmation popup (Ctrl-C)
@@ -2611,33 +2592,11 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
   vim.keymap.set('n', '<C-p>', open_pending_approvals,
     { buffer = true, silent = true, desc = 'Open pending tool approvals' })
 
-  -- Branch the conversation at the user message under the cursor (gb)
+  -- Branch the conversation at the user message under the cursor (gb) — see
+  -- keymap_gb.
   if not is_subagent then
     vim.keymap.set('n', 'gb', function()
-      if not M.exe_path or not M.session_id then
-        vim.notify('Session info not available', vim.log.levels.ERROR)
-        return
-      end
-      local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
-      local el = element_at_row(model, buf, cursor_line)
-      if not (el and el.type == 'user_message' and el.msg_id) then
-        vim.notify('not on a user message', vim.log.levels.WARN)
-        return
-      end
-      local profile_part = ''
-      if M.profile and M.profile ~= '' then
-        -- Single-quote-escape so a profile with shell metacharacters is never
-        -- interpreted by the shell that runs the CLI command.
-        profile_part = ' -p ' .. shquote(M.profile)
-      end
-      local cmd = string.format('%s%s --session=%s branch %s',
-        shquote(M.exe_path), profile_part, shquote(M.session_id), shquote(el.msg_id))
-      local result = vim.fn.system(cmd)
-      local trimmed = vim.trim(result)
-      if trimmed ~= '' then
-        local level = vim.v.shell_error ~= 0 and vim.log.levels.ERROR or vim.log.levels.INFO
-        vim.notify(trimmed, level, { title = 'TCode' })
-      end
+      keymap_gb(model, buf)
     end, { buffer = true, silent = true, desc = 'Branch conversation at user message' })
   end
 end
@@ -2651,7 +2610,7 @@ function M.setup_tool_call_display(tool_call_file, status_file)
   -- Fresh model with full_input set: the detail view never collapses args.
   model = new_model()
   model.full_input = true
-  first_event = true
+  get_renderer_state(model).first_event = true
 
   vim.g.tcode_tc_status = 'Waiting...'
 

@@ -2,9 +2,15 @@
 -- initial bulk load, end, or transition to live streaming. The display opens
 -- on a session file that may end mid-thinking (interrupted session) or keep
 -- growing (live session); the thinking block must collapse cleanly without
--- swallowing blocks below it.
+-- swallowing blocks below it. The initial bulk load is a one-time full
+-- projection (everything materialized), so these assert on real lines + the
+-- integer row map.
 
 local TC_FENCE = string.rep('`', 10)
+
+local function row_of(m, el)
+  return T.get_renderer_state(m).rows[el.id]
+end
 
 local function is_open_thinking()
   local tail = T.model.tail
@@ -12,8 +18,8 @@ local function is_open_thinking()
 end
 
 test('attach scenario: bulk thinking then SubAgentStart', function()
+  local m = T.reset_model()
   local b = new_buf()
-  T.reset_model()
   seed(b, { '' })
   local ok1 = pcall(windowed_render, b, { AssistantMessageStart = {} }, true)
   local ok2 = pcall(windowed_render, b, { AssistantThinkingChunk = { content = 'secret thinking' } }, true)
@@ -23,15 +29,23 @@ test('attach scenario: bulk thinking then SubAgentStart', function()
   check(ok1 and ok2 and ok3, 'rendering bulk thinking -> SubAgentStart raises no errors')
   local l = lines_of(b)
   check(l[1] == '► ASSISTANT', 'assistant label rendered')
-  check(l[2] == '' and l[3] == '' and l[4] == '', 'thinking collapsed to indicator rows')
+  check(l[2] == '► [Thinking... press o to expand]', 'thinking collapsed to one real row')
   -- No SubAgentInputStart was streamed: the reducer adds a fenced fallback
-  -- subagent region (label + input fence + output fence), the plan-mandated
-  -- layout for resumed sessions.
-  check(l[5] == '► SUBAGENT' and l[6] == TC_FENCE, 'subagent label + fenced fallback region below the thinking block')
-  local marks = vim.api.nvim_buf_get_extmarks(b, thinking_ns_id, 0, -1, {})
-  check(#marks >= 1 and marks[1][2] == 1, 'thinking indicator extmark at row 1')
+  -- subagent region (label + Output header + fence + empty output) below the
+  -- thinking block; the subagent is still streaming, so no close fence.
+  check(l[3] == '► SUB-AGENT: [running]  sub' and l[4] == '► Output' and l[5] == TC_FENCE and l[6] == '',
+    'subagent label + fenced fallback region below the thinking block')
+  local block, sa
+  for _, el in ipairs(m.elements) do
+    if el.type == 'thinking_block' then block = el end
+    if el.type == 'subagent' then sa = el end
+  end
+  check(row_of(m, block).start_row == 1 and row_of(m, block).height == 1,
+    'row map: collapsed block at [1, 2)')
+  check(row_of(m, sa).start_row == 2 and row_of(m, sa).height == 4,
+    'row map: subagent region at [2, 6)')
   local blocks, subs = 0, 0
-  for _, el in ipairs(T.model.elements) do
+  for _, el in ipairs(m.elements) do
     if el.type == 'thinking_block' and el.state == 'collapsed' then blocks = blocks + 1 end
     if el.type == 'subagent' then subs = subs + 1 end
   end
@@ -40,8 +54,8 @@ test('attach scenario: bulk thinking then SubAgentStart', function()
 end)
 
 test('thinking is collapsed before a new user message (crash/resume flow)', function()
+  local m = T.reset_model()
   local b = new_buf()
-  T.reset_model()
   seed(b, { '' })
   -- The session file ended mid-thinking: bulk load leaves the thinking block
   -- open (no collapse point in the file).
@@ -55,12 +69,12 @@ test('thinking is collapsed before a new user message (crash/resume flow)', func
   pcall(windowed_render, b, { AssistantMessageStart = {} }, false)
   pcall(windowed_render, b, { AssistantThinkingChunk = { content = 'new thinking' } }, false)
   local l = lines_of(b)
-  check(l[2] == '' and l[3] == '' and l[4] == '', 'old thinking collapsed to indicator rows')
-  check(table.concat(l, '|'):find('hello again', 1, true) ~= nil, 'user message preserved below the indicator')
-  check(table.concat(l, '|'):find('new thinking', 1, true) ~= nil, 'new thinking appended after the user message')
+  check(l[2] == '► [Thinking... press o to expand]', 'old thinking collapsed to one real row')
+  check(l[4] == 'hello again', 'user message preserved below the indicator')
+  check(l[6] == 'new thinking', 'new thinking appended after the user message')
   local first_collapsed, has_user, second_open = false, false, false
   local seen_block = 0
-  for _, el in ipairs(T.model.elements) do
+  for _, el in ipairs(m.elements) do
     if el.type == 'thinking_block' then
       seen_block = seen_block + 1
       if seen_block == 1 and el.state == 'collapsed' then first_collapsed = true end
@@ -72,32 +86,41 @@ test('thinking is collapsed before a new user message (crash/resume flow)', func
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
-test('bulk to live transition: deferred content materializes, collapse covers live rows', function()
+test('bulk to live transition: the full projection materializes, collapse covers live rows', function()
+  local m = T.reset_model()
   local b = new_buf()
-  T.reset_model()
   seed(b, { '' })
   pcall(windowed_render, b, { AssistantMessageStart = {} }, true)
-  -- Bulk chunks are not written to the buffer (content deferred).
+  -- The initial bulk load writes EVERYTHING in one full projection: the bulk
+  -- thinking content is materialized immediately, not deferred.
   pcall(windowed_render, b, { AssistantThinkingChunk = { content = 'from file' } }, true)
   local l = lines_of(b)
-  check(l[1] == '► ASSISTANT' and l[2] == '', 'nothing written for the bulk thinking content')
-  -- The session is alive: live chunks now write to the buffer.
+  check(l[1] == '► ASSISTANT' and l[2] == 'from file',
+    'bulk load materialized the thinking content in one shot')
+  -- The session is alive: live chunks stream onto the thinking block's OWN rows.
   pcall(windowed_render, b, { AssistantThinkingChunk = { content = ' live part\nsecond line' } }, false)
   l = lines_of(b)
-  check(l[2] == ' live part' and l[3] == 'second line', 'live chunks stream onto the anchor row')
+  check(l[2] == 'from file live part' and l[3] == 'second line', 'live chunks stream onto the block rows')
   -- The next collapse point must collapse the thinking rows without touching
   -- the message chunk appended after it.
   pcall(windowed_render, b, { AssistantMessageChunk = { content = ' reply' } }, false)
   l = lines_of(b)
   check(l[1] == '► ASSISTANT', 'assistant label intact')
-  check(l[2] == '' and l[3] == '' and l[4] == ' reply', 'thinking collapsed, message chunk appended after the collapse')
+  -- The thinking block is ATTACHED inside the am: it stays above the reply,
+  -- and the reply lands below it (arrival order: label, thinking, response).
+  check(l[2] == '► [Thinking... press o to expand]', 'thinking collapsed to one real row above the reply')
+  check(l[3] == ' reply', 'message chunk appended below the attached collapsed hint')
   local block = nil
   local am = nil
-  for _, el in ipairs(T.model.elements) do
+  for _, el in ipairs(m.elements) do
     if el.type == 'thinking_block' then block = el end
     if el.type == 'assistant_message' then am = el end
   end
   check(block ~= nil and block.state == 'collapsed', 'model block collapsed')
   check(am ~= nil and T.content_of(am, 'content') == ' reply', 'model assistant message holds the reply')
+  check(row_of(m, am).start_row == 0 and row_of(m, am).height == 3,
+    'row map: assistant region [0, 3) = label + attached block + reply')
+  check(row_of(m, block).start_row == 1 and row_of(m, block).height == 1,
+    'row map: collapsed block attached at [1, 2) inside the am')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)

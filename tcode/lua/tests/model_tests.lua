@@ -369,7 +369,7 @@ test('tool call: full lifecycle with exact deltas', function()
   local tc = d.added[1]
   check(tc.type == 'tool_call', 'tool call type')
   check(tc.tool_call_id == 't1' and tc.tool_name == 'bash' and tc.tool_call_index == 0, 'identity fields')
-  check(tc.args_open == true and tc.args_collapsed == false and tc.output_open == false, 'fence state at start')
+  check(tc.args_open == true and tc.output_open == false, 'fence state at start')
   check(tc.status == 'generating' and tc.full_input == false, 'generating, not full input')
   check(tc.args == '' and tc.output == '', 'empty args/output')
   check(m.tail == tc, 'tail is the tool call')
@@ -381,7 +381,6 @@ test('tool call: full lifecycle with exact deltas', function()
 
   local d4 = T.apply(m, { ToolMessageStart = { tool_call_id = 't1', tool_name = 'bash', tool_args = '' } })
   check(tc.args_open == false, 'args fence closed')
-  check(tc.args_collapsed == true, '>2-line args collapsed')
   check(tc.status == 'running', 'status running')
   check(tc.output_open == true, 'output fence open')
   check(contains_entry(d4.updated_all, tc), 'tool message start tagged updated_all')
@@ -404,37 +403,10 @@ test('tool call: full lifecycle with exact deltas', function()
   check(m.tail == info, 'tail is end_info')
 end)
 
-test('tool call: single-line args are not collapsed', function()
-  local m = T.reset_model()
-  T.apply(m, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
-  T.apply(m, { AssistantToolCallArgChunk = { tool_call_index = 0, content = '{"a":1}' } })
-  local tc = m.elements[1]
-  T.apply(m, { ToolMessageStart = { tool_call_id = 't', tool_args = '' } })
-  check(tc.args_collapsed == false, '1-line args stay expanded')
-end)
-
-test('tool call: long single-line args (escaped JSON) collapse', function()
-  -- Regression: read/edit/write args arrive as one logical line with escaped
-  -- newlines; the old width-aware collapse previewed them, the line-count
-  -- proxy did not. They must collapse again.
-  local long = '{"content":"' .. string.rep('x', 400) .. '\\n\\nstill one line","path":"/tmp/f"}'
-  local m = T.reset_model()
-  T.apply(m, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
-  T.apply(m, { AssistantToolCallArgChunk = { tool_call_index = 0, content = long } })
-  local tc = m.elements[1]
-  T.apply(m, { ToolMessageStart = { tool_call_id = 't', tool_args = '' } })
-  check(tc.args_collapsed == true, 'long single-line args collapsed at ToolMessageStart')
-  -- A moderately long single line (fits ~2 rows at the reference width) stays.
-  local m2 = T.reset_model()
-  T.apply(m2, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
-  T.apply(m2, { AssistantToolCallArgChunk = { tool_call_index = 0, content = string.rep('y', 120) } })
-  T.apply(m2, { ToolMessageStart = { tool_call_id = 't', tool_args = '' } })
-  check(m2.elements[1].args_collapsed == false, 'short single-line args stay expanded')
-end)
-
-test('settle flush: long args/input collapse when the fence closes', function()
+test('settle flush: long args/input close their fences and keep the content', function()
   -- Interrupted session: the file ends with an open args fence; the settle
-  -- flush closes it and must collapse long content (old behavior).
+  -- flush closes it. The collapse machinery is gone: the content stays whole
+  -- in the model (the display caps it to the 5-line tail window instead).
   local long = '{"content":"' .. string.rep('z', 400) .. '"}'
   local m = T.reset_model()
   T.apply(m, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
@@ -442,29 +414,21 @@ test('settle flush: long args/input collapse when the fence closes', function()
   T.close_open_elements(m)
   local tc = m.elements[1]
   check(tc.args_open == false, 'fence closed by the flush')
-  check(tc.args_collapsed == true, 'long args collapsed by the flush')
-  -- Short pending args stay expanded.
+  check(T.content_of(tc, 'args') == long, 'long args content retained after the flush')
+  -- Short pending args stay whole too.
   local m2 = T.reset_model()
   T.apply(m2, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
   T.apply(m2, { AssistantToolCallArgChunk = { tool_call_index = 0, content = 'a\nb' } })
   T.close_open_elements(m2)
-  check(m2.elements[1].args_collapsed == false, 'short args stay expanded after the flush')
-  -- Long pending subagent input collapses too.
+  check(m2.elements[1].args_open == false, 'short args fence closed by the flush')
+  check(T.content_of(m2.elements[1], 'args') == 'a\nb', 'short args content retained after the flush')
+  -- Long pending subagent input closes its fence too.
   local m3 = T.reset_model()
   T.apply(m3, { SubAgentInputStart = { tool_call_id = 's', tool_call_index = 0 } })
   T.apply(m3, { SubAgentInputChunk = { tool_call_index = 0, content = long } })
   T.close_open_elements(m3)
-  check(m3.elements[1].input_open == false and m3.elements[1].input_collapsed == true, 'long subagent input collapsed by the flush')
-end)
-
-test('subagent: long single-line input collapses at SubAgentStart', function()
-  local long = '{"task":"' .. string.rep('w', 400) .. '"}'
-  local m = T.reset_model()
-  T.apply(m, { SubAgentInputStart = { tool_call_id = 's', tool_call_index = 0 } })
-  T.apply(m, { SubAgentInputChunk = { tool_call_index = 0, content = long } })
-  T.apply(m, { SubAgentStart = { tool_call_id = 's', conversation_id = 'c1', description = 'd' } })
-  local sa = m.elements[1]
-  check(sa.input_open == false and sa.input_collapsed == true, 'long single-line input collapsed at SubAgentStart')
+  check(m3.elements[1].input_open == false, 'long subagent input fence closed by the flush')
+  check(T.content_of(m3.elements[1], 'input') == long, 'long subagent input content retained')
 end)
 
 test('subagent: chunks after the settle flush still accumulate (regression)', function()
@@ -483,10 +447,10 @@ test('subagent: chunks after the settle flush still accumulate (regression)', fu
   local d = T.apply(m, { SubAgentInputChunk = { tool_call_index = 0, content = ',"y":2}' } })
   check(T.content_of(sa, 'input') == long .. ',"y":2}', 'chunk after the flush accumulated')
   check(has_delta(d, sa, ',"y":2}'), 'delta tagged on the element')
-  -- SubAgentStart still transforms the element and collapses the long input.
+  -- SubAgentStart still transforms the element.
   local ds = T.apply(m, { SubAgentStart = { tool_call_id = 'sa1', conversation_id = 'c1', description = 'd' } })
   check(sa.status == 'running' and sa.conversation_id == 'c1', 'start transforms the pending element')
-  check(sa.input_open == false and sa.input_collapsed == true, 'long input collapsed at start')
+  check(sa.input_open == false, 'input fence stays closed at start')
   check(contains_entry(ds.updated_all, sa), 'start tagged updated_all')
   -- Once the conversation id is set, further chunks for the index are dropped.
   local d2 = T.apply(m, { SubAgentInputChunk = { tool_call_index = 0, content = 'stray' } })
@@ -494,7 +458,7 @@ test('subagent: chunks after the settle flush still accumulate (regression)', fu
   check(sa.input == long .. ',"y":2}', 'input unchanged after start')
 end)
 
-test('tool call: full_input (detail view) never collapses long args', function()
+test('tool call: full_input (detail view) is carried on the element', function()
   local m = T.reset_model()
   m.full_input = true -- what setup_tool_call_display sets on its model
   local d = T.apply(m, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
@@ -503,14 +467,12 @@ test('tool call: full_input (detail view) never collapses long args', function()
   T.apply(m, { AssistantToolCallArgChunk = { tool_call_index = 0, content = 'a\nb\nc\nd' } })
   check(T.content_of(tc, 'args') == 'a\nb\nc\nd', 'args accumulated')
   T.apply(m, { ToolMessageStart = { tool_call_id = 't', tool_args = '' } })
-  check(tc.args_collapsed == false, '>2-line args NOT collapsed when full_input is set')
   check(tc.status == 'running' and tc.output_open == true, 'fence/status transitions still apply')
-  -- The same sequence WITHOUT full_input collapses (guards the rule).
+  -- The same sequence WITHOUT full_input keeps the element whole too.
   local m2 = T.reset_model()
   T.apply(m2, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
   T.apply(m2, { AssistantToolCallArgChunk = { tool_call_index = 0, content = 'a\nb\nc\nd' } })
   T.apply(m2, { ToolMessageStart = { tool_call_id = 't', tool_args = '' } })
-  check(m2.elements[1].args_collapsed == true, 'same args collapse without full_input')
   check(m2.elements[1].full_input == false, 'default full_input is false')
 end)
 
@@ -930,82 +892,32 @@ test('toggles: thinking collapsed<->expanded, open blocks untouched', function()
   check(#d3.updated_all == 0, 'no diff for an open block')
 end)
 
-test('toggles: tool call args_collapsed flips', function()
-  local m = T.reset_model()
-  T.apply(m, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
-  local tc = m.elements[1]
-  T.apply(m, { ToolMessageStart = { tool_call_id = 't', tool_args = '' } })
-  check(tc.args_collapsed == false, 'single-line args not collapsed by start')
-  local d = T.toggle_tool_call_args_element(m, tc)
-  check(tc.args_collapsed == true, 'collapsed by toggle')
-  check(#d.updated_all == 1 and contains_entry(d.updated_all, tc), 'toggle tagged updated_all')
-  local d2 = T.toggle_tool_call_args_element(m, tc)
-  check(tc.args_collapsed == false, 'expanded by second toggle')
-end)
-
-test('tool end: long output auto-collapses, short stays expanded', function()
+test('tool end: fence closes and status is done for long and short output', function()
   local long = table.concat({ 'r1', 'r2', 'r3', 'r4', 'r5' }, '\n')
   local m = T.reset_model()
   T.apply(m, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
   T.apply(m, { ToolMessageStart = { tool_call_id = 't', tool_args = '' } })
   local tc = m.elements[1]
   T.apply(m, { ToolOutputChunk = { tool_call_id = 't', content = long } })
-  check(tc.output_collapsed == false, 'streaming output is expanded')
+  check(T.content_of(tc, 'output') == long, 'long output accumulated while streaming')
   T.apply(m, { ToolMessageEnd = { tool_call_id = 't', end_status = 'Succeeded' } })
-  check(tc.output_collapsed == true, 'long output collapsed at ToolMessageEnd')
   check(tc.output_open == false and tc.status == 'done', 'fence closed + status done')
-  -- Short output stays expanded.
+  -- Short output closes the fence too.
   local m2 = T.reset_model()
   T.apply(m2, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
   T.apply(m2, { ToolMessageStart = { tool_call_id = 't', tool_args = '' } })
   T.apply(m2, { ToolOutputChunk = { tool_call_id = 't', content = 'r1\nr2' } })
   T.apply(m2, { ToolMessageEnd = { tool_call_id = 't', end_status = 'Succeeded' } })
-  check(m2.elements[1].output_collapsed == false, '2-line output stays expanded')
-  -- full_input (detail view) never collapses the output.
+  check(m2.elements[1].output_open == false and m2.elements[1].status == 'done', '2-line output: fence closed + done')
+  check(T.content_of(m2.elements[1], 'output') == 'r1\nr2', '2-line output content retained')
+  -- full_input (detail view) still closes the fence and marks done.
   local m3 = T.reset_model()
   m3.full_input = true
   T.apply(m3, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
   T.apply(m3, { ToolMessageStart = { tool_call_id = 't', tool_args = '' } })
   T.apply(m3, { ToolOutputChunk = { tool_call_id = 't', content = long } })
   T.apply(m3, { ToolMessageEnd = { tool_call_id = 't', end_status = 'Succeeded' } })
-  check(m3.elements[1].output_collapsed == false, 'full_input keeps the output expanded')
-end)
-
-test('subagent end: long output auto-collapses on the last element', function()
-  local long = table.concat({ 'o1', 'o2', 'o3', 'o4' }, '\n')
-  local m = T.reset_model()
-  T.apply(m, { SubAgentInputStart = { tool_call_id = 's', tool_call_index = 0 } })
-  T.apply(m, { SubAgentStart = { tool_call_id = 's', conversation_id = 'c1', description = 'd' } })
-  local sa = m.elements[1]
-  T.apply(m, { AssistantMessageChunk = { content = long } }) -- sa_active -> output
-  check(sa.output_collapsed == false, 'streaming output expanded')
-  T.apply(m, { SubAgentEnd = { conversation_id = 'c1', end_status = 'Succeeded' } })
-  check(sa.output_collapsed == true, 'long output collapsed at SubAgentEnd')
-  check(sa.status == 'done', 'final status set')
-  -- Short output stays expanded.
-  local m2 = T.reset_model()
-  T.apply(m2, { SubAgentInputStart = { tool_call_id = 's', tool_call_index = 0 } })
-  T.apply(m2, { SubAgentStart = { tool_call_id = 's', conversation_id = 'c1', description = 'd' } })
-  T.apply(m2, { AssistantMessageChunk = { content = 'short' } })
-  T.apply(m2, { SubAgentEnd = { conversation_id = 'c1', end_status = 'Succeeded' } })
-  check(m2.elements[1].output_collapsed == false, 'short output stays expanded')
-end)
-
-test('toggles: tool/subagent output_collapsed flips', function()
-  local m = T.reset_model()
-  T.apply(m, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
-  local tc = m.elements[1]
-  local d = T.toggle_tool_output_element(m, tc)
-  check(tc.output_collapsed == true, 'collapsed by toggle')
-  check(#d.updated_all == 1 and contains_entry(d.updated_all, tc), 'toggle tagged updated_all')
-  local d2 = T.toggle_tool_output_element(m, tc)
-  check(tc.output_collapsed == false, 'expanded by second toggle')
-  -- Subagent too.
-  local m2 = T.reset_model()
-  T.apply(m2, { SubAgentInputStart = { tool_call_id = 's', tool_call_index = 0 } })
-  local sa = m2.elements[1]
-  T.toggle_tool_output_element(m2, sa)
-  check(sa.output_collapsed == true, 'subagent output collapses by toggle')
+  check(m3.elements[1].output_open == false and m3.elements[1].status == 'done', 'full_input: fence closed + done')
 end)
 
 -- ------------------------------------------------------------ dropped events

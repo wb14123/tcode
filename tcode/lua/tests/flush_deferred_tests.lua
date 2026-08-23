@@ -47,9 +47,16 @@ test('flush: JSONL ending mid-thinking auto-collapses without errors', function(
   check(#recorded_errors == 0, 'no error reported during load/flush')
   local l = lines_of(b)
   check(l[1] == '► ASSISTANT', 'assistant label rendered')
-  check(l[2] == '' and l[3] == '' and l[4] == '', 'thinking collapsed to indicator rows')
-  local marks = vim.api.nvim_buf_get_extmarks(b, thinking_ns_id, 0, -1, {})
-  check(#marks >= 1, 'thinking indicator extmark present')
+  check(l[2] == '► [Thinking... press o to expand]', 'thinking collapsed to one real row')
+  local block = nil
+  for _, el in ipairs(T.model.elements) do
+    if el.type == 'thinking_block' then block = el end
+  end
+  local r = block and T.get_renderer_state(T.model).rows[block.id]
+  check(r and r.start_row == 1 and r.height == 1, 'row map: collapsed block at [1, 2)')
+  local el, off = T.element_at_row_full(T.model, b, 1)
+  check(el == block and off == 0 and T.action_at(block, 0) == 'thinking',
+    'the collapsed row resolves to (block, 0) and toggles thinking')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable after flush')
 end)
 
@@ -78,14 +85,11 @@ test('flush: JSONL ending with an open args fence gets it closed', function()
     end
   end
   check(fence_count >= 2, 'args fence opened and closed by the flush')
-  -- The flush closes the fence and collapses long args to a single preview
-  -- row (escaped, backslash-n) instead of the full 4 content rows.
-  local preview_row = nil
-  for _, line in ipairs(l) do
-    if line:find('a\\nb\\nc\\nd', 1, true) then preview_row = line end
-  end
-  check(preview_row ~= nil, 'args collapsed to an escaped preview row by the flush')
-  check(l[5] ~= 'a' and l[6] ~= 'b' and l[7] ~= 'c' and l[8] ~= 'd', 'full args rows not materialized')
+  -- The flush closes the args fence; the 4 args lines (within the 5-line tail
+  -- cap) render in full inside the fence pair, no preview row.
+  check(l[3] == '► Param' and l[4] == TC_FENCE, 'Param header + open fence rendered by the flush')
+  check(l[5] == 'a' and l[6] == 'b' and l[7] == 'c' and l[8] == 'd', 'args materialized in full inside the fence')
+  check(l[9] == TC_FENCE, 'close fence after the args rows')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable after flush')
 end)
 
@@ -117,7 +121,8 @@ test('flush: pause between reasoning bursts merges into a single thinking entry'
   local streaming = vim.wait(500, is_open)
   check(streaming, 'second burst merged and streaming')
   local l = lines_of(b)
-  check(l[2] == '' and l[3] == 'burst two', 'second burst streams visibly at the merged anchor')
+  check(l[2] == 'burst one' and l[3] == 'burst two',
+    'merged reopen streams the full content, first burst included')
 
   -- Final settle flush collapses the merged run into ONE entry.
   local done = vim.wait(1500, function() return not is_open() end)
