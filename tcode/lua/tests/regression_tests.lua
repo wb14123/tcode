@@ -17,7 +17,7 @@ local function last_thinking(m)
   return el
 end
 
-test('bug 1: a collapsed thinking block is one real navigable row; merged reopen keeps full content', function()
+test('bug 1: a collapsed thinking block is one real navigable row; a collapsed tail accumulates invisibly', function()
   local m = T.reset_model()
   local b = new_buf()
   seed(b, { '' })
@@ -32,17 +32,25 @@ test('bug 1: a collapsed thinking block is one real navigable row; merged reopen
   check(r.start_row == 1 and r.height == 1, 'row map: collapsed block at [1, 2)')
   local el, off = T.element_at_row_full(m, b, 1)
   check(el == block and off == 0, 'the collapsed row resolves to (block, offset 0)')
-  check(T.action_at(block, 0) == 'thinking', 'o on the collapsed row resolves to a thinking toggle')
-  -- A later run merges into the SAME element and reopens it in place; the
-  -- full merged content must be visible — no previous block lost.
+  check(T.action_at(block) == 'thinking', 'o on the collapsed row resolves to a thinking toggle')
+  -- A later run streams into the SAME collapsed element with no diff: the
+  -- display stays a single hint row while content accumulates in the model.
   windowed_render(b, { AssistantThinkingChunk = { content = 'B1' } }, false)
   windowed_render(b, { AssistantThinkingChunk = { content = '\nB2' } }, false)
   l = lines_of(b)
-  check(l[1] == '► ASSISTANT' and l[2] == 'A1' and l[3] == 'A2B1' and l[4] == 'B2',
-    'merged reopen renders the FULL content, previous run included')
-  check(T.content_of(block, 'content') == 'A1\nA2B1\nB2', 'the model holds both runs in one element')
+  check(#l == 2 and l[2] == '► [Thinking... press o to expand]',
+    'collapsed tail stays one row (no visible stream, no reopen)')
+  check(T.content_of(block, 'content') == 'A1\nA2B1\nB2', 'the model holds the full accumulated content')
   r = row_of(m, block)
-  check(r.start_row == 1 and r.height == 3, 'row map: merged block at [1, 4)')
+  check(r.start_row == 1 and r.height == 1, 'row map: block stays [1, 2)')
+  -- Expanding rebuilds the full accumulated content from the model.
+  T.toggle_thinking(m, block, b, ns)
+  l = lines_of(b)
+  check(l[1] == '► ASSISTANT' and l[2] == '► [Thinking... press o to collapse]'
+    and l[3] == 'A1' and l[4] == 'A2B1' and l[5] == 'B2',
+    'expand renders the FULL accumulated content, previous run included')
+  r = row_of(m, block)
+  check(r.start_row == 1 and r.height == 4, 'row map: expanded block at [1, 5)')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -75,7 +83,7 @@ test('bug 2: assistant content after a tool call + end_info lands on its own row
   check(row_of(m, tc).start_row == 2, 'tool call shifted down below the assistant content')
   check(row_of(m, info).start_row == 11, 'end_info shifted to the new tail')
   local el, off = T.element_at_row_full(m, b, 11)
-  check(el == info and off == 0 and T.action_at(info, 0) == nil, 'token row resolves to (info, 0), no action')
+  check(el == info and off == 0 and T.action_at(info) == nil, 'token row resolves to (info, 0), no action')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -118,10 +126,10 @@ test('navigation: element_at_row + action_at resolve every chrome/content row', 
   local am = m.elements[2]
   windowed_render(b, { AssistantThinkingChunk = { content = 't1\nt2' } }, false)
   local block = m.elements[3]
-  -- Streaming (open) thinking content is not navigable.
-  local el, off = T.element_at_row_full(m, b, 3)
-  check(el == block and off == 0 and T.action_at(block, 0) == nil,
-    'open streaming thinking content -> nil')
+  -- Streaming (expanded) thinking content is navigable from every row.
+  local el, off = T.element_at_row_full(m, b, 4)
+  check(el == block and off == 1 and T.action_at(block) == 'thinking',
+    'expanded thinking content row resolves to a thinking toggle')
   windowed_render(b, { AssistantToolCallStart = { tool_call_id = 't1', tool_name = 'bash', tool_call_index = 0 } }, false)
   local tc = m.elements[4]
   windowed_render(b, { AssistantToolCallArgChunk = { tool_call_index = 0, content = 'a1\na2\na3\na4' } }, false)
@@ -137,57 +145,51 @@ test('navigation: element_at_row + action_at resolve every chrome/content row', 
   windowed_render(b, { SubAgentEnd = { conversation_id = 'c1', end_status = 'Succeeded', input_tokens = 1, output_tokens = 2 } }, false)
   local sa = m.elements[6]
 
-  -- Expected element per buffer row (row map order) and the action_at intent
-  -- each chrome/content row must resolve to. Layout (0-indexed):
-  --   user label/content; assistant label; collapsed thinking hint; tool
-  --   label/Param/fence/4 args/fence/Result/fence/3 output/fence; end_info
-  --   token line; subagent label/Input/fence/3 input/fence/Output/fence/
-  --   3 output/fence. Every tool/subagent chrome or content row resolves to
-  --   'detail'; the collapsed thinking hint toggles; end_info and the
-  --   user/assistant rows resolve to nothing.
-  local row_element = {
-    um, um, am, block,                          -- rows 0-3
-    tc, tc, tc, tc, tc, tc, tc, tc,             -- rows 4-11
-    tc, tc, tc, tc, tc, tc,                     -- rows 12-17
-    info,                                       -- row 18
-    sa, sa, sa, sa, sa, sa, sa, sa, sa, sa,     -- rows 19-28
-    sa, sa, sa,                                 -- rows 29-31
-  }
-  local expected_action = {
-    [0] = nil, [1] = nil, [2] = nil, [3] = 'thinking',
-    [4] = 'detail', [5] = 'detail', [6] = 'detail', [7] = 'detail',
-    [8] = 'detail', [9] = 'detail', [10] = 'detail', [11] = 'detail',
-    [12] = 'detail', [13] = 'detail', [14] = 'detail', [15] = 'detail',
-    [16] = 'detail', [17] = 'detail',
-    [18] = nil,
-    [19] = 'detail', [20] = 'detail', [21] = 'detail', [22] = 'detail',
-    [23] = 'detail', [24] = 'detail', [25] = 'detail', [26] = 'detail',
-    [27] = 'detail', [28] = 'detail', [29] = 'detail', [30] = 'detail',
-    [31] = 'detail',
-  }
+  -- Every buffer row must resolve to exactly the element whose region covers
+  -- it (via the integer row map), with the correct element-relative offset and
+  -- the intent per element type: thinking rows toggle, tool/subagent rows open
+  -- the detail view, user/assistant/end_info rows resolve to nothing. The
+  -- expected layout is derived from the row map itself, so it stays correct
+  -- as chrome rows and fence pairs shift the rows.
+  local function intent(el)
+    if el.type == 'thinking_block' then return 'thinking' end
+    if el.type == 'tool_call' or el.type == 'subagent' then return 'detail' end
+    return nil
+  end
+  local st = T.get_renderer_state(m)
   local all_ok = true
   local detail = {}
-  for row = 0, #lines_of(b) - 1 do
+  local last_row = vim.api.nvim_buf_line_count(b) - 1
+  local covered = 0
+  for row = 0, last_row do
     local e, off = T.element_at_row_full(m, b, row)
-    local want_el = row_element[row + 1]
-    if e ~= want_el or off ~= row - row_of(m, want_el).start_row then
+    if not e then
       all_ok = false
-      detail[#detail + 1] = ('row %d: element %s off %s'):format(row, tostring(e and e.type), tostring(off))
-    end
-    local act = e and T.action_at(e, off)
-    if act ~= expected_action[row] then
-      all_ok = false
-      detail[#detail + 1] = ('row %d: action %s want %s'):format(row, tostring(act), tostring(expected_action[row]))
+      detail[#detail + 1] = ('row %d: no element'):format(row)
+    else
+      local entry = st.rows[e.id]
+      local want_off = row - entry.start_row
+      if off ~= want_off then
+        all_ok = false
+        detail[#detail + 1] = ('row %d: offset %s want %s'):format(row, tostring(off), tostring(want_off))
+      end
+      local act = T.action_at(e)
+      if act ~= intent(e) then
+        all_ok = false
+        detail[#detail + 1] = ('row %d: action %s want %s'):format(row, tostring(act), tostring(intent(e)))
+      end
+      covered = covered + 1
     end
   end
   check(all_ok, 'every row resolves to the right element/offset/action'
     .. (#detail > 0 and (' (' .. table.concat(detail, '; ') .. ')') or ''))
+  check(covered == last_row + 1, 'every buffer row covered by an element region')
   -- The wrapped element_at_row preserves `== el` identity.
   check(T.element_at_row(m, b, 0) == um, 'user message label row resolves to the same element')
   check(T.element_at_row(m, b, 2) == am, 'assistant label row resolves to the same element')
-  check(T.element_at_row(m, b, 4) == tc, 'tool label row resolves to the same element')
-  check(T.element_at_row(m, b, 18) == info, 'end_info row resolves to the same element')
-  check(T.element_at_row(m, b, 19) == sa, 'subagent label row resolves to the same element')
+  check(T.element_at_row(m, b, row_of(m, tc).start_row) == tc, 'tool label row resolves to the same element')
+  check(T.element_at_row(m, b, row_of(m, info).start_row) == info, 'end_info row resolves to the same element')
+  check(T.element_at_row(m, b, row_of(m, sa).start_row) == sa, 'subagent label row resolves to the same element')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -200,12 +202,12 @@ test('regression: the 5-line tail cap never loses the row map', function()
   local tc = m.elements[1]
   for i = 1, 10 do windowed_render(b, { ToolOutputChunk = { tool_call_id = 't1', content = 'o' .. i .. '\n' } }, false) end
   local l = lines_of(b)
-  check(#l == 8, 'streaming region stays at 8 rows (label + Result + fence + 5 content)')
+  check(#l == 9, 'streaming region stays at 9 rows (label + Result + fence + 5 content + close fence)')
   check(l[4] == 'o6' and l[8] == 'o10', 'exactly the last 5 of 10 lines are shown')
   local r = row_of(m, tc)
-  check(r.start_row == 0 and r.height == 8, 'row map: tool at [0, 8)')
+  check(r.start_row == 0 and r.height == 9, 'row map: tool at [0, 9)')
   local el, off = T.element_at_row_full(m, b, 7)
-  check(el == tc and off == 7 and T.action_at(tc, 7) == 'detail', 'last streaming row resolves to (tc, 7) detail')
+  check(el == tc and off == 7 and T.action_at(tc) == 'detail', 'last streaming row resolves to (tc, 7) detail')
   windowed_render(b, { ToolMessageEnd = { tool_call_id = 't1', end_status = 'Succeeded', input_tokens = 1, output_tokens = 10 } }, false)
   local info = m.elements[2]
   check(row_of(m, tc).height == 9, 'closed tool region is 9 rows')
@@ -275,7 +277,35 @@ test('regression: o opens the detail path from any tool row (stubbed shell-out)'
   check(vim.bo[b].modifiable == false and vim.bo[b2].modifiable == false, 'buffers non-modifiable')
 end)
 
-test('regression: the subagent output fence closes only at SubAgentEnd', function()
+test('regression: `o` on a content row (not the chrome line) toggles the block', function()
+  local m = T.reset_model()
+  local b = new_buf()
+  seed(b, { '' })
+  windowed_render(b, { AssistantMessageStart = {} }, false)
+  windowed_render(b, { AssistantThinkingChunk = { content = 'one\ntwo' } }, false)
+  local block = m.elements[2]
+  -- The streaming block is expanded: chrome row + 2 content rows. A real
+  -- window on the buffer so keymap_o's nvim_win_get_cursor resolves.
+  local win = vim.api.nvim_open_win(b, false, { relative = 'editor', width = 40, height = 20, row = 1, col = 1 })
+  vim.api.nvim_set_current_win(win)
+  -- Park the cursor on a CONTENT row (offset 1) of the expanded block.
+  vim.api.nvim_win_set_cursor(win, { 3, 0 })
+  local ok, err = pcall(T.keymap_o, m, b, ns)
+  vim.api.nvim_win_close(win, true)
+  check(ok, 'keymap_o succeeds on a content row: ' .. tostring(err))
+  check(block.state == 'collapsed', '`o` on the content row folded the block')
+  -- And back: `o` on the (now collapsed) single row expands again.
+  local win2 = vim.api.nvim_open_win(b, false, { relative = 'editor', width = 40, height = 20, row = 1, col = 1 })
+  vim.api.nvim_set_current_win(win2)
+  vim.api.nvim_win_set_cursor(win2, { 2, 0 })
+  local ok2, err2 = pcall(T.keymap_o, m, b, ns)
+  vim.api.nvim_win_close(win2, true)
+  check(ok2, 'keymap_o succeeds on the collapsed row: ' .. tostring(err2))
+  check(block.state == 'expanded', '`o` on the chrome row expanded the block again')
+  check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
+end)
+
+test('regression: the subagent output fence is always paired while streaming', function()
   local m = T.reset_model()
   local b = new_buf()
   seed(b, { '' })
@@ -285,12 +315,13 @@ test('regression: the subagent output fence closes only at SubAgentEnd', functio
   windowed_render(b, { AssistantMessageChunk = { content = 'line1\nline2\nline3' } }, false)
   local sa = m.elements[1]
   local l = lines_of(b)
-  check(l[#l] == 'line3', 'output streams without a close fence while the subagent is active')
-  check(#l == 6, 'streaming subagent renders 6 rows (label + Output + fence + 3 lines)')
+  check(l[#l - 1] == 'line3' and l[#l] == TC_FENCE,
+    'output streams inside a paired fence (close fence present while active)')
+  check(#l == 7, 'streaming subagent renders 7 rows (label + Output + fence + 3 lines + close fence)')
   windowed_render(b, { SubAgentEnd = { conversation_id = 'c1', end_status = 'Succeeded', input_tokens = 1, output_tokens = 2 } }, false)
   l = lines_of(b)
-  check(l[#l] == TC_FENCE, 'close fence appears only after SubAgentEnd')
-  check(#l == 7, 'close fence adds exactly one row')
+  check(l[#l] == TC_FENCE, 'close fence remains after SubAgentEnd')
+  check(#l == 7, 'SubAgentEnd only rebuilds the label; the row count is unchanged')
   check(row_of(m, sa).height == #l, 'row map height matches the buffer rows')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
@@ -331,7 +362,7 @@ test('attached: common case renders [label, thinking, response] in arrival order
   local am = m.elements[1]
   windowed_render(b, { AssistantThinkingChunk = { content = 'T1\nT2' } }, false)
   local block = m.elements[2]
-  -- The response chunk collapses the open thinking block; the reply lands
+  -- The response chunk collapses the expanded thinking block; the reply lands
   -- below it INSIDE the am region (arrival order).
   windowed_render(b, { AssistantMessageChunk = { content = ' reply' } }, false)
   local l = lines_of(b)
@@ -345,7 +376,7 @@ test('attached: common case renders [label, thinking, response] in arrival order
   check(el == block and off == 0, 'attached block row resolves to (block, offset 0)')
   el, off = T.element_at_row_full(m, b, 2)
   check(el == am and off == 2, 'am content row resolves to (am, offset 2)')
-  check(T.action_at(block, 0) == 'thinking', 'attached collapsed block still toggles thinking')
+  check(T.action_at(block) == 'thinking', 'attached collapsed block still toggles thinking')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -411,7 +442,7 @@ test('attached: o toggle collapses/expands the block in place and shifts the res
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
-test('attached: merge-reopen of a collapsed block renders the full content inside the am', function()
+test('attached: a collapsed attached block accumulates invisibly and expands in place', function()
   local m = T.reset_model()
   local b = new_buf()
   seed(b, { '' })
@@ -419,23 +450,33 @@ test('attached: merge-reopen of a collapsed block renders the full content insid
   local am = m.elements[1]
   windowed_render(b, { AssistantThinkingChunk = { content = 'A1\nA2' } }, false)
   local block = m.elements[2]
-  -- The settle flush collapses the open block (the pause path).
+  -- A collapse point folds the attached block.
   T.render(m, T.close_open_elements(m), { buf = b, ns = ns, bulk = false })
   local l = lines_of(b)
-  check(l[2] == '► [Thinking... press o to expand]', 'collapsed by the settle flush')
-  -- A later run merges into the SAME attached block and reopens it in place;
-  -- the full merged content renders INSIDE the am region.
+  check(l[2] == '► [Thinking... press o to expand]', 'collapsed by close_open_elements')
+  -- A later run streams into the SAME attached block invisibly (no diff): the
+  -- display keeps the single hint row while the model accumulates.
   windowed_render(b, { AssistantThinkingChunk = { content = 'B1' } }, false)
   windowed_render(b, { AssistantThinkingChunk = { content = '\nB2' } }, false)
   l = lines_of(b)
-  check(l[1] == '► ASSISTANT' and l[2] == 'A1' and l[3] == 'A2B1' and l[4] == 'B2',
-    'merged reopen renders the FULL content inside the am region')
+  check(#l == 2 and l[2] == '► [Thinking... press o to expand]',
+    'attached collapsed block stays one row while accumulating')
   check(T.content_of(block, 'content') == 'A1\nA2B1\nB2', 'model holds both runs in one attached block')
   local r = row_of(m, block)
-  check(r.start_row == 1 and r.height == 3, 'row map: merged attached block at [1, 4)')
-  check(row_of(m, am).start_row == 0 and row_of(m, am).height == 4, 'row map: am region [0, 4)')
+  check(r.start_row == 1 and r.height == 1, 'row map: collapsed attached block at [1, 2)')
+  check(row_of(m, am).start_row == 0 and row_of(m, am).height == 2, 'row map: am region [0, 2)')
+  -- Expanding the attached block rebuilds the full accumulated content INSIDE
+  -- the am region.
+  T.toggle_thinking(m, block, b, ns)
+  l = lines_of(b)
+  check(l[1] == '► ASSISTANT' and l[2] == '► [Thinking... press o to collapse]'
+    and l[3] == 'A1' and l[4] == 'A2B1' and l[5] == 'B2',
+    'expand renders the FULL accumulated content inside the am region')
+  check(row_of(m, block).start_row == 1 and row_of(m, block).height == 4,
+    'row map: expanded attached block at [1, 5)')
+  check(row_of(m, am).height == 5, 'row map: am region [0, 5)')
   local el, off = T.element_at_row_full(m, b, 3)
-  check(el == block and off == 2, 'merged content row resolves to (block, offset 2)')
+  check(el == block and off == 2, 'expanded content row resolves to (block, offset 2)')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -562,13 +603,14 @@ test('fix 4: assistant content starting with ► joins its own row (structural s
   local block = m2.elements[2]
   windowed_render(b2, { AssistantThinkingChunk = { content = '► more' } }, false)
   local l2 = lines_of(b2)
-  check(l2[1] == '► ASSISTANT' and l2[2] == '► think► more', 'thinking chunks starting with ► join one row')
-  check(row_of(m2, block).start_row == 1 and row_of(m2, block).height == 1,
-    'row map: block sub-entry at [1, 2) inside the am')
+  check(l2[1] == '► ASSISTANT' and l2[2] == '► [Thinking... press o to collapse]'
+    and l2[3] == '► think► more', 'expanded block: chrome row + ►-prefixed chunks join one content row')
+  check(row_of(m2, block).start_row == 1 and row_of(m2, block).height == 2,
+    'row map: block sub-entry at [1, 3) inside the am')
   local hl = false
   local marks = vim.api.nvim_buf_get_extmarks(b2, ns, 0, -1, { details = true })
   for _, mm in ipairs(marks) do
-    if mm[4] and mm[4].hl_group == 'TCodeThinking' and mm[2] == 1 then hl = true end
+    if mm[4] and mm[4].hl_group == 'TCodeThinking' and mm[2] == 2 then hl = true end
   end
   check(hl, 'the ►-prefixed content row is highlighted as CONTENT (TCodeThinking)')
   check(vim.bo[b].modifiable == false and vim.bo[b2].modifiable == false, 'buffers non-modifiable')

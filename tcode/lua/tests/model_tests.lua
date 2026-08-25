@@ -88,13 +88,13 @@ end)
 
 -- --------------------------------------------------------------- thinking
 
-test('thinking: chunks append to the open block in exact order', function()
+test('thinking: chunks append to the expanded block in exact order', function()
   local m = T.reset_model()
   local d1 = T.apply(m, { AssistantThinkingChunk = { content = 'A' } })
   local d2 = T.apply(m, { AssistantThinkingChunk = { content = 'B\nC' } })
   check(#m.elements == 1, 'single element for the stream')
   local t = m.elements[1]
-  check(t.type == 'thinking_block' and t.state == 'open', 'block open')
+  check(t.type == 'thinking_block' and t.state == 'expanded', 'block expanded')
   check(T.content_of(t, 'content') == 'AB\nC', 'content accumulated in order')
   check(m.tail == t, 'tail is the block')
   check(contains_entry(d1.added, t), 'first chunk tagged added (rendered from state)')
@@ -109,25 +109,27 @@ test('thinking: contiguous raw+summary chunks stay one entry', function()
   T.apply(m, { AssistantThinkingChunk = { content = '\nsummary bullet' } })
   check(#m.elements == 1, 'one entry for the whole reasoning stream')
   check(T.content_of(m.elements[1], 'content') == 'raw part one raw part two\nsummary bullet', 'content concatenated in order')
-  check(m.elements[1].state == 'open', 'still open')
+  check(m.elements[1].state == 'expanded', 'still expanded')
 end)
 
-test('thinking: settle-flush collapse then reopen merges into one entry', function()
+test('thinking: a collapsed tail stays collapsed; content accumulates with no diff', function()
   local m = T.reset_model()
   T.apply(m, { AssistantThinkingChunk = { content = 'A1' } })
   local block = m.elements[1]
-  local dc = T.close_open_elements(m) -- settle flush: tail stays on the block
-  check(block.state == 'collapsed', 'open block collapsed by the settle flush')
+  check(block.state == 'expanded', 'block streaming (expanded)')
+  local dc = T.close_open_elements(m) -- collapse point: tail stays on the block
+  check(block.state == 'collapsed', 'expanded block collapsed')
   check(contains_entry(dc.updated_all, block), 'collapse tagged updated_all')
   check(m.tail == block, 'tail stays the block (nothing appended below)')
-  -- Run 2 merges into the SAME element (no new block).
+  -- Run 2 streams into the SAME collapsed element: content accumulates with
+  -- NO diff entry (the display stays a single chrome row).
   local d2 = T.apply(m, { AssistantThinkingChunk = { content = 'B1' } })
   check(#m.elements == 1, 'no new thinking element created')
   check(m.elements[1] == block, 'same element id reused')
-  check(block.state == 'open', 'block reopened')
+  check(block.state == 'collapsed', 'block stays collapsed (never reopened)')
   check(T.content_of(block, 'content') == 'A1B1', 'content concatenated in order')
-  check(#d2.added == 0, 'merge emits no added')
-  check(contains_entry(d2.updated_all, block), 'merge tagged updated_all')
+  check(#d2.added == 0 and #d2.updated_all == 0 and #d2.updated_content == 0,
+    'collapsed tail accumulates with zero diff entries')
 end)
 
 test('thinking: collapse via a new element moves the tail, so no merge', function()
@@ -135,7 +137,7 @@ test('thinking: collapse via a new element moves the tail, so no merge', functio
   T.apply(m, { AssistantThinkingChunk = { content = 'A1' } })
   local block = m.elements[1]
   local d = T.apply(m, { UserMessage = { content = 'next turn' } })
-  check(block.state == 'collapsed', 'open block collapsed when user message opens')
+  check(block.state == 'collapsed', 'expanded block collapsed when user message opens')
   check(contains_entry(d.updated_all, block), 'collapse tagged updated_all')
   -- A later run starts a NEW block: the collapsed block is no longer the tail.
   local d2 = T.apply(m, { AssistantThinkingChunk = { content = 'B1' } })
@@ -150,12 +152,48 @@ test('thinking: an empty chunk while collapsed is a no-op (indicator preserved)'
   T.apply(m, { AssistantThinkingChunk = { content = 'A1' } })
   local block = m.elements[1]
   T.close_open_elements(m)
-  check(block.state == 'collapsed', 'collapsed by the settle flush')
+  check(block.state == 'collapsed', 'collapsed by close_open_elements')
   local d = T.apply(m, { AssistantThinkingChunk = { content = '' } })
   check(#d.added == 0 and #d.updated_all == 0 and #d.updated_content == 0, 'empty chunk produces an empty diff')
   check(block.state == 'collapsed', 'block stays collapsed')
   check(block.content == 'A1', 'content untouched')
   check(m.tail == block, 'tail stays the collapsed block')
+end)
+
+test('thinking: an empty AssistantMessageChunk on an expanded tail is a true no-op', function()
+  local m = T.reset_model()
+  T.apply(m, { AssistantThinkingChunk = { content = 'A' } })
+  local block = m.elements[1]
+  check(block.state == 'expanded', 'block streaming (expanded)')
+  local before = T.content_of(block, 'content')
+  -- An empty text chunk must not collapse the streaming tail: empty diff, the
+  -- block stays expanded and the visible stream is untouched.
+  local d = T.apply(m, { AssistantMessageChunk = { content = '' } })
+  check(#d.added == 0 and #d.updated_all == 0 and #d.updated_content == 0,
+    'empty chunk produces an empty diff (no collapse)')
+  check(block.state == 'expanded', 'block stays expanded')
+  check(T.content_of(block, 'content') == before, 'content untouched')
+  check(m.tail == block, 'tail stays the expanded block')
+end)
+
+test('thinking: a user-expanded tail folds at the next collapse point (documented decision)', function()
+  local m = T.reset_model()
+  T.apply(m, { AssistantThinkingChunk = { content = 'A' } })
+  local block = m.elements[1]
+  -- Fold the streaming block, then re-expand it: from the model's point of
+  -- view it is now "user expanded" (and still the tail).
+  T.toggle_thinking_element(m, block)
+  check(block.state == 'collapsed', 'folded first')
+  T.toggle_thinking_element(m, block)
+  check(block.state == 'expanded', 'user-expanded')
+  check(m.tail == block, 'block is still the tail')
+  -- The two-state model cannot distinguish "user expanded" from "default
+  -- expanded (streaming)": the next collapse point folds the tail block
+  -- regardless (accepted documented decision).
+  local d = T.apply(m, { AssistantRequestEnd = { total_input_tokens = 1, total_output_tokens = 2 } })
+  check(block.state == 'collapsed', 'user-expanded tail folds at the next collapse point')
+  check(contains_entry(d.updated_all, block), 'collapse tagged updated_all')
+  check(T.content_of(block, 'content') == 'A', 'content preserved')
 end)
 
 test('thinking: an expanded block never merges a new run', function()
@@ -169,7 +207,7 @@ test('thinking: an expanded block never merges a new run', function()
   local d = T.apply(m, { AssistantThinkingChunk = { content = 'B' } })
   check(#m.elements == 3, 'new run starts a separate block')
   local b2 = m.elements[3]
-  check(b2.type == 'thinking_block' and b2.content == 'B' and b2.state == 'open', 'separate open block')
+  check(b2.type == 'thinking_block' and b2.content == 'B' and b2.state == 'expanded', 'separate expanded block')
   check(contains_entry(d.added, b2), 'new block tagged added')
   check(block.content == 'A', 'expanded block untouched')
 end)
@@ -184,29 +222,33 @@ test('thinking: a run after visible text starts a separate block', function()
   local d = T.apply(m, { AssistantThinkingChunk = { content = 'B' } })
   check(#m.elements == 3, 'separate block for run 2')
   local b2 = m.elements[3]
-  check(b2.content == 'B' and b2.state == 'open', 'run 2 open with its own content')
+  check(b2.content == 'B' and b2.state == 'expanded', 'run 2 expanded with its own content')
   check(block.content == 'A', 'run 1 content untouched')
   check(contains_entry(d.added, b2), 'new block tagged added')
 end)
 
 -- ------------------------------------------------------------- whitespace
 
-test('whitespace: held between collapsed runs, discarded on merge', function()
+test('whitespace: held after a collapse, discarded without reopening the block', function()
   local m = T.reset_model()
   T.apply(m, { AssistantThinkingChunk = { content = 'A1' } })
   local block = m.elements[1]
-  T.close_open_elements(m) -- settle-flush collapse; tail stays on the block
+  T.close_open_elements(m) -- collapse point; tail stays on the block
   check(block.state == 'collapsed', 'collapsed first')
   local d = T.apply(m, { AssistantMessageChunk = { content = '\n\n' } })
   check(m.pending_whitespace == '\n\n', 'whitespace held in pending_whitespace')
   check(m.tail == block, 'tail stays the collapsed block')
   check(#d.updated_content == 0 and #d.added == 0 and #d.updated_all == 0, 'no diff entries for the whitespace')
-  -- Next thinking chunk merges and DISCARDS the whitespace.
+  -- The next thinking chunk streams into the collapsed block and DISCARDS the
+  -- held whitespace; the block stays collapsed (no reopen, no diff — the
+  -- content accumulates invisibly).
   local d2 = T.apply(m, { AssistantThinkingChunk = { content = 'B1' } })
-  check(T.content_of(block, 'content') == 'A1B1', 'merged content, whitespace discarded')
+  check(T.content_of(block, 'content') == 'A1B1', 'content accumulated, whitespace discarded')
   check(m.pending_whitespace == nil, 'pending whitespace discarded')
   check(#m.elements == 1, 'still one thinking element')
-  check(contains_entry(d2.updated_all, block), 'merge tagged updated_all')
+  check(block.state == 'collapsed', 'block stays collapsed (no reopen)')
+  check(#d2.added == 0 and #d2.updated_all == 0 and #d2.updated_content == 0,
+    'collapsed accumulation emits no diff entries')
 end)
 
 test('whitespace: flushed prepended to the next text chunk (coalesced delta)', function()
@@ -296,7 +338,7 @@ end)
 
 -- ---------------------------------------------------- collapse-on-new-element
 
-test('invariant: open thinking collapses before every new element variant', function()
+test('invariant: expanded thinking collapses before every new element variant', function()
   local variants = {
     { 'AssistantToolCallStart', { tool_call_id = 't1', tool_call_index = 0 } },
     { 'SystemMessage', { level = 'Info', message = 'sys' } },
@@ -317,7 +359,7 @@ test('invariant: open thinking collapses before every new element variant', func
     T.apply(m, { AssistantThinkingChunk = { content = 'A' } })
     local block = m.elements[1]
     local d = T.apply(m, { [v[1]] = v[2] })
-    check(block.state == 'collapsed', v[1] .. ': open thinking collapsed first')
+    check(block.state == 'collapsed', v[1] .. ': expanded thinking collapsed first')
     check(contains_entry(d.updated_all, block), v[1] .. ': collapse tagged updated_all')
   end
 end)
@@ -403,49 +445,50 @@ test('tool call: full lifecycle with exact deltas', function()
   check(m.tail == info, 'tail is end_info')
 end)
 
-test('settle flush: long args/input close their fences and keep the content', function()
-  -- Interrupted session: the file ends with an open args fence; the settle
-  -- flush closes it. The collapse machinery is gone: the content stays whole
-  -- in the model (the display caps it to the 5-line tail window instead).
+test('close_open_elements: long args/input close their fences and keep the content', function()
+  -- Interrupted session: the file ends with an open args fence; the
+  -- close_open_elements reducer op closes it. The collapse machinery is gone:
+  -- the content stays whole in the model (the display caps it to the 5-line
+  -- tail window instead).
   local long = '{"content":"' .. string.rep('z', 400) .. '"}'
   local m = T.reset_model()
   T.apply(m, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
   T.apply(m, { AssistantToolCallArgChunk = { tool_call_index = 0, content = long } })
   T.close_open_elements(m)
   local tc = m.elements[1]
-  check(tc.args_open == false, 'fence closed by the flush')
-  check(T.content_of(tc, 'args') == long, 'long args content retained after the flush')
+  check(tc.args_open == false, 'fence closed by close_open_elements')
+  check(T.content_of(tc, 'args') == long, 'long args content retained after close_open_elements')
   -- Short pending args stay whole too.
   local m2 = T.reset_model()
   T.apply(m2, { AssistantToolCallStart = { tool_call_id = 't', tool_call_index = 0 } })
   T.apply(m2, { AssistantToolCallArgChunk = { tool_call_index = 0, content = 'a\nb' } })
   T.close_open_elements(m2)
-  check(m2.elements[1].args_open == false, 'short args fence closed by the flush')
+  check(m2.elements[1].args_open == false, 'short args fence closed by close_open_elements')
   check(T.content_of(m2.elements[1], 'args') == 'a\nb', 'short args content retained after the flush')
   -- Long pending subagent input closes its fence too.
   local m3 = T.reset_model()
   T.apply(m3, { SubAgentInputStart = { tool_call_id = 's', tool_call_index = 0 } })
   T.apply(m3, { SubAgentInputChunk = { tool_call_index = 0, content = long } })
   T.close_open_elements(m3)
-  check(m3.elements[1].input_open == false, 'long subagent input fence closed by the flush')
+  check(m3.elements[1].input_open == false, 'long subagent input fence closed by close_open_elements')
   check(T.content_of(m3.elements[1], 'input') == long, 'long subagent input content retained')
 end)
 
-test('subagent: chunks after the settle flush still accumulate (regression)', function()
-  -- The 500ms settle flush closes the input fence mid-stream; a pending
-  -- subagent (conversation_id == nil) must keep accumulating later chunks or
-  -- the input is silently truncated.
+test('subagent: chunks after close_open_elements still accumulate (regression)', function()
+  -- close_open_elements closes the input fence mid-stream; a pending subagent
+  -- (conversation_id == nil) must keep accumulating later chunks or the input
+  -- is silently truncated.
   local long = '{"task":"' .. string.rep('x', 400) .. '"'
   local m = T.reset_model()
   T.apply(m, { SubAgentInputStart = { tool_call_id = 'sa1', tool_call_index = 0 } })
   T.apply(m, { SubAgentInputChunk = { tool_call_index = 0, content = long } })
   local sa = m.elements[1]
   T.close_open_elements(m)
-  check(sa.input_open == false, 'fence closed by the flush')
+  check(sa.input_open == false, 'fence closed by close_open_elements')
   check(sa.conversation_id == nil, 'still pending (no conversation id yet)')
   -- Chunks arriving after the pause must still accumulate into el.input.
   local d = T.apply(m, { SubAgentInputChunk = { tool_call_index = 0, content = ',"y":2}' } })
-  check(T.content_of(sa, 'input') == long .. ',"y":2}', 'chunk after the flush accumulated')
+  check(T.content_of(sa, 'input') == long .. ',"y":2}', 'chunk after close_open_elements accumulated')
   check(has_delta(d, sa, ',"y":2}'), 'delta tagged on the element')
   -- SubAgentStart still transforms the element.
   local ds = T.apply(m, { SubAgentStart = { tool_call_id = 'sa1', conversation_id = 'c1', description = 'd' } })
@@ -847,14 +890,14 @@ test('no-ops: UserRequestEnd, PermissionUpdated, AssistantMediaGenerating, unkno
   check(#m.elements == 1, 'model unchanged by no-ops')
 end)
 
--- ------------------------------------------------------------ settle/toggles
+-- ------------------------------------------------------ close_open_elements / toggles
 
-test('close_open_elements: collapses open thinking', function()
+test('close_open_elements: collapses an expanded thinking tail', function()
   local m = T.reset_model()
   T.apply(m, { AssistantThinkingChunk = { content = 'A' } })
   local block = m.elements[1]
   local d = T.close_open_elements(m)
-  check(block.state == 'collapsed', 'open thinking collapsed')
+  check(block.state == 'collapsed', 'expanded thinking collapsed')
   check(#d.updated_all == 1 and contains_entry(d.updated_all, block), 'thinking tagged updated_all')
 end)
 
@@ -872,7 +915,7 @@ test('close_open_elements: closes open args/input fences, idempotent', function(
   check(#d2.updated_all == 0 and #d2.added == 0 and #d2.updated_content == 0, 'second call is a no-op')
 end)
 
-test('toggles: thinking collapsed<->expanded, open blocks untouched', function()
+test('toggles: thinking collapsed<->expanded roundtrip', function()
   local m = T.reset_model()
   T.apply(m, { AssistantThinkingChunk = { content = 'A' } })
   local block = m.elements[1]
@@ -883,13 +926,14 @@ test('toggles: thinking collapsed<->expanded, open blocks untouched', function()
   check(#d.updated_all == 1 and contains_entry(d.updated_all, block), 'expand tagged updated_all')
   local d2 = T.toggle_thinking_element(m, block)
   check(block.state == 'collapsed', 'collapsed by second toggle')
-  -- Open blocks are not toggleable.
+  -- A streaming (expanded) block is toggleable too: `o` folds it mid-stream.
   local m2 = T.reset_model()
   T.apply(m2, { AssistantThinkingChunk = { content = 'B' } })
-  local open_block = m2.elements[1]
-  local d3 = T.toggle_thinking_element(m2, open_block)
-  check(open_block.state == 'open', 'open block untouched')
-  check(#d3.updated_all == 0, 'no diff for an open block')
+  local stream_block = m2.elements[1]
+  check(stream_block.state == 'expanded', 'new block streams expanded by default')
+  local d3 = T.toggle_thinking_element(m2, stream_block)
+  check(stream_block.state == 'collapsed', 'streaming block toggled collapsed by `o`')
+  check(#d3.updated_all == 1 and contains_entry(d3.updated_all, stream_block), 'toggle tagged updated_all')
 end)
 
 test('tool end: fence closes and status is done for long and short output', function()
@@ -944,7 +988,7 @@ test('tail: tracked across key sequences', function()
   local m = T.reset_model()
   T.apply(m, { AssistantThinkingChunk = { content = 'A' } })
   local block = m.elements[1]
-  check(m.tail == block, 'open thinking -> tail is the block')
+  check(m.tail == block, 'expanded thinking -> tail is the block')
   T.apply(m, { UserMessage = { content = 'x' } })
   check(m.tail.type == 'user_message', 'user message -> tail is user message')
   T.apply(m, { AssistantMessageStart = {} })

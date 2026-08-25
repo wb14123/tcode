@@ -1,21 +1,14 @@
--- End-to-end regression tests for the 500ms settle flush (flush_deferred in
--- create_jsonl_reader). These drive the REAL reader: a JSONL file on disk,
--- reader.check() reading it, the real vim.schedule batch render, and the real
--- uv timer armed by arm_flush_timer. vim.wait pumps the loop so the scheduled
--- callback and the timer actually fire.
+-- End-to-end reader tests for the JSONL display reader (create_jsonl_reader).
+-- These drive the REAL reader: a JSONL file on disk, reader.check() reading
+-- it, and the real vim.schedule batch render. vim.wait pumps the loop so the
+-- scheduled batch callback actually fires.
 --
--- Regression: this is the path that used to raise
---   vim.schedule callback: ... Buffer is not 'modifiable'
--- when a session file went quiet with an unterminated thinking block or an
--- open args fence (interrupted / attached sessions).
+-- The 500ms settle flush is GONE: a session file ending mid-thinking stays
+-- expanded (chrome row + content, `o`-toggleable), paused bursts stay open and
+-- the next burst streams into the same block, and every fence section renders
+-- a paired (closed) fence — nothing is ever left dangling.
 
 local TC_FENCE = string.rep('`', 10)
-
--- An open thinking block is the model tail with state 'open'.
-local function is_open()
-  local tail = T.model.tail
-  return tail and tail.type == 'thinking_block' and tail.state == 'open'
-end
 
 local function write_jsonl(path, ...)
   local file = assert(io.open(path, 'w'))
@@ -25,7 +18,7 @@ local function write_jsonl(path, ...)
   file:close()
 end
 
-test('flush: JSONL ending mid-thinking auto-collapses without errors', function()
+test('reader: JSONL ending mid-thinking stays expanded without errors', function()
   local b = new_buf()
   T.reset_model()
   seed(b, { '' })
@@ -38,29 +31,34 @@ test('flush: JSONL ending mid-thinking auto-collapses without errors', function(
   local check_file = T.create_jsonl_reader(jsonl, b, ns, nil)
   check_file()
 
-  -- Initial bulk render runs in the scheduled batch callback.
-  local loaded = vim.wait(500, is_open)
-  -- The 500ms settle timer then collapses the unterminated thinking block.
-  local flushed = vim.wait(1500, function() return not is_open() end)
+  -- Initial bulk render runs in the scheduled batch callback; no flush timer
+  -- exists to wait for (nothing but the batch callback remains).
+  local loaded = vim.wait(500, function()
+    return vim.api.nvim_buf_line_count(b) > 1
+  end)
   check(loaded, 'initial load rendered the thinking block')
-  check(flushed, 'settle flush collapsed the unterminated thinking block')
-  check(#recorded_errors == 0, 'no error reported during load/flush')
+  check(#recorded_errors == 0, 'no error reported during load')
   local l = lines_of(b)
   check(l[1] == '► ASSISTANT', 'assistant label rendered')
-  check(l[2] == '► [Thinking... press o to expand]', 'thinking collapsed to one real row')
+  check(l[2] == '► [Thinking... press o to collapse]' and l[3] == 'thinking a' and l[4] == 'b',
+    'thinking stays expanded (chrome row + full content)')
   local block = nil
   for _, el in ipairs(T.model.elements) do
     if el.type == 'thinking_block' then block = el end
   end
+  check(block ~= nil and block.state == 'expanded', 'block state expanded')
   local r = block and T.get_renderer_state(T.model).rows[block.id]
-  check(r and r.start_row == 1 and r.height == 1, 'row map: collapsed block at [1, 2)')
+  check(r and r.start_row == 1 and r.height == 3, 'row map: expanded block at [1, 4)')
   local el, off = T.element_at_row_full(T.model, b, 1)
-  check(el == block and off == 0 and T.action_at(block, 0) == 'thinking',
-    'the collapsed row resolves to (block, 0) and toggles thinking')
-  check(vim.bo[b].modifiable == false, 'buffer non-modifiable after flush')
+  check(el == block and off == 0 and T.action_at(block) == 'thinking',
+    'the chrome row resolves to (block, 0) and toggles thinking')
+  el, off = T.element_at_row_full(T.model, b, 2)
+  check(el == block and off == 1 and T.action_at(block) == 'thinking',
+    'a content row resolves to (block, 1) and toggles thinking too')
+  check(vim.bo[b].modifiable == false, 'buffer non-modifiable after load')
 end)
 
-test('flush: JSONL ending with an open args fence gets it closed', function()
+test('reader: JSONL ending with an open args fence renders a paired fence', function()
   local b = new_buf()
   T.reset_model()
   seed(b, { '' })
@@ -74,9 +72,9 @@ test('flush: JSONL ending with an open args fence gets it closed', function()
   local check_file = T.create_jsonl_reader(jsonl, b, ns, nil)
   check_file()
 
-  -- Pump the loop: batch render, then the settle flush closes the fence.
-  vim.wait(1000)
-  check(#recorded_errors == 0, 'no error reported during load/flush')
+  -- Pump the loop: the batch render completes; no flush exists to wait for.
+  vim.wait(500)
+  check(#recorded_errors == 0, 'no error reported during load')
   local l = lines_of(b)
   local fence_count = 0
   for _, line in ipairs(l) do
@@ -84,16 +82,16 @@ test('flush: JSONL ending with an open args fence gets it closed', function()
       fence_count = fence_count + 1
     end
   end
-  check(fence_count >= 2, 'args fence opened and closed by the flush')
-  -- The flush closes the args fence; the 4 args lines (within the 5-line tail
-  -- cap) render in full inside the fence pair, no preview row.
-  check(l[3] == '► Param' and l[4] == TC_FENCE, 'Param header + open fence rendered by the flush')
+  check(fence_count == 2, 'args render with an open + close fence pair')
+  -- The 4 args lines (within the 5-line tail cap) render in full inside the
+  -- fence pair, no preview row.
+  check(l[3] == '► Param' and l[4] == TC_FENCE, 'Param header + open fence rendered')
   check(l[5] == 'a' and l[6] == 'b' and l[7] == 'c' and l[8] == 'd', 'args materialized in full inside the fence')
   check(l[9] == TC_FENCE, 'close fence after the args rows')
-  check(vim.bo[b].modifiable == false, 'buffer non-modifiable after flush')
+  check(vim.bo[b].modifiable == false, 'buffer non-modifiable after load')
 end)
 
-test('flush: pause between reasoning bursts merges into a single thinking entry', function()
+test('reader: paused bursts stay expanded; the next burst streams into the same block', function()
   local b = new_buf()
   T.reset_model()
   seed(b, { '' })
@@ -105,40 +103,35 @@ test('flush: pause between reasoning bursts merges into a single thinking entry'
 
   local check_file = T.create_jsonl_reader(jsonl, b, ns, nil)
   check_file()
-  -- First burst renders, then the 500ms settle flush collapses it (this is
-  -- the split point: one continuous reasoning stream paused mid-turn).
-  local loaded = vim.wait(500, is_open)
-  local collapsed = vim.wait(1500, function() return not is_open() end)
+  -- First burst renders and STAYS expanded: no flush fires on the pause, so
+  -- the block never collapses and never re-expands (the flash is gone).
+  local loaded = vim.wait(500, function()
+    return vim.api.nvim_buf_line_count(b) > 1
+  end)
   check(loaded, 'first burst rendered')
-  check(collapsed, 'first burst collapsed by the settle flush')
+  local block = nil
+  for _, el in ipairs(T.model.elements) do
+    if el.type == 'thinking_block' then block = el end
+  end
+  check(block and block.state == 'expanded', 'first burst stays expanded through the pause')
 
-  -- The stream resumes: the second burst must merge into the existing entry
-  -- and stream visibly, not open a second collapsed block.
+  -- The stream resumes: the second burst streams into the SAME block.
   local file = assert(io.open(jsonl, 'a'))
   file:write('{"AssistantThinkingChunk":{"content":"\\nburst two"}}\n')
   file:close()
   check_file()
-  local streaming = vim.wait(500, is_open)
-  check(streaming, 'second burst merged and streaming')
+  local merged = vim.wait(500, function()
+    return block and T.content_of(block, 'content') == 'burst one\nburst two'
+  end)
+  check(merged, 'second burst streamed into the same block')
+  check(#T.model.elements == 2, 'still one thinking element (no second block)')
   local l = lines_of(b)
-  check(l[2] == 'burst one' and l[3] == 'burst two',
-    'merged reopen streams the full content, first burst included')
-
-  -- Final settle flush collapses the merged run into ONE entry.
-  local done = vim.wait(1500, function() return not is_open() end)
-  check(done, 'merged run collapsed by the settle flush')
-  local entries = {}
-  for _, el in ipairs(T.model.elements) do
-    if el.type == 'thinking_block' and el.state ~= 'open' then
-      entries[#entries + 1] = el
-    end
-  end
-  check(#entries == 1, 'both bursts merged into a single thinking entry')
-  check(entries[1] and T.content_of(entries[1], 'content') == 'burst one\nburst two', 'merged entry holds both bursts in order')
-  check(#recorded_errors == 0, 'no errors during the merge')
+  check(l[2] == '► [Thinking... press o to collapse]' and l[3] == 'burst one' and l[4] == 'burst two',
+    'same block streams both bursts (chrome row + full content)')
+  check(#recorded_errors == 0, 'no errors during the live append')
 end)
 
-test('flush: live append after initial load keeps the modifiable invariant', function()
+test('reader: live append after initial load keeps the modifiable invariant', function()
   local b = new_buf()
   T.reset_model()
   seed(b, { '' })
@@ -162,9 +155,34 @@ test('flush: live append after initial load keeps the modifiable invariant', fun
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable after live append')
   local l = lines_of(b)
   check(table.concat(l, '\n'):find('hi', 1, true) ~= nil, 'live content rendered')
-  -- Wait out the settle timer this check_file armed: leaving it pending would
-  -- fire flush_deferred into the next test. It would be a no-op there (the
-  -- next test starts with a fresh model), but drain it anyway so timers never
-  -- pile up across tests.
-  vim.wait(600)
+end)
+
+test('reader: an interrupted tool-call detail file renders a paired (closed) fence', function()
+  -- The tool-call detail view shares create_jsonl_reader; its model sets
+  -- full_input so args never truncate. A detail file interrupted mid-args must
+  -- render a paired (closed) fence — nothing dangling.
+  local b = new_buf()
+  T.reset_model()
+  T.model.full_input = true
+  seed(b, { '' })
+  clear_errors()
+  local jsonl = tmp_dir .. '/detail-interrupted.jsonl'
+  write_jsonl(jsonl,
+    '{"AssistantToolCallStart":{"tool_name":"bash","tool_call_id":"tc1","tool_call_index":1}}',
+    '{"AssistantToolCallArgChunk":{"tool_call_index":1,"content":"{\\"cmd\\":\\"ls\\",\\"dir\\":\\"/tmp\\"}"}}')
+
+  local check_file = T.create_jsonl_reader(jsonl, b, ns, nil)
+  check_file()
+  vim.wait(500)
+  check(#recorded_errors == 0, 'no error reported during load')
+  local l = lines_of(b)
+  local fence_count = 0
+  for _, line in ipairs(l) do
+    if line == TC_FENCE then fence_count = fence_count + 1 end
+  end
+  check(fence_count == 2, 'args render with a paired (open + close) fence')
+  check(l[1]:find('TOOL:', 1, true) ~= nil, 'tool label rendered')
+  check(l[2] == '► Param' and l[3] == TC_FENCE and l[4] == '{"cmd":"ls","dir":"/tmp"}' and l[5] == TC_FENCE,
+    'full args inside the paired fence (full_input, no tail cap)')
+  check(vim.bo[b].modifiable == false, 'buffer non-modifiable after load')
 end)

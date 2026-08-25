@@ -198,9 +198,10 @@ test('thinking: live stream, collapse, expand, collapse roundtrip', function()
   apply_render(m, b, { AssistantThinkingChunk = { content = 'A1\nA2' } })
   local block = m.elements[2]
   local l = lines_of(b)
-  check(l[1] == '► ASSISTANT' and l[2] == 'A1' and l[3] == 'A2', 'content streams after the label')
+  check(l[1] == '► ASSISTANT' and l[2] == '► [Thinking... press o to collapse]'
+    and l[3] == 'A1' and l[4] == 'A2', 'chrome row + content streams after the label')
   local r = row_of(m, block)
-  check(r.start_row == 1 and r.height == 2, 'row map: block at [1, 3)')
+  check(r.start_row == 1 and r.height == 3, 'row map: block at [1, 4)')
 
   -- Collapse: one real hint row.
   render_diff(m, b, T.close_open_elements(m))
@@ -220,7 +221,7 @@ test('thinking: live stream, collapse, expand, collapse roundtrip', function()
   render_diff(m, b, T.toggle_thinking_element(m, block))
   local el, off = T.element_at_row_full(m, b, 1)
   check(el == block and off == 0, 'collapsed row -> (block, offset 0)')
-  check(T.action_at(block, 0) == 'thinking', 'collapsed row toggles thinking')
+  check(T.action_at(block) == 'thinking', 'collapsed row toggles thinking')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -243,9 +244,7 @@ test('thinking: an empty chunk does not erase the collapsed indicator', function
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
-test('merge: a reopened block renders the FULL merged content', function()
-  -- The merge-reopen renders full content (the old tail-only render lost
-  -- previous runs — bug 1 root cause C).
+test('thinking: a collapsed tail accumulates invisibly; expand renders the full content', function()
   local m = T.reset_model()
   local b = new_buf()
   seed(b, { '' })
@@ -253,15 +252,22 @@ test('merge: a reopened block renders the FULL merged content', function()
   apply_render(m, b, { AssistantThinkingChunk = { content = 'A1\nA2' } })
   local block = m.elements[2]
   render_diff(m, b, T.close_open_elements(m))
-  -- Run 2 arrives after the pause: the merge reopen must render the FULL
-  -- content, previous run included.
+  -- Run 2 arrives while the tail is collapsed: content accumulates with no
+  -- diff, so the display stays a single hint row (no reopen).
   apply_render(m, b, { AssistantThinkingChunk = { content = 'B1' } })
   apply_render(m, b, { AssistantThinkingChunk = { content = '\nB2' } })
   local l = lines_of(b)
-  check(l[1] == '► ASSISTANT' and l[2] == 'A1' and l[3] == 'A2B1' and l[4] == 'B2',
-    "full merged content ['label','A1','A2B1','B2']")
-  check(T.content_of(block, 'content') == 'A1\nA2B1\nB2', 'the model holds the full merged content')
-  check(row_of(m, block).height == 3, 'merged block height matches the content rows')
+  check(#l == 2 and l[2] == '► [Thinking... press o to expand]',
+    'collapsed tail stays one hint row while content accumulates')
+  check(T.content_of(block, 'content') == 'A1\nA2B1\nB2', 'the model holds the full accumulated content')
+  check(row_of(m, block).height == 1, 'collapsed block stays one row')
+  -- Expanding rebuilds the full accumulated content from the model.
+  render_diff(m, b, T.toggle_thinking_element(m, block))
+  l = lines_of(b)
+  check(l[1] == '► ASSISTANT' and l[2] == '► [Thinking... press o to collapse]'
+    and l[3] == 'A1' and l[4] == 'A2B1' and l[5] == 'B2',
+    "expand renders the full accumulated content ['label','A1','A2B1','B2']")
+  check(row_of(m, block).height == 4, 'expanded block height matches the content rows + chrome')
   -- Final collapse yields one hint row.
   render_diff(m, b, T.close_open_elements(m))
   l = lines_of(b)
@@ -269,7 +275,7 @@ test('merge: a reopened block renders the FULL merged content', function()
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
-test('merge: bulk runs separated by a whitespace chunk merge into one', function()
+test('thinking: bulk runs separated by a whitespace chunk stay one streaming block', function()
   local m = T.reset_model()
   local b = new_buf()
   seed(b, { '' })
@@ -278,9 +284,10 @@ test('merge: bulk runs separated by a whitespace chunk merge into one', function
   apply_render(m, b, { AssistantMessageChunk = { content = '\n' } }, true)
   apply_render(m, b, { AssistantThinkingChunk = { content = 'bulk two' } }, true)
   local block = m.elements[2]
-  check(block.content == 'bulk onebulk two', 'model holds both bulk runs in order')
+  check(T.content_of(block, 'content') == 'bulk onebulk two', 'model holds both bulk runs in order')
   local l = lines_of(b)
-  check(l[1] == '► ASSISTANT' and l[2] == 'bulk onebulk two', 'merge reopen renders the full merged content')
+  check(l[1] == '► ASSISTANT' and l[2] == '► [Thinking... press o to collapse]'
+    and l[3] == 'bulk onebulk two', 'chrome row + merged content rendered')
   render_diff(m, b, T.close_open_elements(m))
   l = lines_of(b)
   check(l[2] == '► [Thinking... press o to expand]', 'merged run collapsed to one hint row')
@@ -303,25 +310,26 @@ test('tool_call: full lifecycle with args/result sections and row-map shifts', f
   apply_render(m, b, { AssistantToolCallArgChunk = { tool_call_index = 0, content = 'a1\nb2' } })
   apply_render(m, b, { AssistantToolCallArgChunk = { tool_call_index = 0, content = '\nb3\nb4' } })
   l = lines_of(b)
-  check(l[2] == '► Param' and l[3] == TC_FENCE and l[4] == 'a1' and l[5] == 'b2' and l[6] == 'b3' and l[7] == 'b4',
-    'args stream inside the Param fence (open, no close fence)')
-  check(row_of(m, tc).height == 7, 'streamed args grew the tool to 7 rows')
+  check(l[2] == '► Param' and l[3] == TC_FENCE and l[4] == 'a1' and l[5] == 'b2' and l[6] == 'b3' and l[7] == 'b4'
+    and l[8] == TC_FENCE,
+    'args stream inside the Param fence (open, close fence always paired)')
+  check(row_of(m, tc).height == 8, 'streamed args grew the tool to 8 rows')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 
   -- ToolMessageStart: args fence closes, Result section opens with an empty row.
   apply_render(m, b, { ToolMessageStart = { tool_call_id = 't1', tool_args = '' } })
   check(tc.output_started == true, 'output_started set')
   l = lines_of(b)
-  check(l[8] == TC_FENCE and l[9] == '► Result' and l[10] == TC_FENCE and l[11] == '',
-    'args close fence + Result header + open fence + empty output row')
-  check(row_of(m, tc).height == 11, 'tool height 11 with the Result section')
+  check(l[8] == TC_FENCE and l[9] == '► Result' and l[10] == TC_FENCE and l[11] == '' and l[12] == TC_FENCE,
+    'args close fence + Result header + open fence + empty output row + close fence')
+  check(row_of(m, tc).height == 12, 'tool height 12 with the Result section')
 
   -- Output streams onto the tool's own rows.
   apply_render(m, b, { ToolOutputChunk = { tool_call_id = 't1', content = 'out1' } })
   apply_render(m, b, { ToolOutputChunk = { tool_call_id = 't1', content = '\nout2' } })
   l = lines_of(b)
-  check(l[11] == 'out1' and l[12] == 'out2', 'output streams inside the Result fence')
-  check(row_of(m, tc).height == 12, 'streamed output grew the tool to 12 rows')
+  check(l[11] == 'out1' and l[12] == 'out2' and l[13] == TC_FENCE, 'output streams inside the Result fence (paired)')
+  check(row_of(m, tc).height == 13, 'streamed output grew the tool to 13 rows')
 
   -- ToolMessageEnd: output fence closes, end_info added below the region.
   apply_render(m, b, { ToolMessageEnd = { tool_call_id = 't1', end_status = 'Succeeded', input_tokens = 3, output_tokens = 4 } })
@@ -389,18 +397,18 @@ test('parallel: tc1 output lands mid-buffer above tc2, later rows shift', functi
   apply_render(m, b, { ToolMessageStart = { tool_call_id = 'tc1', tool_args = '' } })
   apply_render(m, b, { ToolMessageStart = { tool_call_id = 'tc2', tool_args = '' } })
   local l = lines_of(b)
-  -- Each tool: label + Result header + open fence + empty output row.
-  check(#l == 8, 'two 4-row regions')
-  check(row_of(m, tc1).start_row == 0 and row_of(m, tc2).start_row == 4, 'tc1 at 0, tc2 at 4')
+  -- Each tool: label + Result header + fence + empty output row + close fence.
+  check(#l == 10, 'two 5-row regions')
+  check(row_of(m, tc1).start_row == 0 and row_of(m, tc2).start_row == 5, 'tc1 at 0, tc2 at 5')
   -- tc1 output streams into its own mid-buffer region.
   apply_render(m, b, { ToolOutputChunk = { tool_call_id = 'tc1', content = 'out1' } })
   apply_render(m, b, { ToolOutputChunk = { tool_call_id = 'tc1', content = '\nout2' } })
   l = lines_of(b)
   check(l[4] == 'out1' and l[5] == 'out2', 'tc1 output above tc2')
-  check(l[6] == '► TOOL: [running] grep  [Ctrl-k to cancel]', 'tc2 label below tc1 output')
-  check(row_of(m, tc1).height == 5 and row_of(m, tc2).start_row == 5, 'tc1 grew, tc2 shifted down')
-  local el, off = T.element_at_row_full(m, b, 5)
-  check(el == tc2 and off == 0, 'row 5 resolves to tc2 after the shift')
+  check(l[7] == '► TOOL: [running] grep  [Ctrl-k to cancel]', 'tc2 label below tc1 output')
+  check(row_of(m, tc1).height == 6 and row_of(m, tc2).start_row == 6, 'tc1 grew, tc2 shifted down')
+  local el, off = T.element_at_row_full(m, b, 6)
+  check(el == tc2 and off == 0, 'row 6 resolves to tc2 after the shift')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -438,7 +446,8 @@ test('subagent: input fence, output stream, final status and error rows', functi
   apply_render(m, b, { AssistantMessageChunk = { content = 'result1' } })
   apply_render(m, b, { AssistantMessageChunk = { content = ' result2' } })
   l = lines_of(b)
-  check(l[8] == 'result1 result2', 'output streams inside the Output fence (no close fence)')
+  check(l[8] == 'result1 result2' and l[9] == TC_FENCE,
+    'output streams inside the paired Output fence (close fence present mid-stream)')
 
   -- SubAgentEnd: final status + error rows + the close fence.
   apply_render(m, b, { SubAgentEnd = { conversation_id = 'conv1', end_status = 'Failed', error = 'boom', input_tokens = 5, output_tokens = 6 } })
@@ -468,8 +477,8 @@ test('subagent: a long input shows its capped tail inside the Input fence at Sub
     'input close fence + Output header + open fence + empty output row')
 end)
 
-test('subagent: post-flush input chunks are absorbed into the input region at SubAgentStart', function()
-  -- The settle flush closes the input fence mid-stream; a later chunk must
+test('subagent: input chunks after close_open_elements are absorbed at SubAgentStart', function()
+  -- close_open_elements closes the input fence mid-stream; a later chunk must
   -- still accumulate into el.input, and the SubAgentStart rebuild must render
   -- it INSIDE the input fence — no stray or duplicated rows.
   local m = T.reset_model()
@@ -479,17 +488,17 @@ test('subagent: post-flush input chunks are absorbed into the input region at Su
   apply_render(m, b, { SubAgentInputChunk = { tool_call_index = 0, content = '{"a":1,\n' } })
   apply_render(m, b, { SubAgentInputChunk = { tool_call_index = 0, content = '"b":2}' } })
   local sa = m.elements[1]
-  -- Settle flush closes the input fence (2 visual lines: no collapse).
+  -- close_open_elements closes the input fence (2 visual lines: no collapse).
   render_diff(m, b, T.close_open_elements(m))
   local l = lines_of(b)
-  check(sa.input_open == false, 'input fence closed by the flush')
+  check(sa.input_open == false, 'input fence closed by close_open_elements')
   check(l[1] == '► SUB-AGENT: [generating]' and l[2] == '► Input'
     and l[3] == TC_FENCE and l[4] == '{"a":1,' and l[5] == '"b":2}'
     and l[6] == TC_FENCE and l[7] == '► Output' and l[8] == TC_FENCE and l[9] == '' and l[10] == TC_FENCE,
     'flush rows: label + Input fence pair + Output section')
   -- A chunk arriving after the flush accumulates into el.input.
   apply_render(m, b, { SubAgentInputChunk = { tool_call_index = 0, content = ',"c":3}' } })
-  check(T.content_of(sa, 'input') == '{"a":1,\n"b":2},"c":3}', 'post-flush chunk accumulated into the model')
+  check(T.content_of(sa, 'input') == '{"a":1,\n"b":2},"c":3}', 'chunk after close_open_elements accumulated into the model')
   -- AssistantMessageEnd (as in the real protocol) adds nothing visible.
   apply_render(m, b, { AssistantMessageEnd = {} })
   -- SubAgentStart rebuilds the region from full model state: the post-flush
@@ -505,7 +514,7 @@ test('subagent: post-flush input chunks are absorbed into the input region at Su
   apply_render(m, b, { AssistantMessageChunk = { content = ' result2' } })
   l = lines_of(b)
   check(l[9] == 'result1 result2', 'output streams at the subagent region tail')
-  check(#l == 9, 'no stray rows: exactly the 9-row region')
+  check(#l == 10, 'no stray rows: exactly the 10-row region (paired fences)')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -593,10 +602,10 @@ test('row map: every element region resolves via element_at_row', function()
   apply_render(m, b, { AssistantMessageChunk = { content = 'sub out' } })
   -- user message: label + 2 content rows.
   check(row_of(m, um).start_row == 0 and row_of(m, um).height == 3, 'um covers label + content')
-  -- subagent region: label + Output header + fence + streamed output row
-  -- (the output fence stays open while the subagent streams).
+  -- subagent region: label + Output header + fence + streamed output row +
+  -- close fence (fences are always paired).
   local r = row_of(m, sa)
-  check(r.start_row == 4 and r.height == 4, 'subagent region grew with the output')
+  check(r.start_row == 4 and r.height == 5, 'subagent region grew with the output')
   local el, off = T.element_at_row_full(m, b, 4)
   check(el == sa and off == 0, 'subagent label row resolves to (sa, 0)')
   el, off = T.element_at_row_full(m, b, 7)
@@ -670,13 +679,13 @@ test('o dispatch: a collapsed thinking block is ONE navigable real row', functio
   check(#l == 2, 'collapsed block is one real row below the label')
   local el, off = T.element_at_row_full(m, b, 1)
   check(el == block and off == 0, 'the collapsed row resolves to the block')
-  check(T.action_at(block, 0) == 'thinking', '`o` on the collapsed row toggles thinking')
+  check(T.action_at(block) == 'thinking', '`o` on the collapsed row toggles thinking')
   -- Expand via the keymap-equivalent reducer + render.
   render_diff(m, b, T.toggle_thinking_element(m, block))
   l = lines_of(b)
   check(l[2] == '► [Thinking... press o to collapse]' and l[3] == 'A' and l[4] == 'B' and l[5] == 'C',
     'expanded content restored')
-  check(T.action_at(block, 2) == 'thinking', '`o` on expanded content toggles too')
+  check(T.action_at(block) == 'thinking', '`o` on expanded content toggles too')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -695,11 +704,11 @@ test('o dispatch: every tool row resolves to the detail intent', function()
   check(l[3] == '► Param', 'Param header row')
   check(l[5] == 'a' and l[6] == 'b' and l[7] == 'c' and l[8] == 'd', 'full args rows')
   local el, off = T.element_at_row_full(m, b, 4)
-  check(el == tc and off == 3 and T.action_at(tc, 3) == 'detail', 'args row -> (tc, 3) detail')
+  check(el == tc and off == 3 and T.action_at(tc) == 'detail', 'args row -> (tc, 3) detail')
   el, off = T.element_at_row_full(m, b, 1)
-  check(el == tc and off == 0 and T.action_at(tc, 0) == 'detail', 'label row -> (tc, 0) detail')
+  check(el == tc and off == 0 and T.action_at(tc) == 'detail', 'label row -> (tc, 0) detail')
   el, off = T.element_at_row_full(m, b, 9)
-  check(el == tc and off == 8 and T.action_at(tc, 8) == 'detail', 'Result header row -> (tc, 8) detail')
+  check(el == tc and off == 8 and T.action_at(tc) == 'detail', 'Result header row -> (tc, 8) detail')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -746,15 +755,19 @@ test('hl bound: thinking block keeps one mark per row across collapse/expand cyc
     render_diff(m, b, T.toggle_thinking_element(m, block)) -- expanded -> collapsed
     check(count_hl(b, 'TCodeThinking') == 0, 'collapse removes every content highlight')
   end
-  -- Merge reopen after a collapse: the full content renders fresh, then
-  -- streaming must not stack duplicate marks on the join row.
-  apply_render(m, b, { AssistantThinkingChunk = { content = 'M1' } }) -- merge reopen
-  check(count_hl(b, 'TCodeThinking') == 3, 'merge-reopened content highlighted once per row')
+  -- Streaming into a collapsed tail is invisible (no marks); expanding then
+  -- rebuilds the full accumulated content fresh, and streaming must not stack
+  -- duplicate marks on the join row.
+  apply_render(m, b, { AssistantThinkingChunk = { content = 'M1' } }) -- block is collapsed here
+  check(count_hl(b, 'TCodeThinking') == 0, 'collapsed tail accumulates invisibly (no marks)')
   for _ = 1, 50 do
     apply_render(m, b, { AssistantThinkingChunk = { content = 'x' } })
   end
-  check(count_hl(b, 'TCodeThinking') == 3, '50 newline-less chunks after the reopen add no marks')
-  check(lines_of(b)[4] == 'L3M1' .. string.rep('x', 50), 'chunks joined the reopened tail row')
+  check(count_hl(b, 'TCodeThinking') == 0, 'invisible accumulation adds no marks')
+  -- Expand: the full accumulated content renders fresh with one mark per row.
+  render_diff(m, b, T.toggle_thinking_element(m, block))
+  check(count_hl(b, 'TCodeThinking') == 3, 'expanded accumulated content highlighted once per row')
+  check(lines_of(b)[5] == 'L3M1' .. string.rep('x', 50), 'chunks joined the expanded tail row')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -775,10 +788,10 @@ test('hl dedup: newline-less chunks stack no marks on the thinking join row', fu
   local join_row_marks = 0
   local marks = vim.api.nvim_buf_get_extmarks(b, ns, 0, -1, { details = true })
   for _, mm in ipairs(marks) do
-    if mm[4] and mm[4].hl_group == 'TCodeThinking' and mm[2] == 2 then join_row_marks = join_row_marks + 1 end
+    if mm[4] and mm[4].hl_group == 'TCodeThinking' and mm[2] == 3 then join_row_marks = join_row_marks + 1 end
   end
   check(join_row_marks == 1, 'join row carries exactly one highlight mark')
-  check(lines_of(b)[2] == 'A' and lines_of(b)[3] == 'B' .. string.rep('x', 50), 'chunks joined the B row')
+  check(lines_of(b)[3] == 'A' and lines_of(b)[4] == 'B' .. string.rep('x', 50), 'chunks joined the B row')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -903,13 +916,13 @@ test('tool output: a long result caps at 5 tail lines; the detail intent is unif
 
   -- Every tool row (label, headers, fences, content) resolves to detail.
   for row = 1, 8 do
-    local el, off = T.element_at_row_full(m, b, row)
-    check(el == tc and T.action_at(tc, off) == 'detail', ('tool row %d -> detail'):format(row))
+    local el = T.element_at_row_full(m, b, row)
+    check(el == tc and T.action_at(tc) == 'detail', ('tool row %d -> detail'):format(row))
   end
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
-test('subagent output: the output fence closes at SubAgentEnd; the detail intent is uniform', function()
+test('subagent output: the output fence is paired while streaming; the detail intent is uniform', function()
   local m = T.reset_model()
   local b = new_buf()
   seed(b, { '' })
@@ -920,16 +933,17 @@ test('subagent output: the output fence closes at SubAgentEnd; the detail intent
   apply_render(m, b, { AssistantMessageChunk = { content = 's1\n' } })
   apply_render(m, b, { AssistantMessageChunk = { content = 's2\ns3\ns4' } })
   check(T.content_of(sa, 'output') == 's1\ns2\ns3\ns4', 'output accumulated while streaming')
-  -- While the subagent streams, the Output fence stays OPEN (no close fence).
+  -- While the subagent streams, the Output fence is ALREADY paired (the old
+  -- `not streaming` conditional is gone).
   local l = lines_of(b)
-  check(l[#l] == 's4', 'no close fence while the subagent streams')
+  check(l[#l] == TC_FENCE, 'output streams inside a paired fence')
   apply_render(m, b, { SubAgentEnd = { conversation_id = 'c1', end_status = 'Succeeded', input_tokens = 1, output_tokens = 4 } })
   l = lines_of(b)
-  check(l[#l] == TC_FENCE, 'output close fence appears only after SubAgentEnd')
+  check(l[#l] == TC_FENCE, 'output close fence remains after SubAgentEnd')
   check(l[4] == 's1' and l[5] == 's2' and l[6] == 's3' and l[7] == 's4',
-    'output rows inside the closed fence pair')
-  local el, off = T.element_at_row_full(m, b, 5)
-  check(el == sa and T.action_at(sa, off) == 'detail', 'subagent output row resolves to detail')
+    'output rows inside the paired fence')
+  local el = T.element_at_row_full(m, b, 5)
+  check(el == sa and T.action_at(sa) == 'detail', 'subagent output row resolves to detail')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -949,12 +963,12 @@ test('streaming tail: a 10-line tool output stays capped at 5 rows while streami
   local l = lines_of(b)
   check(l[4] == 'o6' and l[5] == 'o7' and l[6] == 'o8' and l[7] == 'o9' and l[8] == 'o10',
     'exactly 5 content rows while streaming (the last 5 of 10)')
-  check(#l == 8, 'streaming region: label + Result + fence + 5 content (no close fence)')
-  check(row_of(m, tc).height == 8, 'row map height matches the 8 streaming rows')
+  check(#l == 9, 'streaming region: label + Result + fence + 5 content + close fence')
+  check(row_of(m, tc).height == 9, 'row map height matches the 9 streaming rows')
   -- Every streaming row resolves to the tool with a detail intent.
-  for row = 0, 7 do
+  for row = 0, 8 do
     local el, off = T.element_at_row_full(m, b, row)
-    check(el == tc and off == row and T.action_at(tc, off) == 'detail',
+    check(el == tc and off == row and T.action_at(tc) == 'detail',
       ('streaming row %d -> (tc, %d) detail'):format(row, row))
   end
   -- ToolMessageEnd closes the section: same 5 content rows + close fence.
@@ -962,7 +976,7 @@ test('streaming tail: a 10-line tool output stays capped at 5 rows while streami
   l = lines_of(b)
   check(l[4] == 'o6' and l[5] == 'o7' and l[6] == 'o8' and l[7] == 'o9' and l[8] == 'o10' and l[9] == TC_FENCE,
     'closed region: same 5 content rows + close fence')
-  check(row_of(m, tc).height == 9, 'row map height grows by the close fence')
+  check(row_of(m, tc).height == 9, 'row map height unchanged (the fence was already paired)')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
@@ -975,13 +989,41 @@ test('header placement: Param and Result headers sit outside the fence pairs', f
   apply_render(m, b, { ToolMessageStart = { tool_call_id = 't1', tool_args = '' } })
   apply_render(m, b, { ToolOutputChunk = { tool_call_id = 't1', content = 'res' } })
   local l = lines_of(b)
-  -- label, Param, fence, args, fence, Result, fence, output (streaming: no close)
+  -- label, Param, fence, args, fence, Result, fence, output, fence (paired).
   check(l[1]:find('TOOL:', 1, true) ~= nil, 'label row first')
   check(l[2] == '► Param' and l[3] == TC_FENCE and l[4] == '{"a":1}' and l[5] == TC_FENCE,
     'Param header outside the args fence pair')
-  check(l[6] == '► Result' and l[7] == TC_FENCE and l[8] == 'res',
-    'Result header outside the output fence (open while streaming)')
+  check(l[6] == '► Result' and l[7] == TC_FENCE and l[8] == 'res' and l[9] == TC_FENCE,
+    'Result header outside the output fence (paired while streaming)')
   check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
+end)
+
+test('streaming: args/output/input all render paired fences while open', function()
+  local m = T.reset_model()
+  local b = new_buf()
+  seed(b, { '' })
+  -- Tool args stream while args_open: the Param section has a paired fence.
+  apply_render(m, b, { AssistantToolCallStart = { tool_call_id = 't1', tool_name = 'bash', tool_call_index = 0 } })
+  apply_render(m, b, { AssistantToolCallArgChunk = { tool_call_index = 0, content = 'a1\na2' } })
+  local l = lines_of(b)
+  check(l[2] == '► Param' and l[3] == TC_FENCE and l[4] == 'a1' and l[5] == 'a2' and l[6] == TC_FENCE,
+    'streaming args render a paired fence')
+  -- Tool output streams while output_open: the Result section has a paired fence.
+  apply_render(m, b, { ToolMessageStart = { tool_call_id = 't1', tool_args = '' } })
+  apply_render(m, b, { ToolOutputChunk = { tool_call_id = 't1', content = 'o1\no2' } })
+  l = lines_of(b)
+  check(l[7] == '► Result' and l[8] == TC_FENCE and l[9] == 'o1' and l[10] == 'o2' and l[11] == TC_FENCE,
+    'streaming output renders a paired fence')
+  -- Subagent input streams while input_open: the Input section has a paired fence.
+  local m2 = T.reset_model()
+  local b2 = new_buf()
+  seed(b2, { '' })
+  apply_render(m2, b2, { SubAgentInputStart = { tool_call_id = 'sa1', tool_call_index = 0 } })
+  apply_render(m2, b2, { SubAgentInputChunk = { tool_call_index = 0, content = 'i1\ni2' } })
+  local l2 = lines_of(b2)
+  check(l2[2] == '► Input' and l2[3] == TC_FENCE and l2[4] == 'i1' and l2[5] == 'i2' and l2[6] == TC_FENCE,
+    'streaming input renders a paired fence')
+  check(vim.bo[b].modifiable == false and vim.bo[b2].modifiable == false, 'buffers non-modifiable')
 end)
 
 test('label colors: chrome extmarks carry per-part groups on the label row', function()

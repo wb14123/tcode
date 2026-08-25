@@ -6,14 +6,9 @@
 
 local TC_FENCE = '``````````'
 
--- Project with an optional width / media root / extra ctx fields (sa_active
--- for the streaming-subagent fence decision).
-local function proj(el, width, media_root, ctx_extra)
-  local ctx = { width = width, media_root = media_root }
-  if ctx_extra then
-    for k, v in pairs(ctx_extra) do ctx[k] = v end
-  end
-  return T.project_element(el, ctx)
+-- Project with an optional width / media root.
+local function proj(el, width, media_root)
+  return T.project_element(el, { width = width, media_root = media_root })
 end
 
 -- Assert an exact row list with a single check.
@@ -109,19 +104,19 @@ end)
 
 -- ------------------------------------------------------------------ thinking
 
-test('thinking_block: open streams full content without chrome', function()
-  local el = { type = 'thinking_block', state = 'open', content = 'A\nB' }
-  expect_rows(proj(el), { 'A', 'B' }, 'open rows')
+test('thinking_block: only collapsed and expanded exist; every state projects chrome + content', function()
+  local el = { type = 'thinking_block', state = 'expanded', content = 'A\nB' }
+  expect_rows(proj(el), { '► [Thinking... press o to collapse]', 'A', 'B' }, 'expanded rows')
+  -- The `open` state is gone: a chrome-less projection no longer exists. Any
+  -- non-collapsed state (a legacy `open` block from an old session file)
+  -- projects the expanded layout — chrome row + full content.
+  local legacy = { type = 'thinking_block', state = 'open', content = 'A\nB' }
+  expect_rows(proj(legacy), { '► [Thinking... press o to collapse]', 'A', 'B' }, 'legacy open rows')
 end)
 
 test('thinking_block: collapsed is a single hint line', function()
   local el = { type = 'thinking_block', state = 'collapsed', content = 'A\nB' }
   expect_rows(proj(el), { '► [Thinking... press o to expand]' }, 'collapsed row')
-end)
-
-test('thinking_block: expanded hint above full content', function()
-  local el = { type = 'thinking_block', state = 'expanded', content = 'A\nB' }
-  expect_rows(proj(el), { '► [Thinking... press o to collapse]', 'A', 'B' }, 'expanded rows')
 end)
 
 -- ------------------------------------------------------------------ tool_call
@@ -154,11 +149,11 @@ test('tool_call: no timestamp when created_at is absent', function()
   }, 'no ts label')
 end)
 
-test('tool_call: args_open streams fence + args, no close fence, no hint', function()
+test('tool_call: args_open streams fence + args, always paired', function()
   local el = tool_call({ args_open = true, args = '{"a":1,\n"b":2}' })
   expect_rows(proj(el), {
     tool_label('generating', 'bash', 1700000000000, true),
-    '► Param', TC_FENCE, '{"a":1,', '"b":2}',
+    '► Param', TC_FENCE, '{"a":1,', '"b":2}', TC_FENCE,
   }, 'streaming args')
 end)
 
@@ -193,21 +188,21 @@ test('tool_call: empty args render no Param section', function()
   expect_rows(proj(el), { tool_label('generating', 'bash', 1700000000000, true) }, 'empty args rows')
 end)
 
-test('tool_call: output_open streams after closed args, no close fence', function()
+test('tool_call: output_open streams after closed args, always paired', function()
   local el = tool_call({ args = '{}', output_started = true, output_open = true, output = 'out1\nout2', status = 'running' })
   expect_rows(proj(el), {
     tool_label('running', 'bash', 1700000000000, true),
     '► Param', TC_FENCE, '{}', TC_FENCE,
-    '► Result', TC_FENCE, 'out1', 'out2',
+    '► Result', TC_FENCE, 'out1', 'out2', TC_FENCE,
   }, 'open output')
 end)
 
-test('tool_call: output_open with empty output -> fence + one empty line', function()
+test('tool_call: output_open with empty output -> fence + one empty line, paired', function()
   local el = tool_call({ args = '{}', output_started = true, output_open = true, output = '', status = 'running' })
   expect_rows(proj(el), {
     tool_label('running', 'bash', 1700000000000, true),
     '► Param', TC_FENCE, '{}', TC_FENCE,
-    '► Result', TC_FENCE, '',
+    '► Result', TC_FENCE, '', TC_FENCE,
   }, 'open empty output')
 end)
 
@@ -222,14 +217,14 @@ test('tool_call: output_collapsed is ignored — long output caps at 5 tail line
   }, 'closed output tail')
 end)
 
-test('tool_call: streaming output also caps at 5 tail lines', function()
+test('tool_call: streaming output also caps at 5 tail lines, fence paired', function()
   local el = tool_call({ args = '{}', output_started = true, output_open = true,
     output = table.concat({ 'o1', 'o2', 'o3', 'o4', 'o5', 'o6', 'o7', 'o8', 'o9', 'o10' }, '\n'),
     status = 'running' })
   expect_rows(proj(el), {
     tool_label('running', 'bash', 1700000000000, true),
     '► Param', TC_FENCE, '{}', TC_FENCE,
-    '► Result', TC_FENCE, 'o6', 'o7', 'o8', 'o9', 'o10',
+    '► Result', TC_FENCE, 'o6', 'o7', 'o8', 'o9', 'o10', TC_FENCE,
   }, 'streaming output tail')
 end)
 
@@ -394,11 +389,11 @@ test('subagent: unknown multiline status and desc flattened via single_line', fu
   check(proj(el)[1] == subagent_label('odd status', 1700000000000, nil, 'd1 d2'), 'single_line on status and desc')
 end)
 
-test('subagent: input_open streams fenced input, no output section', function()
+test('subagent: input_open streams fenced input, fence always paired', function()
   local el = subagent({ input_open = true, input = 'in1\nin2' })
   expect_rows(proj(el), {
     subagent_label('running', 1700000000000, nil, 'read the file'),
-    '► Input', TC_FENCE, 'in1', 'in2',
+    '► Input', TC_FENCE, 'in1', 'in2', TC_FENCE,
   }, 'open input')
 end)
 
@@ -458,22 +453,16 @@ test('subagent: error rows after a blank line inside the Output fence', function
   }, 'error rows')
 end)
 
-test('subagent: streaming output renders without the close fence', function()
+test('subagent: streaming output renders inside a paired fence (no sa_active dependency)', function()
+  -- The output fence is ALWAYS paired once the section renders: the old
+  -- `not streaming` (sa_active) conditional is gone, so streaming output keeps
+  -- its close fence regardless of which conversation is active.
   local el = subagent({ input = '{}', output = 'o1\no2' })
-  expect_rows(proj(el, nil, nil, { sa_active = 'conv1' }), {
+  expect_rows(proj(el), {
     subagent_label('running', 1700000000000, nil, 'read the file'),
     '► Input', TC_FENCE, '{}', TC_FENCE,
-    '► Output', TC_FENCE, 'o1', 'o2',
+    '► Output', TC_FENCE, 'o1', 'o2', TC_FENCE,
   }, 'streaming output rows')
-end)
-
-test('subagent: streaming output of a different conversation keeps the close fence', function()
-  local el = subagent({ input = '{}', output = 'o1' })
-  expect_rows(proj(el, nil, nil, { sa_active = 'other-conv' }), {
-    subagent_label('running', 1700000000000, nil, 'read the file'),
-    '► Input', TC_FENCE, '{}', TC_FENCE,
-    '► Output', TC_FENCE, 'o1', TC_FENCE,
-  }, 'non-active conversation rows')
 end)
 
 -- ------------------------------------------------------------------ system/media/retry
@@ -589,29 +578,26 @@ end)
 
 test('action_at: thinking states', function()
   local collapsed = { type = 'thinking_block', state = 'collapsed', content = 'x' }
-  check(T.action_at(collapsed, 0) == 'thinking', 'collapsed row toggles')
-  check(T.action_at(collapsed, 1) == nil, 'beyond collapsed row is nil')
+  check(T.action_at(collapsed) == 'thinking', 'collapsed row toggles')
   local expanded = { type = 'thinking_block', state = 'expanded', content = 'a\nb' }
-  check(T.action_at(expanded, 0) == 'thinking', 'expanded hint toggles')
-  check(T.action_at(expanded, 1) == 'thinking', 'expanded content toggles')
-  check(T.action_at(expanded, 2) == 'thinking', 'expanded content row 2 toggles')
-  local open = { type = 'thinking_block', state = 'open', content = 'a' }
-  check(T.action_at(open, 0) == nil, 'open thinking is not navigable')
+  check(T.action_at(expanded) == 'thinking', 'expanded hint toggles')
+  check(T.action_at(expanded) == 'thinking', 'expanded content toggles')
+  check(T.action_at(expanded) == 'thinking', 'expanded content row 2 toggles')
 end)
 
 test('action_at: tool_call rows are all detail', function()
   local el = tool_call({ args = 'x\ny', output_started = true, output = 'o1' })
   -- rows: label, Param, fence, x, y, fence, Result, fence, o1, fence
   for off = 0, 9 do
-    check(T.action_at(el, off) == 'detail', ('row %d -> detail'):format(off))
+    check(T.action_at(el) == 'detail', ('row %d -> detail'):format(off))
   end
 end)
 
 test('action_at: streaming tool rows are still detail', function()
   local el = tool_call({ args = 'a1', args_open = true, output_started = true, output_open = true, output = 'o1' })
-  -- rows: label, Param, fence, a1, Result, fence, o1
-  for off = 0, 6 do
-    check(T.action_at(el, off) == 'detail', ('streaming row %d -> detail'):format(off))
+  -- rows: label, Param, fence, a1, fence, Result, fence, o1, fence
+  for off = 0, 8 do
+    check(T.action_at(el) == 'detail', ('streaming row %d -> detail'):format(off))
   end
 end)
 
@@ -619,27 +605,27 @@ test('action_at: subagent rows are all detail', function()
   local el = subagent({ input = 'i1', output = 'o1' })
   -- rows: label, Input, fence, i1, fence, Output, fence, o1, fence
   for off = 0, 8 do
-    check(T.action_at(el, off) == 'detail', ('subagent row %d -> detail'):format(off))
+    check(T.action_at(el) == 'detail', ('subagent row %d -> detail'):format(off))
   end
 end)
 
 test('action_at: streaming subagent rows are still detail', function()
   local el = subagent({ input = 'i1\ni2', input_open = true })
-  -- rows: label, Input, fence, i1, i2
-  for off = 0, 4 do
-    check(T.action_at(el, off) == 'detail', ('streaming input row %d -> detail'):format(off))
+  -- rows: label, Input, fence, i1, i2, fence
+  for off = 0, 5 do
+    check(T.action_at(el) == 'detail', ('streaming input row %d -> detail'):format(off))
   end
 end)
 
 test('action_at: nil for non-interactive element types', function()
-  check(T.action_at({ type = 'user_message', content = 'x' }, 0) == nil, 'user nil')
-  check(T.action_at({ type = 'assistant_message', content = 'x' }, 1) == nil, 'assistant nil')
-  check(T.action_at({ type = 'system_message', level = 'Info', message = 'm' }, 0) == nil, 'system nil')
-  check(T.action_at({ type = 'media', relative_path = 'p' }, 0) == nil, 'media nil')
-  check(T.action_at({ type = 'retry', attempt = 1, max_retries = 2, reason = 'r' }, 0) == nil, 'retry nil')
-  check(T.action_at({ type = 'end_info', tokens = { input_tokens = 1, output_tokens = 1 } }, 0) == nil, 'end_info nil')
-  check(T.action_at({ type = 'end_marker', tokens = {} }, 0) == nil, 'end_marker nil')
-  check(T.action_at(nil, 0) == nil, 'nil element nil')
+  check(T.action_at({ type = 'user_message', content = 'x' }) == nil, 'user nil')
+  check(T.action_at({ type = 'assistant_message', content = 'x' }) == nil, 'assistant nil')
+  check(T.action_at({ type = 'system_message', level = 'Info', message = 'm' }) == nil, 'system nil')
+  check(T.action_at({ type = 'media', relative_path = 'p' }) == nil, 'media nil')
+  check(T.action_at({ type = 'retry', attempt = 1, max_retries = 2, reason = 'r' }) == nil, 'retry nil')
+  check(T.action_at({ type = 'end_info', tokens = { input_tokens = 1, output_tokens = 1 } }) == nil, 'end_info nil')
+  check(T.action_at({ type = 'end_marker', tokens = {} }) == nil, 'end_marker nil')
+  check(T.action_at(nil) == nil, 'nil element nil')
 end)
 
 -- ------------------------------------------------------------------ chrome spans

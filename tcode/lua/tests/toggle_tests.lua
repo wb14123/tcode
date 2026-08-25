@@ -42,7 +42,41 @@ test('toggle_thinking: expand and collapse roundtrip', function()
   check(block.state == 'collapsed', 'block collapsed again')
   check(row_of(m, block).height == 1, 'collapsed block height 1')
   local el, off = T.element_at_row_full(m, b, 1)
-  check(el == block and off == 0 and T.action_at(block, 0) == 'thinking',
+  check(el == block and off == 0 and T.action_at(block) == 'thinking',
     'the indicator row resolves to (block, 0) and toggles thinking')
   check(vim.bo[b].modifiable == false, 'buffer still non-modifiable after collapse')
+end)
+
+test('toggle_thinking: fold an expanded streaming block, accumulate invisibly, expand again', function()
+  local m = T.reset_model()
+  local b = new_buf()
+  seed(b, { '' })
+  windowed_render(b, { AssistantMessageStart = {} }, false)
+  windowed_render(b, { AssistantThinkingChunk = { content = 'L1\nL2' } }, false)
+  local block = last_thinking(m)
+  -- The streaming block is expanded by default (chrome row + content).
+  check(block.state == 'expanded', 'block streaming (expanded)')
+  local l = lines_of(b)
+  check(l[2] == '► [Thinking... press o to collapse]' and l[3] == 'L1' and l[4] == 'L2',
+    'chrome row + content visible while streaming')
+  -- `o` folds the streaming block mid-stream.
+  T.toggle_thinking(m, block, b, ns)
+  check(block.state == 'collapsed', 'streaming block folded by `o`')
+  l = lines_of(b)
+  check(l[2] == '► [Thinking... press o to expand]' and #l == 2, 'folded to one real row')
+  -- Chunks arriving while collapsed accumulate invisibly (no diff, display
+  -- unchanged).
+  windowed_render(b, { AssistantThinkingChunk = { content = 'hidden' } }, false)
+  windowed_render(b, { AssistantThinkingChunk = { content = '\nmore' } }, false)
+  l = lines_of(b)
+  check(#l == 2 and l[2] == '► [Thinking... press o to expand]', 'display unchanged while collapsed')
+  check(T.content_of(block, 'content') == 'L1\nL2hidden\nmore', 'content accumulated in the model')
+  -- Expanding rebuilds chrome + the full accumulated content.
+  T.toggle_thinking(m, block, b, ns)
+  l = lines_of(b)
+  check(l[2] == '► [Thinking... press o to collapse]' and l[3] == 'L1'
+    and l[4] == 'L2hidden' and l[5] == 'more',
+    'expand restores the hint + full accumulated content')
+  check(block.state == 'expanded', 'block expanded again')
+  check(vim.bo[b].modifiable == false, 'buffer still non-modifiable')
 end)

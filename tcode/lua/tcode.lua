@@ -61,8 +61,8 @@ end
 -- Restoring the *prior* value (rather than hardcoding false) makes nested use
 -- safe: callers already inside a modifiable window (e.g. the JSONL batch
 -- render) see the window stay open, while top-level writers outside any window
--- (e.g. the 500ms settle flush, the `o` expand/collapse toggles) restore the
--- read-only display invariant.
+-- (e.g. the `o` expand/collapse toggles) restore the read-only display
+-- invariant.
 local function with_modifiable(buf, fn)
   if not vim.api.nvim_buf_is_valid(buf) then return nil end
   local was_modifiable = vim.bo[buf].modifiable
@@ -419,11 +419,9 @@ local function find_subagent_input_by_index(model, tool_call_index)
   for i = #model.elements, 1, -1 do
     local el = model.elements[i]
     -- A pending subagent has conversation_id == nil until SubAgentStart /
-    -- SubAgentContinue (exactly like find_pending_subagent). The settle flush
-    -- closes the input fence mid-stream, so input_open alone would drop all
-    -- later chunks: match pending subagents whose fence was already closed.
+    -- SubAgentContinue (exactly like find_pending_subagent).
     if el.type == 'subagent' and el.tool_call_index == tool_call_index
-      and (el.input_open or el.conversation_id == nil) then
+      and el.conversation_id == nil then
       return el
     end
   end
@@ -474,20 +472,21 @@ local function flush_pending_whitespace(model)
   return frag
 end
 
--- Collapse the open thinking block (structurally always the tail) to
--- 'collapsed'. Returns a full diff, empty when nothing was open.
+-- Collapse the expanded thinking block (structurally always the tail) to
+-- 'collapsed'. Returns a full diff, empty when the tail is not expanded.
 local function collapse_open_thinking(model)
   local diff = new_diff()
   local tail = model.tail
-  if tail and tail.type == 'thinking_block' and tail.state == 'open' then
+  if tail and tail.type == 'thinking_block' and tail.state == 'expanded' then
     tail.state = 'collapsed'
     diff.updated_all[#diff.updated_all + 1] = tail
   end
   return diff
 end
 
--- Settle-flush operation: close every open element (open thinking block, open
--- args/input fences), producing updated_all per element.
+-- Reducer operation: close every open element (an expanded thinking tail,
+-- open args/input fences), producing updated_all per element. No production
+-- caller; kept as a test-facing reducer op.
 local function close_open_elements(model)
   local diff = merge_diff(new_diff(), collapse_open_thinking(model))
   for _, el in ipairs(model.elements) do
@@ -548,30 +547,30 @@ local function apply(model, event, envelope_id)
 
   elseif variant == 'AssistantThinkingChunk' then
     local chunk = data.content or ''
-    if chunk == '' then return diff end -- never reopen/erase on an empty chunk
+    if chunk == '' then return diff end -- never create/erase on an empty chunk
     local tail = model.tail
-    if tail and tail.type == 'thinking_block' and tail.state == 'open' then
-      -- Streaming into the open block.
-      append_content(tail, 'content', chunk)
-      add_updated_content(diff, tail, chunk)
-    elseif tail and tail.type == 'thinking_block' and tail.state == 'collapsed' then
-      -- Merge: reopen the collapsed block in place. Held whitespace is
-      -- discarded (today's merge swallows it). No element is ever removed.
-      tail.state = 'open'
+    if tail and tail.type == 'thinking_block' then
+      -- Streaming into the tail thinking block, collapsed or expanded.
+      -- Content accumulates in the model either way; the updated_content
+      -- entry (and the visible stream) appears only while expanded. A
+      -- collapsed block accumulates invisibly and rebuilds in full when
+      -- toggled expanded.
       append_content(tail, 'content', chunk)
       model.pending_whitespace = nil
-      diff.updated_all[#diff.updated_all + 1] = tail
+      if tail.state == 'expanded' then
+        add_updated_content(diff, tail, chunk)
+      end
     else
-      -- New run: collapse any open thinking first, then open a fresh block.
-      -- A run that starts while the model tail is an assistant_message is
-      -- ATTACHED to that am: the renderer places its rows INSIDE the am's
-      -- region at the arrival position, so the display order matches the
-      -- wire order (thinking before response).
+      -- New run: collapse any expanded thinking first, then open a fresh
+      -- expanded block. A run that starts while the model tail is an
+      -- assistant_message is ATTACHED to that am: the renderer places its
+      -- rows INSIDE the am's region at the arrival position, so the display
+      -- order matches the wire order (thinking before response).
       merge_diff(diff, collapse_open_thinking(model))
       local el = add_element(model, {
         type = 'thinking_block',
         content = chunk,
-        state = 'open',
+        state = 'expanded',
         attach_to = tail and tail.type == 'assistant_message' and tail.id or nil,
       })
       diff.added[#diff.added + 1] = el
@@ -580,12 +579,13 @@ local function apply(model, event, envelope_id)
 
   elseif variant == 'AssistantMessageChunk' then
     local chunk = data.content or ''
-    merge_diff(diff, collapse_open_thinking(model))
+    -- Empty chunk: a true no-op (empty diff) - no collapse, no tail move.
     if chunk == '' then return diff end
     if model.sa_active then
       -- Subagent output streams through AssistantMessageChunk after
       -- SubAgentStart: append to the active subagent's output, not the
-      -- assistant message.
+      -- assistant message. Runs before the whitespace handling so
+      -- whitespace during subagent streaming stays subagent output.
       local sa = find_subagent_by_conversation(model, model.sa_active)
       if sa then
         append_content(sa, 'output', chunk)
@@ -594,11 +594,15 @@ local function apply(model, event, envelope_id)
       end
     end
     if is_whitespace_only(chunk) then
-      -- Hold whitespace-only text: it must not move the tail away from a
-      -- collapsed thinking block (the merge guard).
+      -- Hold whitespace-only text: no collapse, no tail move (it would
+      -- otherwise fold a streaming expanded thinking tail). It flushes
+      -- prepended to the next real text chunk.
       model.pending_whitespace = (model.pending_whitespace or '') .. chunk
       return diff -- no diff entries for the chunk itself
     end
+    -- Real text: collapse any expanded thinking tail, then flush held
+    -- whitespace prepended to this chunk.
+    merge_diff(diff, collapse_open_thinking(model))
     merge_diff(diff, flush_pending_whitespace(model))
     local am = last_element_of_type(model, 'assistant_message')
     if not am then
@@ -613,8 +617,8 @@ local function apply(model, event, envelope_id)
 
   elseif variant == 'AssistantMessageEnd' then
     merge_diff(diff, flush_pending_whitespace(model))
-    -- Close every still-open args/input fence first, then collapse any open
-    -- thinking (today's order).
+    -- Close every still-open args/input fence first, then collapse any
+    -- expanded thinking tail.
     for _, el in ipairs(model.elements) do
       if el.type == 'tool_call' and el.args_open then
         el.args_open = false
@@ -993,7 +997,7 @@ end
 -- the reducer's diff contract: { added = {el,...}, updated_all = {el,...},
 -- updated_content = {{el, text},...} } and projects the model onto the buffer.
 -- render(model, diff, ctx) / render_batch(model, diffs, ctx) are the entry
--- points; ctx = { buf, ns, bulk, width, media_root, sa_active }. Element
+-- points; ctx = { buf, ns, bulk, width, media_root }. Element
 -- positions are plain integers in the row map, maintained by three
 -- incremental operations (append / stream / rebuild) — never extmark
 -- anchors, never a full-buffer rebuild in the live path. Extmarks are
@@ -1195,9 +1199,8 @@ end
 -- never drift. Every chrome line starts with '► '; content lines (fences,
 -- message/tool/subagent data) carry no prefix. Fences stay content and the
 -- new section headers sit outside the fence pairs. ctx = { width,
--- media_root, sa_active } carries only read-only rendering inputs: the
--- media URI root and the streaming-subagent signal. No buffer / extmark /
--- navigation state.
+-- media_root } carries only read-only rendering inputs: the media URI
+-- root. No buffer / extmark / navigation state.
 local function element_layout(el, ctx)
   local function c_row(text)
     return { text = text }
@@ -1226,13 +1229,9 @@ local function element_layout(el, ctx)
   elseif el.type == 'thinking_block' then
     if el.state == 'collapsed' then
       return { chrome_row({ { '► [Thinking... press o to expand]', 'TCodeTokens' } }) }
-    elseif el.state == 'expanded' then
-      local out = { chrome_row({ { '► [Thinking... press o to collapse]', 'TCodeTokens' } }) }
-      for _, l in ipairs(lines(content_of(el, 'content'))) do out[#out + 1] = c_row(l) end
-      return out
     end
-    -- open (streaming or merge-reopened): full content, no chrome
-    local out = {}
+    -- expanded: chrome row + full content.
+    local out = { chrome_row({ { '► [Thinking... press o to collapse]', 'TCodeTokens' } }) }
     for _, l in ipairs(lines(content_of(el, 'content'))) do out[#out + 1] = c_row(l) end
     return out
   elseif el.type == 'tool_call' then
@@ -1256,7 +1255,7 @@ local function element_layout(el, ctx)
       out[#out + 1] = chrome_row({ { '► Param', 'TCodeTokens' } })
       out[#out + 1] = c_row(TC_FENCE)
       for _, l in ipairs(section_lines(args)) do out[#out + 1] = c_row(l) end
-      if not el.args_open then out[#out + 1] = c_row(TC_FENCE) end
+      out[#out + 1] = c_row(TC_FENCE)
     end
     if el.output_started then
       out[#out + 1] = chrome_row({ { '► Result', 'TCodeTokens' } })
@@ -1267,7 +1266,7 @@ local function element_layout(el, ctx)
       else
         for _, l in ipairs(out_lines) do out[#out + 1] = c_row(l) end
       end
-      if not el.output_open then out[#out + 1] = c_row(TC_FENCE) end
+      out[#out + 1] = c_row(TC_FENCE)
     end
     return out
   elseif el.type == 'subagent' then
@@ -1292,7 +1291,7 @@ local function element_layout(el, ctx)
       out[#out + 1] = chrome_row({ { '► Input', 'TCodeTokens' } })
       out[#out + 1] = c_row(TC_FENCE)
       for _, l in ipairs(section_lines(input)) do out[#out + 1] = c_row(l) end
-      if not el.input_open then out[#out + 1] = c_row(TC_FENCE) end
+      out[#out + 1] = c_row(TC_FENCE)
     end
     if not el.input_open then
       out[#out + 1] = chrome_row({ { '► Output', 'TCodeTokens' } })
@@ -1307,10 +1306,7 @@ local function element_layout(el, ctx)
         out[#out + 1] = c_row('')
         for _, l in ipairs(lines('Error: ' .. el.error)) do out[#out + 1] = c_row(l) end
       end
-      -- Fenced output: the close fence appears once the subagent stops
-      -- streaming (sa_active moves past this element).
-      local streaming = ctx and ctx.sa_active ~= nil and ctx.sa_active == el.conversation_id
-      if not streaming then out[#out + 1] = c_row(TC_FENCE) end
+      out[#out + 1] = c_row(TC_FENCE)
     end
     return out
   elseif el.type == 'system_message' then
@@ -1410,23 +1406,17 @@ local function element_chrome_spans(el, ctx)
   return spans
 end
 
--- Pure navigation intent: what `o` does on a row offset (0-indexed within
--- the element) of the layout element_layout produces. 'thinking' toggles a
--- thinking block (its collapsed line, or any expanded row); 'detail' opens
--- the tool-call / subagent detail view from EVERY row of a tool_call or
--- subagent element (label, section headers, and content rows — the
--- expand/collapse sections are gone, so nothing else toggles); nil means
--- nothing under the cursor. The tool_call_id / conversation_id guards on
--- 'detail' belong to the keymap caller, not this lookup.
-local function action_at(el, offset)
+-- Pure navigation intent: what `o` does on a row of the layout.
+-- 'thinking' toggles a thinking block from ANY row, in either state;
+-- 'detail' opens the tool-call / subagent detail view from EVERY row of a
+-- tool_call or subagent element (label, section headers, and content rows
+-- — the expand/collapse sections are gone, so nothing else toggles); nil
+-- means nothing under the cursor. The tool_call_id / conversation_id
+-- guards on 'detail' belong to the keymap caller, not this lookup.
+local function action_at(el)
   if not el then return nil end
   if el.type == 'thinking_block' then
-    if el.state == 'collapsed' then
-      return offset == 0 and 'thinking' or nil
-    elseif el.state == 'expanded' then
-      return 'thinking'
-    end
-    return nil
+    return 'thinking'
   elseif el.type == 'tool_call' or el.type == 'subagent' then
     return 'detail'
   end
@@ -1445,10 +1435,8 @@ end
 
 -- Fill in the read-only rendering inputs a caller may omit: the display width
 -- (live window width, default 80 — kept for API stability; the tail-cap
--- projection no longer truncates), the media root precomputed once per batch
--- from M.display_file (the uri-encoded absolute session media dir), and the
--- streaming-subagent signal (model.sa_active) used by the subagent output
--- fence decision.
+-- projection no longer truncates) and the media root precomputed once per
+-- batch from M.display_file (the uri-encoded absolute session media dir).
 local function fill_ctx(ctx)
   if not ctx.width then
     local win = vim.fn.bufwinid(ctx.buf)
@@ -1458,7 +1446,6 @@ local function fill_ctx(ctx)
     local session_dir = vim.fn.fnamemodify(M.display_file, ':h')
     ctx.media_root = vim.uri_encode(session_dir .. '/media/')
   end
-  ctx.sa_active = model.sa_active
 end
 
 -- Per-row highlight decoration for an element's projected lines. Chrome rows
@@ -1602,8 +1589,8 @@ local render_rebuild
 -- keeps the fences / headers / row map exact and never touches other
 -- elements or the whole buffer. Assistant / thinking keep the append path:
 -- the chrome/content split is STRUCTURAL — E "has content rows" iff its
--- height exceeds the chrome rows (1 label for an assistant_message, 0 for
--- open thinking) plus the heights of its attached blocks. With no content
+-- height exceeds the chrome rows (1 for an assistant_message and a thinking
+-- block) plus the heights of its attached blocks. With no content
 -- rows yet the delta inserts as new rows at the region end (after the am
 -- label, or below the last attached block — the wire order
 -- thinking-then-response maps to block rows then content rows); with content
@@ -1631,14 +1618,14 @@ local function render_updated_content(model, entry, state, ctx)
   local join_col = #(vim.api.nvim_buf_get_lines(buf, target_row, target_row + 1, false)[1] or '')
   local added_rows
   -- Structural chrome/content decision: the element "has content rows" iff
-  -- its region height exceeds the chrome rows (1 label for an
-  -- assistant_message, 0 for open thinking) plus the heights of its attached
-  -- blocks. The am's trailing case stays structural too: when the region
-  -- ENDS with an attached block (or holds only the label), the delta starts
-  -- a fresh segment below it — the wire order thinking-then-response — it
-  -- never joins onto the block. Never decided by matching the content text,
-  -- so content that itself starts with '► ' still joins correctly.
-  local chrome_rows = el.type == 'assistant_message' and 1 or 0
+  -- its region height exceeds the chrome rows (1 for an assistant_message
+  -- and a thinking block) plus the heights of its attached blocks. The am's
+  -- trailing case stays structural too: when the region ENDS with an
+  -- attached block (or holds only the label), the delta starts a fresh
+  -- segment below it — the wire order thinking-then-response — it never
+  -- joins onto the block. Never decided by matching the content text, so
+  -- content that itself starts with '► ' still joins correctly.
+  local chrome_rows = 1
   local attached_sum = 0
   local trailing_block = false
   if el.type == 'assistant_message' then
@@ -1773,7 +1760,7 @@ end
 
 -- Operation 3 (rebuild): replace element E's region in place from full model
 -- state (updated_all: toggle / collapse / expand / status change / fence
--- close / merge reopen). Delete E's tracked highlight extmarks, project fresh
+-- close). Delete E's tracked highlight extmarks, project fresh
 -- lines, replace E's region, shift later elements by the height delta, set
 -- E's new height, and re-apply the highlights. An attached block's rebuild
 -- also grows/shrinks its host am's region with it.
@@ -2093,50 +2080,6 @@ end
 local function create_jsonl_reader(filepath, buf, ns, on_event)
   local state = { last_size = 0, line_buffer = '', is_initial_load = true }
 
-  -- One-shot settle timer used to flush content deferred during the initial
-  -- bulk load (thinking blocks / open args fences that never got closed, e.g.
-  -- a crashed session). It is re-armed on every content read, so
-  -- it only fires after the file has been quiet for SETTLE_MS — a live
-  -- session keeps streaming and never flushes prematurely, while a static
-  -- file (idle/crashed) materializes its deferred content once.
-  local flush_timer = nil
-
-  local function cancel_flush_timer()
-    if flush_timer then
-      flush_timer:stop()
-      flush_timer:close()
-      flush_timer = nil
-    end
-  end
-
-  local function flush_deferred()
-    if not vim.api.nvim_buf_is_valid(buf) then return end
-    -- Reducer-level "close open elements" (collapse open thinking, close open
-    -- args/input fences), rendered by render_batch (its own modifiable window,
-    -- scroll, and markdown kick). The updated_all rebuilds materialize any
-    -- bulk-deferred content from model state in one shot.
-    local ok, err = pcall(function()
-      local diff = close_open_elements(model)
-      render_batch(model, { diff }, { buf = buf, ns = ns, bulk = false })
-    end)
-    if not ok then
-      vim.api.nvim_err_writeln('flush_deferred render error: ' .. tostring(err))
-    end
-  end
-
-  local function arm_flush_timer()
-    cancel_flush_timer()
-    flush_timer = vim.uv.new_timer()
-    flush_timer:start(500, 0, vim.schedule_wrap(flush_deferred))
-  end
-
-  -- Stop the timer when the buffer goes away (harmless if already fired).
-  vim.api.nvim_create_autocmd({ 'BufDelete', 'BufWipeout' }, {
-    buffer = buf,
-    once = true,
-    callback = cancel_flush_timer,
-  })
-
   local function check()
     local file = io.open(filepath, 'r')
     if not file then return end
@@ -2146,9 +2089,6 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
 
     if not new_content or #new_content == 0 then return end
     state.last_size = state.last_size + #new_content
-    -- Any new content pushes the settle-flush out: while the file keeps
-    -- growing the stream is live and collapse points handle fences naturally.
-    arm_flush_timer()
 
     local data = state.line_buffer .. new_content
     local lines = vim.split(data, '\n', { plain = true })
@@ -2199,16 +2139,11 @@ local function create_jsonl_reader(filepath, buf, ns, on_event)
         end
       end
 
-      -- Render the whole batch inside render_batch's single modifiable window
-      -- (bulk defers per-chunk content writes; the settle flush materializes).
+      -- Render the whole batch inside render_batch's single modifiable window;
+      -- the first batch (bulk = true) performs the one-time full projection.
       render_batch(model, diffs, { buf = buf, ns = ns, bulk = state.is_initial_load })
       if state.is_initial_load then
         state.is_initial_load = false
-        -- No immediate flush here: arm_flush_timer (called on every content
-        -- read above) fires once the file has been quiet for 500 ms, so a
-        -- live session mid-args/mid-thinking keeps its fence open and
-        -- subsequent chunks stream normally, while a static file (idle or
-        -- crashed) materializes deferred content exactly once.
       end
     end)
   end
@@ -2261,9 +2196,9 @@ end
 local function keymap_o(model, buf, ns)
   local cursor_line = vim.api.nvim_win_get_cursor(0)[1] - 1  -- 0-indexed
 
-  local el, offset = element_at_row(model, buf, cursor_line)
+  local el = select(1, element_at_row(model, buf, cursor_line))
   if not el then return end
-  local kind = action_at(el, offset)
+  local kind = action_at(el)
 
   if kind == 'thinking' then
     local d = toggle_thinking_element(model, el)
