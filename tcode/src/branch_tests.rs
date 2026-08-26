@@ -8,21 +8,12 @@ use llm_rs::llm::{ChatOptions, LLMMessage};
 use llm_rs::media::{ContentPart, MediaData};
 
 use super::branch::{
-    DisplayCut, build_branch_content, collect_media_refs_from_display,
+    DisplayCut, branch_dir_check, build_branch_content, collect_media_refs_from_display,
     collect_media_refs_from_state, collect_subagent_ids, collect_tool_call_ids,
     commit_branch_staging, copy_dir_recursive, shell_quote, truncate_display_at_msg_id,
     truncate_state_at_user, validate_branch,
 };
-
-fn test_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/branch")
-}
-
-fn temp_dir() -> PathBuf {
-    let dir = test_root().join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&dir).expect("failed to create test dir");
-    dir
-}
+use super::test_support::TestDir;
 
 // ---------------------------------------------------------------------------
 // Fixture builders
@@ -197,7 +188,7 @@ fn truncate_state_ordinal_beyond_count_errors() {
 
 #[test]
 fn truncate_display_happy_path() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let e1 = user_envelope(1, "hello", &[]);
     let e2 = assistant_start_envelope(2);
     let e3 = user_envelope(3, "second", &[]);
@@ -222,7 +213,7 @@ fn truncate_display_happy_path() -> Result<()> {
 
 #[test]
 fn truncate_display_target_not_found_errors() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let path = write_display(&dir, &[user_envelope(1, "hello", &[])], &[]);
     let lines = read_lines(&path)?;
     let err = truncate_display_at_msg_id(&lines, 99).unwrap_err();
@@ -234,7 +225,7 @@ fn truncate_display_target_not_found_errors() -> Result<()> {
 
 #[test]
 fn truncate_display_legacy_line_errors_with_old_format() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let legacy = r#"{"UserMessage": {"msg_id": 3, "content": "hi", "created_at": 1}}"#;
     let path = write_display(&dir, &[], &[legacy]);
     let lines = read_lines(&path)?;
@@ -248,7 +239,7 @@ fn truncate_display_legacy_line_errors_with_old_format() -> Result<()> {
 
 #[test]
 fn truncate_display_mixed_new_then_legacy_errors() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let legacy = r#"{"UserMessage": {"msg_id": 2, "content": "legacy", "created_at": 1}}"#;
     let target_line = serde_json::to_string(&user_envelope(3, "third", &[])).expect("serialize");
     let path = write_display(
@@ -267,7 +258,7 @@ fn truncate_display_mixed_new_then_legacy_errors() -> Result<()> {
 
 #[test]
 fn truncate_display_skips_trailing_partial_line() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let e1 = user_envelope(1, "hello", &[]);
     let e3 = user_envelope(3, "third", &[]);
     let l1 = serde_json::to_string(&e1).expect("serialize");
@@ -286,7 +277,7 @@ fn truncate_display_skips_trailing_partial_line() -> Result<()> {
 
 #[test]
 fn truncate_display_empty_prefix_when_target_is_first_line() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let path = write_display(&dir, &[user_envelope(1, "first", &[])], &[]);
     let lines = read_lines(&path)?;
 
@@ -300,7 +291,7 @@ fn truncate_display_empty_prefix_when_target_is_first_line() -> Result<()> {
 
 #[test]
 fn truncate_display_skips_lines_without_any_id() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let target_line = serde_json::to_string(&user_envelope(2, "second", &[])).expect("serialize");
     let path = write_display(&dir, &[], &[r#"{"foo": {"bar": 1}}"#, &target_line]);
     let lines = read_lines(&path)?;
@@ -535,7 +526,7 @@ fn collect_tool_call_ids_covers_both_start_types_and_dedups() {
 
 #[test]
 fn copy_dir_recursive_copies_tree_skips_tmp_and_symlinks() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let src = dir.join("src");
     let dst = dir.join("dst");
     std::fs::create_dir_all(src.join("sub"))?;
@@ -569,7 +560,7 @@ fn copy_dir_recursive_copies_tree_skips_tmp_and_symlinks() -> Result<()> {
 
 #[test]
 fn copy_dir_recursive_missing_src_is_ok() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     copy_dir_recursive(&dir.join("nope"), &dir.join("dst"))?;
     assert!(!dir.join("dst").exists());
     Ok(())
@@ -604,7 +595,7 @@ fn empty_source_and_staging(dir: &Path) -> (PathBuf, PathBuf) {
 
 #[test]
 fn build_branch_content_writes_core_files_even_when_empty() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let (source, staging) = empty_source_and_staging(&dir);
     let state = make_state(vec![LLMMessage::System("system".to_string())]);
     let cut = cut_with_envelopes(vec![]);
@@ -633,7 +624,7 @@ fn build_branch_content_writes_core_files_even_when_empty() -> Result<()> {
 
 #[test]
 fn build_branch_content_skips_malicious_subagent_and_tool_call_ids() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let (source, staging) = empty_source_and_staging(&dir);
 
     // A real subagent dir that must be copied, and an intermediate dir so the
@@ -720,7 +711,7 @@ fn build_branch_content_skips_malicious_subagent_and_tool_call_ids() -> Result<(
 
 #[test]
 fn build_branch_content_copies_only_real_media_files() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let (source, staging) = empty_source_and_staging(&dir);
     std::fs::create_dir_all(source.join("media"))?;
     std::fs::write(source.join("media").join("a.png"), "img")?;
@@ -764,7 +755,7 @@ fn build_branch_content_copies_only_real_media_files() -> Result<()> {
 
 #[test]
 fn build_branch_content_copies_msg_id_epoch_and_retained_prefix() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let (source, staging) = empty_source_and_staging(&dir);
     let state = make_state(vec![LLMMessage::System("system".to_string())]);
 
@@ -831,7 +822,7 @@ fn build_branch_content_copies_msg_id_epoch_and_retained_prefix() -> Result<()> 
 
 #[test]
 fn build_branch_content_skips_missing_epoch_file() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let (source, staging) = empty_source_and_staging(&dir);
     let state = make_state(vec![LLMMessage::System("system".to_string())]);
     let cut = cut_with_envelopes(vec![]);
@@ -851,7 +842,7 @@ fn build_branch_content_skips_missing_epoch_file() -> Result<()> {
 
 #[test]
 fn commit_skips_pre_existing_empty_target_dir() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let base = dir.join("base");
     std::fs::create_dir_all(&base)?;
     // Linux rename would silently replace an EMPTY target dir; the pre-check
@@ -876,7 +867,7 @@ fn commit_skips_pre_existing_empty_target_dir() -> Result<()> {
 
 #[test]
 fn commit_retries_on_non_empty_collision() -> Result<()> {
-    let dir = temp_dir();
+    let dir = TestDir::new("branch");
     let base = dir.join("base");
     std::fs::create_dir_all(&base)?;
     std::fs::create_dir_all(base.join("aaaaaaaa"))?;
@@ -908,4 +899,88 @@ fn shell_quote_wraps_and_escapes_single_quotes() {
     assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     assert_eq!(shell_quote(""), "''");
     assert_eq!(shell_quote("$x `y`"), "'$x `y`'");
+}
+
+// ---------------------------------------------------------------------------
+// branch_dir_check
+// ---------------------------------------------------------------------------
+
+fn utf8_str(path: &Path) -> &str {
+    path.to_str().expect("test paths are UTF-8")
+}
+
+#[test]
+fn branch_dir_check_passes_when_dirs_match() -> Result<()> {
+    let dir = TestDir::new("branch");
+    branch_dir_check("aaaaaaaa", Some(utf8_str(dir.path())), dir.path())?;
+    Ok(())
+}
+
+#[test]
+fn branch_dir_check_rejects_mismatched_dir() -> Result<()> {
+    let dir = TestDir::new("branch");
+    let other = TestDir::new("branch");
+    let err = branch_dir_check("aaaaaaaa", Some(utf8_str(dir.path())), other.path()).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("Cannot branch: current directory"),
+        "unexpected error: {msg}"
+    );
+    assert!(msg.contains("aaaaaaaa"), "session id missing: {msg}");
+    assert!(
+        msg.contains("Run `tcode branch` from"),
+        "expected the run-from hint: {msg}"
+    );
+    Ok(())
+}
+
+#[test]
+fn branch_dir_check_passes_when_parent_has_no_cwd() -> Result<()> {
+    let dir = TestDir::new("branch");
+    branch_dir_check("aaaaaaaa", None, dir.path())?;
+    Ok(())
+}
+
+#[test]
+fn branch_dir_check_passes_when_recorded_cwd_is_unresolvable() -> Result<()> {
+    let dir = TestDir::new("branch");
+    let other = TestDir::new("branch");
+    branch_dir_check(
+        "aaaaaaaa",
+        Some(utf8_str(&dir.path().join("gone"))),
+        other.path(),
+    )?;
+    Ok(())
+}
+
+#[test]
+fn branch_dir_check_passes_when_current_dir_is_unresolvable() -> Result<()> {
+    let dir = TestDir::new("branch");
+    branch_dir_check(
+        "aaaaaaaa",
+        Some(utf8_str(dir.path())),
+        &dir.path().join("gone"),
+    )?;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// branch cwd recording
+// ---------------------------------------------------------------------------
+
+#[test]
+fn branch_meta_records_cwd_at_creation() -> Result<()> {
+    let dir = TestDir::new("branch");
+    let (source, staging) = empty_source_and_staging(dir.path());
+    let state = make_state(vec![LLMMessage::System("system".to_string())]);
+    let cut = cut_with_envelopes(vec![]);
+
+    build_branch_content(&source, &staging, &state, &cut)?;
+    let recorded = tcode_runtime::session::record_session_cwd_if_missing(&staging, dir.path())?;
+
+    let expected = utf8_str(dir.path());
+    assert_eq!(recorded.as_deref(), Some(expected));
+    let meta = tcode_runtime::session::read_session_meta(&staging)?.expect("branch meta written");
+    assert_eq!(meta.cwd.as_deref(), Some(expected));
+    Ok(())
 }

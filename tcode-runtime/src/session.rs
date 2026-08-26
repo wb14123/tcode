@@ -41,6 +41,10 @@ pub struct SessionMeta {
     pub last_active_at: Option<u64>,
     #[serde(default)]
     pub mode: SessionMode,
+    /// Working directory recorded once at first runtime start. `None` for
+    /// sessions created before this feature and for web-only sessions.
+    #[serde(default)]
+    pub cwd: Option<String>,
 }
 
 fn now_millis() -> u64 {
@@ -49,6 +53,12 @@ fn now_millis() -> u64 {
         .expect("system clock before UNIX epoch")
         .as_millis() as u64
 }
+
+/// Serializes the session-meta read-modify-write within this process only, so
+/// a concurrent summary update cannot clobber a just-recorded cwd. This is
+/// in-process serialization: the temp+rename update path is not cross-process
+/// merge-safe, but the architecture prevents concurrent writers per session.
+static META_RMW_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
 
 pub fn read_session_meta(session_dir: &Path) -> Result<Option<SessionMeta>> {
     let path = session_dir.join("session-meta.json");
@@ -68,6 +78,7 @@ pub fn read_session_mode(session_dir: &Path) -> Result<SessionMode> {
 }
 
 fn write_initial_session_meta(session_dir: &Path, mode: SessionMode) -> Result<()> {
+    let _guard = META_RMW_LOCK.lock();
     if read_session_meta(session_dir)?.is_some() {
         return Ok(());
     }
@@ -81,6 +92,7 @@ fn write_initial_session_meta(session_dir: &Path, mode: SessionMode) -> Result<(
         created_at: Some(now),
         last_active_at: Some(now),
         mode,
+        cwd: None,
     };
     let meta_json = serde_json::to_string_pretty(&meta)?;
     let meta_path = session_dir.join("session-meta.json");
@@ -94,7 +106,7 @@ fn write_initial_session_meta(session_dir: &Path, mode: SessionMode) -> Result<(
             .write_all(meta_json.as_bytes())
             .with_context(|| format!("failed to write {}", meta_path.display())),
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            read_session_meta(session_dir)?;
+            read_session_meta_retrying(session_dir)?;
             Ok(())
         }
         Err(e) => Err(e).with_context(|| format!("failed to create {}", meta_path.display())),
@@ -127,6 +139,7 @@ pub fn session_meta_from_summary(
             .or(Some(now)),
         last_active_at: summary.last_active_at.or(Some(now)),
         mode,
+        cwd: existing.as_ref().and_then(|meta| meta.cwd.clone()),
     })
 }
 
@@ -135,6 +148,7 @@ pub fn update_session_meta_from_summary(
     summary: &ConversationSummary,
     default_mode: SessionMode,
 ) -> Result<SessionMeta> {
+    let _guard = META_RMW_LOCK.lock();
     std::fs::create_dir_all(session_dir)
         .with_context(|| format!("failed to create {}", session_dir.display()))?;
     let meta = session_meta_from_summary(session_dir, summary, default_mode)?;
@@ -159,6 +173,138 @@ pub fn update_session_meta_from_summary(
         return Err(e).with_context(|| format!("failed to rename {}", meta_target.display()));
     }
     Ok(meta)
+}
+
+/// Record the session's working directory in the session meta, once.
+///
+/// Returns the effective recorded cwd: the freshly recorded value, the
+/// pre-existing value when the record-once invariant skips the write, or
+/// `None` when nothing was recorded (non-UTF-8 `cwd` skipped, or the meta
+/// file vanished mid-flight).
+///
+/// No-op when the meta already records a cwd (the "record once" invariant).
+/// When the meta file is missing, a new one is created containing only the
+/// cwd (mode defaults to [`SessionMode::Normal`]), tolerating a concurrent
+/// creation race the same way [`write_initial_session_meta`] does. Otherwise
+/// the cwd is set on the existing meta and written back atomically (temp file
+/// + rename).
+///
+/// A non-UTF-8 `cwd` is logged and skipped: a weird path must never fail
+/// session startup.
+pub fn record_session_cwd_if_missing(session_dir: &Path, cwd: &Path) -> Result<Option<String>> {
+    let _guard = META_RMW_LOCK.lock();
+    let cwd_str = match tcode_encoding::path_to_str(cwd) {
+        Ok(s) => s.to_string(),
+        Err(e) => {
+            tracing::warn!(
+                path = ?cwd,
+                error = %e,
+                "skipping session cwd record: path is not valid UTF-8"
+            );
+            return Ok(None);
+        }
+    };
+
+    std::fs::create_dir_all(session_dir)
+        .with_context(|| format!("failed to create {}", session_dir.display()))?;
+
+    let meta_path = session_dir.join("session-meta.json");
+    // Retry-tolerant read: a concurrent creator may have created the file but
+    // not yet finished writing it, which would otherwise surface as a spurious
+    // parse error (empty/partial file).
+    let mut existing = read_session_meta_retrying(session_dir)?;
+    if existing.is_none() {
+        // Meta file missing: create one containing only the cwd. A concurrent
+        // creator may win the create_new race; re-read it and fall through.
+        let meta = SessionMeta {
+            description: None,
+            created_at: None,
+            last_active_at: None,
+            mode: SessionMode::Normal,
+            cwd: Some(cwd_str.clone()),
+        };
+        let meta_json = serde_json::to_string_pretty(&meta)?;
+        match std::fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&meta_path)
+        {
+            Ok(mut file) => {
+                file.write_all(meta_json.as_bytes())
+                    .with_context(|| format!("failed to write {}", meta_path.display()))?;
+                return Ok(Some(cwd_str));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                // A concurrent creator won the race; pick up its meta (it may
+                // still be mid-write, so retry briefly).
+                existing = read_session_meta_retrying(session_dir)?;
+            }
+            Err(e) => {
+                return Err(e).with_context(|| format!("failed to create {}", meta_path.display()));
+            }
+        }
+    }
+
+    // Record once: never overwrite an existing cwd.
+    let Some(mut meta) = existing else {
+        // The meta file vanished between our reads; nothing was recorded.
+        return Ok(None);
+    };
+    if let Some(recorded) = meta.cwd {
+        return Ok(Some(recorded));
+    }
+    meta.cwd = Some(cwd_str.clone());
+
+    let meta_json = serde_json::to_string_pretty(&meta)?;
+    let temp_nonce: u64 = rand::rng().random();
+    let meta_tmp = session_dir.join(format!(
+        "session-meta.json.{}.{}.tmp",
+        std::process::id(),
+        temp_nonce
+    ));
+    let meta_target = session_dir.join("session-meta.json");
+    std::fs::write(&meta_tmp, meta_json)
+        .with_context(|| format!("failed to write {}", meta_tmp.display()))?;
+    if let Err(e) = std::fs::rename(&meta_tmp, &meta_target) {
+        if let Err(cleanup_err) = std::fs::remove_file(&meta_tmp) {
+            tracing::warn!(
+                temp_file = %meta_tmp.display(),
+                error = %cleanup_err,
+                "failed to remove session metadata temp file after rename failure"
+            );
+        }
+        return Err(e).with_context(|| format!("failed to rename {}", meta_target.display()));
+    }
+    Ok(Some(cwd_str))
+}
+
+/// Re-read the session meta, tolerating a brief window in which a concurrent
+/// creator has created the file but not yet finished writing it.
+///
+/// Only serde parse errors are retried (the create-then-write window), bounded
+/// to ~50ms total; IO errors fail fast. `NotFound` is not an error —
+/// [`read_session_meta`] returns `Ok(None)` for it.
+///
+/// Note: callers hold [`META_RMW_LOCK`] while this runs, so the retry loop may
+/// sleep under the lock for up to ~50ms — only when the meta stays permanently
+/// partial (e.g. a creator that crashed mid-write).
+fn read_session_meta_retrying(session_dir: &Path) -> Result<Option<SessionMeta>> {
+    const RETRY_WINDOW: std::time::Duration = std::time::Duration::from_millis(50);
+    let deadline = std::time::Instant::now() + RETRY_WINDOW;
+    loop {
+        match read_session_meta(session_dir) {
+            Ok(meta) => return Ok(meta),
+            Err(e) => {
+                if e.downcast_ref::<serde_json::Error>().is_some()
+                    && std::time::Instant::now() < deadline
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(1));
+                    continue;
+                }
+                return Err(e);
+            }
+        }
+    }
 }
 
 /// Returns the base path for all sessions: ~/.tcode/sessions/

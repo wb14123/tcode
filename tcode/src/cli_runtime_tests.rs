@@ -1,62 +1,12 @@
-use std::ffi::OsString;
 use std::net::{IpAddr, Ipv4Addr};
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
 use std::time::Duration;
 
 use clap::Parser;
-use parking_lot::Mutex;
 use tcode_runtime::protocol::{RuntimeOwnerKind, ServerMessage, SessionRuntimeInfo};
 use tcode_runtime::session::Session;
 use tcode_runtime::session::{SessionMode, read_session_mode};
 
-fn test_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/tcode-cli-runtime")
-}
-
-fn temp_dir() -> PathBuf {
-    let dir = test_root().join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&dir).expect("failed to create test dir");
-    dir
-}
-
-fn home_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct HomeGuard {
-    _guard: parking_lot::MutexGuard<'static, ()>,
-    previous_home: Option<OsString>,
-}
-
-impl HomeGuard {
-    fn set(home_dir: &Path) -> Self {
-        let guard = home_env_lock().lock();
-        let previous_home = std::env::var_os("HOME");
-        // SAFETY: this test holds a process-wide lock while mutating HOME.
-        unsafe { std::env::set_var("HOME", home_dir) };
-        Self {
-            _guard: guard,
-            previous_home,
-        }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        match &self.previous_home {
-            Some(previous_home) => {
-                // SAFETY: restoration happens while the same process-wide lock is held.
-                unsafe { std::env::set_var("HOME", previous_home) };
-            }
-            None => {
-                // SAFETY: restoration happens while the same process-wide lock is held.
-                unsafe { std::env::remove_var("HOME") };
-            }
-        }
-    }
-}
+use super::test_support::{HomeGuard, TestDir};
 
 #[test]
 fn remote_without_password_parses() {
@@ -104,8 +54,8 @@ fn remote_allow_insecure_http_flag_is_accepted() {
 
 #[test]
 fn serve_initializes_requested_mode_when_only_stale_socket_exists() -> anyhow::Result<()> {
-    let home_dir = temp_dir();
-    let _home_guard = HomeGuard::set(&home_dir);
+    let home_dir = TestDir::new("cli_runtime");
+    let _home_guard = HomeGuard::set(home_dir.path());
     let session = Session::new("stales01".to_string())?;
     std::fs::write(session.socket_path(), b"stale socket placeholder")?;
 

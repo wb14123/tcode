@@ -43,7 +43,14 @@ mod tree_tests;
 #[cfg(test)]
 mod lua_tests;
 
+#[cfg(test)]
+mod attach_warning_tests;
+
+#[cfg(test)]
+mod test_support;
+
 use std::fs;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -95,7 +102,10 @@ use tcode_runtime::bootstrap::{
     parse_search_engine, probe_runtime_status,
 };
 use tcode_runtime::protocol::{RuntimeOwnerKind, SessionRuntimeInfo};
-use tcode_runtime::session::{SessionMode, ensure_session_mode_initialized, read_session_mode};
+use tcode_runtime::session::{
+    SessionMeta, SessionMode, ensure_session_mode_initialized, read_session_meta,
+    read_session_mode, validate_session_path,
+};
 use tool_call_display::ToolCallDisplayClient;
 
 #[derive(Parser)]
@@ -372,6 +382,211 @@ fn session_id_or_pick(opt: Option<String>) -> Result<Option<String>> {
     match opt {
         Some(id) => Ok(Some(id)),
         None => session_picker::pick_session(),
+    }
+}
+
+/// Classify whether attaching from `current_dir` to a session recorded at
+/// `recorded_cwd` is a cross-folder attach. Uses the picker's exact-match
+/// semantics ([`session_picker::canonical_paths_match`]): both paths are
+/// canonicalized and must be exactly equal.
+///
+/// Returns `Ok(true)` when the recorded cwd resolves to the current folder
+/// (attach proceeds silently), `Ok(false)` when it resolves to a different
+/// folder (warn and ask for explicit confirmation), and `Err(reason)` when
+/// the check cannot be performed — no recorded cwd, a recorded cwd whose
+/// folder no longer exists, or a current dir that cannot be resolved. The
+/// error message is the human-readable reason.
+fn cross_folder_check(recorded_cwd: Option<&str>, current_dir: &Path) -> Result<bool> {
+    let Some(recorded_cwd) = recorded_cwd else {
+        return Err(anyhow!("no recorded cwd"));
+    };
+    let recorded_cwd = std::fs::canonicalize(recorded_cwd)
+        .map_err(|_| anyhow!("the recorded working directory no longer exists"))?;
+    let current_dir = std::fs::canonicalize(current_dir)
+        .map_err(|_| anyhow!("cannot resolve the current directory"))?;
+    Ok(session_picker::canonical_paths_match(
+        &recorded_cwd,
+        &current_dir,
+    ))
+}
+
+/// Format the warning shown when the cross-folder check cannot be performed
+/// (no recorded cwd, deleted recorded folder, unresolvable current dir).
+/// Ends with the `[y/N]` confirmation prompt (the default answer is No).
+fn cross_folder_unverifiable_text(session_id: &str, reason: &str) -> String {
+    format!(
+        "\nCannot verify session {session_id}'s working directory ({reason}).\n\
+It may have been started in another folder: the model's context and project\n\
+settings (permissions.json, config.toml) are pinned to wherever it first ran,\n\
+which may differ from your current folder.\n\nForce attach anyway? [y/N] "
+    )
+}
+
+/// Format the cross-folder attach warning shown when the session's recorded
+/// cwd differs from the current folder. Ends with the `[y/N]` confirmation
+/// prompt (the default answer is No).
+fn cross_folder_warning_text(session_id: &str, original_cwd: &str, current_cwd: &str) -> String {
+    format!(
+        "\nSession {session_id} was started in:\n  {original_cwd}\nbut you are now in:\n  {current_cwd}\n\n\
+Attaching from a different folder can cause problems:\n\
+- The model's context pins the current directory to {original_cwd} (and loads its\n  CLAUDE.md); file paths and past tool results in this conversation refer to that\n  folder and may not exist here.\n\
+- Project-scoped settings are keyed by folder: saved permissions (permissions.json)\n  and project container config (config.toml) will be loaded for the current folder,\n  not the session's original one. Previously approved operations may prompt again,\n  or project container behavior may silently change.\n\
+- If the session runtime is not running, a new one starts in the current folder,\n  applying all of the above immediately.\n\n\
+Note: this attach will not overwrite the session's recorded working directory;\n\
+it stays pinned to the folder shown above.\n\nForce attach anyway? [y/N] "
+    )
+}
+
+/// Read the user's answer to the force-attach prompt from stdin. Only `y` /
+/// `yes` (trimmed, case-insensitive) confirms; empty input, anything else,
+/// or EOF is treated as No.
+fn confirm_force_attach() -> bool {
+    let mut line = String::new();
+    match std::io::stdin().read_line(&mut line) {
+        Ok(_) => matches!(line.trim().to_ascii_lowercase().as_str(), "y" | "yes"),
+        Err(e) => {
+            tracing::warn!("failed to read attach confirmation from stdin: {e}");
+            false
+        }
+    }
+}
+
+/// Validate the attach target without creating anything (no `Session::new`,
+/// which would create the session directory): the id must be valid and the
+/// session must have conversation state to resume. Bails with the same
+/// "No conversation state found" error the attach flow always surfaced.
+fn validate_attach_target(session_id: &str) -> Result<()> {
+    validate_session_path(session_id)?;
+    let session_dir = session::base_path()?.join(session_id);
+    if !session_dir.join("conversation-state.json").exists() {
+        anyhow::bail!(
+            "No conversation state found for session '{}'. Nothing to resume.",
+            session_id
+        );
+    }
+    Ok(())
+}
+
+/// Read the session's meta without creating anything: reads
+/// `session-meta.json` directly from `~/.tcode/sessions/<id>` (never
+/// `Session::new`, which would create the directory). Returns `Ok(None)` when
+/// the meta records nothing or cannot be read (logged; the attach then treats
+/// the session as having no recorded cwd).
+fn read_session_meta_non_creating(session_id: &str) -> Result<Option<SessionMeta>> {
+    validate_session_path(session_id)?;
+    let session_dir = session::base_path()?.join(session_id);
+    match read_session_meta(&session_dir) {
+        Ok(meta) => Ok(meta),
+        Err(e) => {
+            tracing::warn!("failed to read session meta for '{session_id}': {e}");
+            Ok(None)
+        }
+    }
+}
+
+/// Ensure-on-open index repair for the attach path: registers the session
+/// under the project of its recorded cwd so the current-folder picker view
+/// can find it. Runs unconditionally after id resolution and before the
+/// cross-folder warning check, so a declined force-attach still repairs the
+/// index (it mirrors meta; independent of the prompt outcome). No-op when no
+/// cwd is recorded or the id is a non-root (subagent) session name: only
+/// root sessions are ever indexed, so those names are skipped silently.
+/// Warn-only: a repair failure must never block the attach.
+fn repair_session_index(session_id: &str, recorded_cwd: Option<&str>) {
+    let Some(cwd) = recorded_cwd else {
+        return;
+    };
+    if !session::is_root_session_name(session_id) {
+        return;
+    }
+    if let Err(e) = tcode_runtime::project::ensure_session_indexed(session_id, Path::new(cwd)) {
+        tracing::warn!(
+            session_id,
+            cwd,
+            error = %e,
+            "failed to repair session index during attach"
+        );
+    }
+}
+
+/// Cross-folder attach guard: when the session's recorded cwd differs from
+/// the current folder, print an explanatory warning and require explicit
+/// confirmation. Returns `Ok(true)` to proceed with the attach and `Ok(false)`
+/// when the user declined (the caller should abort cleanly). When the check
+/// cannot be performed (no recorded cwd, deleted recorded folder, unresolvable
+/// current dir) the user is asked to confirm the unverifiable force-attach
+/// instead of passing silently. Web-only sessions never prompt: their cwd is
+/// deliberately not recorded, so there is nothing to verify against.
+/// Applies regardless of whether the session runtime is currently active. The
+/// recorded cwd comes from the attach path's single meta read (see
+/// [`read_session_meta_non_creating`]).
+fn confirm_cross_folder_attach(
+    session_id: &str,
+    recorded_cwd: Option<String>,
+    session_mode: Option<SessionMode>,
+) -> Result<bool> {
+    if session_mode.is_some_and(SessionMode::is_web_only) {
+        return Ok(true);
+    }
+    let current_dir = match std::env::current_dir() {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!("failed to get current directory: {e}");
+            return prompt_cross_folder_attach(&cross_folder_unverifiable_text(
+                session_id,
+                "cannot resolve the current directory",
+            ));
+        }
+    };
+    match cross_folder_check(recorded_cwd.as_deref(), &current_dir) {
+        Ok(true) => Ok(true),
+        Ok(false) => {
+            let Some(original_cwd) = recorded_cwd else {
+                // cross_folder_check only reports a mismatch when a recorded
+                // cwd exists; treat this unreachable state as "proceed silently".
+                tracing::warn!(
+                    "cross-folder mismatch reported without a recorded cwd for '{session_id}'"
+                );
+                return Ok(true);
+            };
+            let current_cwd = match path_to_str(&current_dir) {
+                Ok(cwd) => cwd.to_string(),
+                Err(e) => {
+                    // A non-UTF-8 current dir must never silently bypass the
+                    // cross-folder confirmation: render it with Rust's lossless
+                    // Debug escaping (same fallback as the picker) and prompt
+                    // anyway.
+                    tracing::warn!("current directory is not valid UTF-8: {e}");
+                    format!("{current_dir:?}")
+                }
+            };
+            prompt_cross_folder_attach(&cross_folder_warning_text(
+                session_id,
+                &original_cwd,
+                &current_cwd,
+            ))
+        }
+        Err(e) => {
+            let reason = format!("{e}");
+            tracing::warn!("cannot verify session '{session_id}' working directory: {reason}");
+            prompt_cross_folder_attach(&cross_folder_unverifiable_text(session_id, &reason))
+        }
+    }
+}
+
+/// Print a force-attach warning and read the user's answer. Returns `Ok(true)`
+/// to proceed with the attach and `Ok(false)` when the user declined (the
+/// caller should abort cleanly).
+fn prompt_cross_folder_attach(text: &str) -> Result<bool> {
+    print!("{text}");
+    std::io::stdout()
+        .flush()
+        .context("Failed to flush attach warning")?;
+    if confirm_force_attach() {
+        Ok(true)
+    } else {
+        println!("Aborted.");
+        Ok(false)
     }
 }
 
@@ -665,6 +880,24 @@ async fn main() -> Result<()> {
                     "tcode attach must be run inside tmux.\nRun `tcode serve` to start the server without tmux."
                 );
             }
+            // Cheap validation before creating anything: no session dir is
+            // created and no prompt fires until the id is valid and the
+            // session has conversation state to resume (Session::new would
+            // create the dir).
+            validate_attach_target(&session_id)?;
+            // Single non-creating meta read for the whole attach path: the
+            // recorded cwd drives both the ensure-on-open index repair and
+            // the cross-folder warning. The repair runs unconditionally
+            // before the warning check, so even a declined force-attach still
+            // repairs the index; it is warn-only and can never block the
+            // attach.
+            let meta = read_session_meta_non_creating(&session_id)?;
+            let recorded_cwd = meta.as_ref().and_then(|m| m.cwd.clone());
+            let meta_mode = meta.as_ref().map(|m| m.mode);
+            repair_session_index(&session_id, recorded_cwd.as_deref());
+            if !confirm_cross_folder_attach(&session_id, recorded_cwd, meta_mode)? {
+                return Ok(());
+            }
             let sess = Session::new(session_id.clone())?;
             if !sess.conversation_state_file().exists() {
                 anyhow::bail!(
@@ -725,7 +958,6 @@ async fn main() -> Result<()> {
         }
         Some(Commands::Sessions) => {
             use std::os::unix::net::UnixStream;
-            use tcode_runtime::session::SessionMeta;
             let sessions = session::list_sessions()?;
             if sessions.is_empty() {
                 println!("No sessions in ~/.tcode/sessions/");

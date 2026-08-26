@@ -27,3 +27,6 @@ mod session_tests;
 
 #[cfg(test)]
 mod system_prompt_tests;
+
+#[cfg(test)]
+mod test_support;

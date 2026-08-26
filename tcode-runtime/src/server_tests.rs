@@ -16,50 +16,15 @@ use tokio::net::UnixListener;
 use tokio_stream::Stream;
 
 use crate::bootstrap::send_socket_message;
+use crate::project::project_sessions_dir;
 use crate::protocol::{ClientKind, ClientMessage, RuntimeOwnerKind, ServerMessage};
 use crate::server::{
     ClientLeaseTracker, EventWriterActivityGuard, Server, ServerRuntimeOptions,
     WebIdleShutdownPolicy, WorkActivityTracker, assistant_activity_key, close_stale_running_items,
     next_tool_display_preview_chunk, tool_activity_key, validate_owner_shutdown_token,
 };
-use crate::session::SessionMode;
-
-fn test_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/r")
-}
-
-fn temp_dir() -> PathBuf {
-    let dir = test_root().join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&dir).expect("failed to create test dir");
-    dir
-}
-
-/// Per-test temp dir under the workspace target dir; removed on drop
-/// (cleanup runs on success and on panic).
-struct TestDir(PathBuf);
-
-impl TestDir {
-    fn new(module: &str) -> Self {
-        let root =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join(format!("../target/test-tmp/{module}"));
-        std::fs::create_dir_all(&root).expect("failed to create test root");
-        let dir = root.join(uuid::Uuid::new_v4().to_string());
-        // Cleanup before: remove any stale leftover at this exact path.
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).expect("failed to create test dir");
-        Self(dir)
-    }
-
-    fn path(&self) -> &Path {
-        &self.0
-    }
-}
-
-impl Drop for TestDir {
-    fn drop(&mut self) {
-        let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
+use crate::session::{SessionMeta, SessionMode};
+use crate::test_support::{HomeGuard, TestDir};
 
 /// Create a conversation client whose generator owns `dir`'s id space. A new
 /// conversation runs the epoch-file protocol: read `msg-id-epoch` (missing ->
@@ -318,30 +283,30 @@ fn event_writer_activity_guard_keeps_work_finished_before_drop_inactive() {
 #[test]
 fn event_writer_assistant_activity_key_is_stable_across_message_events() {
     let tracker = Arc::new(WorkActivityTracker::new());
-    let dir = temp_dir();
+    let dir = TestDir::new("r");
 
     let mut guard = EventWriterActivityGuard::new(Arc::clone(&tracker));
-    guard.assistant_started(assistant_activity_key(&dir));
+    guard.assistant_started(assistant_activity_key(dir.path()));
     assert!(tracker.has_active_work());
 
-    guard.assistant_finished(&assistant_activity_key(&dir));
+    guard.assistant_finished(&assistant_activity_key(dir.path()));
     assert!(!tracker.has_active_work());
 }
 
 #[test]
 fn event_writer_tool_activity_keys_are_namespaced_by_session_dir() {
     let tracker = Arc::new(WorkActivityTracker::new());
-    let root_dir = temp_dir();
-    let nested_dir = root_dir.join("subagent-child");
+    let root_dir = TestDir::new("r");
+    let nested_dir = root_dir.path().join("subagent-child");
 
     let mut root_guard = EventWriterActivityGuard::new(Arc::clone(&tracker));
     let mut nested_guard = EventWriterActivityGuard::new(Arc::clone(&tracker));
 
-    root_guard.tool_started(tool_activity_key(&root_dir, "tool-1"));
+    root_guard.tool_started(tool_activity_key(root_dir.path(), "tool-1"));
     nested_guard.tool_started(tool_activity_key(&nested_dir, "tool-1"));
     assert!(tracker.has_active_work());
 
-    root_guard.tool_finished(&tool_activity_key(&root_dir, "tool-1"));
+    root_guard.tool_finished(&tool_activity_key(root_dir.path(), "tool-1"));
     assert!(tracker.has_active_work());
 
     nested_guard.tool_finished(&tool_activity_key(&nested_dir, "tool-1"));
@@ -441,18 +406,18 @@ fn server_runtime_options_default_to_normal_session_mode() {
 
 #[tokio::test]
 async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow::Result<()> {
-    let dir = temp_dir();
-    let socket_path = dir.join("s");
+    let dir = TestDir::new("r");
+    let socket_path = dir.path().join("s");
     let owner_token = "owner-token";
     let registered_tools = Arc::new(parking_lot::Mutex::new(Vec::new()));
     let server = Server::new_with_runtime_options(
         socket_path.clone(),
-        dir.join("display.jsonl"),
-        dir.join("status.txt"),
-        dir.join("usage.txt"),
-        dir.join("effort.txt"),
-        dir.clone(),
-        dir.join("conversation.json"),
+        dir.path().join("display.jsonl"),
+        dir.path().join("status.txt"),
+        dir.path().join("usage.txt"),
+        dir.path().join("effort.txt"),
+        dir.path().to_path_buf(),
+        dir.path().join("conversation.json"),
         Box::new(MockLlm::with_registered_tools(Arc::clone(
             &registered_tools,
         ))),
@@ -491,7 +456,7 @@ async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow:
             "continue_subagent".to_string(),
         ]
     );
-    assert!(!dir.join("lsp-hint.txt").exists());
+    assert!(!dir.path().join("lsp-hint.txt").exists());
 
     // Verify the web_fetch wildcard permission was auto-granted
     let response =
@@ -523,14 +488,20 @@ async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow:
 
 #[tokio::test]
 async fn server_run_removes_stale_socket_inside_startup_path_before_bind() -> anyhow::Result<()> {
-    let dir = temp_dir();
-    let socket_path = dir.join("s");
+    // Short module name keeps the Unix socket path under SUN_LEN.
+    let dir = TestDir::new("r");
+    // Redirect HOME so the startup cwd record + session index mirror never
+    // touch the real home directory.
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    let _home_guard = HomeGuard::set(&home);
+    let socket_path = dir.path().join("s");
     let stale_listener = UnixListener::bind(&socket_path)?;
     drop(stale_listener);
     assert!(socket_path.exists());
 
     let owner_token = "owner-token";
-    let server = test_server(socket_path.clone(), dir, owner_token);
+    let server = test_server(socket_path.clone(), dir.path().to_path_buf(), owner_token);
     let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
     let handle = tokio::spawn(server.run(Some(ready_tx)));
 
@@ -546,6 +517,113 @@ async fn server_run_removes_stale_socket_inside_startup_path_before_bind() -> an
 
     handle.await??;
     assert!(!socket_path.exists());
+    Ok(())
+}
+
+/// Server start mirrors the recorded cwd into the per-project session index:
+/// a fresh session gets its zero-byte marker under the project of the folder
+/// the server recorded at startup.
+#[tokio::test]
+async fn server_start_writes_session_index_entry() -> anyhow::Result<()> {
+    // Short module name keeps the Unix socket path under SUN_LEN.
+    let dir = TestDir::new("r");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    let _home_guard = HomeGuard::set(&home);
+
+    let session_dir = dir.path().join("abc123xy");
+    std::fs::create_dir_all(&session_dir)?;
+    let socket_path = dir.path().join("s");
+    let owner_token = "owner-token";
+
+    let server = test_server(socket_path.clone(), session_dir.clone(), owner_token);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(server.run(Some(ready_tx)));
+    ready_rx.await??;
+
+    // The recorded cwd is the test process's current folder, so the entry
+    // must appear under that project's sessions dir.
+    let recorded = std::env::current_dir()?;
+    let marker = project_sessions_dir(&recorded)?.join("abc123xy");
+    assert!(
+        marker.is_file(),
+        "expected index marker at {}",
+        marker.display()
+    );
+    assert_eq!(std::fs::metadata(&marker)?.len(), 0);
+
+    let response = send_socket_message(
+        socket_path,
+        &ClientMessage::AuthorizedShutdown {
+            owner_token: owner_token.to_string(),
+        },
+    )
+    .await?;
+    assert!(matches!(response, Some(ServerMessage::Ack)));
+    handle.await??;
+    Ok(())
+}
+
+/// When the session meta already records a cwd (folder A) and the server
+/// starts in a different folder, the index entry stays under the recorded
+/// cwd's project — never under the server's folder.
+#[tokio::test]
+async fn server_start_keeps_entry_under_recorded_cwd_for_cross_folder() -> anyhow::Result<()> {
+    // Short module name keeps the Unix socket path under SUN_LEN.
+    let dir = TestDir::new("r");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    let _home_guard = HomeGuard::set(&home);
+
+    // The session's recorded cwd differs from the folder the server runs in
+    // (the test process's current folder).
+    let folder_a = dir.path().join("folder-a");
+    std::fs::create_dir_all(&folder_a)?;
+
+    let session_dir = dir.path().join("abc123xy");
+    std::fs::create_dir_all(&session_dir)?;
+    let meta = SessionMeta {
+        description: None,
+        created_at: Some(1),
+        last_active_at: Some(2),
+        mode: SessionMode::Normal,
+        cwd: Some(folder_a.to_str().unwrap().to_string()),
+    };
+    std::fs::write(
+        session_dir.join("session-meta.json"),
+        serde_json::to_string_pretty(&meta)?,
+    )?;
+
+    let socket_path = dir.path().join("s");
+    let owner_token = "owner-token";
+    let server = test_server(socket_path.clone(), session_dir.clone(), owner_token);
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(server.run(Some(ready_tx)));
+    ready_rx.await??;
+
+    let marker = project_sessions_dir(&folder_a)?.join("abc123xy");
+    assert!(
+        marker.is_file(),
+        "expected index marker under the recorded cwd at {}",
+        marker.display()
+    );
+
+    let server_folder = std::env::current_dir()?;
+    let foreign = project_sessions_dir(&server_folder)?.join("abc123xy");
+    assert!(
+        !foreign.exists(),
+        "no entry may appear under the server's folder"
+    );
+
+    let response = send_socket_message(
+        socket_path,
+        &ClientMessage::AuthorizedShutdown {
+            owner_token: owner_token.to_string(),
+        },
+    )
+    .await?;
+    assert!(matches!(response, Some(ServerMessage::Ack)));
+    handle.await??;
     Ok(())
 }
 #[tokio::test]
@@ -802,8 +880,9 @@ async fn dev_null_default_permissions_granted() -> anyhow::Result<()> {
         return Ok(());
     }
 
+    let dir = TestDir::new("r");
     let pm = Arc::new(llm_rs::permission::PermissionManager::new(
-        temp_dir().join("permissions.json"),
+        dir.path().join("permissions.json"),
     ));
     crate::server::grant_dev_null_default_permissions(&pm).await?;
 

@@ -747,6 +747,36 @@ pub(crate) fn commit_branch_staging(
     )
 }
 
+/// Verify that the current directory matches the source session's recorded
+/// working directory, so the branch starts in the same project world as its
+/// parent. Passes when the session has no recorded cwd or either path cannot
+/// be canonicalized (a mismatch cannot be proven).
+pub(crate) fn branch_dir_check(
+    session_id: &str,
+    recorded_cwd: Option<&str>,
+    current_dir: &Path,
+) -> Result<()> {
+    let Some(recorded) = recorded_cwd else {
+        return Ok(());
+    };
+    let (Ok(recorded_canon), Ok(current_canon)) = (
+        fs::canonicalize(Path::new(recorded)),
+        fs::canonicalize(current_dir),
+    ) else {
+        return Ok(());
+    };
+    if recorded_canon != current_canon {
+        bail!(
+            "Cannot branch: current directory {} differs from session {}'s working directory {}.\nRun `tcode branch` from {}.",
+            current_canon.display(),
+            session_id,
+            recorded_canon.display(),
+            recorded_canon.display()
+        );
+    }
+    Ok(())
+}
+
 /// Clone the source session up to (not including) the target user message
 /// into a new independent session and open it in a new tmux tab.
 pub(crate) fn run_branch(
@@ -759,7 +789,19 @@ pub(crate) fn run_branch(
     let display_path = source_dir.join("display.jsonl");
     let state_path = source_dir.join("conversation-state.json");
 
-    // Step 1: read and cut the source display at the target line.
+    // Step 1: verify the branch starts from the source session's recorded
+    // working directory, so it inherits the same project world as its
+    // parent. A session with no recorded cwd, or an unresolvable path,
+    // cannot be checked and passes.
+    let recorded_cwd =
+        tcode_runtime::session::read_session_meta(&source_dir)?.and_then(|meta| meta.cwd);
+    branch_dir_check(
+        source_session_id,
+        recorded_cwd.as_deref(),
+        &std::env::current_dir()?,
+    )?;
+
+    // Step 2: read and cut the source display at the target line.
     let content = fs::read_to_string(&display_path).with_context(|| {
         format!(
             "failed to read display file {}: target msg_id {} cannot be found",
@@ -779,7 +821,7 @@ pub(crate) fn run_branch(
         "display cut complete"
     );
 
-    // Step 2: read the full state, validate against it, then truncate it.
+    // Step 3: read the full state, validate against it, then truncate it.
     let state_json = fs::read_to_string(&state_path)
         .with_context(|| format!("failed to read conversation state {}", state_path.display()))?;
     let state: ConversationState = serde_json::from_str(&state_json).with_context(|| {
@@ -791,17 +833,29 @@ pub(crate) fn run_branch(
     validate_branch(&state, &cut, &state_path, &display_path)?;
     let truncated_state = truncate_state_at_user(state, cut.target_ordinal)?;
 
-    // Step 3: reserve a fresh session id.
+    // Step 4: reserve a fresh session id.
     let new_id = tcode_runtime::session::generate_unique_session_id(&base, None)?;
 
-    // Step 4: staging dir on the same filesystem as the final location.
+    // Step 5: staging dir on the same filesystem as the final location.
     let staging = create_staging_dir(&base)?;
 
-    // Steps 5-7: build content and commit. Any failure removes the staging
-    // dir so nothing half-written remains in the sessions dir.
+    // Steps 6-8: build content, record the cwd, and commit. Any failure
+    // removes the staging dir so nothing half-written remains in the
+    // sessions dir.
     if let Err(e) = build_branch_content(&source_dir, &staging, &truncated_state, &cut) {
         cleanup_staging(&staging);
         return Err(e);
+    }
+    // Record the branch's cwd (warn-only: a record failure must never fail
+    // the branch). In the normal flow this equals the parent's recorded cwd,
+    // so the branch inherits the same project world from birth.
+    if let Err(e) =
+        tcode_runtime::session::record_session_cwd_if_missing(&staging, &std::env::current_dir()?)
+    {
+        tracing::warn!(
+            error = %e,
+            "failed to record branch session cwd; branch continues without a recorded cwd"
+        );
     }
     let new_id = match commit_branch_staging(&base, &staging, new_id) {
         Ok(id) => id,
@@ -811,7 +865,7 @@ pub(crate) fn run_branch(
         }
     };
 
-    // Step 8: open the branch in a new tmux tab. The session is already
+    // Step 9: open the branch in a new tmux tab. The session is already
     // committed and complete, so a spawn failure is a partial success: keep
     // the session, report the tab error, and let the user attach manually.
     let spawn_outcome = (|| -> std::io::Result<std::process::Output> {
@@ -845,7 +899,7 @@ pub(crate) fn run_branch(
         }
     }
 
-    // Step 9: report success.
+    // Step 10: report success.
     println!("Branched to session {}", new_id);
     Ok(())
 }

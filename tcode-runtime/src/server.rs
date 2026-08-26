@@ -34,7 +34,10 @@ use crate::protocol::{
     ClientKind, ClientLeaseInfo, ClientMessage, RuntimeOwnerKind, ServerMessage,
     SessionRuntimeInfo, lease_timeout_duration,
 };
-use crate::session::{SessionMode, is_root_session_name, update_session_meta_from_summary};
+use crate::session::{
+    SessionMode, is_root_session_name, record_session_cwd_if_missing,
+    update_session_meta_from_summary,
+};
 use crate::system_prompt::tcode_system_prompt_builder;
 
 /// Shared map from tool_call_id -> ConversationClient that owns the tool.
@@ -613,6 +616,41 @@ impl Server {
         } else {
             Some(std::env::current_dir().context("Failed to get current working directory")?)
         };
+        // Record the session's working directory once (never overwritten). A
+        // failure must never prevent the server from starting.
+        let recorded_cwd = if let Some(cwd) = cwd.as_ref() {
+            match record_session_cwd_if_missing(&self.session_dir, cwd) {
+                Ok(recorded) => recorded,
+                Err(e) => {
+                    tracing::warn!(
+                        session_dir = %self.session_dir.display(),
+                        error = %e,
+                        "failed to record session cwd"
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        // Mirror the recorded cwd into the per-project session index so the
+        // picker's current-folder view can find this session without scanning
+        // every session. Keyed by the *recorded* cwd (the meta file is the
+        // source of truth), never by this server's folder. A failure must
+        // never prevent the server from starting.
+        if let Some(recorded_cwd) = recorded_cwd
+            && let Some(session_id) = self.session_dir.file_name().and_then(|name| name.to_str())
+            && is_root_session_name(session_id)
+            && let Err(e) =
+                crate::project::ensure_session_indexed(session_id, Path::new(&recorded_cwd))
+        {
+            tracing::warn!(
+                session_dir = %self.session_dir.display(),
+                session_id,
+                error = %e,
+                "failed to ensure session index entry"
+            );
+        }
         let permissions_path = if let Some(cwd) = cwd.as_ref() {
             crate::project::project_config_dir(cwd)?.join("permissions.json")
         } else {

@@ -15,10 +15,11 @@ use ratatui::crossterm::execute;
 use ratatui::crossterm::terminal::{
     EnterAlternateScreen, LeaveAlternateScreen, disable_raw_mode, enable_raw_mode,
 };
-use ratatui::layout::{Constraint, Layout};
+use ratatui::layout::{Alignment, Constraint, Flex, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
+use tcode_encoding::path_to_str;
 use tcode_runtime::fts::{self, IndexProgress, SearchResult};
 use tcode_runtime::session::{SessionMeta, SessionMode};
 
@@ -26,6 +27,14 @@ use crate::session::{self, Session};
 
 const TICK_RATE: Duration = Duration::from_millis(50);
 const SEARCH_DEBOUNCE: Duration = Duration::from_millis(150);
+
+/// Which sessions the picker lists: only sessions whose recorded cwd matches
+/// the current folder, or every session regardless of folder.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FilterMode {
+    CurrentFolder,
+    All,
+}
 
 struct SessionEntry {
     id: String,
@@ -76,57 +85,60 @@ struct SnippetCell {
 /// Returns `None` if the user cancels (Esc/q) or there are no sessions.
 pub fn pick_session() -> Result<Option<String>> {
     let base_path = session::base_path()?;
-    let sessions = session::list_sessions_at(&base_path)?;
-    if sessions.is_empty() {
-        println!("No sessions found in ~/.tcode/sessions/");
+    pick_session_at(&base_path)
+}
+
+/// Picker entry point over an explicit sessions base path. Returns `None`
+/// when there are no sessions at all (before any UI work) or the user
+/// cancels.
+fn pick_session_at(base_path: &Path) -> Result<Option<String>> {
+    let total_sessions = session::list_sessions_at(base_path)?.len();
+    if total_sessions == 0 {
+        println!(
+            "No sessions found in {}",
+            format_path_for_display(base_path)
+        );
         return Ok(None);
     }
 
-    // Collect session info with metadata for sorting
-    let mut entries: Vec<(SessionEntry, u64)> = sessions
-        .into_iter()
-        .filter_map(|id| {
-            let session = Session::new(id.clone()).ok()?;
-            let status = if std::os::unix::net::UnixStream::connect(session.socket_path()).is_ok() {
-                "active"
-            } else {
-                "inactive"
-            };
-            let meta = std::fs::read_to_string(session.session_meta_file())
-                .ok()
-                .and_then(|json| serde_json::from_str::<SessionMeta>(&json).ok());
-            let last_active = meta.as_ref().and_then(|m| m.last_active_at).unwrap_or(0);
-            let mode = meta.as_ref().map(|m| m.mode).unwrap_or_default();
-            let description = meta.and_then(|m| m.description);
-            Some((
-                SessionEntry {
-                    id,
-                    status: status.to_string(),
-                    mode,
-                    description,
-                    last_active_at: last_active,
-                },
-                last_active,
-            ))
-        })
-        .collect();
+    // Resolve the current folder once, up front. If it cannot be resolved
+    // (deleted cwd, unusual platform state), fall back to showing all
+    // sessions for the whole picker run.
+    let (filter_mode, current_dir) = match std::env::current_dir().and_then(std::fs::canonicalize) {
+        Ok(dir) => (FilterMode::CurrentFolder, Some(dir)),
+        Err(e) => {
+            tracing::warn!(error = %e, "failed to resolve the current directory; showing all sessions");
+            (FilterMode::All, None)
+        }
+    };
 
-    // Sort by last_active_at descending (most recent first)
-    entries.sort_by_key(|b| std::cmp::Reverse(b.1));
-
-    let entries: Vec<SessionEntry> = entries.into_iter().map(|(e, _)| e).collect();
-
-    run_picker(&entries, base_path)
+    run_picker(
+        base_path.to_path_buf(),
+        total_sessions,
+        filter_mode,
+        current_dir,
+    )
 }
 
-fn run_picker(entries: &[SessionEntry], base_path: PathBuf) -> Result<Option<String>> {
+fn run_picker(
+    base_path: PathBuf,
+    total_sessions: usize,
+    filter_mode: FilterMode,
+    current_dir: Option<PathBuf>,
+) -> Result<Option<String>> {
     enable_raw_mode()?;
     let mut stdout = io::stdout();
     execute!(stdout, EnterAlternateScreen)?;
     let backend = CrosstermBackend::new(stdout);
     let mut terminal = Terminal::new(backend)?;
 
-    let result = run_picker_loop(&mut terminal, entries, base_path);
+    let result = run_picker_loop(
+        &mut terminal,
+        base_path,
+        filter_mode,
+        current_dir.as_deref(),
+        total_sessions,
+    );
 
     let cleanup_result = (|| -> Result<()> {
         disable_raw_mode()?;
@@ -143,17 +155,27 @@ fn run_picker(entries: &[SessionEntry], base_path: PathBuf) -> Result<Option<Str
 
 fn run_picker_loop(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
-    entries: &[SessionEntry],
     base_path: PathBuf,
+    mut filter_mode: FilterMode,
+    current_dir: Option<&Path>,
+    total_sessions: usize,
 ) -> Result<Option<String>> {
     let mut list_state = ListState::default();
     list_state.select(Some(0));
 
-    let entry_by_id: HashMap<String, usize> = entries
-        .iter()
-        .enumerate()
-        .map(|(index, entry)| (entry.id.clone(), index))
-        .collect();
+    // Per-mode entry lists, loaded on demand and cached for the picker run.
+    // The current-folder list is read from the current project's session
+    // index at open; the all-sessions list (a full scan) is deferred until
+    // the first Tab into All mode.
+    let mut folder_entries: Option<Vec<SessionEntry>> = None;
+    let mut all_entries: Option<Vec<SessionEntry>> = None;
+    let mut entry_by_id: HashMap<String, usize> = entry_index_by_id(load_entries_for_mode(
+        &mut folder_entries,
+        &mut all_entries,
+        filter_mode,
+        &base_path,
+        current_dir,
+    ));
 
     let (index_tx, index_rx) = mpsc::channel();
     let index_base_path = base_path.clone();
@@ -162,7 +184,7 @@ fn run_picker_loop(
     });
     let mut index_state = IndexState {
         current: 0,
-        total: entries.len(),
+        total: total_sessions,
         finished: false,
         error: None,
     };
@@ -188,11 +210,15 @@ fn run_picker_loop(
         poll_search_results(&search_rx, &mut search_state);
         maybe_start_search(&base_path, &search_tx, &mut search_state);
 
-        let visible_len = display_len(entries, &entry_by_id, &search_state);
+        let active_entries: &[SessionEntry] = match filter_mode {
+            FilterMode::CurrentFolder => folder_entries.as_deref().unwrap_or(&[]),
+            FilterMode::All => all_entries.as_deref().unwrap_or(&[]),
+        };
+        let visible_len = display_len(active_entries, &entry_by_id, &search_state);
         clamp_selection(&mut list_state, visible_len);
 
         terminal.draw(|f| {
-            let status = status_text(&index_state, &search_state);
+            let status = status_text(&index_state, &search_state, filter_mode, visible_len);
             let mut constraints = Vec::new();
             if search_state.active {
                 constraints.push(Constraint::Length(1));
@@ -231,28 +257,63 @@ fn run_picker_loop(
             let list_area = chunks[chunk_index];
             chunk_index += 1;
 
-            let display_items = build_display_items(entries, &entry_by_id, &search_state);
-            let item_width = usize::from(list_area.width.saturating_sub(4));
-            let items: Vec<ListItem> = display_items
-                .iter()
-                .map(|item| list_item_for_display(item, item_width))
-                .collect();
-
-            let title = if search_state.active {
-                " Search sessions "
-            } else {
-                " Select a session "
+            let mode_title = match filter_mode {
+                FilterMode::All => "all sessions".to_string(),
+                FilterMode::CurrentFolder => current_dir
+                    .map(|dir| format!("in {}", format_path_for_display(dir)))
+                    .unwrap_or_else(|| "all sessions".to_string()),
             };
-            let list = List::new(items)
-                .block(Block::default().borders(Borders::ALL).title(title))
-                .highlight_style(
-                    Style::default()
-                        .add_modifier(Modifier::BOLD)
-                        .add_modifier(Modifier::REVERSED),
-                )
-                .highlight_symbol("> ");
+            let list_title = if search_state.active {
+                "Search sessions"
+            } else {
+                "Select a session"
+            };
+            let title = format!(" {list_title} - {mode_title} ");
+            let block = Block::default().borders(Borders::ALL).title(title);
 
-            f.render_stateful_widget(list, list_area, &mut list_state);
+            if show_empty_folder_hint(
+                filter_mode,
+                visible_len,
+                total_sessions,
+                current_dir,
+                search_state.active,
+            ) {
+                // The current-folder view is empty while sessions exist
+                // elsewhere: replace the list content with a centered hint
+                // pointing at the Tab toggle.
+                let hint_dir =
+                    current_dir.expect("the empty-folder hint is only shown with a current dir");
+                let hint = Line::from(Span::styled(
+                    format!(
+                        "No sessions under {} - press Tab to show all sessions",
+                        format_path_for_display(hint_dir)
+                    ),
+                    Style::default().fg(Color::Yellow),
+                ));
+                let hint_area = Layout::vertical([Constraint::Length(1)])
+                    .flex(Flex::Center)
+                    .split(block.inner(list_area))[0];
+                f.render_widget(block, list_area);
+                f.render_widget(Paragraph::new(hint).alignment(Alignment::Center), hint_area);
+            } else {
+                let display_items =
+                    build_display_items(active_entries, &entry_by_id, &search_state);
+                let item_width = usize::from(list_area.width.saturating_sub(4));
+                let items: Vec<ListItem> = display_items
+                    .iter()
+                    .map(|item| list_item_for_display(item, item_width))
+                    .collect();
+                let list = List::new(items)
+                    .block(block)
+                    .highlight_style(
+                        Style::default()
+                            .add_modifier(Modifier::BOLD)
+                            .add_modifier(Modifier::REVERSED),
+                    )
+                    .highlight_symbol("> ");
+
+                f.render_stateful_widget(list, list_area, &mut list_state);
+            }
 
             if let Some(status) = status {
                 let status_area = chunks[chunk_index];
@@ -299,7 +360,8 @@ fn run_picker_loop(
             }
             KeyCode::Enter => {
                 let selected_id = {
-                    let display_items = build_display_items(entries, &entry_by_id, &search_state);
+                    let display_items =
+                        build_display_items(active_entries, &entry_by_id, &search_state);
                     list_state
                         .selected()
                         .and_then(|i| display_items.get(i))
@@ -310,28 +372,42 @@ fn run_picker_loop(
                     break Ok(Some(selected_id));
                 }
             }
+            KeyCode::Tab => {
+                filter_mode = match filter_mode {
+                    FilterMode::CurrentFolder => FilterMode::All,
+                    FilterMode::All => FilterMode::CurrentFolder,
+                };
+                entry_by_id = entry_index_by_id(load_entries_for_mode(
+                    &mut folder_entries,
+                    &mut all_entries,
+                    filter_mode,
+                    &base_path,
+                    current_dir,
+                ));
+                list_state.select(Some(0));
+            }
             KeyCode::Up => {
                 move_selection_up(
                     &mut list_state,
-                    display_len(entries, &entry_by_id, &search_state),
+                    display_len(active_entries, &entry_by_id, &search_state),
                 );
             }
             KeyCode::Char('k') if !search_state.active => {
                 move_selection_up(
                     &mut list_state,
-                    display_len(entries, &entry_by_id, &search_state),
+                    display_len(active_entries, &entry_by_id, &search_state),
                 );
             }
             KeyCode::Down => {
                 move_selection_down(
                     &mut list_state,
-                    display_len(entries, &entry_by_id, &search_state),
+                    display_len(active_entries, &entry_by_id, &search_state),
                 );
             }
             KeyCode::Char('j') if !search_state.active => {
                 move_selection_down(
                     &mut list_state,
-                    display_len(entries, &entry_by_id, &search_state),
+                    display_len(active_entries, &entry_by_id, &search_state),
                 );
             }
             KeyCode::Backspace if search_state.active => {
@@ -542,6 +618,151 @@ fn build_display_items<'a>(
             entry,
             snippet: None,
         })
+        .collect()
+}
+
+/// Exact equality between two already-canonical paths. No canonicalization
+/// happens here — callers must pass canonical paths (the attach flow and the
+/// picker canonicalize once, up front).
+pub(crate) fn canonical_paths_match(canonical_a: &Path, canonical_b: &Path) -> bool {
+    canonical_a == canonical_b
+}
+
+/// Load (and cache) the entry list for the given mode. `CurrentFolder` reads
+/// the current project's session index; `All` scans every session under the
+/// base path (deferred until the first Tab into All mode).
+fn load_entries_for_mode<'a>(
+    folder_entries: &'a mut Option<Vec<SessionEntry>>,
+    all_entries: &'a mut Option<Vec<SessionEntry>>,
+    mode: FilterMode,
+    base_path: &Path,
+    current_dir: Option<&Path>,
+) -> &'a [SessionEntry] {
+    match mode {
+        FilterMode::CurrentFolder => folder_entries.get_or_insert_with(|| {
+            current_dir
+                .map(|dir| load_folder_entries(base_path, dir))
+                .unwrap_or_default()
+        }),
+        FilterMode::All => all_entries.get_or_insert_with(|| load_all_entries(base_path)),
+    }
+}
+
+/// Build the current-folder entry list from the current project's session
+/// index. Marker files (one per session id) drive the list; session
+/// directories and metas are only read for those ids.
+fn load_folder_entries(base_path: &Path, current_dir: &Path) -> Vec<SessionEntry> {
+    let sessions_dir = match tcode_runtime::project::project_sessions_dir(current_dir) {
+        Ok(dir) => dir,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = ?current_dir,
+                "failed to resolve the project session index; showing an empty current-folder view"
+            );
+            return Vec::new();
+        }
+    };
+    entries_from_index_markers(base_path, &sessions_dir)
+}
+
+/// Build the all-sessions entry list: every session under `base_path`, read
+/// regardless of folder. Sessions with unreadable metas are kept with default
+/// values (unchanged all-sessions behavior).
+fn load_all_entries(base_path: &Path) -> Vec<SessionEntry> {
+    let ids = match session::list_sessions_at(base_path) {
+        Ok(ids) => ids,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = ?base_path,
+                "failed to list sessions for the all-sessions view"
+            );
+            return Vec::new();
+        }
+    };
+    build_entries(base_path, ids, false)
+}
+
+/// Build an entry list from a project session index directory: one zero-byte
+/// marker file per session id. A missing index directory yields an empty list
+/// (the picker shows the Tab hint instead of falling back to a scan). Stale
+/// markers and sessions whose meta cannot be read are skipped at read time.
+fn entries_from_index_markers(base_path: &Path, sessions_dir: &Path) -> Vec<SessionEntry> {
+    let ids = match std::fs::read_dir(sessions_dir) {
+        Ok(entries) => entries
+            .filter_map(|entry| entry.ok())
+            .filter(|entry| entry.file_type().map(|t| t.is_file()).unwrap_or(false))
+            .filter_map(|entry| entry.file_name().to_str().map(str::to_string))
+            .filter(|name| session::is_valid_session_id(name))
+            .collect(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                path = ?sessions_dir,
+                "failed to read the project session index; showing an empty current-folder view"
+            );
+            Vec::new()
+        }
+    };
+    build_entries(base_path, ids, true)
+}
+
+/// Read each session id's metadata into an entry. When `require_meta` is set,
+/// sessions without a readable meta are skipped (current-folder view);
+/// otherwise they are kept with default values (all-sessions view). Entries
+/// are sorted by last_active_at descending (most recent first).
+fn build_entries(base_path: &Path, ids: Vec<String>, require_meta: bool) -> Vec<SessionEntry> {
+    let mut entries: Vec<(SessionEntry, u64)> = ids
+        .into_iter()
+        .filter_map(|id| session_entry_from_id(base_path, &id, require_meta))
+        .collect();
+    entries.sort_by_key(|(_, last_active)| std::cmp::Reverse(*last_active));
+    entries.into_iter().map(|(entry, _)| entry).collect()
+}
+
+fn session_entry_from_id(
+    base_path: &Path,
+    id: &str,
+    require_meta: bool,
+) -> Option<(SessionEntry, u64)> {
+    let session_dir = base_path.join(id);
+    if !session_dir.is_dir() {
+        return None;
+    }
+    let session = Session::with_dir(session_dir);
+    let status = if std::os::unix::net::UnixStream::connect(session.socket_path()).is_ok() {
+        "active"
+    } else {
+        "inactive"
+    };
+    let meta = std::fs::read_to_string(session.session_meta_file())
+        .ok()
+        .and_then(|json| serde_json::from_str::<SessionMeta>(&json).ok());
+    if require_meta && meta.is_none() {
+        return None;
+    }
+    let last_active = meta.as_ref().and_then(|m| m.last_active_at).unwrap_or(0);
+    let mode = meta.as_ref().map(|m| m.mode).unwrap_or_default();
+    let description = meta.and_then(|m| m.description);
+    Some((
+        SessionEntry {
+            id: id.to_string(),
+            status: status.to_string(),
+            mode,
+            description,
+            last_active_at: last_active,
+        },
+        last_active,
+    ))
+}
+
+fn entry_index_by_id(entries: &[SessionEntry]) -> HashMap<String, usize> {
+    entries
+        .iter()
+        .enumerate()
+        .map(|(index, entry)| (entry.id.clone(), index))
         .collect()
 }
 
@@ -789,7 +1010,12 @@ fn push_snippet_span(spans: &mut Vec<Span<'static>>, current: &mut String, highl
     spans.push(Span::styled(text, style));
 }
 
-fn status_text(index_state: &IndexState, search_state: &SearchState) -> Option<Line<'static>> {
+fn status_text(
+    index_state: &IndexState,
+    search_state: &SearchState,
+    filter_mode: FilterMode,
+    visible_len: usize,
+) -> Option<Line<'static>> {
     let mut parts = Vec::new();
 
     if search_state.in_progress {
@@ -798,6 +1024,14 @@ fn status_text(index_state: &IndexState, search_state: &SearchState) -> Option<L
         parts.push(format!("Search failed: {error}"));
     } else if has_current_search_results(search_state) && search_state.results.is_empty() {
         parts.push("No matches".to_string());
+    } else if has_current_search_results(search_state)
+        && !search_state.results.is_empty()
+        && filter_mode == FilterMode::CurrentFolder
+        && visible_len == 0
+    {
+        // The search found matches, but all of them were filtered out by the
+        // current-folder index, so the list area shows nothing.
+        parts.push("No matches in this folder - press Tab to show all sessions".to_string());
     }
 
     if let Some(error) = &index_state.error {
@@ -819,12 +1053,41 @@ fn status_text(index_state: &IndexState, search_state: &SearchState) -> Option<L
     }
 }
 
+/// Whether the current-folder view should render the in-list "no sessions"
+/// hint: the folder view is empty while sessions exist elsewhere, so Tab
+/// can reveal them. Suppressed while a search is active — an active search
+/// surfaces its own "No matches" status instead.
+fn show_empty_folder_hint(
+    filter_mode: FilterMode,
+    visible_len: usize,
+    total_sessions: usize,
+    current_dir: Option<&Path>,
+    search_active: bool,
+) -> bool {
+    filter_mode == FilterMode::CurrentFolder
+        && visible_len == 0
+        && total_sessions > 0
+        && current_dir.is_some()
+        && !search_active
+}
+
+/// Render a path for the picker UI. Paths are normally UTF-8; if not, fall
+/// back to Rust's lossless Debug escaping rather than a lossy conversion.
+fn format_path_for_display(path: &Path) -> String {
+    match path_to_str(path) {
+        Ok(s) => s.to_string(),
+        Err(_) => format!("{path:?}"),
+    }
+}
+
 fn default_help_bar() -> Line<'static> {
     Line::from(vec![
         Span::styled(" ↑/k", Style::default().fg(Color::Yellow)),
         Span::raw(" up  "),
         Span::styled("↓/j", Style::default().fg(Color::Yellow)),
         Span::raw(" down  "),
+        Span::styled("Tab", Style::default().fg(Color::Yellow)),
+        Span::raw(" folder/all  "),
         Span::styled("/", Style::default().fg(Color::Yellow)),
         Span::raw(" search  "),
         Span::styled("Enter", Style::default().fg(Color::Yellow)),
@@ -839,6 +1102,8 @@ fn search_help_bar() -> Line<'static> {
         Span::raw("type to search  "),
         Span::styled("↑/↓", Style::default().fg(Color::Yellow)),
         Span::raw(" navigate  "),
+        Span::styled("Tab", Style::default().fg(Color::Yellow)),
+        Span::raw(" folder/all  "),
         Span::styled("Enter", Style::default().fg(Color::Yellow)),
         Span::raw(" select  "),
         Span::styled("Esc", Style::default().fg(Color::Yellow)),
@@ -847,3 +1112,7 @@ fn search_help_bar() -> Line<'static> {
         Span::raw(" exit"),
     ])
 }
+
+#[cfg(test)]
+#[path = "session_picker_tests.rs"]
+mod session_picker_tests;

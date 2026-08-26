@@ -1,22 +1,10 @@
-use std::ffi::OsString;
-use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::path::Path;
 
 use anyhow::Result;
 use auth::OAuthTokens;
-use parking_lot::Mutex;
 
+use super::test_support::{HomeGuard, TestDir};
 use super::{auth_command_for_profile, claude_auth, config, create_llm, openai_auth};
-
-fn test_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/tcode-oauth-profile")
-}
-
-fn temp_dir() -> PathBuf {
-    let dir = test_root().join(uuid::Uuid::new_v4().to_string());
-    std::fs::create_dir_all(&dir).expect("failed to create test dir");
-    dir
-}
 
 fn now_secs() -> u64 {
     std::time::SystemTime::now()
@@ -58,53 +46,10 @@ fn api_key_config(provider: &str) -> config::TcodeConfig {
     }
 }
 
-fn home_env_lock() -> &'static Mutex<()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(()))
-}
-
-struct HomeGuard {
-    _guard: parking_lot::MutexGuard<'static, ()>,
-    previous_home: Option<OsString>,
-}
-
-impl HomeGuard {
-    fn set(home_dir: &Path) -> Self {
-        let guard = home_env_lock().lock();
-        let previous_home = std::env::var_os("HOME");
-
-        // SAFETY: these tests serialize HOME mutation with a process-wide mutex,
-        // and only call HOME-dependent code while holding that lock.
-        unsafe { std::env::set_var("HOME", home_dir) };
-
-        Self {
-            _guard: guard,
-            previous_home,
-        }
-    }
-}
-
-impl Drop for HomeGuard {
-    fn drop(&mut self) {
-        match &self.previous_home {
-            Some(previous_home) => {
-                // SAFETY: see HomeGuard::set; restoration happens while the same
-                // process-wide mutex is still held.
-                unsafe { std::env::set_var("HOME", previous_home) };
-            }
-            None => {
-                // SAFETY: see HomeGuard::set; restoration happens while the same
-                // process-wide mutex is still held.
-                unsafe { std::env::remove_var("HOME") };
-            }
-        }
-    }
-}
-
 #[tokio::test]
 async fn claude_runtime_uses_profile_specific_tokens_without_fallback() -> Result<()> {
-    let home_dir = temp_dir();
-    let _home_guard = HomeGuard::set(&home_dir);
+    let home_dir = TestDir::new("oauth_profile");
+    let _home_guard = HomeGuard::set(home_dir.path());
     let default_path = claude_auth::token_storage_path(None);
 
     write_tokens(&default_path, &token_fixture("default-claude-token"))?;
@@ -136,8 +81,8 @@ async fn claude_runtime_uses_profile_specific_tokens_without_fallback() -> Resul
 
 #[tokio::test]
 async fn openai_runtime_uses_profile_specific_tokens_when_profile_is_selected() -> Result<()> {
-    let home_dir = temp_dir();
-    let _home_guard = HomeGuard::set(&home_dir);
+    let home_dir = TestDir::new("oauth_profile");
+    let _home_guard = HomeGuard::set(home_dir.path());
     let profile_path = openai_auth::token_storage_path(Some("work"));
 
     write_tokens(&profile_path, &token_fixture("work-openai-token"))?;
