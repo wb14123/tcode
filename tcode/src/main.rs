@@ -175,8 +175,18 @@ enum Commands {
         force: bool,
     },
     /// Attach to an existing session and resume the conversation
+    ///
+    /// Must be run inside tmux. With `--session`, attaches directly; otherwise
+    /// an interactive picker is shown. The picker opens in "current folder"
+    /// mode, listing sessions whose recorded working directory matches the
+    /// current folder; press Tab to toggle to all sessions. Attaching from a
+    /// folder different from the session's recorded working directory prints a
+    /// warning and requires explicit confirmation before attaching.
     Attach,
     /// Branch off a new independent session at a user message (clone history up to, not including, that message)
+    ///
+    /// Must be run from the source session's working directory; otherwise the
+    /// command is rejected.
     Branch {
         /// The display msg_id of the target user message
         msg_id: i64,

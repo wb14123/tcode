@@ -62,7 +62,9 @@ See [02-configuration.md](02-configuration.md#config-file-location) for the wiza
 
 Attaches to an existing session and resumes the conversation in the current tmux session. Must be run inside tmux. If `--session` is omitted, an interactive picker is shown. Existing sessions always use their stored mode; passing `--web-only` does not convert a normal session to web-only or a web-only session to normal.
 
-The interactive picker lists sessions by last activity time. Press `/` to search conversation history across sessions. Search runs in the background and shows ranked snippet results with highlighted matches; the search index is checked in the background when the picker opens, so early results may be partial until that check finishes.
+Each session records its working directory once, at its first server start. When the session's recorded working directory differs from the folder you attach from, a warning is printed and attaching requires explicit confirmation (`Force attach anyway? [y/N]`). If the recorded working directory cannot be verified — no recorded cwd, the folder no longer exists, or the current directory cannot be resolved — a similar confirmation is required with the reason shown. Web-only sessions never prompt.
+
+The interactive picker opens showing sessions whose recorded working directory matches the current folder; press Tab to toggle between that view and all sessions. When the current folder has no sessions but sessions exist elsewhere, the list shows a hint to press Tab. Sessions are listed by last activity time. Press `/` to search conversation history across sessions. Search runs in the background and shows ranked snippet results with highlighted matches; the search index is checked in the background when the picker opens, so early results may be partial until that check finishes.
 
 ```
 tcode attach
@@ -131,7 +133,7 @@ tcode --session <id> permission
 
 ### `tcode project-config-path`
 
-Print the absolute path to the project config directory, where `permissions.json` and project `config.toml` are stored. The path is derived from the current working directory (hashed with SHA-256) and is stable across sessions.
+Print the absolute path to the project config directory, where `permissions.json`, project `config.toml`, and the per-project `sessions/` session index are stored. The path is derived from the current working directory (hashed with SHA-256) and is stable across sessions.
 
 ```
 tcode project-config-path
@@ -423,6 +425,10 @@ replacement in the new session — and is self-contained: subagent
 conversations, tool-call details, and media are copied, so the source session
 can be deleted without affecting the branch. The branch is opened with the
 same config profile as the source display.
+
+The command must be run from the source session's recorded working directory;
+running it from a different directory fails with an error. The `gb` keybinding
+runs from that directory.
 
 ```
 tcode --session <id> branch <msg-id>

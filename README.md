@@ -12,7 +12,7 @@ A terminal-based coding agent powered by neovim and tmux.
   - Tree-sitter syntax highlighting and render-markdown support in the display pane
   - Configurable tmux pane layout (display, edit, tree, permissions — arrange however you like)
 - **Subagent tree view** — see all subagents and tool calls in a live hierarchy, open any subagent's conversation, cancel running ones
-- **Searchable session picker** — `tcode attach` can search prior conversation history with ranked snippets, including Chinese text
+- **Session picker scoped to the current folder** — `tcode attach` opens a picker showing sessions in the current folder (Tab toggles all sessions) and can search prior conversation history with ranked snippets, including Chinese text
 - **Conversation branching** — press `gb` on any user message to fork the conversation at that point into a new independent session in a new tab, keeping the original untouched
 - **Permission dashboard** — see every permission the agent currently has at a glance, approve or revoke individually, with session and project-level persistence
 - Headless Chrome for web search and web fetch — log in with your own accounts (Kagi, Google, etc.)
