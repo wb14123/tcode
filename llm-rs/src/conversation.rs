@@ -26,15 +26,18 @@ pub struct SystemPromptContext {
     pub subagent_depth: usize,
 }
 
-pub type SystemPromptBuilder = Arc<dyn Fn(SystemPromptContext) -> String + Send + Sync + 'static>;
+pub type SystemPromptBuilder =
+    Arc<dyn Fn(SystemPromptContext) -> anyhow::Result<String> + Send + Sync + 'static>;
 
 pub fn default_system_prompt_builder() -> SystemPromptBuilder {
     Arc::new(|context| {
         if context.subagent_depth == 0 {
-            "You are a helpful assistant.".to_string()
+            Ok("You are a helpful assistant.".to_string())
         } else {
-            "You are a helpful assistant. Complete the delegated task and return a concise result."
-                .to_string()
+            Ok(
+                "You are a helpful assistant. Complete the delegated task and return a concise result."
+                    .to_string(),
+            )
         }
     })
 }
@@ -790,7 +793,7 @@ impl ConversationManager {
         })
     }
 
-    fn build_system_prompt(&self, subagent_depth: usize) -> String {
+    fn build_system_prompt(&self, subagent_depth: usize) -> anyhow::Result<String> {
         (self.system_prompt_builder)(SystemPromptContext { subagent_depth })
     }
 
@@ -917,7 +920,7 @@ impl ConversationManager {
                 last_active_at: Some(now),
             },
         )?;
-        let system_prompt = self.build_system_prompt(subagent_depth);
+        let system_prompt = self.build_system_prompt(subagent_depth)?;
         let llm_msgs = vec![LLMMessage::System(system_prompt)];
         let conversation = Conversation {
             id: conversation_id.clone(),

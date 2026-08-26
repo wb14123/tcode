@@ -191,11 +191,11 @@ mod tests {
             dir.path().join("permissions.json"),
             None,
             std::sync::Arc::new(|context: SystemPromptContext| {
-                format!("custom prompt depth {}", context.subagent_depth)
+                Ok(format!("custom prompt depth {}", context.subagent_depth))
             }),
         );
 
-        assert_eq!(manager.build_system_prompt(2), "custom prompt depth 2");
+        assert_eq!(manager.build_system_prompt(2)?, "custom prompt depth 2");
         Ok(())
     }
 

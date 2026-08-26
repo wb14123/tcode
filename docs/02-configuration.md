@@ -42,7 +42,7 @@ All other settings live in the config file.
 
 ## Session Modes
 
-Normal sessions are the default for the terminal/tmux UI. They load project context, register the local filesystem and shell tools, and honor project instructions such as `CLAUDE.md`.
+Normal sessions are the default for the terminal/tmux UI. They load project context, register the local filesystem and shell tools, and honor project instructions such as `CLAUDE.md` or `AGENTS.md`.
 
 Web sessions are always web-only. The `tcode remote` web server creates only web-only sessions — no flag is needed. Web-only sessions register only these tools:
 
@@ -52,7 +52,7 @@ Web sessions are always web-only. The `tcode remote` web server creates only web
 - `subagent`
 - `continue_subagent`
 
-They do not register shell commands, local file tools (`read`, `write`, `edit`, `grep`, `glob`), LSP, or skills, and they do not load project-local `CLAUDE.md` instructions.
+They do not register shell commands, local file tools (`read`, `write`, `edit`, `grep`, `glob`), LSP, or skills, and they do not load project-local `CLAUDE.md` or `AGENTS.md` instructions.
 
 `web_fetch` hostname permissions are auto-granted in web-only sessions (a session-scoped wildcard `web_fetch > hostname > *`). The grant appears in the permission tree and can be revoked.
 
@@ -231,17 +231,19 @@ When this file exists, running `tcode` (without `-c`) automatically uses the con
 - The system prompt tells the agent that bash commands execute inside the container and file tools operate on the host.
 - The permission UI annotates tool names: `bash (in container X)` for the bash tool and `(outside container)` for all other tools.
 
-## CLAUDE.md
+## Project instructions (CLAUDE.md / AGENTS.md)
 
-Place a `CLAUDE.md` file in your project root to inject custom instructions into every normal-mode conversation. Its content is appended to the system prompt automatically. Web-only sessions do not load `CLAUDE.md`.
+Place a `CLAUDE.md` or `AGENTS.md` file in your project root to inject custom instructions into every normal-mode conversation. The file content is appended to the system prompt automatically. Web-only sessions do not load project instructions.
 
-**Location:** `<project-root>/CLAUDE.md`
+**Location:** `<project-root>/AGENTS.md` (preferred), falling back to `<project-root>/CLAUDE.md`
 
 **Behavior:**
 
-- Loaded every time the system prompt is built in normal sessions (both root agent and subagents).
+- `AGENTS.md` takes precedence: when both files exist, only `AGENTS.md` is loaded. `CLAUDE.md` is used only when `AGENTS.md` is absent.
+- Loaded every time the system prompt is built in normal sessions (both root agent and subagents). Web-only sessions never load either file.
 - The entire file content is appended to the end of the system prompt.
 - If the file doesn't exist, it is silently skipped.
+- An unreadable file (invalid UTF-8, permission error) fails the session start with a clear error naming the file — there is no silent skip and no fallback to the other file.
 - No size limit is enforced — keep it concise for best results.
 
 Example `CLAUDE.md`:
@@ -256,7 +258,7 @@ Example `CLAUDE.md`:
 
 ## Skills
 
-Skills are reusable instruction sets the agent can load on demand via a tool call in normal sessions. Unlike CLAUDE.md (which is always present in the normal-mode system prompt), skills are only loaded when the agent decides they are relevant. Web-only sessions do not scan skills or register the skill tool.
+Skills are reusable instruction sets the agent can load on demand via a tool call in normal sessions. Unlike project instruction files such as `CLAUDE.md` or `AGENTS.md` (which are always present in the normal-mode system prompt), skills are only loaded when the agent decides they are relevant. Web-only sessions do not scan skills or register the skill tool.
 
 **Directory structure:**
 

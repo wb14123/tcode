@@ -439,7 +439,7 @@ fn cross_folder_warning_text(session_id: &str, original_cwd: &str, current_cwd: 
     format!(
         "\nSession {session_id} was started in:\n  {original_cwd}\nbut you are now in:\n  {current_cwd}\n\n\
 Attaching from a different folder can cause problems:\n\
-- The model's context pins the current directory to {original_cwd} (and loads its\n  CLAUDE.md); file paths and past tool results in this conversation refer to that\n  folder and may not exist here.\n\
+- The model's context pins the current directory to {original_cwd} (and loads its\n  project instructions, e.g. `CLAUDE.md` or `AGENTS.md`); file paths and past tool\n  results in this conversation refer to that folder and may not exist here.\n\
 - Project-scoped settings are keyed by folder: saved permissions (permissions.json)\n  and project container config (config.toml) will be loaded for the current folder,\n  not the session's original one. Previously approved operations may prompt again,\n  or project container behavior may silently change.\n\
 - If the session runtime is not running, a new one starts in the current folder,\n  applying all of the above immediately.\n\n\
 Note: this attach will not overwrite the session's recorded working directory;\n\

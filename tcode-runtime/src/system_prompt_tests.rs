@@ -5,14 +5,15 @@ mod tests {
     use crate::session::SessionMode;
     use llm_rs::tool::ContainerConfig;
 
-    use crate::system_prompt::tcode_system_prompt_builder;
+    use crate::system_prompt::{project_instructions, tcode_system_prompt_builder};
+    use crate::test_support::TestDir;
 
     fn build_prompt(
         session_mode: SessionMode,
         container_config: Option<ContainerConfig>,
     ) -> String {
         let builder = tcode_system_prompt_builder(session_mode, container_config);
-        builder(SystemPromptContext { subagent_depth: 0 })
+        builder(SystemPromptContext { subagent_depth: 0 }).unwrap()
     }
 
     #[test]
@@ -46,14 +47,15 @@ mod tests {
     }
 
     #[test]
-    fn subagent_prompt_includes_file_tool_preference() {
+    fn subagent_prompt_includes_file_tool_preference() -> anyhow::Result<()> {
         let builder = tcode_system_prompt_builder(SessionMode::Normal, None);
-        let prompt = builder(SystemPromptContext { subagent_depth: 1 });
+        let prompt = builder(SystemPromptContext { subagent_depth: 1 })?;
 
         assert!(prompt.starts_with("You are a subagent spawned for a specific task."));
         assert!(prompt.contains("Never use bash to read code or files"));
         assert!(prompt.contains("Strongly prefer the dedicated file tools"));
         assert!(prompt.contains("Prefer simple commands"));
+        Ok(())
     }
 
     #[test]
@@ -89,6 +91,7 @@ mod tests {
 
         assert!(!prompt.contains("Current directory:"));
         assert!(!prompt.contains("CLAUDE.md"));
+        assert!(!prompt.contains("AGENTS.md"));
         assert!(!prompt.contains("Container Mode"));
         assert!(!prompt.contains("bash"));
         assert!(!prompt.contains("shell"));
@@ -109,11 +112,90 @@ mod tests {
     }
 
     #[test]
-    fn subagent_depth_selects_subagent_role() {
+    fn subagent_depth_selects_subagent_role() -> anyhow::Result<()> {
         let builder = tcode_system_prompt_builder(SessionMode::WebOnly, None);
-        let prompt = builder(SystemPromptContext { subagent_depth: 1 });
+        let prompt = builder(SystemPromptContext { subagent_depth: 1 })?;
 
         assert!(prompt.starts_with("You are a subagent spawned for a specific task."));
         assert!(prompt.contains("This session is web-only"));
+        Ok(())
+    }
+
+    // ======== project_instructions ========
+
+    #[test]
+    fn project_instructions_uses_agents_md_when_only_it_exists() -> anyhow::Result<()> {
+        let dir = TestDir::new("system_prompt");
+        std::fs::write(dir.path().join("AGENTS.md"), "agents content")?;
+
+        let instructions = project_instructions(dir.path())?;
+        assert_eq!(instructions.as_deref(), Some("agents content"));
+        Ok(())
+    }
+
+    #[test]
+    fn project_instructions_uses_claude_md_when_only_it_exists() -> anyhow::Result<()> {
+        let dir = TestDir::new("system_prompt");
+        std::fs::write(dir.path().join("CLAUDE.md"), "claude content")?;
+
+        let instructions = project_instructions(dir.path())?;
+        assert_eq!(instructions.as_deref(), Some("claude content"));
+        Ok(())
+    }
+
+    #[test]
+    fn project_instructions_prefers_agents_md_over_claude_md() -> anyhow::Result<()> {
+        let dir = TestDir::new("system_prompt");
+        std::fs::write(dir.path().join("AGENTS.md"), "agents content")?;
+        std::fs::write(dir.path().join("CLAUDE.md"), "claude content")?;
+
+        let instructions =
+            project_instructions(dir.path())?.expect("instructions present when AGENTS.md exists");
+        assert!(instructions.contains("agents content"));
+        assert!(!instructions.contains("claude content"));
+        Ok(())
+    }
+
+    #[test]
+    fn project_instructions_returns_none_when_neither_file_exists() -> anyhow::Result<()> {
+        let dir = TestDir::new("system_prompt");
+
+        let instructions = project_instructions(dir.path())?;
+        assert!(instructions.is_none());
+        Ok(())
+    }
+
+    #[test]
+    fn project_instructions_fails_on_invalid_utf8_agents_md_without_fallback() -> anyhow::Result<()>
+    {
+        let dir = TestDir::new("system_prompt");
+        std::fs::write(dir.path().join("AGENTS.md"), [0xff, 0xfe, 0x80, 0x00])?;
+        std::fs::write(dir.path().join("CLAUDE.md"), "claude content")?;
+
+        let err = project_instructions(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("AGENTS.md"), "error: {err}");
+        Ok(())
+    }
+
+    #[test]
+    fn project_instructions_fails_on_invalid_utf8_claude_md_when_agents_md_absent()
+    -> anyhow::Result<()> {
+        let dir = TestDir::new("system_prompt");
+        std::fs::write(dir.path().join("CLAUDE.md"), [0xff, 0xfe, 0x80, 0x00])?;
+
+        let err = project_instructions(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("CLAUDE.md"), "error: {err}");
+        Ok(())
+    }
+
+    #[test]
+    fn project_instructions_fails_on_invalid_utf8_agents_md_without_claude_md() -> anyhow::Result<()>
+    {
+        let dir = TestDir::new("system_prompt");
+        std::fs::write(dir.path().join("AGENTS.md"), [0xff, 0xfe, 0x80, 0x00])?;
+
+        let err = project_instructions(dir.path()).unwrap_err();
+        assert!(err.to_string().contains("AGENTS.md"), "error: {err}");
+        Ok(())
     }
 }

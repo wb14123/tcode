@@ -1,5 +1,7 @@
+use std::path::Path;
 use std::sync::Arc;
 
+use anyhow::Context;
 use llm_rs::conversation::{SystemPromptBuilder, SystemPromptContext};
 use llm_rs::tool::ContainerConfig;
 
@@ -65,7 +67,7 @@ bash output is char-capped and truncated.
 
 ### Bash output filtering
 
-Project instructions (including `CLAUDE.md`) may tell you to pipe bash \
+Project instructions (e.g. `CLAUDE.md` or `AGENTS.md`) may tell you to pipe bash \
 commands through `tail`, `head`, `grep`, `sed`, etc. Treat those as \
 **intent** and translate to the bash tool's `filter` / `head` / `tail` \
 parameters — do **not** use the shell pipeline form.
@@ -149,24 +151,30 @@ fn system_prompt_role(subagent_depth: usize) -> &'static str {
     }
 }
 
+/// Project instruction content for a directory, appended to the normal-mode
+/// system prompt. `AGENTS.md` takes precedence over `CLAUDE.md`. A file that
+/// does not exist is skipped; a file that exists but cannot be read is a
+/// hard error (no fallback).
+pub(crate) fn project_instructions(dir: &Path) -> anyhow::Result<Option<String>> {
+    for candidate in ["AGENTS.md", "CLAUDE.md"] {
+        let path = dir.join(candidate);
+        if !path.is_file() {
+            continue;
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("failed to read {}", path.display()))?;
+        return Ok(Some(content));
+    }
+    Ok(None)
+}
+
 fn build_normal_system_prompt(
     context: SystemPromptContext,
     container_config: Option<&ContainerConfig>,
-) -> String {
+) -> anyhow::Result<String> {
     let role = system_prompt_role(context.subagent_depth);
-    let cwd = match std::env::current_dir() {
-        Ok(p) => match tcode_encoding::path_to_str(&p) {
-            Ok(s) => s.to_string(),
-            Err(e) => {
-                tracing::warn!("Failed to decode current directory as UTF-8: {e}");
-                "unknown".to_string()
-            }
-        },
-        Err(e) => {
-            tracing::warn!("Failed to get current directory: {}", e);
-            "unknown".to_string()
-        }
-    };
+    let cwd = std::env::current_dir().with_context(|| "Failed to get current working directory")?;
+    let cwd = tcode_encoding::path_to_str(&cwd)?;
     let start_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z");
     let rules = format!("{COMMON_SUBAGENT_RULES}{NORMAL_SUBAGENT_RULES}{OUTPUT_STYLE_RULES}");
     let mut prompt = format!(
@@ -179,17 +187,9 @@ fn build_normal_system_prompt(
         start_time = start_time,
     );
 
-    let claude_md_path = std::path::Path::new(&cwd).join("CLAUDE.md");
-    if claude_md_path.is_file() {
-        match std::fs::read_to_string(&claude_md_path) {
-            Ok(content) => {
-                prompt.push_str("\n\n");
-                prompt.push_str(&content);
-            }
-            Err(e) => {
-                tracing::warn!("Failed to read CLAUDE.md: {}", e);
-            }
-        }
+    if let Some(instructions) = project_instructions(Path::new(cwd))? {
+        prompt.push_str("\n\n");
+        prompt.push_str(&instructions);
     }
 
     if let Some(config) = container_config {
@@ -204,14 +204,14 @@ fn build_normal_system_prompt(
         ));
     }
 
-    prompt
+    Ok(prompt)
 }
 
-fn build_web_only_system_prompt(context: SystemPromptContext) -> String {
+fn build_web_only_system_prompt(context: SystemPromptContext) -> anyhow::Result<String> {
     let role = system_prompt_role(context.subagent_depth);
     let rules = format!("{COMMON_SUBAGENT_RULES}{WEB_ONLY_SUBAGENT_RULES}{OUTPUT_STYLE_RULES}");
     let start_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z");
-    format!(
+    Ok(format!(
         "{role}\n\n{rules}\n\n## Available Tools\n\n\
          This session is web-only. Use only `current_time`, `web_search`, `web_fetch`, \
          `subagent`, and `continue_subagent`. The environment is limited to web \
@@ -222,5 +222,5 @@ fn build_web_only_system_prompt(context: SystemPromptContext) -> String {
         role = role,
         rules = rules,
         start_time = start_time,
-    )
+    ))
 }

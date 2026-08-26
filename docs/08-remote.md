@@ -165,7 +165,7 @@ All sessions created through the web UI are web-only sessions — no flag is nee
 In web-only mode:
 
 - New sessions are created as web-only sessions.
-- Project-local instructions such as `CLAUDE.md` are not loaded.
+- Project-local instructions such as `CLAUDE.md` or `AGENTS.md` are not loaded.
 - No current working directory is captured.
 - Local filesystem, shell, edit, grep/glob, LSP, and skill tools are not registered.
 - Available tools are limited to:
