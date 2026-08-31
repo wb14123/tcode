@@ -122,8 +122,17 @@ pub async fn validate_container(name: &str, runtime: &str) -> Result<()> {
 
 /// Build a `ContainerConfig` from runtime info and host environment.
 pub fn build_container_config(name: &str, runtime: &str) -> ContainerConfig {
-    let uid = nix::unistd::getuid().as_raw();
-    let gid = nix::unistd::getgid().as_raw();
+    // Rootless Podman maps container root (uid 0) to the host user, so exec as
+    // 0:0 to keep files on the shared mount owned by the host user. Docker has
+    // no such mapping, so exec as the host uid:gid directly.
+    let (uid, gid) = if runtime == "podman" {
+        (0, 0)
+    } else {
+        (
+            nix::unistd::getuid().as_raw(),
+            nix::unistd::getgid().as_raw(),
+        )
+    };
     let home = std::env::var("HOME").unwrap_or_else(|_| "/root".to_string());
     ContainerConfig {
         name: name.to_string(),

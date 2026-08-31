@@ -226,7 +226,7 @@ When this file exists, running `tcode` (without `-c`) automatically uses the con
 
 **Behavior changes in container mode:**
 
-- Bash commands run as your host UID/GID inside the container.
+- Bash commands run as your host UID/GID inside the container when using Docker, or as root (`0:0`) when using Podman. With rootless Podman (the default), container root maps to your host user, so files created on the shared mount are still owned by you. If you run rootful Podman, files created by container commands will be owned by root instead.
 - Only the `HOME` environment variable is forwarded; the container provides its own environment.
 - The system prompt tells the agent that bash commands execute inside the container and file tools operate on the host.
 - The permission UI annotates tool names: `bash (in container X)` for the bash tool and `(outside container)` for all other tools.

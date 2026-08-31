@@ -48,13 +48,16 @@ use crate::media::ContentPart;
 
 pub use tokio_util::sync::CancellationToken;
 
-/// Configuration for Docker container mode. When present, bash commands
-/// execute inside the specified container via `docker exec`.
+/// Configuration for container mode. When present, bash commands
+/// execute inside the specified container via `docker exec` or `podman exec`.
 #[derive(Clone, Debug)]
 pub struct ContainerConfig {
     pub name: String,
     pub runtime: String, // "docker" or "podman"
+    /// uid to exec as inside the container (0 for podman: container root maps
+    /// to the host user under rootless podman)
     pub uid: u32,
+    /// gid to exec as inside the container (0 for podman, see `uid`)
     pub gid: u32,
     pub home: String,
 }
