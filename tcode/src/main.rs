@@ -47,6 +47,9 @@ mod lua_tests;
 mod attach_warning_tests;
 
 #[cfg(test)]
+mod module_cache_tests;
+
+#[cfg(test)]
 mod test_support;
 
 use std::fs;
@@ -59,18 +62,33 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
+use sha2::{Digest, Sha256};
 use tcode_encoding::{non_utf8_output_message, path_to_str};
 use tokio::process::Child;
 use tracing_subscriber::EnvFilter;
 
 /// Escape a string for use inside a Lua single-quoted string literal.
-/// Replaces `\` with `\\`, `'` with `\'`, and newlines/carriage returns
-/// with their escape sequences to prevent injection and syntax errors.
+/// Replaces `\` with `\\`, `'` with `\'`, newlines/carriage returns with
+/// their escape sequences, and every other C0 control byte plus DEL with a
+/// zero-padded 3-digit decimal escape (`\007`, `\013`). Lua source cannot
+/// contain raw control bytes such as NUL, and a fixed 3-digit escape stays
+/// unambiguous when followed by a digit.
 pub(crate) fn lua_escape(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('\'', "\\'")
-        .replace('\n', "\\n")
-        .replace('\r', "\\r")
+    use std::fmt::Write as _;
+    let mut out = String::with_capacity(s.len());
+    for ch in s.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            c if (c as u32) < 0x20 || c == '\u{7f}' => {
+                write!(out, "\\{:03}", c as u32).expect("writing to String cannot fail");
+            }
+            c => out.push(c),
+        }
+    }
+    out
 }
 
 /// Gracefully stop a neovim child: SIGTERM with timeout, then SIGKILL.
@@ -290,87 +308,218 @@ const TCODE_LUA: &str = include_str!("../lua/tcode.lua");
 const INJECTIONS_SCM: &str = include_str!("../../tree-sitter-tcode/queries/injections.scm");
 const HIGHLIGHTS_SCM: &str = include_str!("../../tree-sitter-tcode/queries/highlights.scm");
 
-/// Write the embedded Lua source and tree-sitter query files to a cache directory
-/// and return the directory path for the Lua files.
-/// Uses `<session_dir>/lua/` so each session gets its own copy (avoids conflicts
-/// between concurrent sessions running different binary versions).
-/// Writes `queries/tcode/{injections,highlights}.scm` under `session_dir`.
-///
-/// When `user_skills` is `Some`, also writes `tcode.lua` with skills preamble
-/// tables (`_G.tcode_skills` and `_G.tcode_skill_descriptions`). When `None`,
-/// only the tree-sitter query files are written (the Lua file is assumed to
-/// already exist from a prior call with skills).
-fn ensure_lua_files(
-    session_dir: &Path,
-    user_skills: Option<&[llm_rs::skill::SkillMeta]>,
-) -> Result<PathBuf> {
-    let lua_dir = session_dir.join("lua");
-    std::fs::create_dir_all(&lua_dir)
-        .with_context(|| format!("Failed to create lua cache directory {:?}", lua_dir))?;
+/// Format marker for the cache entry layout. Both hashes below prefix their
+/// inputs with this, so a change to the entry structure (new or renamed
+/// files) yields a fresh cache key instead of silently reusing a stale
+/// entry; bump it whenever the entry layout changes.
+const CACHE_ENTRY_FORMAT: &[u8] = b"tcode-cache-entry-v1";
 
-    // Write tree-sitter query files for the tcode filetype
-    let queries_dir = session_dir.join("queries").join("tcode");
-    std::fs::create_dir_all(&queries_dir)
-        .with_context(|| format!("Failed to create queries directory {:?}", queries_dir))?;
-    std::fs::write(queries_dir.join("injections.scm"), INJECTIONS_SCM)
-        .with_context(|| format!("Failed to write injections.scm to {:?}", queries_dir))?;
-    std::fs::write(queries_dir.join("highlights.scm"), HIGHLIGHTS_SCM)
-        .with_context(|| format!("Failed to write highlights.scm to {:?}", queries_dir))?;
+/// SHA-256 (lowercase hex) over the layout marker and the concatenated
+/// embedded content `TCODE_LUA || INJECTIONS_SCM || HIGHLIGHTS_SCM`. The
+/// plain cache entry dir is named by this hash, so a present entry is
+/// authoritative and never needs verification.
+fn content_hash() -> String {
+    let bytes = [
+        CACHE_ENTRY_FORMAT,
+        TCODE_LUA.as_bytes(),
+        INJECTIONS_SCM.as_bytes(),
+        HIGHLIGHTS_SCM.as_bytes(),
+    ]
+    .concat();
+    sha256_hex(&bytes)
+}
 
-    if let Some(skills) = user_skills {
-        let lua_file = lua_dir.join("tcode.lua");
+/// SHA-256 (lowercase hex) over the layout marker and the exact module bytes
+/// written to a skills entry (`skills tables || TCODE_LUA`), so the skills
+/// entry dir name matches its content.
+fn skills_hash(module_content: &str) -> String {
+    let bytes = [CACHE_ENTRY_FORMAT, module_content.as_bytes()].concat();
+    sha256_hex(&bytes)
+}
 
-        use std::fmt::Write;
-        let mut preamble = String::new();
-
-        // Build _G.tcode_skills table (body content without frontmatter).
-        // Collect names of skills whose bodies loaded successfully so the
-        // descriptions table stays in sync.
-        let mut loaded_names: Vec<&str> = Vec::new();
-        preamble.push_str("_G.tcode_skills = {\n");
-        for skill in skills {
-            match llm_rs::skill::load_skill_body(skill) {
-                Ok(body) => {
-                    writeln!(
-                        preamble,
-                        "  ['{}'] = '{}',",
-                        lua_escape(&skill.name),
-                        lua_escape(&body)
-                    )
-                    .expect("writing to String cannot fail");
-                    loaded_names.push(&skill.name);
-                }
-                Err(e) => {
-                    tracing::warn!("Failed to load skill body for '{}': {e}", skill.name);
-                }
-            }
-        }
-        preamble.push_str("}\n\n");
-
-        // Build _G.tcode_skill_descriptions table (only for skills that loaded)
-        preamble.push_str("_G.tcode_skill_descriptions = {\n");
-        for skill in skills {
-            if !loaded_names.contains(&skill.name.as_str()) {
-                continue;
-            }
-            let desc = skill.description.as_deref().unwrap_or("");
-            writeln!(
-                preamble,
-                "  ['{}'] = '{}',",
-                lua_escape(&skill.name),
-                lua_escape(desc)
-            )
-            .expect("writing to String cannot fail");
-        }
-        preamble.push_str("}\n\n");
-
-        preamble.push_str(TCODE_LUA);
-
-        std::fs::write(&lua_file, preamble)
-            .with_context(|| format!("Failed to write tcode.lua to {:?}", lua_file))?;
+/// Lowercase hex encoding of the SHA-256 digest of `bytes`.
+fn sha256_hex(bytes: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let digest = Sha256::digest(bytes);
+    let mut out = String::with_capacity(digest.len() * 2);
+    for byte in digest {
+        write!(out, "{byte:02x}").expect("writing to String cannot fail");
     }
+    out
+}
 
-    Ok(lua_dir)
+/// Build the module source for the skills variant: `_G.tcode_skills` and
+/// `_G.tcode_skill_descriptions` preamble tables followed by the embedded
+/// `TCODE_LUA` source. Skill bodies that fail to load are skipped with a
+/// warning, and the descriptions table stays in sync with the names whose
+/// bodies loaded successfully.
+fn build_skills_module(user_skills: &[llm_rs::skill::SkillMeta]) -> String {
+    use std::fmt::Write as _;
+    let mut module = String::new();
+
+    module.push_str("_G.tcode_skills = {\n");
+    let mut loaded_names: Vec<&str> = Vec::new();
+    for skill in user_skills {
+        match llm_rs::skill::load_skill_body(skill) {
+            Ok(body) => {
+                writeln!(
+                    module,
+                    "  ['{}'] = '{}',",
+                    lua_escape(&skill.name),
+                    lua_escape(&body)
+                )
+                .expect("writing to String cannot fail");
+                loaded_names.push(&skill.name);
+            }
+            Err(e) => {
+                tracing::warn!("Failed to load skill body for '{}': {e}", skill.name);
+            }
+        }
+    }
+    module.push_str("}\n\n");
+
+    module.push_str("_G.tcode_skill_descriptions = {\n");
+    for skill in user_skills {
+        if !loaded_names.contains(&skill.name.as_str()) {
+            continue;
+        }
+        let desc = skill.description.as_deref().unwrap_or("");
+        writeln!(
+            module,
+            "  ['{}'] = '{}',",
+            lua_escape(&skill.name),
+            lua_escape(desc)
+        )
+        .expect("writing to String cannot fail");
+    }
+    module.push_str("}\n\n");
+
+    module.push_str(TCODE_LUA);
+    module
+}
+
+/// Ensure the plain module cache entry `<cache_base>/<content_hash>/` exists
+/// with `tcode.lua`, `queries/tcode/injections.scm`, and
+/// `queries/tcode/highlights.scm`, and return the entry dir. The entry is
+/// published atomically as a whole directory, so concurrent opens never see
+/// a partial entry. If the entry dir already exists, nothing is written: the
+/// dir name is the content hash, so a present entry is authoritative and
+/// complete by construction.
+fn ensure_module_cache(cache_base: &Path, content_hash: &str) -> Result<PathBuf> {
+    let entry_dir = cache_base.join(content_hash);
+    if entry_dir.is_dir() {
+        return Ok(entry_dir);
+    }
+    publish_cache_entry(cache_base, content_hash, |tmp_dir| {
+        fs::create_dir_all(tmp_dir)
+            .with_context(|| format!("Failed to create cache temp dir {:?}", tmp_dir))?;
+        let queries_dir = tmp_dir.join("queries").join("tcode");
+        fs::create_dir_all(&queries_dir)
+            .with_context(|| format!("Failed to create cache queries dir {:?}", queries_dir))?;
+        fs::write(tmp_dir.join("tcode.lua"), TCODE_LUA)
+            .with_context(|| format!("Failed to write tcode.lua in {:?}", tmp_dir))?;
+        fs::write(queries_dir.join("injections.scm"), INJECTIONS_SCM)
+            .with_context(|| format!("Failed to write injections.scm in {:?}", queries_dir))?;
+        fs::write(queries_dir.join("highlights.scm"), HIGHLIGHTS_SCM)
+            .with_context(|| format!("Failed to write highlights.scm in {:?}", queries_dir))?;
+        Ok(())
+    })
+}
+
+/// Ensure the skills cache entry `<cache_base>/<full_hash>/` exists with
+/// `tcode.lua` containing `module_content`, and return the entry dir. Same
+/// skip-if-exists and atomic-publish behavior as [`ensure_module_cache`]; the
+/// skills entry needs no query files.
+fn ensure_skills_module_cache(
+    cache_base: &Path,
+    full_hash: &str,
+    module_content: &str,
+) -> Result<PathBuf> {
+    let entry_dir = cache_base.join(full_hash);
+    if entry_dir.is_dir() {
+        return Ok(entry_dir);
+    }
+    publish_cache_entry(cache_base, full_hash, |tmp_dir| {
+        fs::create_dir_all(tmp_dir)
+            .with_context(|| format!("Failed to create cache temp dir {:?}", tmp_dir))?;
+        fs::write(tmp_dir.join("tcode.lua"), module_content)
+            .with_context(|| format!("Failed to write tcode.lua in {:?}", tmp_dir))?;
+        Ok(())
+    })
+}
+
+/// Serializes cache publishes within this process so concurrent tasks can
+/// never collide on the same pid-suffixed temp dir.
+static CACHE_PUBLISH_LOCK: parking_lot::Mutex<()> = parking_lot::Mutex::new(());
+
+/// Publish a cache entry `<cache_base>/<name>` atomically: build its contents
+/// in a temp dir `<cache_base>/.<name>.tmp.<pid>` via `build`, then rename
+/// the whole directory into place. A directory rename publishes the entry
+/// fully-formed or not at all, so concurrent opens never observe a partial
+/// entry — this also covers a process killed between per-file writes. The
+/// temp dir lives inside `cache_base` so the rename stays on one filesystem;
+/// the `.<name>.tmp.<pid>` name is unique across processes, and publishes
+/// within a process are serialized by [`CACHE_PUBLISH_LOCK`] with a re-check
+/// of the entry under the lock. If the rename races another process that
+/// published the same entry first (Linux returns ENOTEMPTY for a non-empty
+/// target), this removes its own temp dir and returns the existing entry. On
+/// any failure the temp dir is removed before the error is returned.
+fn publish_cache_entry(
+    cache_base: &Path,
+    name: &str,
+    build: impl FnOnce(&Path) -> Result<()>,
+) -> Result<PathBuf> {
+    let entry_dir = cache_base.join(name);
+    // Serialize publishes within this process: without this, two concurrent
+    // tasks could share the same pid-suffixed temp dir and corrupt each
+    // other's in-flight build.
+    let _guard = CACHE_PUBLISH_LOCK.lock();
+    // Re-check under the lock: a concurrent publisher in this process may
+    // have created the entry between the caller's fast-path check and here.
+    if entry_dir.is_dir() {
+        return Ok(entry_dir);
+    }
+    let tmp_dir = cache_base.join(format!(".{name}.tmp.{}", std::process::id()));
+    // Remove a stale temp dir left by a killed attempt at this exact path.
+    if let Err(e) = fs::remove_dir_all(&tmp_dir)
+        && e.kind() != std::io::ErrorKind::NotFound
+    {
+        tracing::warn!("Failed to remove stale cache temp dir {:?}: {e}", tmp_dir);
+    }
+    if let Err(e) = build(&tmp_dir) {
+        if let Err(cleanup) = fs::remove_dir_all(&tmp_dir) {
+            tracing::warn!("Failed to clean up cache temp dir {:?}: {cleanup}", tmp_dir);
+        }
+        return Err(e);
+    }
+    match fs::rename(&tmp_dir, &entry_dir) {
+        Ok(()) => Ok(entry_dir),
+        Err(e) => {
+            // Another process may have published the same entry first (Linux
+            // returns ENOTEMPTY for a non-empty target dir). Whatever the
+            // cause, drop our temp dir; a present entry wins.
+            if entry_dir.is_dir() {
+                tracing::warn!(
+                    "Cache entry {:?} already exists after rename failure ({e}); discarding temp dir {:?}",
+                    entry_dir,
+                    tmp_dir
+                );
+            }
+            if let Err(cleanup) = fs::remove_dir_all(&tmp_dir) {
+                tracing::warn!("Failed to clean up cache temp dir {:?}: {cleanup}", tmp_dir);
+            }
+            if entry_dir.is_dir() {
+                Ok(entry_dir)
+            } else {
+                Err(e).with_context(|| {
+                    format!(
+                        "Failed to publish cache entry {:?} from {:?}",
+                        entry_dir, tmp_dir
+                    )
+                })
+            }
+        }
+    }
 }
 
 fn is_in_tmux() -> bool {
@@ -746,6 +895,7 @@ async fn main() -> Result<()> {
             .await
         }
         Some(Commands::Serve) => {
+            let cache_base = session::cache_path()?;
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let sess = Session::new(session_id.clone())?;
@@ -813,8 +963,9 @@ async fn main() -> Result<()> {
                 config.supports_media,
             );
 
-            // Write Lua file with user-invocable skills so TUI windows
-            // started against this session have skill completion available.
+            // Warm the global module cache so TUI windows started against
+            // this session have skill completion available without any
+            // per-session copies of the Lua module.
             let (all_skills, warnings) = llm_rs::skill::scan_skills();
             for warning in &warnings {
                 tracing::warn!("{}", warning);
@@ -823,11 +974,16 @@ async fn main() -> Result<()> {
                 .into_iter()
                 .filter(|s| s.user_invocable)
                 .collect();
-            ensure_lua_files(sess.session_dir(), Some(&user_skills))?;
+            let content_hash = content_hash();
+            ensure_module_cache(&cache_base, &content_hash)?;
+            let module_content = build_skills_module(&user_skills);
+            let full_hash = skills_hash(&module_content);
+            ensure_skills_module_cache(&cache_base, &full_hash, &module_content)?;
 
             server.run(None).await
         }
         Some(Commands::Edit { conversation_id }) => {
+            let cache_base = session::cache_path()?;
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
@@ -839,16 +995,20 @@ async fn main() -> Result<()> {
                 .into_iter()
                 .filter(|s| s.user_invocable)
                 .collect();
-            let lua_dir = ensure_lua_files(session.session_dir(), Some(&user_skills))?;
+            let module_content = build_skills_module(&user_skills);
+            let full_hash = skills_hash(&module_content);
+            let lua_dir = ensure_skills_module_cache(&cache_base, &full_hash, &module_content)?;
             let client = EditClient::new(session, lua_dir, conversation_id);
             client.run().await
         }
         Some(Commands::Display { is_subagent }) => {
+            let cache_base = session::cache_path()?;
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id.clone())?;
-            let lua_dir = ensure_lua_files(session.session_dir(), None)?;
-            let runtime_dir = session.session_dir().clone();
+            let content_hash = content_hash();
+            let lua_dir = ensure_module_cache(&cache_base, &content_hash)?;
+            let runtime_dir = lua_dir.clone();
             let client = DisplayClient::new(
                 session,
                 lua_dir,
@@ -860,10 +1020,12 @@ async fn main() -> Result<()> {
             client.run().await
         }
         Some(Commands::ToolCall { tool_call_id }) => {
+            let cache_base = session::cache_path()?;
             let session_id = require_session(session)?;
             init_tracing(&session_id);
             let session = Session::new(session_id)?;
-            let lua_dir = ensure_lua_files(session.session_dir(), None)?;
+            let content_hash = content_hash();
+            let lua_dir = ensure_module_cache(&cache_base, &content_hash)?;
             let client = ToolCallDisplayClient::new(session, lua_dir, tool_call_id);
             client.run().await
         }
@@ -1594,6 +1756,7 @@ async fn run_unified_with_session(
     label: &str,
     profile: Option<&str>,
 ) -> Result<()> {
+    let cache_base = session::cache_path()?;
     let max_subagent_depth = config.max_subagent_depth.unwrap_or(10);
     let subagent_model_selection = config.subagent_model_selection.unwrap_or(false);
     let browser_server_url = config.browser_server_url.clone();
@@ -1738,10 +1901,9 @@ async fn run_unified_with_session(
         }
     };
 
-    // Write the Lua file with user-invocable skills before spawning TUI panes.
-    // This runs after the server is ready, so skills have been scanned once.
-    // TUI windows (display, tool-call) only write tree-sitter queries and
-    // expect the Lua file to already exist from here.
+    // Warm the global module cache with the skills variant before spawning
+    // TUI panes, so display and tool-call windows resolve the plain entry
+    // from the cache without any per-session copies.
     let (all_skills, warnings) = llm_rs::skill::scan_skills();
     for warning in &warnings {
         tracing::warn!("{}", warning);
@@ -1750,7 +1912,11 @@ async fn run_unified_with_session(
         .into_iter()
         .filter(|s| s.user_invocable)
         .collect();
-    ensure_lua_files(session.session_dir(), Some(&user_skills))?;
+    let content_hash = content_hash();
+    ensure_module_cache(&cache_base, &content_hash)?;
+    let module_content = build_skills_module(&user_skills);
+    let full_hash = skills_hash(&module_content);
+    ensure_skills_module_cache(&cache_base, &full_hash, &module_content)?;
 
     let panes = match setup_layout_panes(&layout, &current_pane_id, exe_str, &session_arg) {
         Ok(p) => p,

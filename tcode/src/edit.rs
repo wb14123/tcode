@@ -15,6 +15,7 @@ use crate::lua_escape;
 use crate::protocol::ClientMessage;
 use crate::session::Session;
 use crate::tty_stdio;
+use tcode_encoding::path_to_str;
 
 pub struct EditClient {
     session: Session,
@@ -225,11 +226,11 @@ fn spawn_nvim(
 ) -> Result<Child> {
     let lua_cmd = format!(
         "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_edit('{}', {}, '{}', '{}')",
-        lua_escape(&lua_dir.display().to_string()),
-        lua_escape(&msg_file.display().to_string()),
+        lua_escape(path_to_str(lua_dir)?),
+        lua_escape(path_to_str(msg_file)?),
         is_subagent,
         lua_escape(session_id),
-        lua_escape(&exe_path.display().to_string()),
+        lua_escape(path_to_str(exe_path)?),
     );
 
     let (stdin, stdout, stderr) = tty_stdio::get_tty_stdio();

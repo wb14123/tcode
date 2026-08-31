@@ -6,6 +6,7 @@ use tokio::process::{Child, Command};
 use crate::lua_escape;
 use crate::session::Session;
 use crate::tty_stdio;
+use tcode_encoding::path_to_str;
 
 pub struct ToolCallDisplayClient {
     session: Session,
@@ -61,9 +62,9 @@ impl ToolCallDisplayClient {
 fn spawn_nvim(lua_dir: &Path, tool_call_file: &Path, status_file: &Path) -> Result<Child> {
     let lua_cmd = format!(
         "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_tool_call_display('{}', '{}')",
-        lua_escape(&lua_dir.display().to_string()),
-        lua_escape(&tool_call_file.display().to_string()),
-        lua_escape(&status_file.display().to_string()),
+        lua_escape(path_to_str(lua_dir)?),
+        lua_escape(path_to_str(tool_call_file)?),
+        lua_escape(path_to_str(status_file)?),
     );
 
     let (stdin, stdout, stderr) = tty_stdio::get_tty_stdio();

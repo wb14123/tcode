@@ -315,6 +315,29 @@ pub fn base_path() -> Result<PathBuf> {
         .join("sessions"))
 }
 
+/// Returns the base path for the content-addressed Lua module cache:
+/// ~/.tcode/cache/, created with 0700 permissions on demand.
+///
+/// The cache is disposable: its contents may be safely deleted manually at
+/// any time and are recreated on demand by the next invocation that needs
+/// them. Only the cache root itself is set to 0700; entry and temp dirs
+/// below it rely on the root's permissions for protection.
+pub fn cache_path() -> Result<PathBuf> {
+    let cache_dir = dirs::home_dir()
+        .context("Could not find home directory")?
+        .join(".tcode")
+        .join("cache");
+    fs::create_dir_all(&cache_dir)
+        .with_context(|| format!("Failed to create cache directory {:?}", cache_dir))?;
+    fs::set_permissions(&cache_dir, Permissions::from_mode(0o700)).with_context(|| {
+        format!(
+            "Failed to set 0700 permissions on cache directory {:?}",
+            cache_dir
+        )
+    })?;
+    Ok(cache_dir)
+}
+
 /// Generate a unique 8-character session ID (lowercase alphanumeric)
 pub fn generate_session_id() -> String {
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyz0123456789";

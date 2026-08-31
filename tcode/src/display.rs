@@ -6,6 +6,7 @@ use tokio::process::{Child, Command};
 use crate::lua_escape;
 use crate::session::Session;
 use crate::tty_stdio;
+use tcode_encoding::path_to_str;
 
 pub struct DisplayClient {
     session: Session,
@@ -149,16 +150,16 @@ fn spawn_nvim(
 ) -> Result<Child> {
     let lua_cmd = format!(
         "lua package.path = '{}' .. '/?.lua;' .. package.path; require('tcode').setup_display('{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', '{}', {}, '{}')",
-        lua_escape(&lua_dir.display().to_string()),
-        lua_escape(&display_file.display().to_string()),
-        lua_escape(&status_file.display().to_string()),
-        lua_escape(&usage_file.display().to_string()),
-        lua_escape(&token_usage_file.display().to_string()),
+        lua_escape(path_to_str(lua_dir)?),
+        lua_escape(path_to_str(display_file)?),
+        lua_escape(path_to_str(status_file)?),
+        lua_escape(path_to_str(usage_file)?),
+        lua_escape(path_to_str(token_usage_file)?),
         lua_escape(session_id),
-        lua_escape(&exe_path.display().to_string()),
-        lua_escape(&parser_path.display().to_string()),
-        lua_escape(&runtime_dir.display().to_string()),
-        lua_escape(&effort_file.display().to_string()),
+        lua_escape(path_to_str(exe_path)?),
+        lua_escape(path_to_str(parser_path)?),
+        lua_escape(path_to_str(runtime_dir)?),
+        lua_escape(path_to_str(effort_file)?),
         is_subagent,
         lua_escape(profile),
     );
