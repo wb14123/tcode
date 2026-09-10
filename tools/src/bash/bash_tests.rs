@@ -1,4 +1,7 @@
 use super::starts_with_cd;
+use super::{BashRequest, build_command};
+use llm_rs::tool::{CancellationToken, ContainerConfig};
+use std::sync::Arc;
 
 #[test]
 fn detects_bare_cd() {
@@ -38,6 +41,75 @@ fn ignores_non_cd_commands() {
 fn ignores_empty_and_whitespace() {
     assert!(!starts_with_cd(""));
     assert!(!starts_with_cd("   "));
+}
+
+/// The container-mode wrapper must not alter the bytes of the caller's
+/// command. Appending anything to the command's last line breaks a
+/// here-document: `EOF ` is not a terminator, so the here-doc swallows the
+/// wrapper's closing line and the whole command fails to parse (exit 2,
+/// "syntax error: unexpected end of file").
+#[test]
+fn container_wrapper_leaves_command_bytes_intact() -> anyhow::Result<()> {
+    let command = "cat <<'EOF'\nheredoc body line\nEOF";
+    let job_id = "11111111-2222-3333-4444-555555555555";
+    let request = BashRequest {
+        command: command.to_string(),
+        description: "container wrapper test".to_string(),
+        timeout_ms: 10_000,
+        work_dir: None,
+        filter: None,
+        head: None,
+        tail: None,
+        container_config: Some(Arc::new(ContainerConfig {
+            name: "test-container".to_string(),
+            runtime: "docker".to_string(),
+            uid: 0,
+            gid: 0,
+            home: "/root".to_string(),
+        })),
+        cancel_token: CancellationToken::new(),
+        tool_log_dir: None,
+    };
+
+    let cmd = build_command(&request, Some(job_id))?;
+    let wrapped = cmd
+        .as_std()
+        .get_args()
+        .last()
+        .and_then(|arg| arg.to_str())
+        .ok_or_else(|| anyhow::anyhow!("wrapped command missing from argv"))?
+        .to_string();
+
+    // The command is embedded verbatim: nothing inserted between its last
+    // line and the `\n`, and the wrapper adds exactly one line (the marker).
+    assert!(
+        wrapped.contains(command),
+        "wrapper altered the command bytes: {wrapped:?}"
+    );
+    assert_eq!(
+        wrapped.lines().count(),
+        command.lines().count() + 1,
+        "wrapper must not add or split lines: {wrapped:?}"
+    );
+    assert!(
+        wrapped.ends_with(&format!("\n) # TCODE_JOB={job_id}")),
+        "kill marker must stay on its own line: {wrapped:?}"
+    );
+
+    // And the wrapped string must still execute: the here-doc terminates at
+    // the caller's EOF line, so the subshell closes and the marker comment
+    // is not swallowed as here-document body.
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&wrapped)
+        .output()?;
+    assert!(
+        output.status.success(),
+        "wrapped command failed: {}",
+        String::from_utf8(output.stderr)?
+    );
+    assert_eq!(String::from_utf8(output.stdout)?, "heredoc body line\n");
+    Ok(())
 }
 
 // ── streaming mode e2e tests ──────────────────────────────────────────

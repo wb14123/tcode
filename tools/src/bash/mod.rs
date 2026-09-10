@@ -327,7 +327,7 @@ struct BashRequest {
 fn build_command(request: &BashRequest, job_id: Option<&str>) -> Result<Command> {
     if let Some(ref config) = request.container_config {
         let command = if let Some(job_id) = job_id {
-            format!("( {} \n) # TCODE_JOB={}", request.command, job_id)
+            format!("( {}\n) # TCODE_JOB={}", request.command, job_id)
         } else {
             request.command.clone()
         };
