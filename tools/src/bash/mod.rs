@@ -117,7 +117,7 @@ const STDERR_TAG: &str = "stderr| ";
 /// - Optional timeout, default 120000ms (2 min). Always provide a 5-10 word description.
 /// - Use `workdir` instead of `cd <dir> && <command>` or `git -C <dir>`.
 /// - Never use bash for `ls`, `find`, `grep`/`rg`, `cat`, `head`, `tail`, `sed`, `awk`, `wc`, `echo` — use `read` for files/directories, `glob` for recursive patterns, `grep` for content search. Such commands are auto-reviewed and may be denied.
-/// - Prefer one command per call: don't bundle multiple commands with `&&` or `;` - separate bash calls are easier to review. Chain only when functionally useful (e.g. piping data between commands), not just to run several commands together.
+/// - Prefer one simple command per call: an approved command prefix pre-authorizes only that command, and each part of a `&&`/`;` chain (or a `cd ... && ...`) needs its own approval - and `cd`/`$?`-style chains can never be cached, so they prompt the human every time. Split into separate calls, or use the `workdir`/`filter`/`head`/`tail` parameters. The exit code is returned in `<bash_metadata>`, so never append `; echo $?`.
 #[tool(self_managed_cancellation = true)]
 #[allow(clippy::too_many_arguments)]
 pub fn bash(
@@ -745,8 +745,10 @@ fn finalize_log_file(
 /// positives on filenames like `grep-test` (since `\b` treats `-` as non-word boundary),
 /// which is acceptable — the review LLM will correctly respond CONTINUE for those.
 /// `git -C` is included because the bash tool's `workdir` parameter replaces it.
+/// `cd` is included because `cd <dir> && <command>` can never be cached (it is
+/// non-decomposable), so it is worth reviewing even when the rest has no keyword.
 const REVIEWABLE_KEYWORDS: &[&str] = &[
-    "ls", "find", "grep", "rg", "cat", "head", "tail", "sed", "awk", "echo", "2>&1", "git -C",
+    "ls", "find", "grep", "rg", "cat", "head", "tail", "sed", "awk", "echo", "2>&1", "git -C", "cd",
 ];
 
 fn has_reviewable_keywords(command: &str) -> bool {
@@ -784,6 +786,16 @@ async fn review_bash_command(
            uses `2>&1` solely to merge stderr into stdout, respond with DENY. The only\n\
            exception is when `2>&1` is part of a complex shell pipeline that cannot be\n\
            expressed using `filter`/`head`/`tail` alone (e.g., `sort | uniq -c`).\n\
+         - Sequential chaining (`&&`, `||`, `;`) between independent steps is unnecessary:\n\
+           each part is approved separately anyway, so it should be split into separate\n\
+           bash calls. Respond DENY for chains like `cargo build && ls`, `make; echo done`,\n\
+           or `cd src && cargo test` - especially when a chained part is only status/report\n\
+           output (`echo`, `ls`, `cat`) or the chain uses `cd`/`export`/`$?`/`$VAR`/`$(...)`/\n\
+           subshells, which can never be cached and force a human approval every time.\n\
+           Point the caller to `workdir`, separate calls, or the built-in tools.\n\
+         - Pipelines (`|`) are fine only when they move data between commands in a way\n\
+           `filter`/`head`/`tail` cannot (e.g. `sort | uniq -c`, `find ... | xargs ...`).\n\
+           DENY pipelines used only to filter or trim output.\n\
          \n\
          Review this bash command:\n\
          ```\n\

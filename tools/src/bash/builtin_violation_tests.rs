@@ -98,6 +98,15 @@ fn detects_git_minus_c() {
 }
 
 #[test]
+fn detects_cd() {
+    // `cd <dir> && <command>` is non-decomposable and cannot be cached, so it is
+    // always worth reviewing (the `workdir` parameter replaces it).
+    assert!(has_reviewable_keywords("cd src && cargo test"));
+    assert!(has_reviewable_keywords("cd /tmp"));
+    assert!(has_reviewable_keywords("cd ../other; git status"));
+}
+
+#[test]
 fn detects_keywords_in_pipelines() {
     assert!(has_reviewable_keywords("cargo test 2>&1 | grep FAIL"));
     assert!(has_reviewable_keywords("cargo build 2>&1 | tail -n 30"));
@@ -110,6 +119,7 @@ fn detects_keywords_in_pipelines() {
 fn detects_keywords_in_compound_commands() {
     assert!(has_reviewable_keywords("cargo build && ls target/"));
     assert!(has_reviewable_keywords("git status; echo done"));
+    assert!(has_reviewable_keywords("cd src && cargo build"));
 }
 
 #[test]
@@ -146,6 +156,9 @@ fn word_boundary_avoids_false_positives_on_substrings() {
     assert!(!has_reviewable_keywords("lsblk"));
     // "head" as substring
     assert!(!has_reviewable_keywords("ahead of time"));
+    // "cd" as substring
+    assert!(!has_reviewable_keywords("abcde"));
+    assert!(!has_reviewable_keywords("cargo build -p tcode"));
 }
 
 #[test]

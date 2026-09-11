@@ -85,11 +85,15 @@ shell pipeline only when the processing cannot be expressed with \
 
 ### Prefer simple commands
 
-Prefer one simple command per bash call over bundling several with `&&` or `;`. \
-Each bash call is auto-reviewed independently, so splitting steps into separate \
-calls is easier to review. Chain commands only when it serves a functional \
-purpose - e.g. piping output between commands - not just to run multiple \
-commands at once.
+Approvals are matched against a session/project allowlist by leading command \
+tokens (an approved `cargo test` prefix covers `cargo test --release` and stops \
+prompting). Compound commands lose that: each part needs its own approval, and \
+`cd ... &&`, `export ... &&`, `$?`, `$(...)` can never be cached, so they prompt \
+the human every time. Keep each call to one simple command:
+
+- Don't append `; echo $?` or similar - the exit code is already returned in `<bash_metadata>`.
+- Don't chain steps with `&&` or `;` - use separate calls, the `workdir` parameter, or the `read`/`grep` tools.
+- Use `|` only to move data between commands, not to trim output (use `filter`/`head`/`tail`).
 
 ## Efficient Reading
 

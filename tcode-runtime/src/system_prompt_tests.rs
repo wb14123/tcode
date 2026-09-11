@@ -43,7 +43,8 @@ mod tests {
         assert!(prompt.contains("Prefer simple commands"));
         assert!(prompt.contains("`&&`"));
         assert!(prompt.contains("`;`"));
-        assert!(prompt.contains("auto-reviewed"));
+        assert!(prompt.contains("allowlist"));
+        assert!(prompt.contains("exit code is already returned"));
     }
 
     #[test]
