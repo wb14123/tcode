@@ -1,6 +1,8 @@
 #[cfg(test)]
 mod edit_tests;
-mod exact_replacer;
+#[cfg(test)]
+mod edit_tool_tests;
+mod replacer;
 
 use std::path::{Path, PathBuf};
 
@@ -9,7 +11,7 @@ use llm_rs::tool::ToolContext;
 use llm_rs_macros::tool;
 use uuid::Uuid;
 
-use exact_replacer::ExactReplacer;
+use replacer::Replacer;
 
 /// Build a tcodediff preview for the permission prompt.
 ///
@@ -41,7 +43,7 @@ fn build_tcodediff_preview(
 
 /// Performs exact string replacements in files.
 ///
-/// - Must use `Read` tool at least once before editing (tool will error otherwise).
+/// - Must use `Read` tool at least once before editing.
 /// - No need to re-read before each edit if the relevant section is already in context.
 /// - Preserve exact indentation (tabs/spaces) from inside `<line>` tags; never include XML tags or line number attributes in old_string/new_string.
 /// - ALWAYS prefer editing existing files. NEVER write new files unless explicitly required.
@@ -97,13 +99,20 @@ pub fn edit(
             return;
         }
 
-        let new_content = match ExactReplacer::replace(&content, &old_string, &new_string, replace_all) {
-            Ok(result) => result,
-            Err(e) => {
-                yield Err(e);
-                return;
-            }
-        };
+        let (new_content, replacement_count) =
+            match Replacer::replace(&content, &old_string, &new_string, replace_all) {
+                Ok(result) => result,
+                Err(e) => {
+                    yield Err(e);
+                    return;
+                }
+            };
+
+        // A replacement that leaves every byte of the content in place is not an edit.
+        if new_content == content {
+            yield Err(anyhow!("The replacement would not change the file. No changes made."));
+            return;
+        }
 
         // Build tcodediff preview and check write permission
         let preview_and_tmp = ctx.permission.session_dir()
@@ -142,8 +151,7 @@ pub fn edit(
         match crate::file_write_util::locked_write(path, new_content.as_bytes(), pre_mtime) {
             Ok(_) => {
                 let replacements = if replace_all {
-                    let count = content.matches(&old_string).count();
-                    format!("{} replacement(s)", count)
+                    format!("{} replacement(s)", replacement_count)
                 } else {
                     "1 replacement".to_string()
                 };

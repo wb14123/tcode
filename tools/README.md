@@ -25,6 +25,24 @@ Performs a web search and returns formatted results with titles, URLs, and snipp
 
 Returns the current date and time.
 
+### `edit`
+
+Replaces text in an existing file by string match.
+
+- Matching is attempted byte for byte first, unchanged from before. The retry can never match a file that has no carriage return anywhere, so such a file behaves exactly as it always has.
+- Only if the exact search finds nothing is the search retried with the search text and the replacement text converted to Windows line endings: every `\n` not already preceded by `\r` becomes `\r\n`. A search text written with Unix endings therefore edits a Windows-style file, and the lines the edit inserts carry the endings the file uses.
+- A search that matches more than once without `replace_all` is reported as ambiguous immediately and is never retried.
+- Text outside the replaced region is copied byte for byte.
+- A replacement that would not change any byte of the file is reported as a no-op and the file is left untouched.
+
+Known limitations, each deliberate and pre-existing behaviour rather than a regression:
+
+- A search that spans a region where the file's own endings are mixed is not found: each attempt requires one style throughout the matched region.
+- A search text that already contains `\r\n` against a file that uses `\n` is not found. The reverse direction is deliberately not attempted.
+- A search text with no line break at all matches on the exact attempt, and the replacement is written as supplied, so a single-line search that inserts lines into a Windows-style file writes Unix endings. Nothing is inspected on the exact attempt.
+- If a file contains the same text with both styles, the exact attempt wins and replaces the occurrence with Unix endings, rather than reporting an ambiguity.
+- A search text that does carry Windows endings and matches on the exact attempt is used as supplied, so a replacement written with Unix endings stays Unix.
+
 ## Browser Client
 
 The `browser_client` module provides an HTTP client for communicating with `browser-server`:
