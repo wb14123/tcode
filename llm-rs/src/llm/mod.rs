@@ -14,6 +14,9 @@ mod sse;
 mod bedrock_tests;
 
 #[cfg(test)]
+mod claude_tests;
+
+#[cfg(test)]
 mod openai_tests;
 
 #[cfg(test)]

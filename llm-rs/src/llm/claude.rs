@@ -157,7 +157,7 @@ struct MessagesRequest<'a> {
 
 /// System prompt content block for Claude API.
 #[derive(Serialize)]
-struct SystemBlock {
+pub(super) struct SystemBlock {
     #[serde(rename = "type")]
     block_type: &'static str,
     text: String,
@@ -197,13 +197,13 @@ const CLAUDE_CODE_SYSTEM_PREFIX: &str = "You are Claude Code, Anthropic's offici
 
 /// Claude message format.
 #[derive(Serialize)]
-struct ClaudeMessage {
+pub(super) struct ClaudeMessage {
     role: &'static str,
     content: ClaudeContent,
 }
 
-/// Claude message content - either a simple string or array of content blocks.
-#[derive(Serialize)]
+/// Claude message or tool result content - a string or array of content blocks.
+#[derive(Serialize, Deserialize, Clone)]
 #[serde(untagged)]
 enum ClaudeContent {
     Text(String),
@@ -241,7 +241,7 @@ enum ContentBlock {
     #[serde(rename = "tool_result")]
     ToolResult {
         tool_use_id: String,
-        content: String,
+        content: ClaudeContent,
     },
     #[serde(rename = "thinking")]
     Thinking { thinking: String, signature: String },
@@ -393,14 +393,18 @@ fn strip_tool_prefix(name: &str) -> String {
 /// Convert LLMMessage list to Claude message format.
 /// Returns (system_blocks, messages).
 /// The system prompt is prefixed with CLAUDE_CODE_SYSTEM_PREFIX for OAuth authentication.
-fn convert_messages(
+pub(super) fn convert_messages(
     msgs: &[LLMMessage],
     media_dir: &Option<PathBuf>,
 ) -> anyhow::Result<(Option<Vec<SystemBlock>>, Vec<ClaudeMessage>)> {
     let mut user_system_prompt: Option<String> = None;
     let mut claude_messages: Vec<ClaudeMessage> = Vec::new();
+    let mut previous_was_tool_result = false;
 
     for msg in msgs {
+        // Group only consecutive input tool results, not arbitrary user messages.
+        let follows_tool_result = previous_was_tool_result;
+        previous_was_tool_result = matches!(msg, LLMMessage::ToolResult { .. });
         match msg {
             LLMMessage::System(content) => {
                 // Claude uses top-level system parameter, not a message role
@@ -525,57 +529,62 @@ fn convert_messages(
                 tool_call_id,
                 content,
             } => {
-                if crate::llm::is_all_text(content) {
-                    let text: String = crate::media::join_text_parts(content);
-                    claude_messages.push(ClaudeMessage {
-                        role: "user",
-                        content: ClaudeContent::Blocks(vec![ContentBlock::ToolResult {
-                            tool_use_id: tool_call_id.clone(),
-                            content: text,
-                        }]),
-                    });
+                let result_content = if crate::llm::is_all_text(content) {
+                    ClaudeContent::Text(crate::media::join_text_parts(content))
                 } else {
                     let media_dir = media_dir
                         .as_ref()
                         .context("Media present in tool result but no media_dir configured")?;
-                    let text_content: String = crate::media::join_text_parts(content);
-                    let tool_result_content = if text_content.is_empty() {
-                        "[Image output]".to_string()
-                    } else {
-                        text_content
-                    };
                     let mut blocks: Vec<ContentBlock> = Vec::new();
-                    blocks.push(ContentBlock::ToolResult {
-                        tool_use_id: tool_call_id.clone(),
-                        content: tool_result_content,
-                    });
                     for part in content {
-                        if let crate::media::ContentPart::Media(media) = part {
-                            let data = media.get_data(media_dir)?;
-                            let encoded = base64::engine::general_purpose::STANDARD.encode(data);
-                            let media_type = media.media_type().to_string();
-                            if media_type == "application/pdf" {
-                                blocks.push(ContentBlock::Document {
-                                    source: DocumentSource {
-                                        r#type: "base64".to_string(),
-                                        media_type,
-                                        data: encoded,
-                                    },
-                                });
-                            } else {
-                                blocks.push(ContentBlock::Image {
-                                    source: ImageSource {
-                                        r#type: "base64".to_string(),
-                                        media_type,
-                                        data: encoded,
-                                    },
-                                });
+                        match part {
+                            crate::media::ContentPart::Text(text) => {
+                                if !text.is_empty() {
+                                    blocks.push(ContentBlock::Text { text: text.clone() });
+                                }
+                            }
+                            crate::media::ContentPart::Media(media) => {
+                                let data = media.get_data(media_dir)?;
+                                let encoded =
+                                    base64::engine::general_purpose::STANDARD.encode(data);
+                                let media_type = media.media_type().to_string();
+                                if media_type == "application/pdf" {
+                                    blocks.push(ContentBlock::Document {
+                                        source: DocumentSource {
+                                            r#type: "base64".to_string(),
+                                            media_type,
+                                            data: encoded,
+                                        },
+                                    });
+                                } else {
+                                    blocks.push(ContentBlock::Image {
+                                        source: ImageSource {
+                                            r#type: "base64".to_string(),
+                                            media_type,
+                                            data: encoded,
+                                        },
+                                    });
+                                }
                             }
                         }
                     }
-                    claude_messages.push(ClaudeMessage {
+                    ClaudeContent::Blocks(blocks)
+                };
+                let tool_result = ContentBlock::ToolResult {
+                    tool_use_id: tool_call_id.clone(),
+                    content: result_content,
+                };
+                if follows_tool_result
+                    && let Some(ClaudeMessage {
                         role: "user",
                         content: ClaudeContent::Blocks(blocks),
+                    }) = claude_messages.last_mut()
+                {
+                    blocks.push(tool_result);
+                } else {
+                    claude_messages.push(ClaudeMessage {
+                        role: "user",
+                        content: ClaudeContent::Blocks(vec![tool_result]),
                     });
                 }
             }
