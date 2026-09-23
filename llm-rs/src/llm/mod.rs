@@ -42,6 +42,14 @@ use crate::tool::Tool;
 // Shared auth types (used by Claude, OpenAI, and auth crate)
 // ============================================================================
 
+/// `User-Agent` identifying this client as the Claude Code CLI.
+///
+/// Anthropic's OAuth tokens are only accepted when the request is signed as
+/// Claude Code, which includes this exact header. The version should track the
+/// newest published Claude Code release; check it with:
+/// `curl -s https://registry.npmjs.org/@anthropic-ai/claude-code/latest | jq -r .version`
+pub const CLAUDE_CLI_USER_AGENT: &str = "claude-cli/2.1.280 (external, cli)";
+
 /// Function type for getting an access token. Called before each API request.
 /// For static tokens, returns the same token. For OAuth, may trigger refresh.
 pub type GetTokenFn =

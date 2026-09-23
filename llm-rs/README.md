@@ -259,7 +259,7 @@ Claude Code OAuth tokens require specific request signatures to work. The implem
 4. **Additional Headers**:
    - `x-app: cli`
    - `anthropic-dangerous-direct-browser-access: true`
-   - `User-Agent: claude-cli/2.1.2 (external, cli)`
+   - `User-Agent: claude-cli/2.1.280 (external, cli)`
 
 5. **URL Parameter**: Requests must include `?beta=true` query parameter.
 

@@ -4,6 +4,7 @@
 //! to retrieve rate-limit window utilisation and reset times.
 
 use anyhow::{Context, Result};
+use llm_rs::llm::CLAUDE_CLI_USER_AGENT;
 use serde::{Deserialize, Serialize};
 
 /// Top-level response from `GET /api/oauth/usage`.
@@ -40,7 +41,7 @@ pub async fn fetch_usage(
     let response = client
         .get("https://api.anthropic.com/api/oauth/usage")
         .header("Authorization", format!("Bearer {}", access_token))
-        .header("User-Agent", "claude-cli/2.1.2 (external, cli)")
+        .header("User-Agent", CLAUDE_CLI_USER_AGENT)
         .header("anthropic-beta", "oauth-2025-04-20")
         .header("Accept", "application/json")
         .send()

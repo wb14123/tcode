@@ -17,8 +17,9 @@ use tokio_stream::{Stream, StreamExt};
 
 use super::sse;
 use super::{
-    ChatOptions, GetTokenFn, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason,
-    TokenProvider, ToolCall, is_manual_only_model, model_max_output_tokens,
+    CLAUDE_CLI_USER_AGENT, ChatOptions, GetTokenFn, LLM, LLMEvent, LLMMessage, ModelInfo,
+    ReasoningEffort, StopReason, TokenProvider, ToolCall, is_manual_only_model,
+    model_max_output_tokens,
 };
 use crate::tool::Tool;
 
@@ -766,7 +767,7 @@ impl LLM for Claude {
                 req = req
                     .header("Authorization", format!("Bearer {}", access_token))
                     .header("anthropic-beta", "claude-code-20250219,oauth-2025-04-20,interleaved-thinking-2025-05-14,fine-grained-tool-streaming-2025-05-14")
-                    .header("User-Agent", "claude-cli/2.1.2 (external, cli)")
+                    .header("User-Agent", CLAUDE_CLI_USER_AGENT)
                     .header("x-app", "cli")
                     .header("anthropic-dangerous-direct-browser-access", "true");
             } else {
