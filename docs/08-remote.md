@@ -57,7 +57,7 @@ Remote-specific flags:
 |------|-------------|
 | `--port <port>` | TCP port to bind. Required. `0` is rejected; choose a concrete port. |
 | `--host <ip>` | IP address to bind. Defaults to `127.0.0.1`. Use `0.0.0.0` or `::` only when intentionally exposing the server beyond localhost. |
-| `--allow-insecure-http` | Omit the `Secure` cookie attribute for direct plain-HTTP access. Use only for trusted local/private setups. |
+| `--allow-insecure-http` | Omit the `Secure` cookie attribute for plain HTTP. Opt in only for local loopback development; use HTTPS for exposed deployments. |
 
 Relevant global flags:
 
@@ -132,13 +132,15 @@ For HTTPS reverse proxies, preserve the original `Host` header and set either `X
 
 For default loopback access such as `http://127.0.0.1:8080/`, browsers generally treat loopback origins as secure enough for local development behavior.
 
-For direct non-loopback plain HTTP, login may fail because the browser can discard `Secure` cookies. If you intentionally run on trusted plain HTTP, opt in explicitly:
+If your browser does not round-trip `Secure` cookies on loopback HTTP during
+local development, explicitly opt in while keeping the loopback bind:
 
 ```sh
-tcode remote --host 0.0.0.0 --port 8080 --allow-insecure-http
+tcode remote --host 127.0.0.1 --port 8080 --allow-insecure-http
 ```
 
-This sends the password and session cookie over cleartext HTTP. Do not use it on untrusted networks.
+This sends the password and session cookie over cleartext HTTP; it does not
+add TLS. Keep this override local and use HTTPS for exposed deployments.
 
 ## Web UI capabilities
 
@@ -251,138 +253,80 @@ npm run build
 
 ## Docker web-only deployment
 
-The repository includes a Dockerfile for running the remote server in web-only mode. The image includes:
+These commands use rootless Podman on Linux without a `--userns` override.
+If `~/tcode-web-vol` already contains a browser profile, valid configuration,
+and web users with persistent paths, skip setup and go to step 4.
 
-- `tcode`
-- `browser-server`
-- Chromium and Chromium sandbox support
-- bundled web frontend
-- a non-root `tcode` runtime user
+### 1. Build the image
 
-The default container command is:
+Run this command from the repository root:
 
 ```sh
-tcode remote --host 0.0.0.0 --port 8080
+./build-docker.sh podman
 ```
 
-### Build the image
+### 2. Copy the browser profile
 
-From the repository root:
+Follow [Browser Setup](06-browser.md) to prepare and locate your host browser
+profile, then stop every browser or tcode process using it. Copy the complete
+profile directory, not just `Default`, into a new, dedicated state directory.
+Replace the source below if your profile is elsewhere, and continue only if
+both commands succeed:
 
 ```sh
-./build-docker.sh
+mkdir -m 700 ~/tcode-web-vol && cp -a ~/.tcode/chrome ~/tcode-web-vol/chrome
 ```
 
-The script tags the image as:
+Podman's `:U` recursively changes ownership of this host directory and may
+prevent your host user from accessing it. Never mount your original profile,
+live `~/.tcode`, or files linked to them. The copied profile must be exclusive
+to one container or browser at a time, including during setup.
 
-- `tcode-remote:<git-short-hash>` when all changes are committed and the git tree is clean
-- `tcode-remote:<year-month-day-unix-timestamp>` when there are uncommitted or untracked changes, for example `tcode-remote:2026-04-28-1777390212`
+### 3. Configure tcode and create a web user
 
-The script prints the exact tag after the build. The examples below use `"$IMAGE_TAG"` for that printed value:
+Both configuration and a web user are required. Run these commands one at a
+time before starting the server:
 
 ```sh
-IMAGE_TAG=tcode-remote:abc1234  # replace with the tag printed by ./build-docker.sh
+podman run --rm -it --init -v ~/tcode-web-vol:/home/tcode/.tcode:rw,U localhost/tcode-remote:latest config
+podman run --rm -it --init -v ~/tcode-web-vol:/home/tcode/.tcode:rw,U localhost/tcode-remote:latest add-web-user alice
 ```
 
-### Run the image
+When prompted, enter `/home/tcode/.tcode/sessions/alice` for the session
+directory and `/home/tcode/.tcode/trash/alice` for the trash directory so both
+persist in the host volume. See [Configuration](02-configuration.md#providers)
+and the [CLI reference](03-commands.md) for provider and authentication details.
 
-For HTTPS/reverse-proxy use:
+### 4. Run the server
 
 ```sh
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  -p 8080:8080 \
-  -v "$HOME/.tcode/web-users.toml:/home/tcode/.tcode/web-users.toml:ro" \
-  "$IMAGE_TAG"
+podman run --rm --init --name tcode-remote -p 127.0.0.1:8080:8080 -v ~/tcode-web-vol:/home/tcode/.tcode:rw,U localhost/tcode-remote:latest
 ```
 
-The `--security-opt seccomp=unconfined` option lets Chromium create the sandbox namespaces it needs inside Docker. Without it, Chromium may fail to launch and browser tools can hang until their timeout.
+Open `http://127.0.0.1:8080/` and log in. The port is published only on host
+loopback. If local HTTP login requires insecure cookies, append
+`remote --host 0.0.0.0 --port 8080 --allow-insecure-http` after the image name;
+keep the loopback port mapping.
 
-This starts the server, but model calls still need provider configuration. Mount a data directory containing `config.toml` and any OAuth tokens, or pass provider API-key environment variables such as `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, or `OPENROUTER_API_KEY`.
+To update an existing container, rebuild the image and recreate the container;
+the `latest` tag does not update a running container automatically.
 
-For non-loopback direct plain-HTTP testing, add `--allow-insecure-http` by passing the full remote args after the image name. You should not need this for loopback access such as `http://127.0.0.1:8080/` when you use the same hostname consistently, or when accessing through HTTPS:
+### Docker alternative
+
+For conventional Linux Docker without user-namespace remapping, build as your
+non-root host user:
 
 ```sh
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  -p 8080:8080 \
-  -v "$HOME/.tcode/web-users.toml:/home/tcode/.tcode/web-users.toml:ro" \
-  "$IMAGE_TAG" \
-  --host 0.0.0.0 --port 8080 --allow-insecure-http
+./build-docker.sh docker \
+  --build-arg TCODE_UID="$(id -u)" --build-arg TCODE_GID="$(id -g)"
 ```
 
-### Persist container state
-
-The image does not mount your host `~/.tcode` by default. Inside the container, tcode uses:
-
-```text
-/home/tcode/.tcode
-```
-
-For persistent state, mount a dedicated data directory:
+Prepare a fresh, host-owned `~/tcode-web-vol-docker` using the same copying
+steps; do not reuse the Podman-owned copy. Adapt both setup commands above to
+use `docker`, the image `tcode-remote:latest`, and the mount
+`-v ~/tcode-web-vol-docker:/home/tcode/.tcode:rw` without Podman's `:U` option.
+Keep the same persistent session and trash paths, then start the server:
 
 ```sh
-mkdir -p "$HOME/tcode-docker-data"
-
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  -p 8080:8080 \
-  -v "$HOME/tcode-docker-data:/home/tcode/.tcode:rw" \
-  "$IMAGE_TAG"
+docker run --rm --init --name tcode-remote -p 127.0.0.1:8080:8080 -v ~/tcode-web-vol-docker:/home/tcode/.tcode:rw tcode-remote:latest
 ```
-
-Recommended practice is to copy only the data you want into this dedicated directory instead of mounting your real `~/.tcode`:
-
-```sh
-mkdir -p "$HOME/tcode-docker-data"
-cp ~/.tcode/config.toml "$HOME/tcode-docker-data/"
-cp ~/.tcode/web-users.toml "$HOME/tcode-docker-data/"
-# Optional, only if needed:
-# cp -a ~/.tcode/auth "$HOME/tcode-docker-data/"
-# cp -a ~/.tcode/chrome "$HOME/tcode-docker-data/"
-# If using snap Chromium, copy the snap profile instead:
-# cp -a ~/snap/chromium/common/.tcode-chrome "$HOME/tcode-docker-data/"
-```
-
-If your `web-users.toml` specifies a `trash_dir` outside the data directory (e.g. `/home/alice/.tcode/trash`), ensure that path is accessible from the container — either mount it explicitly or place it inside the mounted data directory so the server can write deleted sessions there.
-
-Mounting your real `~/.tcode` is possible, but it exposes all local tcode config, auth, sessions, and browser data to the container:
-
-```sh
-docker run --rm \
-  --security-opt seccomp=unconfined \
-  -p 8080:8080 \
-  -v "$HOME/.tcode:/home/tcode/.tcode:rw" \
-  "$IMAGE_TAG"
-```
-
-### Docker browser profile data
-
-The container uses:
-
-```text
-/home/tcode/.tcode/chrome
-```
-
-If you use snap Chromium, your profile is at
-`~/snap/chromium/common/.tcode-chrome/` on the host. Copy that instead.
-
-You can prepare browser data outside Docker with:
-
-```sh
-tcode browser
-```
-
-Then copy the profile into your Docker data directory:
-
-```sh
-cp -a ~/.tcode/chrome "$HOME/tcode-docker-data/"
-```
-
-The browser profile should be writable inside the container. Chromium writes locks, cookies, preferences, cache/state, and other runtime files.
-
-### Docker image vs container mode
-
-The Dockerfile runs tcode itself inside a container and serves the remote web UI.
-
-This is different from tcode's `-c/--container` mode, where tcode runs on the host but bash commands execute inside an already-running Docker or Podman container. See [Configuration: Container Mode](02-configuration.md#container-mode).

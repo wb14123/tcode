@@ -1,16 +1,61 @@
-.git/
-.idea/
-.vscode/
+# Repository and editor metadata, including nested checkouts
+**/.git
+**/.idea
+**/.vscode
 
-# Build outputs and dependency caches
-target/
-target-docker/
-**/node_modules/
-tcode-web/frontend/dist/
-tree-sitter-tcode/src/generated/
+# Build outputs and dependency caches at any depth
+**/target
+**/target-*
+**/node_modules
+**/dist
+**/.cache
+**/.cargo
+**/.npm
+**/.pnpm-store
+**/.yarn
+**/__pycache__
+**/.venv
+**/*.log
+**/*.tsbuildinfo
+**/libtree-sitter-tcode.so
+**/libtree-sitter-tcode.dylib
+tree-sitter-tcode/src/generated
 
-# Local environment, logs, and app data
-.env
-.env.*
-*.log
-.tcode/
+# Local app data and browser profiles must never be baked into the image.
+**/.tcode
+**/.tcode-chrome
+**/.config
+**/.local
+**/chrome
+**/chromium
+**/google-chrome
+**/data
+**/test-tmp
+testdir
+**/*.db
+**/*.db-*
+**/*.sqlite
+**/*.sqlite3
+**/*.sqlite-*
+**/*.sqlite3-*
+
+# Credentials and private configuration, including those in nested sources
+**/.env
+**/.env.*
+**/.aws
+**/.azure
+**/.kube
+**/.ssh
+**/.gnupg
+**/.docker
+**/.netrc
+**/.npmrc
+**/.pypirc
+**/credentials
+**/credentials.*
+**/secrets
+**/secrets.*
+**/*.pem
+**/*.key
+**/*.p12
+**/*.pfx

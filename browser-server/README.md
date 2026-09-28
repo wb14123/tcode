@@ -88,7 +88,11 @@ browser-server browser
 
 #### `browser-server browser`
 
-Launches a visible (non-headless) Chrome window with the persistent profile at `~/.tcode/chrome/`. Use this to log in to services (e.g., Kagi for web search) before running the server. Log in to your accounts, then press Ctrl+C to exit the command (closing the Chrome window first is optional — session data is persisted to the profile directory as you use it). Fails with an error if the profile is already locked by a running browser-server instance.
+Launches a visible Chrome window with a persistent profile so you can log in
+to services such as Kagi before running the server. See
+[Browser Setup](../docs/06-browser.md#profile-location) for profile locations.
+Press Ctrl+C to exit when done. Stop other processes using the profile before
+setup, and stop the browser before copying its profile.
 
 ### Options
 
@@ -133,7 +137,7 @@ tcode --browser-server-url http://host:8090 --browser-server-token xxx
 
 ### `browser`
 
-Shared headless Chrome management with tab pooling. Launches Chrome with a persistent profile at `~/.tcode/chrome/`, handles navigation and page load waiting via `wait-for-idle.js`. Features automatic crash recovery and idle browser shutdown.
+Shared headless Chrome management with tab pooling. Launches Chrome with the same [installation-specific persistent profile](../docs/06-browser.md#profile-location), handles navigation and page load waiting via `wait-for-idle.js`. Features automatic crash recovery and idle browser shutdown.
 
 ### `web_search`
 

@@ -8,7 +8,20 @@ A shared `browser-server` process manages the Chrome instance, tab pooling, and 
 
 ## Chrome/Chromium Setup
 
-Install Chrome or Chromium.
+Install Chrome or Chromium on the machine that runs `tcode browser` or
+`browser-server`; neither command installs it automatically.
+
+If several browsers are installed, select one explicitly with `CHROME`:
+
+```bash
+CHROME=/usr/bin/chromium tcode browser
+# For a snap installation, use its actual launcher instead:
+# CHROME=/snap/bin/chromium tcode browser
+```
+
+Set `CHROME` to the full path of an existing browser executable, without
+arguments. Use the same setting for `tcode browser` and your tcode sessions,
+and restart any running browser-server after changing it.
 
 **Ubuntu/Debian:**
 
@@ -71,7 +84,19 @@ in once — your sessions carry over across tcode restarts. Run this setup
 before using web-only sessions if you need logged-in search or page
 access.
 
-This is a standalone command — it opens a visible Chrome window and does not interact with the browser-server process. When finished, press Ctrl+C in the terminal to exit (closing the Chrome window first is optional).
+The command requests shutdown of the default local browser-server before
+opening a visible browser window. Stop any other browser processes using
+this profile and avoid using other tcode sessions during setup. When
+finished, close the browser window and press Ctrl+C in the terminal.
+
+### Container profile copies
+
+For `tcode remote` in a container, stop the host browser and any other process
+using its profile, then copy the complete profile directory to a separate,
+writable location. Mount only this dedicated copy in the container; never
+share the original or a live profile between browsers. See the
+[container deployment guide](08-remote.md#docker-web-only-deployment)
+for build, copy, and run commands.
 
 ## Browser Server Configuration
 
