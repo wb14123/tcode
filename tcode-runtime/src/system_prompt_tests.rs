@@ -25,6 +25,7 @@ mod tests {
         assert!(prompt.contains("Tool Usage"));
         assert!(prompt.contains("Strongly prefer the dedicated file tools"));
         assert!(prompt.contains("Output Style"));
+        assert!(prompt.contains("Do not search for them"));
     }
 
     #[test]
@@ -130,7 +131,9 @@ mod tests {
         std::fs::write(dir.path().join("AGENTS.md"), "agents content")?;
 
         let instructions = project_instructions(dir.path())?;
-        assert_eq!(instructions.as_deref(), Some("agents content"));
+        let instructions = instructions.expect("AGENTS.md present");
+        assert_eq!(instructions.file_name, "AGENTS.md");
+        assert_eq!(instructions.content, "agents content");
         Ok(())
     }
 
@@ -140,7 +143,9 @@ mod tests {
         std::fs::write(dir.path().join("CLAUDE.md"), "claude content")?;
 
         let instructions = project_instructions(dir.path())?;
-        assert_eq!(instructions.as_deref(), Some("claude content"));
+        let instructions = instructions.expect("CLAUDE.md present");
+        assert_eq!(instructions.file_name, "CLAUDE.md");
+        assert_eq!(instructions.content, "claude content");
         Ok(())
     }
 
@@ -152,8 +157,9 @@ mod tests {
 
         let instructions =
             project_instructions(dir.path())?.expect("instructions present when AGENTS.md exists");
-        assert!(instructions.contains("agents content"));
-        assert!(!instructions.contains("claude content"));
+        assert_eq!(instructions.file_name, "AGENTS.md");
+        assert!(instructions.content.contains("agents content"));
+        assert!(!instructions.content.contains("claude content"));
         Ok(())
     }
 

@@ -155,11 +155,21 @@ fn system_prompt_role(subagent_depth: usize) -> &'static str {
     }
 }
 
+/// Project instructions loaded for a directory: the file it came from
+/// (e.g. `AGENTS.md`) plus its raw content.
+#[derive(Debug)]
+pub(crate) struct ProjectInstructions {
+    /// File name the content was read from, e.g. `AGENTS.md`.
+    pub file_name: String,
+    /// Raw file content.
+    pub content: String,
+}
+
 /// Project instruction content for a directory, appended to the normal-mode
 /// system prompt. `AGENTS.md` takes precedence over `CLAUDE.md`. A file that
 /// does not exist is skipped; a file that exists but cannot be read is a
 /// hard error (no fallback).
-pub(crate) fn project_instructions(dir: &Path) -> anyhow::Result<Option<String>> {
+pub(crate) fn project_instructions(dir: &Path) -> anyhow::Result<Option<ProjectInstructions>> {
     for candidate in ["AGENTS.md", "CLAUDE.md"] {
         let path = dir.join(candidate);
         if !path.is_file() {
@@ -167,7 +177,10 @@ pub(crate) fn project_instructions(dir: &Path) -> anyhow::Result<Option<String>>
         }
         let content = std::fs::read_to_string(&path)
             .with_context(|| format!("failed to read {}", path.display()))?;
-        return Ok(Some(content));
+        return Ok(Some(ProjectInstructions {
+            file_name: candidate.to_string(),
+            content,
+        }));
     }
     Ok(None)
 }
@@ -191,9 +204,22 @@ fn build_normal_system_prompt(
         start_time = start_time,
     );
 
-    if let Some(instructions) = project_instructions(Path::new(cwd))? {
-        prompt.push_str("\n\n");
-        prompt.push_str(&instructions);
+    match project_instructions(Path::new(cwd))? {
+        Some(instructions) => {
+            prompt.push_str(&format!(
+                "\n\n{}\n\n(Loaded project instructions from `{}` above. Do not search for \
+                 `AGENTS.md`/`CLAUDE.md` — not in the current directory, and especially not in \
+                 parent, home, or root directories.)",
+                instructions.content, instructions.file_name
+            ));
+        }
+        None => {
+            prompt.push_str(
+                "\n\n(No `AGENTS.md`/`CLAUDE.md` in the current directory, so no project \
+                 instructions were loaded. Do not search for them — especially not in parent, \
+                 home, or root directories.)",
+            );
+        }
     }
 
     if let Some(config) = container_config {
