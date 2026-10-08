@@ -1,7 +1,9 @@
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::future::Future;
+    use std::path::{Path, PathBuf};
     use std::sync::Arc;
+    use std::time::Duration;
 
     use anyhow::{Result, anyhow};
     use llm_rs::permission::{
@@ -20,6 +22,37 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("failed to create temp dir");
         dir.join("permissions.json")
+    }
+
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Result<Self> {
+            let root = test_root();
+            std::fs::create_dir_all(&root)?;
+            let dir = root.join(uuid::Uuid::new_v4().to_string());
+            match std::fs::remove_dir_all(&dir) {
+                Ok(()) => {}
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
+            std::fs::create_dir_all(&dir)?;
+            Ok(Self(dir))
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            if let Err(error) = std::fs::remove_dir_all(&self.0)
+                && error.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!(path = ?self.0, %error, "failed to clean up permission test directory");
+            }
+        }
     }
 
     fn make_scoped(pm: Arc<PermissionManager>) -> ScopedPermissionManager {
@@ -53,6 +86,221 @@ mod tests {
             }
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
         }
+    }
+
+    fn grant_session_root_read(pm: &PermissionManager, root: &Path) -> Result<PermissionKey> {
+        let canonical_root = root.canonicalize()?;
+        let key = make_key(
+            "file_read",
+            "path",
+            tcode_encoding::path_to_str(&canonical_root)?,
+        );
+        pm.add_permission(key.clone(), PermissionScope::Session)?;
+        Ok(key)
+    }
+
+    async fn assert_permission_denied(
+        pm: &PermissionManager,
+        check: impl Future<Output = Result<()>>,
+        expected_key: &PermissionKey,
+    ) -> Result<()> {
+        tokio::pin!(check);
+        tokio::select! {
+            result = &mut check => {
+                return Err(anyhow!("permission check completed without an approval request: {result:?}"));
+            }
+            result = wait_for_pending(pm, 1) => result?,
+        }
+
+        let state = pm.snapshot();
+        assert_eq!(state.pending.len(), 1);
+        let pending = &state.pending[0];
+        assert_eq!(
+            make_key(&pending.tool, &pending.key, &pending.value),
+            *expected_key
+        );
+        pm.resolve(
+            expected_key,
+            &PermissionDecision::Deny { reason: None },
+            None,
+        )?;
+        let result = tokio::time::timeout(Duration::from_secs(2), &mut check).await?;
+        assert!(result.is_err(), "denied permission should return an error");
+        assert!(pm.snapshot().pending.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_root_read_grant_covers_descendants_without_prompts() -> Result<()> {
+        let fixture = TestDir::new()?;
+        let root = fixture.path().join("sessions/session-a");
+        std::fs::create_dir_all(&root)?;
+        let pm = Arc::new(PermissionManager::new(
+            fixture.path().join("permissions.json"),
+        ));
+        let root_key = grant_session_root_read(&pm, &root)?;
+        let scoped = make_scoped(Arc::clone(&pm));
+
+        // Create descendants after granting the root to exercise future session files.
+        for relative in [
+            "tool-logs/root.log",
+            "subagent-child/tool-logs/child.log",
+            "subagent-child/subagent-grandchild/tool-logs/nested.log",
+            "conversation.json",
+            "history.json",
+            "media/image.png",
+            "tool-events/event.json",
+            "subagent-child/subagent-grandchild/history.json",
+        ] {
+            let file = root.join(relative);
+            let parent = file.parent().expect("session descendants have a parent");
+            std::fs::create_dir_all(parent)?;
+            std::fs::write(&file, "session data")?;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                check_file_read_permission(&scoped, &file, false),
+            )
+            .await??;
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                check_file_read_permission(&scoped, parent, true),
+            )
+            .await??;
+        }
+
+        let state = pm.snapshot();
+        assert!(state.pending.is_empty());
+        assert_eq!(state.session, vec![root_key]);
+        assert!(state.project.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_root_read_grant_does_not_cover_parent_or_sibling_sessions() -> Result<()> {
+        let fixture = TestDir::new()?;
+        let sessions = fixture.path().join("sessions");
+        let root = sessions.join("session-a");
+        let sibling = sessions.join("session-a-sibling");
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&sibling)?;
+        let sibling_file = sibling.join("history.json");
+        std::fs::write(&sibling_file, "other session")?;
+        let pm = Arc::new(PermissionManager::new(
+            fixture.path().join("permissions.json"),
+        ));
+        let root_key = grant_session_root_read(&pm, &root)?;
+        let scoped = make_scoped(Arc::clone(&pm));
+
+        for (path, is_dir, permission_dir) in [
+            (&sessions, true, &sessions),
+            (&sibling, true, &sibling),
+            (&sibling_file, false, &sibling),
+        ] {
+            let canonical_dir = permission_dir.canonicalize()?;
+            let expected = make_key(
+                "file_read",
+                "path",
+                tcode_encoding::path_to_str(&canonical_dir)?,
+            );
+            assert_permission_denied(
+                &pm,
+                check_file_read_permission(&scoped, path, is_dir),
+                &expected,
+            )
+            .await?;
+        }
+
+        let state = pm.snapshot();
+        assert_eq!(state.session, vec![root_key]);
+        assert!(state.project.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_root_read_grant_does_not_authorize_writes() -> Result<()> {
+        let fixture = TestDir::new()?;
+        let root = fixture.path().join("sessions/session-a");
+        std::fs::create_dir_all(&root)?;
+        let existing = root.join("history.json");
+        let new_file = root.join("new.json");
+        std::fs::write(&existing, "session history")?;
+        let pm = Arc::new(PermissionManager::new(
+            fixture.path().join("permissions.json"),
+        ));
+        let root_key = grant_session_root_read(&pm, &root)?;
+        let scoped = make_scoped(Arc::clone(&pm));
+
+        let canonical_root = root.canonicalize()?;
+        let cwd = std::env::current_dir()?.canonicalize()?;
+        let permission_dir = if canonical_root.starts_with(&cwd) {
+            &cwd
+        } else {
+            &canonical_root
+        };
+        let expected = make_key(
+            "file_write",
+            "path",
+            tcode_encoding::path_to_str(permission_dir)?,
+        );
+        for path in [&existing, &new_file] {
+            assert_permission_denied(
+                &pm,
+                check_file_write_permission(&scoped, path, "updated history", "json"),
+                &expected,
+            )
+            .await?;
+        }
+
+        let state = pm.snapshot();
+        assert_eq!(state.session, vec![root_key]);
+        assert!(state.project.is_empty());
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_root_read_grant_does_not_follow_symlinks_outside_root() -> Result<()> {
+        let fixture = TestDir::new()?;
+        let root = fixture.path().join("sessions/session-a");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&outside)?;
+        let outside_file = outside.join("external.log");
+        std::fs::write(&outside_file, "external data")?;
+        let pm = Arc::new(PermissionManager::new(
+            fixture.path().join("permissions.json"),
+        ));
+        let root_key = grant_session_root_read(&pm, &root)?;
+        let scoped = make_scoped(Arc::clone(&pm));
+
+        let linked_logs = root.join("tool-logs");
+        let linked_file = root.join("external.log");
+        std::os::unix::fs::symlink(&outside, &linked_logs)?;
+        std::os::unix::fs::symlink(&outside_file, &linked_file)?;
+        let log_file = linked_logs.join("external.log");
+        let canonical_outside = outside.canonicalize()?;
+        let expected = make_key(
+            "file_read",
+            "path",
+            tcode_encoding::path_to_str(&canonical_outside)?,
+        );
+        for (path, is_dir) in [
+            (&linked_logs, true),
+            (&log_file, false),
+            (&linked_file, false),
+        ] {
+            assert_permission_denied(
+                &pm,
+                check_file_read_permission(&scoped, path, is_dir),
+                &expected,
+            )
+            .await?;
+        }
+
+        let state = pm.snapshot();
+        assert_eq!(state.session, vec![root_key]);
+        assert!(state.project.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
@@ -146,41 +394,33 @@ mod tests {
 
     #[tokio::test]
     async fn unified_scope_works_across_tool_names() -> Result<()> {
-        let pm = Arc::new(PermissionManager::new(temp_path()));
-
-        let dir = test_root().join(uuid::Uuid::new_v4().to_string());
-        let _ = std::fs::remove_dir_all(&dir);
+        let fixture = TestDir::new()?;
+        let dir = fixture.path().join("session");
         std::fs::create_dir_all(&dir)?;
+        let pm = Arc::new(PermissionManager::new(
+            fixture.path().join("permissions.json"),
+        ));
+        let root_key = grant_session_root_read(&pm, &dir)?;
 
-        let canonical_dir = tokio::fs::canonicalize(&dir).await?;
-        let canonical_dir_str = canonical_dir.to_str().unwrap().to_string();
+        for tool_name in ["read", "grep", "glob"] {
+            let scoped = ScopedPermissionManager::new(
+                tool_name,
+                Arc::clone(&pm),
+                Arc::new(|| {}),
+                Arc::new(|| {}),
+                None,
+            );
+            tokio::time::timeout(
+                Duration::from_secs(2),
+                check_file_read_permission(&scoped, &dir, true),
+            )
+            .await??;
+        }
 
-        let key = make_key("file_read", "path", &canonical_dir_str);
-        pm.resolve(&key, &PermissionDecision::AllowSession, None)?;
-
-        let read_scoped = ScopedPermissionManager::new(
-            "read",
-            Arc::clone(&pm),
-            Arc::new(|| {}),
-            Arc::new(|| {}),
-            None,
-        );
-        let result = check_file_read_permission(&read_scoped, &dir, true).await;
-        assert!(result.is_ok(), "read tool should see file_read approval");
-
-        let glob_scoped = ScopedPermissionManager::new(
-            "glob",
-            Arc::clone(&pm),
-            Arc::new(|| {}),
-            Arc::new(|| {}),
-            None,
-        );
-        let result = check_file_read_permission(&glob_scoped, &dir, true).await;
-        assert!(result.is_ok(), "glob tool should see file_read approval");
-
-        assert!(pm.snapshot().pending.is_empty());
-
-        let _ = std::fs::remove_dir_all(&dir);
+        let state = pm.snapshot();
+        assert!(state.pending.is_empty());
+        assert_eq!(state.session, vec![root_key]);
+        assert!(state.project.is_empty());
         Ok(())
     }
 

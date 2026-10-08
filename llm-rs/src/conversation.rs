@@ -188,7 +188,7 @@ impl std::fmt::Display for UniqueId {
 
 /// Mints ids for one session. Exactly one instance exists per session,
 /// created from the ROOT session dir by
-/// [`ConversationManager::ensure_id_generator`] and shared by the root
+/// [`ConversationManager::ensure_session_initialized`] and shared by the root
 /// conversation and all subagents (every `ConversationClient` holds an `Arc`
 /// to it). The shared Relaxed-atomic counter makes ids globally unique across
 /// the whole session dir. `new(dir)` may also be called with `None` by test
@@ -696,7 +696,7 @@ type PreparedConversation = (
 
 /// Prepare tools and channels common to both new and resumed conversations.
 /// The caller supplies the shared session id generator (created by
-/// [`ConversationManager::ensure_id_generator`], which runs the epoch-file
+/// [`ConversationManager::ensure_session_initialized`], which runs the epoch-file
 /// protocol once per session), so ids are globally unique across the root
 /// conversation and all subagents.
 fn prepare_conversation(
@@ -756,7 +756,7 @@ pub struct ConversationManager {
     container_config: Option<Arc<ContainerConfig>>,
     system_prompt_builder: SystemPromptBuilder,
     /// The single shared session id generator. Created lazily by
-    /// `ensure_id_generator` from the ROOT session dir (which runs the
+    /// `ensure_session_initialized` from the ROOT session dir (which runs the
     /// epoch-file protocol exactly once per session) and shared by the root
     /// conversation and all subagents. `None` until the first conversation
     /// start (new or resumed) requests one.
@@ -802,22 +802,47 @@ impl ConversationManager {
         &self.permission_manager
     }
 
-    /// Get (creating once) the session's shared id generator.
-    ///
-    /// The epoch-file protocol (read `msg-id-epoch`, bump, tmp + fsync +
-    /// rename + dir fsync) runs exactly once per session, from the ROOT
-    /// session dir (the first caller's `dir`); every later caller reuses the
-    /// same generator, so ids are globally unique across the root
-    /// conversation and all subagents. `dir` is `None` only for
-    /// conversations without a state dir (tests), giving epoch 0, no file.
-    fn ensure_id_generator(&self, dir: Option<&Path>) -> anyhow::Result<Arc<UniqueIdGenerator>> {
+    /// Initialize shared IDs and the root read default once, using the first
+    /// caller's top-level state directory. Later conversations reuse the IDs
+    /// without repeating the epoch protocol or permission registration.
+    fn ensure_session_initialized(
+        &self,
+        dir: Option<&Path>,
+    ) -> anyhow::Result<Arc<UniqueIdGenerator>> {
         let mut guard = self.id_generator.lock();
         if let Some(generator) = guard.as_ref() {
             return Ok(Arc::clone(generator));
         }
         let generator = Arc::new(UniqueIdGenerator::new(dir)?);
+        // Cache before permission setup so an encoding error cannot bump the
+        // epoch again or cause a later child to retry the automatic grant.
         *guard = Some(Arc::clone(&generator));
+        if let Some(dir) = dir {
+            self.grant_session_root_read(dir)?;
+        }
         Ok(generator)
+    }
+
+    fn grant_session_root_read(&self, dir: &Path) -> anyhow::Result<()> {
+        let canonical = match std::fs::canonicalize(dir) {
+            Ok(canonical) => canonical,
+            Err(e) => {
+                tracing::warn!("Failed to canonicalize session root {dir:?}: {e}");
+                return Ok(());
+            }
+        };
+        let key = crate::permission::PermissionKey {
+            tool: crate::permission::SCOPE_FILE_READ.to_string(),
+            key: crate::permission::KEY_PATH.to_string(),
+            value: tcode_encoding::path_to_str(&canonical)?.to_string(),
+        };
+        if let Err(e) = self
+            .permission_manager
+            .add_permission(key, crate::permission::PermissionScope::Session)
+        {
+            tracing::warn!("Failed to add read permission for session root {canonical:?}: {e}");
+        }
+        Ok(())
     }
 
     /// Create a new conversation. The new conversation will be kept in the manager's
@@ -852,45 +877,13 @@ impl ConversationManager {
         )
     }
 
-    /// Create the session directory structure from the given state directory.
-    ///
-    /// Creates the `tool-logs/` subdirectory and grants a `Session`-scoped
-    /// `file_read` permission so the LLM can later `read`/`grep`/`glob` log
-    /// files produced by tools (e.g., full bash output saved on truncation).
-    fn make_session_dir(
-        &self,
-        state_dir: &Option<PathBuf>,
-    ) -> Result<Option<crate::tool::SessionDir>> {
-        let dir = match state_dir {
-            Some(dir) => dir,
-            None => return Ok(None),
-        };
+    fn make_session_dir(state_dir: &Option<PathBuf>) -> Option<crate::tool::SessionDir> {
+        let dir = state_dir.as_ref()?;
         let tool_logs_dir = dir.join("tool-logs");
         if let Err(e) = std::fs::create_dir_all(&tool_logs_dir) {
-            tracing::warn!(
-                "Failed to create tool logs directory {}: {e}",
-                tool_logs_dir.display()
-            );
+            tracing::warn!("Failed to create tool logs directory {tool_logs_dir:?}: {e}");
         }
-        if let Ok(canonical) = std::fs::canonicalize(&tool_logs_dir) {
-            let key = crate::permission::PermissionKey {
-                tool: crate::permission::SCOPE_FILE_READ.to_string(),
-                key: crate::permission::KEY_PATH.to_string(),
-                value: tcode_encoding::path_to_str(&canonical)?.to_string(),
-            };
-            if let Err(e) = self
-                .permission_manager
-                .add_permission(key, crate::permission::PermissionScope::Session)
-            {
-                tracing::warn!("Failed to add permission for tool logs directory: {e}");
-            }
-        } else {
-            tracing::warn!(
-                "Failed to canonicalize tool logs directory path: {}",
-                tool_logs_dir.display()
-            );
-        }
-        Ok(Some(crate::tool::SessionDir::new(dir.clone())))
+        Some(crate::tool::SessionDir::new(dir.clone()))
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -909,7 +902,7 @@ impl ConversationManager {
     ) -> Result<(String, Arc<ConversationClient>)> {
         let now = now_millis();
         let llm_clone = Arc::from(llm.clone_box());
-        let ids = self.ensure_id_generator(state_dir.as_deref())?;
+        let ids = self.ensure_session_initialized(state_dir.as_deref())?;
         let (tools_map, input_rx, client) = prepare_conversation(
             &mut *llm,
             tools,
@@ -952,7 +945,7 @@ impl ConversationManager {
                     subagent_depth,
                     max_subagent_depth,
                     state_dir: state_dir.clone(),
-                    session_dir: self.make_session_dir(&state_dir)?,
+                    session_dir: Self::make_session_dir(&state_dir),
                     supports_media,
                     permission_manager: Arc::clone(&self.permission_manager),
                     container_config: self.container_config.clone(),
@@ -1088,7 +1081,7 @@ impl ConversationManager {
         let created_at = summary.created_at;
 
         let llm_clone = Arc::from(llm.clone_box());
-        let ids = self.ensure_id_generator(state_dir.as_deref())?;
+        let ids = self.ensure_session_initialized(state_dir.as_deref())?;
         let (tools_map, input_rx, client) = prepare_conversation(&mut *llm, tools, ids, summary)?;
         let conv_id = state.id.clone();
         let conversation = Conversation {
@@ -1121,7 +1114,7 @@ impl ConversationManager {
                     subagent_depth: state.subagent_depth,
                     max_subagent_depth,
                     state_dir: state_dir.clone(),
-                    session_dir: self.make_session_dir(&state_dir)?,
+                    session_dir: Self::make_session_dir(&state_dir),
                     supports_media,
                     permission_manager: Arc::clone(&self.permission_manager),
                     container_config: self.container_config.clone(),
@@ -1150,14 +1143,10 @@ impl ConversationManager {
         state_dir: PathBuf,
         supports_media: bool,
     ) -> Result<(String, Arc<ConversationClient>, Vec<ResumedSubagent>)> {
-        // Ordering invariant: run the epoch-file protocol (read/bump/write,
-        // tmp + fsync + rename + dir fsync) for the ROOT dir up front, before
-        // ANY subagent is resumed, so the new epoch is durable before any
-        // event with it can be written (synthetic stale-close appends happen
-        // after this whole function returns). The single generator is then
-        // shared by the root and every resumed subagent (their resume paths
-        // reuse it via ensure_id_generator).
-        self.ensure_id_generator(Some(&state_dir))?;
+        // Initialize from the root before restoring children: the shared epoch
+        // must be durable and the root read default attempted before any child
+        // can use tools. Child resumes only reuse this shared initialization.
+        self.ensure_session_initialized(Some(&state_dir))?;
 
         // Find all subagent states (depth-first: nested before parent)
         let subagent_states = find_subagent_states(&state_dir);
@@ -2990,7 +2979,7 @@ async fn execute_continue_subagent(
 /// Use for the client to send chat messages and subscribe to the conversation's messages.
 pub struct ConversationClient {
     /// The session's shared id generator (one per session, see
-    /// `ConversationManager::ensure_id_generator`). All conversations in a
+    /// `ConversationManager::ensure_session_initialized`). All conversations in a
     /// session — root and subagents — mint from the same Arc, so ids are
     /// globally unique across the whole session dir.
     ids: Arc<UniqueIdGenerator>,

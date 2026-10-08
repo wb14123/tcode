@@ -10,11 +10,15 @@ mod tests {
         ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall,
     };
     use crate::media::ContentPart;
+    use crate::permission::{
+        KEY_PATH, PermissionKey, PermissionManager, PermissionScope, SCOPE_FILE_READ,
+    };
     use crate::tool::{CancellationToken, Tool};
+    use parking_lot::Mutex;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use tokio::sync::{broadcast, mpsc};
     use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
     use tokio_stream::{Stream, StreamExt};
@@ -38,7 +42,11 @@ mod tests {
             std::fs::create_dir_all(&root).expect("failed to create test root");
             let dir = root.join(uuid::Uuid::new_v4().to_string());
             // Cleanup before: remove any stale leftover at this exact path.
-            let _ = std::fs::remove_dir_all(&dir);
+            if let Err(e) = std::fs::remove_dir_all(&dir)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                tracing::warn!("Failed to clean stale test directory {dir:?}: {e}");
+            }
             std::fs::create_dir_all(&dir).expect("failed to create test dir");
             Self(dir)
         }
@@ -50,7 +58,9 @@ mod tests {
 
     impl Drop for TestDir {
         fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
+            if let Err(e) = std::fs::remove_dir_all(&self.0) {
+                tracing::warn!("Failed to remove test directory {:?}: {e}", self.0);
+            }
         }
     }
 
@@ -685,18 +695,36 @@ mod tests {
 
     struct MockLlmInner {
         responses: Vec<MockResponse>,
+        required_session_read: Option<(Arc<PermissionManager>, PermissionKey)>,
     }
 
     impl MockLlm {
         fn new(responses: Vec<MockResponse>) -> Self {
             Self {
-                inner: Arc::new(Mutex::new(MockLlmInner { responses })),
+                inner: Arc::new(Mutex::new(MockLlmInner {
+                    responses,
+                    required_session_read: None,
+                })),
             }
+        }
+
+        fn requiring_session_read(
+            self,
+            permissions: Arc<PermissionManager>,
+            key: PermissionKey,
+        ) -> Self {
+            self.inner.lock().required_session_read = Some((permissions, key));
+            self
         }
     }
 
     impl crate::llm::LLM for MockLlm {
-        fn register_tools(&mut self, _tools: Vec<Arc<Tool>>) {}
+        fn register_tools(&mut self, _tools: Vec<Arc<Tool>>) {
+            let inner = self.inner.lock();
+            if let Some((permissions, key)) = &inner.required_session_read {
+                assert!(permissions.snapshot().session.contains(key));
+            }
+        }
 
         fn chat(
             &self,
@@ -704,7 +732,7 @@ mod tests {
             _msgs: &[LLMMessage],
             _options: &ChatOptions,
         ) -> Pin<Box<dyn Stream<Item = LLMEvent> + Send>> {
-            let mut inner = self.inner.lock().unwrap();
+            let mut inner = self.inner.lock();
             let response = inner.responses.remove(0);
             match response {
                 MockResponse::Events(events) => Box::pin(tokio_stream::iter(events)),
@@ -1600,13 +1628,361 @@ mod tests {
         Ok(())
     }
 
-    // ======== get_subagent_conversation_id (reverse lookup) ========
-
     fn make_manager(dir: &Path) -> anyhow::Result<Arc<ConversationManager>> {
         let permissions_file = dir.join("permissions.json");
         std::fs::write(&permissions_file, "[]")?;
         Ok(ConversationManager::new(permissions_file, None))
     }
+
+    fn session_root_read_key(root: &Path) -> anyhow::Result<PermissionKey> {
+        Ok(PermissionKey {
+            tool: SCOPE_FILE_READ.to_string(),
+            key: KEY_PATH.to_string(),
+            value: tcode_encoding::path_to_str(&std::fs::canonicalize(root)?)?.to_string(),
+        })
+    }
+
+    fn assert_session_root_read_only(
+        manager: &ConversationManager,
+        root: &Path,
+    ) -> anyhow::Result<()> {
+        let snapshot = manager.permission_manager().snapshot();
+        assert_eq!(snapshot.session, vec![session_root_read_key(root)?]);
+        assert!(snapshot.project.is_empty());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_root_read_fresh_and_nested_creation_register_only_root() -> anyhow::Result<()>
+    {
+        let dir = TestDir::new("conversation");
+        let session_dir = dir.path().join("custom-base/session");
+        std::fs::create_dir_all(&session_dir)?;
+        let manager = make_manager(dir.path())?;
+        let (_, root_client) = manager.new_conversation_with_id(
+            "root".to_string(),
+            Box::new(MockLlm::new(vec![])),
+            "test-model",
+            vec![],
+            ChatOptions::default(),
+            true,
+            0,
+            10,
+            Some(session_dir.clone()),
+            false,
+        )?;
+
+        assert_session_root_read_only(&manager, &session_dir)?;
+        assert!(session_dir.join("tool-logs").is_dir());
+        assert_eq!(root_client.ids.epoch(), 1);
+        let mut ids = HashSet::from([root_client.get_unique_id().as_i64()]);
+        for (id, depth, child_dir) in [
+            ("A", 1, session_dir.join("subagent-A")),
+            ("B", 2, session_dir.join("subagent-A/subagent-B")),
+            ("C", 1, session_dir.join("subagent-C")),
+        ] {
+            std::fs::create_dir_all(&child_dir)?;
+            let (_, child_client) = manager.new_conversation_with_id(
+                id.to_string(),
+                Box::new(MockLlm::new(vec![])),
+                "test-model",
+                vec![],
+                ChatOptions::default(),
+                true,
+                depth,
+                10,
+                Some(child_dir.clone()),
+                false,
+            )?;
+            assert!(child_dir.join("tool-logs").is_dir());
+            assert!(!child_dir.join("msg-id-epoch").exists());
+            assert!(Arc::ptr_eq(&root_client.ids, &child_client.ids));
+            assert!(ids.insert(child_client.get_unique_id().as_i64()));
+            assert_session_root_read_only(&manager, &session_dir)?;
+        }
+        assert_eq!(
+            std::fs::read_to_string(session_dir.join("msg-id-epoch"))?,
+            "1\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("permissions.json"))?,
+            "[]"
+        );
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_root_read_resume_revocation_and_restart() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let session_dir = dir.path().join("session");
+        let child_dir = session_dir.join("subagent-A");
+        let nested_dir = child_dir.join("subagent-B");
+        std::fs::create_dir_all(&nested_dir)?;
+        let manager = make_manager(dir.path())?;
+        let (_, root_client) = manager.resume_conversation(
+            make_resume_state("root", 0, vec![]),
+            Box::new(MockLlm::new(vec![])),
+            vec![],
+            10,
+            Some(session_dir.clone()),
+            false,
+        )?;
+        assert_session_root_read_only(&manager, &session_dir)?;
+        manager.resume_conversation(
+            make_resume_state("A", 1, vec![]),
+            Box::new(MockLlm::new(vec![])),
+            vec![],
+            10,
+            Some(child_dir),
+            false,
+        )?;
+        assert_session_root_read_only(&manager, &session_dir)?;
+
+        manager
+            .permission_manager()
+            .revoke(&session_root_read_key(&session_dir)?)?;
+        let (_, nested_client) = manager.new_conversation_with_id(
+            "B".to_string(),
+            Box::new(MockLlm::new(vec![])),
+            "test-model",
+            vec![],
+            ChatOptions::default(),
+            true,
+            2,
+            10,
+            Some(nested_dir.clone()),
+            false,
+        )?;
+        manager.resume_conversation(
+            make_resume_state("B-resumed", 2, vec![]),
+            Box::new(MockLlm::new(vec![])),
+            vec![],
+            10,
+            Some(nested_dir),
+            false,
+        )?;
+        assert!(manager.permission_manager().snapshot().session.is_empty());
+        assert!(Arc::ptr_eq(&root_client.ids, &nested_client.ids));
+        assert_eq!(
+            std::fs::read_to_string(session_dir.join("msg-id-epoch"))?,
+            "1\n"
+        );
+
+        let restarted = ConversationManager::new(dir.path().join("permissions.json"), None);
+        let (_, restarted_client) = restarted.resume_conversation(
+            make_resume_state("root", 0, vec![]),
+            Box::new(MockLlm::new(vec![])),
+            vec![],
+            10,
+            Some(session_dir.clone()),
+            false,
+        )?;
+        assert_session_root_read_only(&restarted, &session_dir)?;
+        assert_eq!(restarted_client.ids.epoch(), 2);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_root_read_no_state_directory_initializes_without_grant() -> anyhow::Result<()>
+    {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        let (_, root_client) = manager.new_conversation_with_id(
+            "root".to_string(),
+            Box::new(MockLlm::new(vec![])),
+            "test-model",
+            vec![],
+            ChatOptions::default(),
+            true,
+            0,
+            10,
+            None,
+            false,
+        )?;
+        manager.resume_conversation(
+            make_resume_state("resumed", 0, vec![]),
+            Box::new(MockLlm::new(vec![])),
+            vec![],
+            10,
+            None,
+            false,
+        )?;
+        assert!(manager.permission_manager().snapshot().session.is_empty());
+        assert_eq!(root_client.ids.epoch(), 0);
+        assert!(ConversationManager::make_session_dir(&None).is_none());
+
+        let later_dir = dir.path().join("later-state");
+        std::fs::create_dir_all(&later_dir)?;
+        let (_, later_client) = manager.resume_conversation(
+            make_resume_state("later", 1, vec![]),
+            Box::new(MockLlm::new(vec![])),
+            vec![],
+            10,
+            Some(later_dir.clone()),
+            false,
+        )?;
+        assert!(manager.permission_manager().snapshot().session.is_empty());
+        assert!(Arc::ptr_eq(&root_client.ids, &later_client.ids));
+        assert!(!later_dir.join("msg-id-epoch").exists());
+        assert!(later_dir.join("tool-logs").is_dir());
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn session_root_read_preserves_existing_session_and_project_grants() -> anyhow::Result<()>
+    {
+        let dir = TestDir::new("conversation");
+        let session_dir = dir.path().join("session");
+        let child_dir = session_dir.join("subagent-approved");
+        std::fs::create_dir_all(&child_dir)?;
+        let manager = make_manager(dir.path())?;
+        let approved_child = session_root_read_key(&child_dir)?;
+        let project_key = session_root_read_key(dir.path())?;
+        manager
+            .permission_manager()
+            .add_permission(approved_child.clone(), PermissionScope::Session)?;
+        manager
+            .permission_manager()
+            .add_permission(project_key.clone(), PermissionScope::Project)?;
+        let project_file = dir.path().join("permissions.json");
+        let persisted = std::fs::read(&project_file)?;
+
+        manager.resume_conversation(
+            make_resume_state("root", 0, vec![]),
+            Box::new(MockLlm::new(vec![])),
+            vec![],
+            10,
+            Some(session_dir.clone()),
+            false,
+        )?;
+        let snapshot = manager.permission_manager().snapshot();
+        assert_eq!(
+            snapshot.session.into_iter().collect::<HashSet<_>>(),
+            HashSet::from([approved_child, session_root_read_key(&session_dir)?])
+        );
+        assert_eq!(snapshot.project, vec![project_key]);
+        assert_eq!(std::fs::read(project_file)?, persisted);
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_root_read_symlinked_logs_do_not_grant_outside_targets() -> anyhow::Result<()> {
+        use anyhow::Context;
+        use std::os::unix::fs::symlink;
+
+        let dir = TestDir::new("conversation");
+        let actual_root = dir.path().join("actual-session");
+        let session_dir = dir.path().join("session-alias");
+        let actual_child = actual_root.join("subagent-A");
+        let outside_root_logs = dir.path().join("outside/root-logs");
+        let outside_child_logs = dir.path().join("outside/child-logs");
+        std::fs::create_dir_all(&actual_child)?;
+        std::fs::create_dir_all(&outside_root_logs)?;
+        std::fs::create_dir_all(&outside_child_logs)?;
+        symlink(&actual_root, &session_dir)?;
+        symlink(&outside_root_logs, actual_root.join("tool-logs"))?;
+        symlink(&outside_child_logs, actual_child.join("tool-logs"))?;
+        let manager = make_manager(dir.path())?;
+        for (id, depth, state_dir) in [
+            ("root", 0, session_dir.clone()),
+            ("A", 1, session_dir.join("subagent-A")),
+        ] {
+            manager.resume_conversation(
+                make_resume_state(id, depth, vec![]),
+                Box::new(MockLlm::new(vec![])),
+                vec![],
+                10,
+                Some(state_dir.clone()),
+                false,
+            )?;
+            let session = ConversationManager::make_session_dir(&Some(state_dir.clone()))
+                .context("persisted conversation must keep its session directory")?;
+            assert_eq!(session.tool_log_dir(), state_dir.join("tool-logs"));
+            assert_eq!(session.media_dir(), state_dir.join("media"));
+            assert!(session.tool_log_dir().is_dir());
+            assert_session_root_read_only(&manager, &actual_root)?;
+        }
+        assert_ne!(
+            session_root_read_key(&actual_root)?,
+            session_root_read_key(&outside_root_logs)?
+        );
+        assert_ne!(
+            session_root_read_key(&actual_root)?,
+            session_root_read_key(&outside_child_logs)?
+        );
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn session_root_read_invalid_utf8_does_not_retry_or_bump_epoch() -> anyhow::Result<()> {
+        use anyhow::Context;
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = TestDir::new("conversation");
+        let session_dir = dir
+            .path()
+            .join(std::ffi::OsString::from_vec(b"session-\xff".to_vec()));
+        std::fs::create_dir_all(&session_dir)?;
+        let manager = make_manager(dir.path())?;
+        let error = manager
+            .resume_conversation(
+                make_resume_state("root", 0, vec![]),
+                Box::new(MockLlm::new(vec![])),
+                vec![],
+                10,
+                Some(session_dir.clone()),
+                false,
+            )
+            .err()
+            .context("invalid UTF-8 root must fail explicitly")?;
+        assert!(error.to_string().contains("path is not valid UTF-8"));
+        assert_eq!(
+            std::fs::read_to_string(session_dir.join("msg-id-epoch"))?,
+            "1\n"
+        );
+        assert!(manager.permission_manager().snapshot().session.is_empty());
+
+        let (_, client) = manager.resume_conversation(
+            make_resume_state("root-retried", 0, vec![]),
+            Box::new(MockLlm::new(vec![])),
+            vec![],
+            10,
+            Some(session_dir.clone()),
+            false,
+        )?;
+        let child_dir = session_dir.join("subagent-A");
+        std::fs::create_dir_all(&child_dir)?;
+        manager.resume_conversation(
+            make_resume_state("A", 1, vec![]),
+            Box::new(MockLlm::new(vec![])),
+            vec![],
+            10,
+            Some(child_dir),
+            false,
+        )?;
+        assert_eq!(client.ids.epoch(), 1);
+        assert_eq!(
+            std::fs::read_to_string(session_dir.join("msg-id-epoch"))?,
+            "1\n"
+        );
+        assert!(session_dir.join("tool-logs").is_dir());
+        assert!(manager.permission_manager().snapshot().session.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn session_root_read_canonicalization_failure_is_best_effort() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        manager.grant_session_root_read(&dir.path().join("missing-session"))?;
+        assert!(manager.permission_manager().snapshot().session.is_empty());
+        assert!(manager.permission_manager().snapshot().project.is_empty());
+        Ok(())
+    }
+
+    // ======== get_subagent_conversation_id (reverse lookup) ========
 
     #[test]
     fn get_subagent_conversation_id_resolves_registered_parent() -> anyhow::Result<()> {
@@ -2030,6 +2406,7 @@ mod tests {
                                 ..
                             } = &m.msg
                             {
+                                assert_session_root_read_only(&manager, dir.path())?;
                                 subagent_id = Some(conversation_id.clone());
                                 spawned_tool_call_id = Some(tool_call_id.clone());
                                 if !cancelled {
@@ -2156,6 +2533,7 @@ mod tests {
         )?;
 
         assert_eq!(resumed_root_id, root_id);
+        assert_session_root_read_only(&manager, &session_dir)?;
         assert_eq!(resumed_subagents.len(), 1);
         assert_eq!(resumed_subagents[0].conversation_id, sub_id);
         assert_eq!(
@@ -2269,16 +2647,32 @@ mod tests {
                 .with_context(|| "failed to read root state")?,
         )?;
 
-        let (_resumed_root_id, _root_client, resumed_subagents) = manager
-            .resume_conversation_tree(
-                root_state,
-                Box::new(MockLlm::new(vec![])),
-                vec![],
-                10,
-                session_dir.clone(),
-                false,
-            )?;
+        let mock = MockLlm::new(vec![]).requiring_session_read(
+            Arc::clone(manager.permission_manager()),
+            session_root_read_key(&session_dir)?,
+        );
+        let (_resumed_root_id, root_client, resumed_subagents) = manager.resume_conversation_tree(
+            root_state,
+            Box::new(mock),
+            vec![],
+            10,
+            session_dir.clone(),
+            false,
+        )?;
 
+        assert_session_root_read_only(&manager, &session_dir)?;
+        assert_eq!(
+            std::fs::read_to_string(session_dir.join("msg-id-epoch"))?,
+            "1\n"
+        );
+        for subagent in &resumed_subagents {
+            assert!(Arc::ptr_eq(&root_client.ids, &subagent.client.ids));
+            assert!(subagent.state_dir.join("tool-logs").is_dir());
+            assert!(!subagent.state_dir.join("msg-id-epoch").exists());
+        }
+        assert_eq!(resumed_subagents.len(), 2);
+        assert_eq!(resumed_subagents[0].state_dir, sub_b_dir);
+        assert_eq!(resumed_subagents[1].state_dir, sub_a_dir);
         let resumed_ids: HashSet<String> = resumed_subagents
             .iter()
             .map(|sa| sa.conversation_id.clone())

@@ -5,19 +5,23 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use llm_rs::conversation::{
-    BroadcastMessage, ConversationClient, ConversationManager, Message, MessageEndStatus,
+    BroadcastMessage, ConversationClient, ConversationManager, ConversationState, Message,
+    MessageEndStatus,
 };
 use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo};
 use llm_rs::permission::{
-    KEY_HOSTNAME, PermissionKey, SCOPE_FILE_READ, SCOPE_FILE_WRITE, SCOPE_WEB_FETCH, WILDCARD_VALUE,
+    KEY_HOSTNAME, KEY_PATH, PermissionKey, PermissionManager, PermissionScope, PermissionState,
+    SCOPE_FILE_READ, SCOPE_FILE_WRITE, SCOPE_WEB_FETCH, WILDCARD_VALUE,
 };
 use llm_rs::tool::Tool;
 use tokio::net::UnixListener;
 use tokio_stream::Stream;
 
 use crate::bootstrap::send_socket_message;
-use crate::project::project_sessions_dir;
-use crate::protocol::{ClientKind, ClientMessage, RuntimeOwnerKind, ServerMessage};
+use crate::project::{project_config_dir, project_sessions_dir};
+use crate::protocol::{
+    ClientKind, ClientMessage, RuntimeOwnerKind, ServerMessage, SessionRuntimeInfo,
+};
 use crate::server::{
     ClientLeaseTracker, EventWriterActivityGuard, Server, ServerRuntimeOptions,
     WebIdleShutdownPolicy, WorkActivityTracker, assistant_activity_key, close_stale_running_items,
@@ -114,6 +118,123 @@ fn test_server(socket_path: PathBuf, session_dir: PathBuf, owner_token: &str) ->
         },
         false,
     )
+}
+
+async fn runtime_snapshots(
+    server: Server,
+    socket_path: PathBuf,
+    owner_token: &str,
+) -> anyhow::Result<(SessionRuntimeInfo, PermissionState)> {
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(server.run(Some(ready_tx)));
+    let ready_result: anyhow::Result<()> = async {
+        ready_rx.await??;
+        Ok(())
+    }
+    .await;
+    if let Err(error) = ready_result {
+        handle.await??;
+        return Err(error);
+    }
+
+    let snapshots = async {
+        let response =
+            send_socket_message(socket_path.clone(), &ClientMessage::GetSessionRuntimeInfo).await?;
+        let Some(ServerMessage::SessionRuntimeInfo(info)) = response else {
+            anyhow::bail!("expected runtime info response");
+        };
+        let response =
+            send_socket_message(socket_path.clone(), &ClientMessage::GetPermissionState).await?;
+        let Some(ServerMessage::PermissionState(state)) = response else {
+            anyhow::bail!("expected permission state response");
+        };
+        Ok((info, state))
+    }
+    .await;
+
+    let shutdown_response = send_socket_message(
+        socket_path,
+        &ClientMessage::AuthorizedShutdown {
+            owner_token: owner_token.to_string(),
+        },
+    )
+    .await;
+    if !matches!(shutdown_response, Ok(Some(ServerMessage::Ack))) {
+        handle.abort();
+        match handle.await {
+            Ok(result) => result?,
+            Err(error) if error.is_cancelled() => {}
+            Err(error) => return Err(error.into()),
+        }
+        anyhow::bail!("expected shutdown acknowledgment, got {shutdown_response:?}");
+    }
+    handle.await??;
+    snapshots
+}
+
+fn file_permission_key(scope: &str, path: &Path) -> anyhow::Result<PermissionKey> {
+    Ok(PermissionKey {
+        tool: scope.to_string(),
+        key: KEY_PATH.to_string(),
+        value: tcode_encoding::path_to_str(&std::fs::canonicalize(path)?)?.to_string(),
+    })
+}
+
+fn assert_session_root_read_default(
+    state: &PermissionState,
+    session_dir: &Path,
+) -> anyhow::Result<()> {
+    let root_key = file_permission_key(SCOPE_FILE_READ, session_dir)?;
+    let root = Path::new(&root_key.value);
+    let subtree_grants: Vec<_> = state
+        .session
+        .iter()
+        .filter(|key| key.key == KEY_PATH && Path::new(&key.value).starts_with(root))
+        .collect();
+    assert_eq!(
+        subtree_grants,
+        vec![&root_key],
+        "the session subtree must have only its root read default"
+    );
+    assert!(!state.project.contains(&root_key));
+    assert!(state.pending.is_empty());
+    assert!(session_dir.join("tool-logs").is_dir());
+    if Path::new("/dev/null").exists() {
+        for scope in [SCOPE_FILE_READ, SCOPE_FILE_WRITE] {
+            assert!(
+                state
+                    .session
+                    .contains(&file_permission_key(scope, Path::new("/dev/null"))?),
+                "missing session-scoped {scope} default for /dev/null"
+            );
+        }
+    }
+    Ok(())
+}
+
+fn write_runtime_resume_state(
+    state_path: &Path,
+    id: &str,
+    subagent_depth: usize,
+) -> anyhow::Result<()> {
+    let state = ConversationState {
+        id: id.to_string(),
+        model: "mock-model".to_string(),
+        llm_msgs: vec![],
+        chat_options: ChatOptions::default(),
+        total_input_tokens: 0,
+        total_output_tokens: 0,
+        total_cache_creation_tokens: 0,
+        total_cache_read_tokens: 0,
+        aggregate_input_tokens: 0,
+        aggregate_output_tokens: 0,
+        aggregate_cache_creation_tokens: 0,
+        aggregate_cache_read_tokens: 0,
+        single_turn: subagent_depth > 0,
+        subagent_depth,
+    };
+    std::fs::write(state_path, serde_json::to_string_pretty(&state)?)?;
+    Ok(())
 }
 
 #[test]
@@ -407,6 +528,9 @@ fn server_runtime_options_default_to_normal_session_mode() {
 #[tokio::test]
 async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow::Result<()> {
     let dir = TestDir::new("r");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    let _home_guard = HomeGuard::set(&home);
     let socket_path = dir.path().join("s");
     let owner_token = "owner-token";
     let registered_tools = Arc::new(parking_lot::Mutex::new(Vec::new()));
@@ -435,16 +559,8 @@ async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow:
         },
         false,
     );
-    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
-    let handle = tokio::spawn(server.run(Some(ready_tx)));
-
-    ready_rx.await??;
-
-    let response =
-        send_socket_message(socket_path.clone(), &ClientMessage::GetSessionRuntimeInfo).await?;
-    let Some(ServerMessage::SessionRuntimeInfo(info)) = response else {
-        anyhow::bail!("expected runtime info response");
-    };
+    let (info, state) = runtime_snapshots(server, socket_path, owner_token).await?;
+    assert!(info.active);
     assert_eq!(info.session_mode, SessionMode::WebOnly);
     assert_eq!(
         registered_tools.lock().clone(),
@@ -458,12 +574,12 @@ async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow:
     );
     assert!(!dir.path().join("lsp-hint.txt").exists());
 
-    // Verify the web_fetch wildcard permission was auto-granted
-    let response =
-        send_socket_message(socket_path.clone(), &ClientMessage::GetPermissionState).await?;
-    let Some(ServerMessage::PermissionState(state)) = response else {
-        anyhow::bail!("expected permission state response");
-    };
+    assert_session_root_read_default(&state, dir.path())?;
+    assert!(state.project.is_empty());
+    assert!(!state.session.contains(&file_permission_key(
+        SCOPE_FILE_READ,
+        &std::env::current_dir()?,
+    )?));
     let web_fetch_wildcard = PermissionKey {
         tool: SCOPE_WEB_FETCH.to_string(),
         key: KEY_HOSTNAME.to_string(),
@@ -473,17 +589,68 @@ async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow:
         state.session.contains(&web_fetch_wildcard),
         "web-only session must auto-grant web_fetch > hostname > *"
     );
-
-    let response = send_socket_message(
-        socket_path,
-        &ClientMessage::AuthorizedShutdown {
-            owner_token: owner_token.to_string(),
-        },
-    )
-    .await?;
-    assert!(matches!(response, Some(ServerMessage::Ack)));
-    handle.await??;
     Ok(())
+}
+
+async fn assert_normal_runtime_permission_defaults(resuming: bool) -> anyhow::Result<()> {
+    let dir = TestDir::new("r");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    let _home_guard = HomeGuard::set(&home);
+    let session_dir = dir.path().join("abc123xy");
+    std::fs::create_dir_all(&session_dir)?;
+    let cwd = std::env::current_dir()?;
+    let cwd_key = file_permission_key(SCOPE_FILE_READ, &cwd)?;
+    assert_ne!(cwd_key, file_permission_key(SCOPE_FILE_READ, &session_dir)?);
+
+    let approved_file = session_dir.join("approved-history.json");
+    std::fs::write(&approved_file, "{}")?;
+    let project_grant = file_permission_key(SCOPE_FILE_READ, &approved_file)?;
+    let permissions_path = project_config_dir(&cwd)?.join("permissions.json");
+    PermissionManager::new(permissions_path.clone())
+        .add_permission(project_grant.clone(), PermissionScope::Project)?;
+    let persisted_permissions = std::fs::read(&permissions_path)?;
+
+    let child_dir = session_dir.join("subagent-A");
+    let nested_dir = child_dir.join("subagent-B");
+    if resuming {
+        std::fs::create_dir_all(&nested_dir)?;
+        // The runtime fixture reads conversation.json for the root only.
+        write_runtime_resume_state(&session_dir.join("conversation.json"), "root", 0)?;
+        write_runtime_resume_state(&child_dir.join("conversation-state.json"), "A", 1)?;
+        write_runtime_resume_state(&nested_dir.join("conversation-state.json"), "B", 2)?;
+        assert!(!child_dir.join("tool-logs").exists());
+        assert!(!nested_dir.join("tool-logs").exists());
+    }
+
+    let socket_path = dir.path().join("s");
+    let owner_token = "owner-token";
+    let server = test_server(socket_path.clone(), session_dir.clone(), owner_token);
+    let (info, state) = runtime_snapshots(server, socket_path, owner_token).await?;
+    assert!(info.active);
+    assert_eq!(info.session_mode, SessionMode::Normal);
+    assert_session_root_read_default(&state, &session_dir)?;
+    assert!(state.session.contains(&cwd_key));
+    let cwd_write_key = file_permission_key(SCOPE_FILE_WRITE, &cwd)?;
+    assert!(!state.session.contains(&cwd_write_key));
+    assert!(!state.session.iter().any(|key| key.tool == SCOPE_WEB_FETCH));
+    assert_eq!(state.project, vec![project_grant]);
+    assert_eq!(std::fs::read(&permissions_path)?, persisted_permissions);
+    if resuming {
+        assert!(child_dir.join("tool-logs").is_dir());
+        assert!(nested_dir.join("tool-logs").is_dir());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn new_runtime_permission_snapshot_has_only_session_root_default() -> anyhow::Result<()> {
+    assert_normal_runtime_permission_defaults(false).await
+}
+
+#[tokio::test]
+async fn resumed_runtime_permission_snapshot_has_only_session_root_default() -> anyhow::Result<()> {
+    assert_normal_runtime_permission_defaults(true).await
 }
 
 #[tokio::test]
