@@ -1,3 +1,7 @@
+import { marked } from 'marked';
+import katex from 'katex';
+// markdown.ts registers its math tokenizers with marked as a side effect of import.
+import './src/markdown.ts';
 import { TimelineStore } from './src/timeline-store.ts';
 import { StreamEventBatcher } from './src/stream-event-batcher.ts';
 import { ConversationTimelineBuilder, parseStreamLine } from './src/messages.ts';
@@ -385,6 +389,247 @@ function validateWireFormatNormalization() {
   assert(notAnEnvelope?.wire === null, 'non-object msg values fall back to raw events');
 }
 
+// Matches the math placeholder contract from markdown.ts exactly: a `span` element
+// with the two data attributes and no children (an exactly-empty placeholder).
+const mathPlaceholderPattern =
+  /<span class="math-src" data-display="(block|inline)" data-tex="([^"]*)"><\/span>/g;
+
+function decodeMathAttribute(value) {
+  return value
+    .replace(/&quot;/g, '"')
+    .replace(/&gt;/g, '>')
+    .replace(/&lt;/g, '<')
+    .replace(/&amp;/g, '&');
+}
+
+function extractMathPlaceholders(html) {
+  const matches = [...html.matchAll(mathPlaceholderPattern)];
+  const openTags = (html.match(/<span class="math-src"/g) ?? []).length;
+  assert(
+    matches.length === openTags,
+    `every math placeholder is an empty span element (open tags: ${openTags}, empty placeholders: ${matches.length})`,
+  );
+  return matches.map((match) => ({ display: match[1], tex: decodeMathAttribute(match[2]) }));
+}
+
+function validateMathRendering() {
+  const motivating = `\\[
+L=Z^{(N)}W_{\\text{vocab}}+b
+\\qquad
+L\\in\\mathbb R^{T\\times|\\mathcal V|}
+\\]`;
+  // The inner source sits between the `\[`/`\]` lines, so it keeps the surrounding newlines.
+  const motivatingTex =
+    '\nL=Z^{(N)}W_{\\text{vocab}}+b\n\\qquad\nL\\in\\mathbb R^{T\\times|\\mathcal V|}\n';
+  const motivatingPlaceholders = extractMathPlaceholders(marked.parse(motivating));
+  assert(
+    motivatingPlaceholders.length === 1,
+    'motivating display example produces exactly one placeholder',
+  );
+  assert(
+    motivatingPlaceholders[0].display === 'block',
+    'motivating display example is a block placeholder',
+  );
+  assert(
+    motivatingPlaceholders[0].tex === motivatingTex,
+    'motivating display example preserves the inner LaTeX source',
+  );
+
+  // A blank line ends the paragraph, so this case is only reachable via the block tokenizer.
+  const blankLine = `\\[
+L=Z^{(N)}W_{\\text{vocab}}+b
+
+\\qquad
+L\\in\\mathbb R^{T\\times|\\mathcal V|}
+\\]`;
+  const blankLinePlaceholders = extractMathPlaceholders(marked.parse(blankLine));
+  assert(
+    blankLinePlaceholders.length === 1,
+    'display math spanning a blank line produces exactly one placeholder',
+  );
+  assert(
+    blankLinePlaceholders[0].display === 'block',
+    'display math spanning a blank line is a block placeholder',
+  );
+
+  const bracketOneLine = extractMathPlaceholders(marked.parse('\\[x^2\\]'));
+  assert(bracketOneLine.length === 1, 'single-line \\[...\\] produces one placeholder');
+  assert(bracketOneLine[0].display === 'block', 'single-line \\[...\\] is a block placeholder');
+  assert(bracketOneLine[0].tex === 'x^2', 'single-line \\[...\\] keeps its LaTeX source');
+
+  const doubleDollarOneLine = extractMathPlaceholders(marked.parse('$$\\frac{a}{b}$$'));
+  assert(doubleDollarOneLine.length === 1, 'single-line $$...$$ produces one placeholder');
+  assert(doubleDollarOneLine[0].display === 'block', 'single-line $$...$$ is a block placeholder');
+
+  const parenInline = extractMathPlaceholders(marked.parse('inline \\(E=mc^2\\) here'));
+  assert(parenInline.length === 1, 'inline \\(...\\) produces one placeholder');
+  assert(parenInline[0].display === 'inline', 'inline \\(...\\) is an inline placeholder');
+  assert(parenInline[0].tex === 'E=mc^2', 'inline \\(...\\) keeps its LaTeX source');
+
+  const dollarInline = extractMathPlaceholders(marked.parse('costs $E=mc^2$ today'));
+  assert(dollarInline.length === 1, 'inline $...$ produces one placeholder');
+  assert(dollarInline[0].display === 'inline', 'inline $...$ is an inline placeholder');
+  assert(dollarInline[0].tex === 'E=mc^2', 'inline $...$ keeps its LaTeX source');
+
+  const inlineDisplay = extractMathPlaceholders(marked.parse('before \\[z\\] after'));
+  assert(
+    inlineDisplay.length === 1,
+    'display delimiter inside a paragraph produces one placeholder',
+  );
+  assert(inlineDisplay[0].display === 'block', 'display delimiter inside a paragraph is block-mode');
+  assert(inlineDisplay[0].tex === 'z', 'display delimiter inside a paragraph keeps its LaTeX source');
+
+  const doubleDollarWins = extractMathPlaceholders(marked.parse('$$x$$'));
+  assert(doubleDollarWins.length === 1, '$$x$$ produces exactly one placeholder');
+  assert(doubleDollarWins[0].tex === 'x', '$$x$$ uses the $$-delimiter interpretation');
+
+  const currency9 = marked.parse('It costs $5 and $10.');
+  assert(
+    extractMathPlaceholders(currency9).length === 0,
+    'currency prose "$5 and $10" produces no placeholder',
+  );
+  assert(
+    currency9.includes('$5') && currency9.includes('$10'),
+    'currency prose "$5 and $10" keeps its literal dollar amounts',
+  );
+
+  const currency10 = marked.parse('$20,000 x $30,000');
+  assert(
+    extractMathPlaceholders(currency10).length === 0,
+    'currency prose "$20,000 x $30,000" produces no placeholder',
+  );
+  assert(
+    currency10.includes('$20,000') && currency10.includes('$30,000'),
+    'currency prose "$20,000 x $30,000" keeps its literal amounts',
+  );
+
+  const escapedDollar = marked.parse('\\$5');
+  assert(
+    extractMathPlaceholders(escapedDollar).length === 0,
+    'escaped dollar \\$5 produces no placeholder',
+  );
+  assert(escapedDollar.includes('$5'), 'escaped dollar \\$5 renders as a literal dollar sign');
+
+  const spaceAfterOpen = marked.parse('a $ x$ b');
+  assert(
+    extractMathPlaceholders(spaceAfterOpen).length === 0,
+    'whitespace after the opening $ produces no placeholder',
+  );
+  assert(spaceAfterOpen.includes('$ x$'), 'text around a whitespace-after-open $ survives');
+
+  const spaceBeforeClose = marked.parse('a $x $ b');
+  assert(
+    extractMathPlaceholders(spaceBeforeClose).length === 0,
+    'whitespace before the closing $ produces no placeholder',
+  );
+  assert(spaceBeforeClose.includes('$x $'), 'text around a whitespace-before-close $ survives');
+
+  const digitAfterClose = marked.parse('a $x$5 b');
+  assert(
+    extractMathPlaceholders(digitAfterClose).length === 0,
+    'digit after the closing $ produces no placeholder',
+  );
+  assert(digitAfterClose.includes('$x$5'), 'text around a digit-after-close $ survives');
+
+  const unclosedOpen = marked.parse('a $x');
+  assert(
+    extractMathPlaceholders(unclosedOpen).length === 0,
+    'unclosed opening $ produces no placeholder',
+  );
+  assert(unclosedOpen.includes('$x'), 'unclosed opening $ text survives');
+
+  const unclosedClose = marked.parse('a x$');
+  assert(
+    extractMathPlaceholders(unclosedClose).length === 0,
+    'unclosed closing $ produces no placeholder',
+  );
+  assert(unclosedClose.includes('x$'), 'unclosed closing $ text survives');
+
+  let halfTyped;
+  try {
+    halfTyped = marked.parse('\\[ L=Z^{(N)}W_{\\text{vocab');
+  } catch (error) {
+    throw new Error(`half-typed display formula must not throw from marked.parse: ${error}`);
+  }
+  assert(
+    extractMathPlaceholders(halfTyped).length === 0,
+    'half-typed display formula produces no placeholder',
+  );
+  assert(
+    halfTyped.includes('L=Z^{(N)}W_{\\text{vocab'),
+    'half-typed display formula text survives',
+  );
+
+  const crossLine = marked.parse('a $x\ny$ b');
+  assert(
+    extractMathPlaceholders(crossLine).length === 0,
+    '$ span crossing a newline produces no placeholder',
+  );
+  assert(crossLine.includes('x') && crossLine.includes('y$'), 'text around a newline-crossing $ survives');
+
+  const fenced = marked.parse('```\n\\[x\\]\n$y$\n```');
+  assert(
+    extractMathPlaceholders(fenced).length === 0,
+    'math inside a fenced code block stays literal',
+  );
+  assert(fenced.includes('<pre>') && fenced.includes('<code>'), 'fenced code block renders as pre/code');
+  assert(
+    fenced.includes('\\[x\\]') && fenced.includes('$y$'),
+    'fenced code block preserves math text verbatim',
+  );
+
+  const inlineCode = marked.parse('`$x$` and `\\[y\\]`');
+  assert(extractMathPlaceholders(inlineCode).length === 0, 'math inside inline code stays literal');
+  assert(inlineCode.includes('<code>$x$</code>'), 'inline code preserves $x$ verbatim');
+  assert(inlineCode.includes('<code>\\[y\\]</code>'), 'inline code preserves \\[y\\] verbatim');
+
+  const ampHtml = marked.parse('\\[a & b\\]');
+  assert(
+    ampHtml.includes('data-tex="a &amp; b"'),
+    'ampersand in LaTeX is escaped in the raw placeholder attribute',
+  );
+  const ampPlaceholders = extractMathPlaceholders(ampHtml);
+  assert(
+    ampPlaceholders.length === 1 && ampPlaceholders[0].tex === 'a & b',
+    'ampersand in LaTeX unescapes back to the source text',
+  );
+
+  const quoteHtml = marked.parse('\\[a"b\\]');
+  assert(
+    quoteHtml.includes('data-tex="a&quot;b"'),
+    'double quote in LaTeX is escaped in the raw placeholder attribute',
+  );
+  const quotePlaceholders = extractMathPlaceholders(quoteHtml);
+  assert(
+    quotePlaceholders.length === 1 && quotePlaceholders[0].tex === 'a"b',
+    'double quote in LaTeX unescapes back to the source text',
+  );
+
+  const typesetCases = [
+    ['motivating display', motivatingPlaceholders[0].tex, true],
+    ['single-line display', bracketOneLine[0].tex, true],
+    ['inline paren', parenInline[0].tex, false],
+    ['inline dollar', dollarInline[0].tex, false],
+  ];
+  for (const [label, tex, displayMode] of typesetCases) {
+    let rendered;
+    try {
+      rendered = katex.renderToString(tex, { displayMode, throwOnError: true });
+    } catch (error) {
+      throw new Error(`KaTeX could not typeset the ${label} formula: ${error}`);
+    }
+    assert(rendered.includes('class="katex"'), `KaTeX typesets the ${label} formula`);
+  }
+
+  let invalidThrew = false;
+  try {
+    katex.renderToString('\\frac{a', { throwOnError: true });
+  } catch {
+    invalidThrew = true;
+  }
+  assert(invalidThrew, 'KaTeX throws on invalid LaTeX so the plain-text fallback is reachable');
+}
+
 validateTimelineStore();
 validateWireFormatNormalization();
 validateSubagentInputAggregation();
@@ -392,5 +637,6 @@ validateActiveWorkState();
 validateSpecialToolArgsPresentation();
 validateSubagentPromptPreview();
 validateComposerEnterDecision();
+validateMathRendering();
 await validateStreamEventBatcher();
 console.log('frontend test passed');

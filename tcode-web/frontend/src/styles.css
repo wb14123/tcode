@@ -1565,6 +1565,25 @@ tcode-timeline {
   overflow-wrap: anywhere;
 }
 
+/* Declared before the :first-child/:last-child resets below so a leading or
+   trailing display equation still collapses to the bubble edge. */
+.markdown-content .katex-display {
+  overflow-x: auto;
+  overflow-y: hidden;
+  overflow-wrap: normal;
+  margin-bottom: 0.75rem;
+}
+
+.markdown-content .katex {
+  color: inherit;
+}
+
+.math-fallback {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  white-space: pre-wrap;
+  color: var(--text-muted);
+}
+
 .markdown-content > :first-child {
   margin-top: 0;
 }
