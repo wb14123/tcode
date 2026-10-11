@@ -5346,6 +5346,7 @@ version = "0.3.9"
 dependencies = [
  "anyhow",
  "async-stream",
+ "base64 0.23.1",
  "browser-server",
  "chrono",
  "fs2",

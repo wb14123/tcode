@@ -5,7 +5,9 @@ use std::time::Duration;
 use anyhow::{Context, Result, anyhow, bail};
 use bytes::Bytes;
 use futures::SinkExt;
-use llm_rs::llm::{Bedrock, ChatOptions, Claude, LLM, OpenAI, OpenRouter, ReasoningEffort};
+use llm_rs::llm::{
+    Bedrock, ChatOptions, Claude, DEFAULT_IMAGE_MODEL, LLM, OpenAI, OpenRouter, ReasoningEffort,
+};
 use llm_rs::tool::ContainerConfig;
 use tokio::net::UnixStream;
 use tokio_stream::StreamExt;
@@ -408,7 +410,6 @@ pub fn build_chat_options(config: &TcodeConfig) -> ChatOptions {
         reasoning_effort: Some(ReasoningEffort::XHigh),
         max_tokens: config.max_tokens,
         request_timeout_secs: config.request_timeout_secs,
-        media_generation_timeout_secs: config.media_generation_timeout_secs,
         max_retries: config.max_retries,
         ..Default::default()
     }
@@ -435,6 +436,10 @@ pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<C
         .model
         .clone()
         .unwrap_or_else(|| provider.default_model().to_string());
+    let image_model = config
+        .image_model
+        .clone()
+        .unwrap_or_else(|| DEFAULT_IMAGE_MODEL.to_string());
 
     let (llm, token_manager): (Box<dyn LLM>, Option<Arc<dyn auth::OAuthTokenManager>>) =
         match provider {
@@ -479,7 +484,8 @@ pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<C
                     .clone()
                     .unwrap_or_else(|| provider.default_base_url().to_string());
                 let api_key = get_api_key(config, provider);
-                let mut llm = OpenAI::with_base_url(&api_key, &base_url);
+                let mut llm = OpenAI::with_base_url(&api_key, &base_url)
+                    .with_image_model(image_model.clone());
                 if let Some(timeout) = config.connect_timeout_secs {
                     llm = llm.with_connect_timeout(timeout);
                 }
@@ -505,7 +511,8 @@ pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<C
                     .ok()
                     .and_then(|t| t.account_id.clone());
                 let mut llm = OpenAI::with_token_provider(manager.clone(), &base_url)
-                    .with_account_id(account_id);
+                    .with_account_id(account_id)
+                    .with_image_model(image_model.clone());
                 if let Some(timeout) = config.connect_timeout_secs {
                     llm = llm.with_connect_timeout(timeout);
                 }

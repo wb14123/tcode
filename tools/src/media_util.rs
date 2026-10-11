@@ -64,6 +64,71 @@ pub async fn save_image_to_media(
     Ok((MediaData::new(filename, media_type), annotation))
 }
 
+/// Detect a PNG/JPEG/WebP image from its leading bytes.
+///
+/// Returns `(media_type, extension)` for a recognized format, or `None`.
+pub fn sniff_image_type(bytes: &[u8]) -> Option<(&'static str, &'static str)> {
+    if bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
+        Some(("image/png", "png"))
+    } else if bytes.starts_with(b"\xFF\xD8\xFF") {
+        Some(("image/jpeg", "jpg"))
+    } else if bytes.len() >= 12 && &bytes[0..4] == b"RIFF" && &bytes[8..12] == b"WEBP" {
+        Some(("image/webp", "webp"))
+    } else {
+        None
+    }
+}
+
+/// Save raw image bytes to the media directory without any processing.
+///
+/// The bytes are written unchanged (no resize, no re-encode), so the saved file
+/// is byte-for-byte what the provider returned. The media directory is created
+/// with `0o700` and the file with `0o600` permissions.
+///
+/// Returns the `MediaData` pointing to the saved file and a text annotation
+/// like `[Image: <absolute path> (<media_type>)]`.
+///
+/// # Errors
+///
+/// Returns an error if the directory or file cannot be written.
+pub async fn save_raw_image_to_media(
+    data: Vec<u8>,
+    media_type: &str,
+    extension: &str,
+    media_dir: &Path,
+) -> Result<(MediaData, String)> {
+    tokio::fs::create_dir_all(media_dir)
+        .await
+        .with_context(|| format!("Failed to create media directory {}", media_dir.display()))?;
+    set_mode(media_dir, 0o700).await?;
+
+    let filename = format!("{}.{}", Uuid::new_v4(), extension);
+    let image_path = media_dir.join(&filename);
+
+    tokio::fs::write(&image_path, &data)
+        .await
+        .with_context(|| format!("Failed to write image to {}", image_path.display()))?;
+    set_mode(&image_path, 0o600).await?;
+
+    let annotation = format!(
+        "[Image: {} ({})]",
+        tcode_encoding::path_to_str(&image_path)?,
+        media_type
+    );
+
+    Ok((MediaData::new(filename, media_type.to_string()), annotation))
+}
+
+/// Set the permission bits of `path` to `mode`.
+async fn set_mode(path: &Path, mode: u32) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let permissions = std::fs::Permissions::from_mode(mode);
+    tokio::fs::set_permissions(path, permissions)
+        .await
+        .with_context(|| format!("Failed to set permissions on {}", path.display()))
+}
+
 /// Validate and save PDF bytes to the media directory.
 ///
 /// Performs validation checks:

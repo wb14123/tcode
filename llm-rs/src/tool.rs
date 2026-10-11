@@ -25,7 +25,7 @@
 //!
 //! // Execute with JSON string
 //! use tokio_util::sync::CancellationToken;
-//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, session_dir: None, supports_media: false, llm: None, model: None };
+//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, session_dir: None, supports_media: false, llm: None, model: None, media_sink: None };
 //! let stream = tool.execute(ctx, r#"{"path": "/tmp/test.txt"}"#.to_string());
 //! ```
 
@@ -44,7 +44,7 @@ use tokio::time::{Instant, Sleep};
 use tokio_stream::{Stream, StreamExt};
 
 use crate::llm::LLM;
-use crate::media::ContentPart;
+use crate::media::{ContentPart, MediaData};
 
 pub use tokio_util::sync::CancellationToken;
 
@@ -87,6 +87,26 @@ impl SessionDir {
     }
 }
 
+/// Channel by which a tool reports media it produces to the conversation layer.
+///
+/// A tool never yields produced media through its output stream; this sink is
+/// the only way the UI learns about it. It is installed per tool call by the
+/// conversation layer, so a tool only needs to call the methods and does not
+/// have to know how events reach the user.
+pub trait MediaSink: Send + Sync {
+    /// Announce that a media item is being produced and return the id that a
+    /// later `media_output`/`media_failed` call must use. Callers that start an
+    /// item are responsible for resolving its id exactly once.
+    fn media_started(&self) -> String;
+
+    /// Publish a produced media file, identified by a `media_started` id. The
+    /// media is a path reference, never the bytes themselves.
+    fn media_output(&self, media_id: &str, media: MediaData);
+
+    /// Report that a started media item failed and will produce no output.
+    fn media_failed(&self, media_id: &str);
+}
+
 /// Context provided to every tool execution.
 /// Extensible — future additions (user info, etc.) go here.
 #[derive(Clone)]
@@ -106,6 +126,8 @@ pub struct ToolContext {
     pub llm: Option<Arc<dyn LLM>>,
     /// The model identifier used by this LLM.
     pub model: Option<String>,
+    /// Optional sink for media events produced during tool execution.
+    pub media_sink: Option<Arc<dyn MediaSink>>,
 }
 
 /// Type alias for the boxed stream returned by tool execution.
@@ -300,7 +322,7 @@ impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send
 ///
 /// // Execute with JSON string
 /// use tokio_util::sync::CancellationToken;
-/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, session_dir: None, supports_media: false, llm: None, model: None };
+/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, session_dir: None, supports_media: false, llm: None, model: None, media_sink: None };
 /// let stream = tool.execute(ctx, r#"{"query": "foo"}"#.to_string());
 /// ```
 pub struct Tool {

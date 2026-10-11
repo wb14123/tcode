@@ -533,8 +533,21 @@ pub(crate) async fn serve_media(
 ) -> ApiResult<Response<Body>> {
     let session = root.open_session(&session_id)?;
     let path = session.media_path(&filename)?;
+    serve_media_file(&path, &filename).await
+}
 
-    let bytes = tokio::fs::read(&path).await.map_err(|e| {
+pub(crate) async fn serve_subagent_media(
+    Extension(root): Extension<SessionRoot>,
+    AxumPath((session_id, subagent_id, filename)): AxumPath<(String, String, String)>,
+) -> ApiResult<Response<Body>> {
+    let session = root.open_session(&session_id)?;
+    let subagent = session.subagent_dir(&subagent_id)?;
+    let path = subagent.media_path(&filename)?;
+    serve_media_file(&path, &filename).await
+}
+
+async fn serve_media_file(path: &Path, filename: &str) -> ApiResult<Response<Body>> {
+    let bytes = tokio::fs::read(path).await.map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             ApiError::not_found("media not found")
         } else {
@@ -542,7 +555,7 @@ pub(crate) async fn serve_media(
         }
     })?;
 
-    let media_type = llm_rs::media::media_type_from_extension(&filename);
+    let media_type = llm_rs::media::media_type_from_extension(filename);
 
     Response::builder()
         .header(header::CONTENT_TYPE, media_type)

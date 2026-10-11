@@ -1,4 +1,5 @@
 pub mod conversation;
+pub mod image;
 pub mod llm;
 pub mod media;
 pub mod permission;
@@ -19,6 +20,9 @@ mod permission_tests;
 
 #[cfg(test)]
 mod media_tests;
+
+#[cfg(test)]
+mod image_tests;
 
 #[cfg(test)]
 mod skill_tests;

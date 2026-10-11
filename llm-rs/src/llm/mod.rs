@@ -27,7 +27,7 @@ mod sse_tests;
 
 pub use bedrock::Bedrock;
 pub use claude::Claude;
-pub use openai::OpenAI;
+pub use openai::{DEFAULT_IMAGE_MODEL, OpenAI};
 pub use openrouter::OpenRouter;
 
 use std::future::Future;
@@ -218,11 +218,6 @@ pub struct ChatOptions {
     pub request_timeout_secs: Option<u64>,
     /// Max retry attempts for failed LLM requests (0 = no retry). None means use default (3).
     pub max_retries: Option<u32>,
-    /// Max seconds to wait for media generation (image, etc.) after MediaGenerationStarted.
-    /// This is separate from request_timeout_secs because media generation is not streamed
-    /// like text — the server produces the result in one shot and may need more time.
-    /// None means use default (300s).
-    pub media_generation_timeout_secs: Option<u64>,
 }
 
 // ============================================================================
@@ -424,24 +419,6 @@ pub enum LLMEvent {
     /// Error occurred during generation.
     /// Maps to Claude's error event or OpenAI error responses.
     Error(String),
-
-    /// Emitted when a media generation call is detected, before processing begins.
-    /// Carries a correlation ID that the subsequent MediaOutput event will reuse.
-    MediaGenerationStarted { media_id: String },
-
-    /// The LLM generated media (e.g. OpenAI image_generation_call).
-    /// The provider has saved the media file to the session media dir.
-    /// `relative_path` is like "uuid.png" (relative to media/ dir).
-    /// `media_id` correlates with MediaGenerationStarted.
-    MediaOutput {
-        media_id: String,
-        relative_path: String,
-        media_type: String,
-    },
-
-    /// Emitted when a media generation call (e.g. image_generation_call) fails.
-    /// The media_id correlates with the earlier MediaGenerationStarted event.
-    MediaGenerationFailed { media_id: String },
 }
 
 pub trait LLM: Send + Sync {
@@ -484,4 +461,19 @@ pub trait LLM: Send + Sync {
     /// Return the list of models available from this provider.
     /// Used to generate the subagent tool description.
     fn available_models(&self) -> Vec<ModelInfo>;
+
+    /// Whether this provider can generate images via [`LLM::generate_image`].
+    fn supports_image_generation(&self) -> bool {
+        false
+    }
+
+    /// Generate a new image or edit existing ones.
+    ///
+    /// Providers that do not support image generation return an error.
+    fn generate_image(
+        &self,
+        _request: crate::image::ImageRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::image::ImageResponse, String>> + Send>> {
+        Box::pin(async { Err("image generation is not supported by this provider".into()) })
+    }
 }

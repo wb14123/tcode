@@ -55,23 +55,37 @@ async fn test_conversation_client(dir: &Path) -> anyhow::Result<Arc<Conversation
 #[derive(Clone)]
 struct MockLlm {
     registered_tools: Arc<parking_lot::Mutex<Vec<String>>>,
+    supports_image_generation: bool,
 }
 
 impl MockLlm {
     fn new() -> Self {
         Self {
             registered_tools: Arc::new(parking_lot::Mutex::new(Vec::new())),
+            supports_image_generation: false,
         }
     }
 
     fn with_registered_tools(registered_tools: Arc<parking_lot::Mutex<Vec<String>>>) -> Self {
-        Self { registered_tools }
+        Self {
+            registered_tools,
+            supports_image_generation: false,
+        }
+    }
+
+    fn with_image_generation(mut self, supported: bool) -> Self {
+        self.supports_image_generation = supported;
+        self
     }
 }
 
 impl LLM for MockLlm {
     fn register_tools(&mut self, tools: Vec<Arc<Tool>>) {
         *self.registered_tools.lock() = tools.iter().map(|tool| tool.name.clone()).collect();
+    }
+
+    fn supports_image_generation(&self) -> bool {
+        self.supports_image_generation
     }
 
     fn chat(
@@ -588,6 +602,106 @@ async fn web_only_runtime_reports_mode_and_registers_only_web_tools() -> anyhow:
     assert!(
         state.session.contains(&web_fetch_wildcard),
         "web-only session must auto-grant web_fetch > hostname > *"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn web_only_runtime_registers_generate_image_when_supported() -> anyhow::Result<()> {
+    let dir = TestDir::new("r");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    let _home_guard = HomeGuard::set(&home);
+    let socket_path = dir.path().join("s");
+    let owner_token = "owner-token";
+    let registered_tools = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let server = Server::new_with_runtime_options(
+        socket_path.clone(),
+        dir.path().join("display.jsonl"),
+        dir.path().join("status.txt"),
+        dir.path().join("usage.txt"),
+        dir.path().join("effort.txt"),
+        dir.path().to_path_buf(),
+        dir.path().join("conversation.json"),
+        Box::new(
+            MockLlm::with_registered_tools(Arc::clone(&registered_tools))
+                .with_image_generation(true),
+        ),
+        "mock-model".to_string(),
+        ChatOptions::default(),
+        10,
+        false,
+        None,
+        None,
+        ServerRuntimeOptions {
+            owner_kind: RuntimeOwnerKind::Serve,
+            session_mode: SessionMode::WebOnly,
+            owner_shutdown_token: owner_token.to_string(),
+            lease_timeout: Duration::from_secs(60),
+        },
+        false,
+    );
+    let (info, _state) = runtime_snapshots(server, socket_path, owner_token).await?;
+    assert_eq!(info.session_mode, SessionMode::WebOnly);
+    assert_eq!(
+        registered_tools.lock().clone(),
+        vec![
+            "current_time".to_string(),
+            "web_fetch".to_string(),
+            "web_search".to_string(),
+            "subagent".to_string(),
+            "continue_subagent".to_string(),
+            "generate_image".to_string(),
+        ]
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn normal_runtime_registers_generate_image_when_supported() -> anyhow::Result<()> {
+    let dir = TestDir::new("r");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    let _home_guard = HomeGuard::set(&home);
+    let session_dir = dir.path().join("abc123xy");
+    std::fs::create_dir_all(&session_dir)?;
+    let socket_path = dir.path().join("s");
+    let owner_token = "owner-token";
+    let registered_tools = Arc::new(parking_lot::Mutex::new(Vec::new()));
+    let server = Server::new_with_runtime_options(
+        socket_path.clone(),
+        session_dir.join("display.jsonl"),
+        session_dir.join("status.txt"),
+        session_dir.join("usage.txt"),
+        session_dir.join("effort.txt"),
+        session_dir.clone(),
+        session_dir.join("conversation.json"),
+        Box::new(
+            MockLlm::with_registered_tools(Arc::clone(&registered_tools))
+                .with_image_generation(true),
+        ),
+        "mock-model".to_string(),
+        ChatOptions::default(),
+        10,
+        false,
+        None,
+        None,
+        ServerRuntimeOptions {
+            owner_kind: RuntimeOwnerKind::Serve,
+            session_mode: SessionMode::Normal,
+            owner_shutdown_token: owner_token.to_string(),
+            lease_timeout: Duration::from_secs(60),
+        },
+        false,
+    );
+    let (info, _state) = runtime_snapshots(server, socket_path, owner_token).await?;
+    assert_eq!(info.session_mode, SessionMode::Normal);
+    assert!(
+        registered_tools
+            .lock()
+            .contains(&"generate_image".to_string()),
+        "normal session with image-generation support must register generate_image: {:?}",
+        registered_tools.lock()
     );
     Ok(())
 }

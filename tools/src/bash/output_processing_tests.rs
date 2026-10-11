@@ -487,6 +487,7 @@ mod e2e {
             supports_media: false,
             llm: None,
             model: None,
+            media_sink: None,
         }
     }
 

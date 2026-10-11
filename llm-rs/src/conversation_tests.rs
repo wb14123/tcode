@@ -9,11 +9,11 @@ mod tests {
     use crate::llm::{
         ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall,
     };
-    use crate::media::ContentPart;
+    use crate::media::{ContentPart, MediaData};
     use crate::permission::{
         KEY_PATH, PermissionKey, PermissionManager, PermissionScope, SCOPE_FILE_READ,
     };
-    use crate::tool::{CancellationToken, Tool};
+    use crate::tool::{CancellationToken, Tool, ToolContext};
     use parking_lot::Mutex;
     use std::collections::{HashMap, HashSet};
     use std::path::{Path, PathBuf};
@@ -266,7 +266,6 @@ mod tests {
                 exclude_reasoning: false,
                 connect_timeout_secs: None,
                 request_timeout_secs: None,
-                media_generation_timeout_secs: None,
                 max_retries: None,
             },
             total_input_tokens: 1000,
@@ -831,6 +830,178 @@ mod tests {
         pred: T,
     ) -> usize {
         msgs.iter().filter(|m| pred(&m.msg)).count()
+    }
+
+    /// A tool named `emit_media` whose handler starts one media item through the
+    /// sink and then either publishes it (`succeed = true`) or fails it, before
+    /// yielding a normal text result.
+    fn media_emitting_tool(succeed: bool) -> Arc<Tool> {
+        #[derive(serde::Deserialize, schemars::JsonSchema)]
+        struct Empty {}
+
+        Arc::new(Tool::new(
+            "emit_media",
+            "Emits one media item",
+            None,
+            move |ctx: ToolContext, _params: Empty| {
+                let sink = ctx.media_sink.clone();
+                async_stream::stream! {
+                    if let Some(sink) = &sink {
+                        let id = sink.media_started();
+                        if succeed {
+                            sink.media_output(
+                                &id,
+                                MediaData::new("out.png".to_string(), "image/png".to_string()),
+                            );
+                        } else {
+                            sink.media_failed(&id);
+                        }
+                    }
+                    yield Ok::<_, String>("emitted".to_string());
+                }
+            },
+        ))
+    }
+
+    /// Drive a conversation in which the model calls the `emit_media` tool once,
+    /// collecting broadcast messages until both assistant turns have ended (the
+    /// tool-use turn and the final text turn).
+    async fn drive_with_media_tool(
+        tool: Arc<Tool>,
+        dir: &Path,
+    ) -> anyhow::Result<Vec<Arc<crate::conversation::BroadcastMessage>>> {
+        use crate::conversation::{BroadcastMessage, Message};
+
+        fn message_end(stop_reason: StopReason) -> LLMEvent {
+            LLMEvent::MessageEnd {
+                stop_reason,
+                input_tokens: 1,
+                output_tokens: 1,
+                reasoning_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                raw: None,
+            }
+        }
+
+        let tool_call = ToolCall {
+            id: "tc-media".to_string(),
+            name: "emit_media".to_string(),
+            arguments: "{}".to_string(),
+        };
+        let mock = MockLlm::new(vec![
+            MockResponse::Events(vec![
+                LLMEvent::ToolCall(tool_call),
+                message_end(StopReason::ToolUse),
+            ]),
+            MockResponse::Events(vec![
+                LLMEvent::TextDelta("done".to_string()),
+                message_end(StopReason::EndTurn),
+            ]),
+        ]);
+
+        let permissions_file = dir.join("permissions.json");
+        std::fs::write(&permissions_file, "[]")?;
+        let manager = ConversationManager::new(permissions_file, None);
+        let (_conv_id, client) = manager.new_conversation_with_id(
+            "test-conv".to_string(),
+            Box::new(mock),
+            "test-model",
+            vec![tool],
+            ChatOptions::default(),
+            true, // single_turn
+            0,    // subagent_depth
+            10,   // max_subagent_depth
+            Some(dir.to_path_buf()),
+            false, // supports_media
+        )?;
+
+        let mut stream = client.subscribe();
+        client.send_chat("Hello").await?;
+
+        let mut messages: Vec<Arc<BroadcastMessage>> = Vec::new();
+        let mut ends = 0usize;
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
+        tokio::pin!(deadline);
+
+        loop {
+            tokio::select! {
+                msg = stream.next() => {
+                    match msg {
+                        Some(Ok(m)) => {
+                            if matches!(&m.msg, Message::AssistantMessageEnd { .. }) {
+                                ends += 1;
+                            }
+                            messages.push(m);
+                            if ends >= 2 {
+                                break;
+                            }
+                        }
+                        Some(Err(BroadcastStreamRecvError::Lagged(_))) => continue,
+                        None => break,
+                    }
+                }
+                _ = &mut deadline => break,
+            }
+        }
+
+        Ok(messages)
+    }
+
+    #[tokio::test]
+    async fn tool_media_sink_emits_generating_then_output() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+        let dir = TestDir::new("conversation");
+        let msgs = drive_with_media_tool(media_emitting_tool(true), dir.path()).await?;
+
+        let gen_idx = msgs
+            .iter()
+            .position(|m| matches!(&m.msg, Message::AssistantMediaGenerating { .. }))
+            .expect("expected AssistantMediaGenerating");
+        let out_idx = msgs
+            .iter()
+            .position(|m| matches!(&m.msg, Message::AssistantMediaOutput { .. }))
+            .expect("expected AssistantMediaOutput");
+        assert!(
+            gen_idx < out_idx,
+            "AssistantMediaGenerating must precede AssistantMediaOutput"
+        );
+
+        let gen_id = match &msgs[gen_idx].msg {
+            Message::AssistantMediaGenerating { media_id } => media_id.clone(),
+            _ => unreachable!(),
+        };
+        match &msgs[out_idx].msg {
+            Message::AssistantMediaOutput {
+                media_id,
+                end_status,
+                media,
+            } => {
+                assert_eq!(media_id, &gen_id, "output id must match generating id");
+                assert_eq!(*end_status, MessageEndStatus::Succeeded);
+                assert!(media.is_some(), "successful output must carry the media");
+            }
+            _ => unreachable!(),
+        }
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn tool_media_sink_failure_emits_failed_output() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+        let dir = TestDir::new("conversation");
+        let msgs = drive_with_media_tool(media_emitting_tool(false), dir.path()).await?;
+
+        let out = msgs.iter().find_map(|m| match &m.msg {
+            Message::AssistantMediaOutput {
+                end_status, media, ..
+            } => Some((end_status, media.is_some())),
+            _ => None,
+        });
+        let (end_status, has_media) = out.expect("expected AssistantMediaOutput");
+        assert_eq!(*end_status, MessageEndStatus::Failed);
+        assert!(!has_media, "failed output must not carry media");
+        Ok(())
     }
 
     // ----------------------------------------------------------------

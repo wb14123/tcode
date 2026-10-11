@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
 use crate::media::{ContentPart, MediaData, media_type_from_extension};
-use crate::tool::{CancellationToken, ContainerConfig, Tool, ToolContext};
+use crate::tool::{CancellationToken, ContainerConfig, MediaSink, Tool, ToolContext};
 use anyhow::{Context, Result, bail};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -554,9 +554,8 @@ pub enum Message {
         media_id: String,
     },
 
-    /// The LLM generated media (e.g. via OpenAI's image_generation_call).
-    /// `media` is Some if generation succeeded, None if it failed.
-    /// `media_id` correlates with AssistantMediaGenerating.
+    /// A media item was produced. `media` is Some if generation succeeded,
+    /// None if it failed. `media_id` correlates with AssistantMediaGenerating.
     AssistantMediaOutput {
         media_id: String,
         end_status: MessageEndStatus,
@@ -1995,12 +1994,6 @@ impl Conversation {
         let max_retries = self.env.chat_options.max_retries.unwrap_or(3);
         let read_timeout =
             Duration::from_secs(self.env.chat_options.request_timeout_secs.unwrap_or(120));
-        let media_timeout = Duration::from_secs(
-            self.env
-                .chat_options
-                .media_generation_timeout_secs
-                .unwrap_or(300),
-        );
 
         self.broadcast_msg(Message::AssistantMessageStart {
             created_at: now_millis(),
@@ -2172,34 +2165,6 @@ impl Conversation {
                     }
                     LLMEvent::Error(error) => {
                         break StreamResult::Error(error);
-                    }
-                    LLMEvent::MediaGenerationStarted { media_id } => {
-                        self.broadcast_msg(Message::AssistantMediaGenerating {
-                            media_id: media_id.clone(),
-                        })?;
-                        idle_timeout
-                            .as_mut()
-                            .reset(tokio::time::Instant::now() + media_timeout);
-                        continue;
-                    }
-                    LLMEvent::MediaOutput {
-                        media_id,
-                        relative_path,
-                        media_type,
-                    } => {
-                        let media = MediaData::new(relative_path, media_type);
-                        self.broadcast_msg(Message::AssistantMediaOutput {
-                            media_id,
-                            end_status: MessageEndStatus::Succeeded,
-                            media: Some(media),
-                        })?;
-                    }
-                    LLMEvent::MediaGenerationFailed { media_id } => {
-                        self.broadcast_msg(Message::AssistantMediaOutput {
-                            media_id,
-                            end_status: MessageEndStatus::Failed,
-                            media: None,
-                        })?;
                     }
                 }
                 idle_timeout
@@ -2456,6 +2421,44 @@ impl Drop for ToolCompleteGuard {
     }
 }
 
+/// Bridges a tool's media events onto the conversation's message stream so the
+/// UI can show a pending placeholder and then the produced file.
+struct ConversationMediaSink {
+    client: Arc<ConversationClient>,
+}
+
+impl MediaSink for ConversationMediaSink {
+    fn media_started(&self) -> String {
+        let media_id = Uuid::new_v4().to_string();
+        if let Err(e) = self.client.notify_msg(Message::AssistantMediaGenerating {
+            media_id: media_id.clone(),
+        }) {
+            tracing::error!(error = %e, "failed to send AssistantMediaGenerating");
+        }
+        media_id
+    }
+
+    fn media_output(&self, media_id: &str, media: MediaData) {
+        if let Err(e) = self.client.notify_msg(Message::AssistantMediaOutput {
+            media_id: media_id.to_string(),
+            end_status: MessageEndStatus::Succeeded,
+            media: Some(media),
+        }) {
+            tracing::error!(error = %e, "failed to send AssistantMediaOutput");
+        }
+    }
+
+    fn media_failed(&self, media_id: &str) {
+        if let Err(e) = self.client.notify_msg(Message::AssistantMediaOutput {
+            media_id: media_id.to_string(),
+            end_status: MessageEndStatus::Failed,
+            media: None,
+        }) {
+            tracing::error!(error = %e, "failed to send AssistantMediaOutput for a failed item");
+        }
+    }
+}
+
 /// Execute a regular (non-subagent) tool call as a standalone async function.
 /// Sends results through `loop_tx` for the main event loop.
 async fn execute_regular_tool(
@@ -2518,6 +2521,9 @@ async fn execute_regular_tool(
         supports_media: env.supports_media,
         llm: env.llm.clone(),
         model: Some(env.model.clone()),
+        media_sink: Some(Arc::new(ConversationMediaSink {
+            client: Arc::clone(&env.client),
+        })),
     };
     let end_status = if let Some(tool) = tool_arc {
         tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use anyhow::anyhow;
+use anyhow::{Context, anyhow};
 use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
@@ -178,6 +178,9 @@ pub struct PermissionManager {
     project_permissions: parking_lot::Mutex<HashSet<PermissionKey>>,
     project_permissions_path: PathBuf,
     pending_requests: parking_lot::Mutex<HashMap<PermissionKey, PendingRequest>>,
+    /// When `Some`, `file_read`/`file_write` path checks are confined to this
+    /// canonicalized root; paths outside it are denied without prompting.
+    file_root: parking_lot::RwLock<Option<PathBuf>>,
 }
 
 impl PermissionManager {
@@ -189,7 +192,43 @@ impl PermissionManager {
             project_permissions: parking_lot::Mutex::new(project_permissions),
             project_permissions_path: project_path,
             pending_requests: parking_lot::Mutex::new(HashMap::new()),
+            file_root: parking_lot::RwLock::new(None),
         }
+    }
+
+    /// Confine `file_read`/`file_write` path checks to `root`; paths outside it
+    /// are denied without prompting. `None` (the default) leaves file access
+    /// unrestricted. `Some` roots are canonicalized so they can be compared
+    /// against canonicalized caller paths; a root that cannot be canonicalized
+    /// returns an error and leaves the configured root unchanged.
+    pub fn set_file_root(&self, root: Option<PathBuf>) -> anyhow::Result<()> {
+        let canonical = match root {
+            None => None,
+            Some(r) => Some(
+                std::fs::canonicalize(&r)
+                    .with_context(|| format!("failed to canonicalize file root {}", r.display()))?,
+            ),
+        };
+        *self.file_root.write() = canonical;
+        Ok(())
+    }
+
+    /// True when a `file_root` is configured and this `(scope, key, value)`
+    /// names a `file_read`/`file_write` path outside that root. Wildcard
+    /// values and every non-file scope (e.g. command, hostname) are never
+    /// confined.
+    fn path_outside_file_root(&self, scope: &str, key: &str, value: &str) -> bool {
+        if scope != SCOPE_FILE_READ && scope != SCOPE_FILE_WRITE {
+            return false;
+        }
+        if key != KEY_PATH || value == WILDCARD_VALUE {
+            return false;
+        }
+        let guard = self.file_root.read();
+        let Some(root) = guard.as_ref() else {
+            return false;
+        };
+        !std::path::Path::new(value).starts_with(root)
     }
 
     /// Check if a permission exists in session or project storage.
@@ -198,6 +237,9 @@ impl PermissionManager {
     /// stored, or a wildcard entry `(tool, key, WILDCARD_VALUE)` is stored
     /// for the same `(tool, key)` pair. See [`WILDCARD_VALUE`].
     pub fn has_permission(&self, tool: &str, key: &str, value: &str) -> bool {
+        if self.path_outside_file_root(tool, key, value) {
+            return false;
+        }
         let pk = PermissionKey {
             tool: tool.to_string(),
             key: key.to_string(),
@@ -643,6 +685,15 @@ impl ScopedPermissionManager {
                 "internal error: tool attempted to use reserved wildcard value '*' \
                  for scope={scope:?} key={key:?}; this is a bug — the wildcard can \
                  only be created via the user-initiated add-permission UI flow"
+            ));
+        }
+
+        // Confinement: a file path outside the configured file root is denied
+        // outright — never prompted, never recorded as pending.
+        if self.manager.path_outside_file_root(scope, key, value) {
+            Self::cleanup_preview_file(&preview_file_path);
+            return Err(anyhow!(
+                "web sessions can only access files inside the session directory"
             ));
         }
 

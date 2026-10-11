@@ -60,6 +60,7 @@ class TcodeSessionView extends LitElement {
   private draftSessionId: string | null = null;
   private uploadProgress: string | null = null;
   private cache = new TimelineCacheManager();
+  private lastViewKey: string | null = null;
 
   createRenderRoot(): this {
     return this;
@@ -73,6 +74,7 @@ class TcodeSessionView extends LitElement {
   disconnectedCallback(): void {
     this.cache.flushSave();
     super.disconnectedCallback();
+    this.lastViewKey = null;
     this.stopView();
     for (const timeout of this.toastTimeouts.values()) {
       window.clearTimeout(timeout);
@@ -87,6 +89,15 @@ class TcodeSessionView extends LitElement {
   }
 
   private startView(): void {
+    // `connectedCallback` and the first `updated` both fire on mount, and both
+    // call this method. Restart only when the identity being rendered changes,
+    // otherwise the cached history would be replayed twice.
+    const key = JSON.stringify([this.sessionId, this.draftMode, this.draftVersion]);
+    if (key === this.lastViewKey) {
+      return;
+    }
+    this.lastViewKey = key;
+
     // Flush old cache BEFORE clearing state
     if (this.cache.hasCache && !this.cache.matches(this.sessionId)) {
       this.cache.flushSave();

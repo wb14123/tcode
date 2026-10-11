@@ -664,6 +664,15 @@ impl Server {
             system_prompt_builder,
         );
 
+        // A web-only session may only touch files under its own session dir;
+        // the permission manager confines every file_read/file_write path
+        // check to that root (normal sessions stay unrestricted).
+        let file_root = session_mode.is_web_only().then(|| self.session_dir.clone());
+        manager
+            .permission_manager()
+            .set_file_root(file_root)
+            .context("Failed to set the session file-access root")?;
+
         // Grant session-scoped file_read permission for cwd so it appears
         // in the permission tree and can be revoked by the user.
         if let Some(ref cwd) = cwd {
@@ -751,6 +760,9 @@ impl Server {
             }
             tools
         };
+        if self.llm.supports_image_generation() {
+            tools_list.push(Arc::new(tools::generate_image_tool()));
+        }
 
         let lsp_config_task = if session_mode.is_web_only() {
             None

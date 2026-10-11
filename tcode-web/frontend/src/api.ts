@@ -1,4 +1,4 @@
-import { runtimeConfig } from './config';
+import { runtimeConfig } from './config.ts';
 import type {
   AuthSessionStatus,
   CreateSessionResponse,
@@ -11,7 +11,20 @@ import type {
   SessionRuntimeInfo,
   SessionsResponse,
   LeaseResponse,
-} from './types';
+} from './types.ts';
+
+export interface MediaTarget {
+  sessionId: string;
+  subagentId?: string;
+}
+
+export function mediaUrl(target: MediaTarget, filename: string): string {
+  const sessionId = encodeURIComponent(target.sessionId);
+  const base = target.subagentId
+    ? `api/sessions/${sessionId}/subagents/${encodeURIComponent(target.subagentId)}`
+    : `api/sessions/${sessionId}`;
+  return `/${base}/media/${encodeURIComponent(filename)}`;
+}
 
 function authExpired(): void {
   window.dispatchEvent(new CustomEvent('tcode-auth-required'));

@@ -65,12 +65,51 @@ mod tests {
                 LLMEvent::ToolCallDelta { .. } => "ToolCallDelta",
                 LLMEvent::MessageEnd { .. } => "MessageEnd",
                 LLMEvent::Error(_) => "Error",
-                LLMEvent::MediaGenerationStarted { .. } => "MediaGenerationStarted",
-                LLMEvent::MediaOutput { .. } => "MediaOutput",
-                LLMEvent::MediaGenerationFailed { .. } => "MediaGenerationFailed",
             })
             .collect::<Vec<_>>()
             .join(", ")
+    }
+
+    /// Assistant `raw` output items of type `image_generation_call` are dropped
+    /// while every other item is preserved.
+    #[test]
+    fn convert_messages_drops_image_generation_items() -> anyhow::Result<()> {
+        use crate::llm::openai::convert_messages;
+
+        let raw = serde_json::json!([
+            { "type": "reasoning", "id": "rs_1", "summary": [] },
+            { "type": "message", "id": "msg_1", "role": "assistant", "content": [] },
+            {
+                "type": "image_generation_call",
+                "id": "ig_1",
+                "status": "completed",
+                "result": "AAAA"
+            },
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "read",
+                "arguments": "{}"
+            }
+        ]);
+        let messages = vec![LLMMessage::Assistant {
+            content: String::new(),
+            tool_calls: vec![],
+            raw: Some(raw),
+        }];
+
+        let (_, items) = convert_messages(&messages, &None)?;
+        let serialized = serde_json::to_value(&items)?;
+        let items = serialized
+            .as_array()
+            .expect("serialized items should be a JSON array");
+
+        let types: Vec<&str> = items
+            .iter()
+            .filter_map(|item| item.get("type").and_then(|t| t.as_str()))
+            .collect();
+        assert_eq!(types, ["reasoning", "message", "function_call"]);
+        Ok(())
     }
 
     // ========================================================================

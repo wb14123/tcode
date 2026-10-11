@@ -407,7 +407,7 @@ class TcodeUserMessage extends TimelineRowElement {
         ${item.content ? html`<pre class="timeline-pre message-bubble-content">${item.content}</pre>` : nothing}
         ${item.media && item.media.length > 0 ? html`
           <div class="message-media-row">
-            ${item.media.map(m => renderMediaAttachment(m, this.sessionId))}
+            ${item.media.map(m => renderMediaAttachment(m, { sessionId: this.sessionId, subagentId: this.currentSubagentId || undefined }))}
           </div>
         ` : nothing}
       </article>
@@ -463,7 +463,7 @@ class TcodeAssistantMessage extends TimelineRowElement {
               : nothing;
           }
           if (block.kind === 'image') {
-            return renderAssistantImageBlock(block, this.sessionId);
+            return renderAssistantImageBlock(block, { sessionId: this.sessionId, subagentId: this.currentSubagentId || undefined });
           }
         })}
         ${item.error ? html`<div class="inline-alert error">${item.error}</div>` : nothing}
@@ -574,7 +574,7 @@ class TcodeToolRow extends TimelineRowElement {
         'Open detail',
         hrefForRoute(toolDetailRoute(this.sessionId, item.toolCallId, this.currentSubagentId || undefined)),
       ),
-      body: renderExpandedToolBody(item, this.sessionId),
+      body: renderExpandedToolBody(item, { sessionId: this.sessionId, subagentId: this.currentSubagentId || undefined }),
       footer: renderToolFooterContent(item),
     });
   }

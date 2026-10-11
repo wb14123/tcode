@@ -31,6 +31,7 @@ class TcodeToolCallView extends LitElement {
   private leaseErrorMessage = '';
   private streamUpdateFrame: number | null = null;
   private stickToBottom = true;
+  private lastViewKey: string | null = null;
 
   createRenderRoot(): this {
     return this;
@@ -43,6 +44,7 @@ class TcodeToolCallView extends LitElement {
 
   disconnectedCallback(): void {
     super.disconnectedCallback();
+    this.lastViewKey = null;
     this.stopView();
   }
 
@@ -53,6 +55,15 @@ class TcodeToolCallView extends LitElement {
   }
 
   private startView(): void {
+    // `connectedCallback` and the first `updated` both fire on mount, and both
+    // call this method. Restart only when the identity being rendered changes,
+    // otherwise the streamed history would be replayed twice.
+    const key = JSON.stringify([this.sessionId, this.toolCallId, this.subagentId]);
+    if (key === this.lastViewKey) {
+      return;
+    }
+    this.lastViewKey = key;
+
     if (!this.sessionId || !this.toolCallId) {
       return;
     }

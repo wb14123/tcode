@@ -540,4 +540,47 @@ mod tests {
         );
         Ok(())
     }
+
+    #[tokio::test]
+    async fn confined_manager_allows_inside_and_denies_outside_without_prompt() -> Result<()> {
+        let fixture = TestDir::new()?;
+        let root = fixture.path().join("session");
+        let outside = fixture.path().join("outside");
+        std::fs::create_dir_all(&root)?;
+        std::fs::create_dir_all(&outside)?;
+        let inside_file = root.join("image.png");
+        let outside_file = outside.join("secret.png");
+        std::fs::write(&inside_file, "inside")?;
+        std::fs::write(&outside_file, "outside")?;
+
+        let pm = Arc::new(PermissionManager::new(
+            fixture.path().join("permissions.json"),
+        ));
+        pm.set_file_root(Some(root.clone()))?;
+        let root_key = grant_session_root_read(&pm, &root)?;
+        let scoped = make_scoped(Arc::clone(&pm));
+
+        // A path inside the file root is covered by the session-root grant.
+        tokio::time::timeout(
+            Duration::from_secs(2),
+            check_file_read_permission(&scoped, &inside_file, false),
+        )
+        .await??;
+        assert!(pm.snapshot().pending.is_empty());
+
+        // A path outside the file root is denied with the confinement message
+        // and never registers a prompt.
+        let error = check_file_read_permission(&scoped, &outside_file, false)
+            .await
+            .expect_err("path outside the file root must be denied");
+        assert!(
+            error
+                .to_string()
+                .contains("web sessions can only access files inside the session directory"),
+            "expected the confinement message, got: {error}"
+        );
+        assert!(pm.snapshot().pending.is_empty());
+        assert_eq!(pm.snapshot().session, vec![root_key]);
+        Ok(())
+    }
 }

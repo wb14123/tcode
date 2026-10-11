@@ -34,6 +34,10 @@ pub(crate) fn protected_routes(state: Arc<AppState>) -> axum::Router<Arc<AppStat
             axum::routing::get(api::serve_media),
         )
         .route(
+            "/api/sessions/{session_id}/subagents/{subagent_id}/media/{filename}",
+            axum::routing::get(api::serve_subagent_media),
+        )
+        .route(
             "/api/sessions/{session_id}/session-meta.json",
             axum::routing::get(api::get_session_meta),
         )

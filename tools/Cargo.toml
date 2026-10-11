@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 anyhow = "1"
+base64 = "0.23"
 chrono = "0.4"
 async-stream = "0.3"
 browser-server = { path = "../browser-server" }

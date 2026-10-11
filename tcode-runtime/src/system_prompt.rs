@@ -242,11 +242,9 @@ fn build_web_only_system_prompt(context: SystemPromptContext) -> anyhow::Result<
     let rules = format!("{COMMON_SUBAGENT_RULES}{WEB_ONLY_SUBAGENT_RULES}{OUTPUT_STYLE_RULES}");
     let start_time = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %z");
     Ok(format!(
-        "{role}\n\n{rules}\n\n## Available Tools\n\n\
-         This session is web-only. Use only `current_time`, `web_search`, `web_fetch`, \
-         `subagent`, and `continue_subagent`. The environment is limited to web \
-         research and delegation; do not assume any local project context or non-listed \
-         capabilities.\n\n\
+        "{role}\n\n{rules}\n\n## Environment\n\n\
+         This session is web-only: there is no local project context and no local \
+         command execution. Work only through the tools provided to you.\n\n\
          This conversation started at: {start_time}. Note that time may have passed since then; \
          use the `current_time` tool to get the accurate current time if needed.",
         role = role,

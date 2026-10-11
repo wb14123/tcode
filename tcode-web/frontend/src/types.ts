@@ -133,6 +133,9 @@ export type AssistantContentBlock = AssistantTextBlock | AssistantImageBlock;
 export interface AssistantTimelineItem extends TimelineItemBase {
   kind: 'assistant';
   msgId: number | null;
+  // True for rows created only to display generated media. Such a row has no
+  // message lifecycle (no start/end events), so it never looks "finished".
+  mediaOnly: boolean;
   createdAt: number | null;
   contentBlocks: AssistantContentBlock[];
   thinking: string;

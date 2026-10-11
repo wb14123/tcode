@@ -50,6 +50,7 @@ class TcodeSubagentView extends LitElement {
   private streamRetryDelayMs = 1000;
   private streamEventsReceived = 0;
   private cache = new TimelineCacheManager();
+  private lastViewKey: string | null = null;
 
   createRenderRoot(): this {
     return this;
@@ -63,6 +64,7 @@ class TcodeSubagentView extends LitElement {
   disconnectedCallback(): void {
     this.cache.flushSave();
     super.disconnectedCallback();
+    this.lastViewKey = null;
     this.stopView();
     for (const timeout of this.toastTimeouts.values()) {
       window.clearTimeout(timeout);
@@ -77,6 +79,15 @@ class TcodeSubagentView extends LitElement {
   }
 
   private startView(): void {
+    // `connectedCallback` and the first `updated` both fire on mount, and both
+    // call this method. Restart only when the identity being rendered changes,
+    // otherwise the cached history would be replayed twice.
+    const key = JSON.stringify([this.sessionId, this.subagentId]);
+    if (key === this.lastViewKey) {
+      return;
+    }
+    this.lastViewKey = key;
+
     if (this.cache.hasCache && !this.cache.matches(this.sessionId, this.subagentId)) {
       this.cache.flushSave();
     }

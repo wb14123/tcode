@@ -110,6 +110,7 @@ async fn main() {
                                 supports_media: false,
                                 llm: None,
                                 model: None,
+                                media_sink: None,
                             };
                             let mut result_stream = tool.execute(ctx, tool_call.arguments.clone());
                             let mut result = String::new();
@@ -136,11 +137,7 @@ async fn main() {
             LLMEvent::Error(err) => {
                 eprintln!("\nError: {}", err);
             }
-            LLMEvent::ToolCallStart { .. }
-            | LLMEvent::ToolCallDelta { .. }
-            | LLMEvent::MediaOutput { .. }
-            | LLMEvent::MediaGenerationStarted { .. }
-            | LLMEvent::MediaGenerationFailed { .. } => {}
+            LLMEvent::ToolCallStart { .. } | LLMEvent::ToolCallDelta { .. } => {}
         }
     }
 }

@@ -80,11 +80,7 @@ async fn main() {
             LLMEvent::Error(err) => {
                 eprintln!("\nError: {}", err);
             }
-            LLMEvent::ToolCallStart { .. }
-            | LLMEvent::ToolCallDelta { .. }
-            | LLMEvent::MediaOutput { .. }
-            | LLMEvent::MediaGenerationStarted { .. }
-            | LLMEvent::MediaGenerationFailed { .. } => {}
+            LLMEvent::ToolCallStart { .. } | LLMEvent::ToolCallDelta { .. } => {}
         }
     }
 }

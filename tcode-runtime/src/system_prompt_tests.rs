@@ -101,15 +101,10 @@ mod tests {
         for tool_name in ["`read`", "`write`", "`edit`", "`grep`", "`glob`"] {
             assert!(!prompt.contains(tool_name), "prompt mentions {tool_name}");
         }
-        for tool_name in [
-            "`current_time`",
-            "`web_search`",
-            "`web_fetch`",
-            "`subagent`",
-            "`continue_subagent`",
-        ] {
-            assert!(prompt.contains(tool_name), "prompt omits {tool_name}");
-        }
+        assert!(
+            !prompt.contains("Available Tools"),
+            "the web-only prompt must not enumerate a closed tool list"
+        );
         assert!(prompt.contains("Output Style"));
     }
 

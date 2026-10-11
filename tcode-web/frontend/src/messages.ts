@@ -1,6 +1,7 @@
 import { html, nothing, type TemplateResult } from 'lit';
 import { unsafeHTML } from 'lit/directives/unsafe-html.js';
 
+import { mediaUrl, type MediaTarget } from './api.ts';
 import { renderMarkdownToHtml } from './markdown.ts';
 import { formatTimestamp, prettyJson } from './formatting.ts';
 import { hrefForRoute } from './router.ts';
@@ -136,6 +137,7 @@ function createAssistant(id: string, msgId: number | null): AssistantTimelineIte
     revision: 0,
     kind: 'assistant',
     msgId,
+    mediaOnly: false,
     createdAt: null,
     contentBlocks: [],
     thinking: '',
@@ -251,7 +253,7 @@ function hasFinishedStatus(value: string | null | undefined): boolean {
 function timelineItemHasActiveWork(item: TimelineItem): boolean {
   switch (item.kind) {
     case 'assistant':
-      return !hasFinishedStatus(item.endStatus);
+      return !item.mediaOnly && !hasFinishedStatus(item.endStatus);
     case 'tool':
       return !hasFinishedStatus(item.endStatus) || item.permissionState === 'waiting';
     case 'subagent':
@@ -754,7 +756,7 @@ export class ConversationTimelineBuilder {
           this.addItem(createSignal(this.store, 'Subagent token rollup recorded'), false);
           break;
         case 'AssistantMediaGenerating': {
-          const id = this.ensureActiveAssistantId();
+          const id = this.ensureMediaAssistantId();
           this.updateAssistant(id, (item) => {
             item.msgId ??= asNumber(payload.msg_id);
             const imageId = asString(payload.media_id);
@@ -769,7 +771,7 @@ export class ConversationTimelineBuilder {
         }
 
         case 'AssistantMediaOutput': {
-          const id = this.ensureActiveAssistantId();
+          const id = this.ensureMediaAssistantId();
           const imageId = asString(payload.media_id);
           const endStatus = payload.end_status as string | undefined;
           const imgData = payload.media as { relative_path: string; media_type: string } | undefined;
@@ -844,6 +846,22 @@ export class ConversationTimelineBuilder {
     const item = createAssistant(id, null);
     this.addItem(item, false);
     this.store.setActiveAssistantId(id);
+    return id;
+  }
+
+  // Generated media arrives after the requesting assistant message has ended,
+  // so it normally needs a new row. That row only displays media, which is why
+  // it is marked as media-only (see timelineItemHasActiveWork).
+  private ensureMediaAssistantId(): string {
+    const activeId = this.store.getActiveAssistantId();
+    if (activeId && this.store.hasItem(activeId)) {
+      return activeId;
+    }
+
+    const id = this.ensureActiveAssistantId();
+    this.updateAssistant(id, (item) => {
+      item.mediaOnly = true;
+    });
     return id;
   }
 
@@ -1154,7 +1172,7 @@ export function openLightbox(src: string): void {
 
 export function renderAssistantImageBlock(
   block: { kind: 'image'; pending: boolean; failed?: boolean; image?: { relative_path: string } },
-  sessionId: string,
+  target: MediaTarget,
 ): TemplateResult | typeof nothing {
   if (block.pending) {
     return html`
@@ -1173,7 +1191,7 @@ export function renderAssistantImageBlock(
   if (!block.image) {
     return nothing;
   }
-  const imgSrc = `/api/sessions/${sessionId}/media/${block.image.relative_path}`;
+  const imgSrc = mediaUrl(target, block.image.relative_path);
   return html`
     <img src=${imgSrc} loading="lazy" class="message-inline-image generated-image"
          @click=${() => openLightbox(imgSrc)}
@@ -1184,11 +1202,11 @@ export function renderAssistantImageBlock(
 
 export function renderMediaAttachment(
   media: { relative_path: string; media_type: string },
-  sessionId: string,
+  target: MediaTarget,
 ): TemplateResult | typeof nothing {
   if (media.media_type.startsWith('image/')) {
     return html`
-      <img src="/api/sessions/${sessionId}/media/${media.relative_path}"
+      <img src=${mediaUrl(target, media.relative_path)}
            loading="lazy" class="message-inline-image"
            @click=${(e: Event) => openLightbox((e.target as HTMLImageElement).src)}
            @error=${(e: Event) => {(e.target as HTMLImageElement).src = BROKEN_IMAGE_SVG; (e.target as HTMLImageElement).classList.add('broken-image')}}
@@ -1197,7 +1215,7 @@ export function renderMediaAttachment(
   }
   if (media.media_type === 'application/pdf') {
     return html`
-      <a href="/api/sessions/${sessionId}/media/${media.relative_path}"
+      <a href=${mediaUrl(target, media.relative_path)}
          target="_blank" rel="noopener noreferrer"
          class="message-media-link">
          📄 View PDF
@@ -1224,7 +1242,7 @@ function renderUser(item: UserTimelineItem, context: TimelineRenderContext): Tem
       ${item.content ? html`<pre class="timeline-pre message-bubble-content">${item.content}</pre>` : nothing}
       ${item.media && item.media.length > 0 ? html`
         <div class="message-media-row">
-          ${item.media.map(m => renderMediaAttachment(m, context.sessionId))}
+          ${item.media.map(m => renderMediaAttachment(m, { sessionId: context.sessionId, subagentId: context.currentSubagentId }))}
         </div>
       ` : nothing}
     </article>
@@ -1256,7 +1274,7 @@ function renderAssistant(item: AssistantTimelineItem, context: TimelineRenderCon
             : nothing;
         }
         if (block.kind === 'image') {
-          return renderAssistantImageBlock(block, context.sessionId);
+          return renderAssistantImageBlock(block, { sessionId: context.sessionId, subagentId: context.currentSubagentId });
         }
       })}
       ${item.error ? html`<div class="inline-alert error">${item.error}</div>` : nothing}
@@ -1309,7 +1327,7 @@ function renderTool(item: ToolTimelineItem, context: TimelineRenderContext): Tem
         }
       : undefined,
     action: renderExpandedRowAction('Open detail', hrefForRoute(toolDetailRoute(context.sessionId, item.toolCallId, context.currentSubagentId))),
-    body: renderExpandedToolBody(item, context.sessionId),
+    body: renderExpandedToolBody(item, { sessionId: context.sessionId, subagentId: context.currentSubagentId }),
     footer: renderToolFooterContent(item),
   });
 }

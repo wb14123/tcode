@@ -52,6 +52,8 @@ Web sessions are always web-only. The `tcode remote` web server creates only web
 - `subagent`
 - `continue_subagent`
 
+When the provider supports image generation (OpenAI providers only), both web-only and normal sessions also register the `generate_image` tool.
+
 They do not register shell commands, local file tools (`read`, `write`, `edit`, `grep`, `glob`), LSP, or skills, and they do not load project-local `CLAUDE.md` or `AGENTS.md` instructions.
 
 `web_fetch` hostname permissions are auto-granted in web-only sessions (a session-scoped wildcard `web_fetch > hostname > *`). The grant appears in the permission tree and can be revoked.
@@ -107,6 +109,10 @@ max_retries = 3                 # max retry attempts for failed LLM requests (0 
                                  # Only retries when no content (text or tool calls) has been
                                  # received yet — partial responses are never retried.
                                  # Defaults to 3 if omitted.
+image_model = "gpt-image-2"     # optional. Model used by the generate_image tool. Defaults to
+                                 # "gpt-image-2". Only applies to OpenAI providers
+                                 # (open-ai / open-ai-oauth); other providers do not register
+                                 # the generate_image tool.
 
 ```
 

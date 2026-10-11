@@ -177,6 +177,130 @@ async fn subagent_write_routes_validate_subagent_existence() -> anyhow::Result<(
     Ok(())
 }
 
+fn build_get_request(uri: &str, cookie_pair: Option<&str>) -> anyhow::Result<Request<Body>> {
+    let mut builder = Request::builder().method("GET").uri(uri);
+    if let Some(cookie_pair) = cookie_pair {
+        builder = builder.header("cookie", cookie_pair);
+    }
+    Ok(builder.body(Body::empty())?)
+}
+
+#[tokio::test]
+async fn subagent_media_route_is_auth_gated() -> anyhow::Result<()> {
+    let app = fresh_app();
+
+    let resp = app
+        .oneshot(build_get_request(
+            "/api/sessions/missing-session/subagents/child/media/image.png",
+            None,
+        )?)
+        .await?;
+
+    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    Ok(())
+}
+
+#[tokio::test]
+async fn subagent_media_route_rejects_missing_subagent() -> anyhow::Result<()> {
+    let home_dir = temp_dir();
+    let _home_guard = HomeGuard::set(&home_dir);
+    create_session_dir("med123ab")?;
+
+    let app = fresh_app_with_session_dir(tcode_runtime::session::base_path()?);
+    let pair = login_and_take_cookie_pair(&app).await?;
+
+    let resp = app
+        .oneshot(build_get_request(
+            "/api/sessions/med123ab/subagents/missing-child/media/image.png",
+            Some(&pair),
+        )?)
+        .await?;
+
+    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert!(response_text(resp).await?.contains("subagent not found"));
+    Ok(())
+}
+
+#[tokio::test]
+async fn subagent_media_route_serves_nested_subagent_file() -> anyhow::Result<()> {
+    let home_dir = temp_dir();
+    let _home_guard = HomeGuard::set(&home_dir);
+    let session_dir = create_session_dir("med456cd")?;
+    let media_dir = session_dir
+        .join("subagent-parent")
+        .join("subagent-child")
+        .join("media");
+    std::fs::create_dir_all(&media_dir)?;
+    let payload = b"subagent image bytes";
+    std::fs::write(media_dir.join("pic.png"), payload)?;
+
+    let app = fresh_app_with_session_dir(tcode_runtime::session::base_path()?);
+    let pair = login_and_take_cookie_pair(&app).await?;
+
+    let resp = app
+        .oneshot(build_get_request(
+            "/api/sessions/med456cd/subagents/child/media/pic.png",
+            Some(&pair),
+        )?)
+        .await?;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    assert_eq!(
+        resp.headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok()),
+        Some("image/png")
+    );
+    let bytes = resp.into_body().collect().await?.to_bytes();
+    assert_eq!(bytes.as_ref(), payload);
+    Ok(())
+}
+
+#[tokio::test]
+async fn subagent_media_route_serves_root_relative_subagent_file() -> anyhow::Result<()> {
+    let home_dir = temp_dir();
+    let _home_guard = HomeGuard::set(&home_dir);
+    let session_dir = create_session_dir("med654dc")?;
+    let media_dir = session_dir.join("subagent-child").join("media");
+    std::fs::create_dir_all(&media_dir)?;
+    std::fs::write(media_dir.join("pic.png"), b"bytes")?;
+
+    let app = fresh_app_with_session_dir(tcode_runtime::session::base_path()?);
+    let pair = login_and_take_cookie_pair(&app).await?;
+
+    let resp = app
+        .oneshot(build_get_request(
+            "/api/sessions/med654dc/subagents/child/media/pic.png",
+            Some(&pair),
+        )?)
+        .await?;
+
+    assert_eq!(resp.status(), StatusCode::OK);
+    Ok(())
+}
+
+#[tokio::test]
+async fn subagent_media_route_rejects_traversal_filename() -> anyhow::Result<()> {
+    let home_dir = temp_dir();
+    let _home_guard = HomeGuard::set(&home_dir);
+    let session_dir = create_session_dir("med789ef")?;
+    std::fs::create_dir_all(session_dir.join("subagent-child").join("media"))?;
+    std::fs::write(session_dir.join("secret.txt"), "top secret")?;
+
+    let app = fresh_app_with_session_dir(tcode_runtime::session::base_path()?);
+    let pair = login_and_take_cookie_pair(&app).await?;
+
+    let resp = app
+        .oneshot(build_get_request(
+            "/api/sessions/med789ef/subagents/child/media/..%2F..%2Fsecret.txt",
+            Some(&pair),
+        )?)
+        .await?;
+
+    assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+    Ok(())
+}
+
 #[tokio::test]
 async fn nested_subagent_reads_still_work() -> anyhow::Result<()> {
     let home_dir = temp_dir();

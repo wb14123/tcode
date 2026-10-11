@@ -1,12 +1,15 @@
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
 
     use anyhow::Result;
     use image::{ImageBuffer, Rgb};
 
     use crate::media_util::save_image_to_media;
     use crate::media_util::save_pdf_to_media;
+    use crate::media_util::save_raw_image_to_media;
+    use crate::media_util::sniff_image_type;
 
     fn test_root() -> std::path::PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/media_util")
@@ -309,6 +312,83 @@ mod tests {
             "error should mention 'has 101 pages', got: {err}"
         );
 
+        Ok(())
+    }
+
+    // ── Test 6: sniff_image_type recognizes known formats ──────────────────
+
+    #[test]
+    fn sniff_image_type_recognizes_known_formats() {
+        assert_eq!(
+            sniff_image_type(b"\x89PNG\r\n\x1a\n rest"),
+            Some(("image/png", "png"))
+        );
+        assert_eq!(
+            sniff_image_type(b"\xFF\xD8\xFF\xE0 rest"),
+            Some(("image/jpeg", "jpg"))
+        );
+        let mut webp = b"RIFF\x00\x00\x00\x00WEBP".to_vec();
+        webp.extend_from_slice(b"VP8 ");
+        assert_eq!(sniff_image_type(&webp), Some(("image/webp", "webp")));
+        assert_eq!(sniff_image_type(b"not an image"), None);
+    }
+
+    // ── Test 7: save_raw_image_to_media writes bytes unchanged with 0600 ───
+
+    /// Per-test temp dir under the workspace target dir; removed on drop.
+    struct TestDir(PathBuf);
+
+    impl TestDir {
+        fn new() -> Self {
+            let root =
+                Path::new(env!("CARGO_MANIFEST_DIR")).join("../target/test-tmp/media_util_raw");
+            std::fs::create_dir_all(&root).expect("failed to create test root");
+            let dir = root.join(uuid::Uuid::new_v4().to_string());
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("failed to create test dir");
+            Self(dir)
+        }
+
+        fn path(&self) -> &Path {
+            &self.0
+        }
+    }
+
+    impl Drop for TestDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[tokio::test]
+    async fn save_raw_image_to_media_writes_unprocessed_bytes_with_0600() -> Result<()> {
+        let fixture = TestDir::new();
+        let media_dir = fixture.path().join("media");
+        let png = make_test_png_bytes();
+
+        let (media, annotation) =
+            save_raw_image_to_media(png.clone(), "image/png", "png", &media_dir).await?;
+
+        assert!(media.relative_path().ends_with(".png"));
+        assert_eq!(media.media_type(), "image/png");
+
+        let expected_path = media_dir.join(media.relative_path());
+        assert!(
+            annotation.contains(&expected_path.display().to_string()),
+            "annotation must contain the absolute path, got: {annotation}"
+        );
+        assert!(annotation.contains("(image/png)"));
+
+        let saved = std::fs::read(&expected_path)?;
+        assert_eq!(saved, png, "bytes must be written unchanged");
+        assert_eq!(
+            std::fs::metadata(&expected_path)?.permissions().mode() & 0o777,
+            0o600
+        );
+        assert_eq!(
+            std::fs::metadata(&media_dir)?.permissions().mode() & 0o777,
+            0o700
+        );
         Ok(())
     }
 }

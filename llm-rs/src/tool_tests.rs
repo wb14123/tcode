@@ -15,6 +15,7 @@ mod tests {
             supports_media: false,
             llm: None,
             model: None,
+            media_sink: None,
         }
     }
 
@@ -203,6 +204,36 @@ mod tests {
         assert_eq!(result, "Error: something went wrong");
     }
 
+    /// A tool that consults `ctx.media_sink` must run fine when the context has
+    /// no sink: the `None` branch simply produces no media events.
+    #[tokio::test]
+    async fn tool_context_without_media_sink_does_not_panic() {
+        let tool = Tool::new(
+            "media_probe",
+            "A tool that consults the media sink",
+            None,
+            |ctx: ToolContext, _params: TestParams| {
+                let sink = ctx.media_sink.clone();
+                async_stream::stream! {
+                    if let Some(sink) = &sink {
+                        let id = sink.media_started();
+                        sink.media_failed(&id);
+                    }
+                    yield Ok::<_, String>("probe done".to_string());
+                }
+            },
+        );
+
+        let mut stream = tool.execute(test_ctx(), r#"{"message": "x"}"#.to_string());
+        let mut results = Vec::new();
+        while let Some(item) = stream.next().await {
+            results.push(item);
+        }
+
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].as_text(), Some("probe done"));
+    }
+
     #[test]
     fn test_tool_default_timeout() {
         let tool = Tool::new(
@@ -324,6 +355,7 @@ mod tests {
             supports_media: false,
             llm: None,
             model: None,
+            media_sink: None,
         };
 
         let json_args = r#"{"message": "test"}"#.to_string();
@@ -377,6 +409,7 @@ mod tests {
             supports_media: false,
             llm: None,
             model: None,
+            media_sink: None,
         };
 
         let mut stream = tool.execute(ctx, r#"{"message": "test"}"#.to_string());
@@ -462,6 +495,7 @@ mod tests {
                 supports_media: false,
                 llm: None,
                 model: None,
+                media_sink: None,
             }
         }
 
@@ -574,6 +608,7 @@ mod tests {
                 supports_media: false,
                 llm: None,
                 model: None,
+                media_sink: None,
             };
             let mut stream = tool.execute(ctx, r#"{"message": "first"}"#.to_string());
 

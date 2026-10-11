@@ -8,8 +8,7 @@
 //! persisted across turns in stateless mode. For full reasoning persistence,
 //! use server-managed mode with `previous_response_id`.
 
-use std::io::Write;
-use std::os::unix::fs::PermissionsExt;
+use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
@@ -21,7 +20,6 @@ use base64::Engine;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
-use uuid::Uuid;
 
 use super::openai_common::effort_to_str;
 use super::sse;
@@ -49,7 +47,7 @@ struct ResponsesRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     max_output_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    tools: Option<Vec<ToolItem>>,
+    tools: Option<Vec<FunctionToolDef>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<ReasoningConfig>,
     /// Request encrypted reasoning content so it can be round-tripped in
@@ -65,13 +63,13 @@ struct ResponsesRequest<'a> {
 /// Can be either a simple message or a structured item (function call, output, etc.).
 #[derive(Serialize)]
 #[serde(untagged)]
-enum InputItem {
+pub(super) enum InputItem {
     EasyMessage(EasyInputMessage),
     Item(serde_json::Value),
 }
 
 #[derive(Serialize)]
-struct EasyInputMessage {
+pub(super) struct EasyInputMessage {
     role: &'static str,
     content: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -86,20 +84,6 @@ struct FunctionToolDef {
     description: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     parameters: Option<serde_json::Value>,
-}
-
-/// A tool item in the Responses API `tools` array.  Can be a function tool or
-/// the `image_generation` capability marker.
-#[derive(Serialize)]
-#[serde(untagged)]
-enum ToolItem {
-    Function(FunctionToolDef),
-    ImageGeneration(ImageGenerationToolDef),
-}
-
-#[derive(Serialize)]
-struct ImageGenerationToolDef {
-    r#type: &'static str,
 }
 
 #[derive(Serialize)]
@@ -193,6 +177,9 @@ struct ErrorEventPayload {
 // OpenAI client (Responses API)
 // ============================================================================
 
+/// Default model for Images API requests.
+pub const DEFAULT_IMAGE_MODEL: &str = "gpt-image-2";
+
 /// OpenAI LLM client using the Responses API.
 ///
 /// Provides reasoning support:
@@ -214,6 +201,8 @@ pub struct OpenAI {
     cached_tools: Option<Vec<FunctionToolDef>>,
     /// Directory for session media files (images, PDFs) referenced by ContentPart::Media.
     pub media_dir: Option<PathBuf>,
+    /// Model used for Images API requests (`images/generations`, `images/edits`).
+    image_model: String,
 }
 
 impl OpenAI {
@@ -240,6 +229,7 @@ impl OpenAI {
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
             media_dir: None,
+            image_model: DEFAULT_IMAGE_MODEL.to_string(),
         }
     }
 
@@ -258,6 +248,7 @@ impl OpenAI {
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
             media_dir: None,
+            image_model: DEFAULT_IMAGE_MODEL.to_string(),
         }
     }
 
@@ -291,6 +282,12 @@ impl OpenAI {
             .expect("reqwest Client should always build with standard TLS");
         self
     }
+
+    /// Set the model used for Images API requests.
+    pub fn with_image_model(mut self, model: impl Into<String>) -> Self {
+        self.image_model = model.into();
+        self
+    }
 }
 
 // ============================================================================
@@ -321,9 +318,9 @@ fn build_raw_output(
     };
 
     // The ChatGPT proxy may return items in response.completed.output
-    // without a "type" field (e.g. image_generation_call), but streamed
-    // output_item.done events always include the full type.  Cross-reference
-    // by id to fill in any missing structural fields.
+    // without a "type" field, but streamed output_item.done events always
+    // include the full type.  Cross-reference by id to fill in any missing
+    // structural fields.
     for item in &mut output {
         if item.get("type").is_none()
             && let Some(id) = item.get("id").and_then(|v| v.as_str())
@@ -338,34 +335,6 @@ fn build_raw_output(
             }
         }
     }
-
-    // Strip output-only fields from image_generation_call items so they
-    // can be round-tripped as input.  The API rejects call-parameter fields
-    // (action, background, output_format, quality, size) when replayed.
-    // Keep type, id, status, revised_prompt, and result.
-    for item in &mut output {
-        if item.get("type").and_then(|v| v.as_str()) == Some("image_generation_call")
-            && let Some(obj) = item.as_object_mut()
-        {
-            obj.retain(|k, _| {
-                matches!(
-                    k.as_str(),
-                    "type" | "id" | "status" | "revised_prompt" | "result"
-                )
-            });
-        }
-    }
-
-    // Remove image_generation_call items that failed or have no result --
-    // they cannot be round-tripped when store: false and serve no purpose
-    // in conversation context.
-    output.retain(|item| {
-        if item.get("type").and_then(|v| v.as_str()) != Some("image_generation_call") {
-            return true;
-        }
-        item.get("status").and_then(|v| v.as_str()) != Some("failed")
-            && item.get("result").is_some()
-    });
 
     if saw_function_calls {
         let has_fc_in_output = output
@@ -389,7 +358,7 @@ fn build_raw_output(
 /// Returns `(instructions, input_items)` — the system message is extracted
 /// as the top-level `instructions` field (required by the ChatGPT backend proxy),
 /// and remaining messages become input items.
-fn convert_messages(
+pub(super) fn convert_messages(
     msgs: &[LLMMessage],
     media_dir: &Option<PathBuf>,
 ) -> anyhow::Result<(Option<String>, Vec<InputItem>)> {
@@ -479,6 +448,14 @@ fn convert_messages(
 
                 if let Some(arr) = raw_items {
                     for item_json in arr {
+                        // Drop server-side image generation items: the tool that
+                        // produced them is no longer declared, and each item
+                        // carries a full base64 image that must not be replayed.
+                        if item_json.get("type").and_then(|t| t.as_str())
+                            == Some("image_generation_call")
+                        {
+                            continue;
+                        }
                         items.push(InputItem::Item(item_json.clone()));
                     }
                 } else {
@@ -594,6 +571,7 @@ impl LLM for OpenAI {
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
             media_dir: self.media_dir.clone(),
+            image_model: self.image_model.clone(),
         })
     }
 
@@ -642,6 +620,54 @@ impl LLM for OpenAI {
         ]
     }
 
+    fn supports_image_generation(&self) -> bool {
+        true
+    }
+
+    fn generate_image(
+        &self,
+        request: crate::image::ImageRequest,
+    ) -> Pin<Box<dyn Future<Output = Result<crate::image::ImageResponse, String>> + Send>> {
+        let client = self.client.clone();
+        let get_token = self.get_token.clone();
+        let base_url = self.base_url.clone();
+        let account_id = self.account_id.clone();
+        let model = self.image_model.clone();
+
+        Box::pin(async move {
+            let body = request.to_json_body(&model)?;
+            let endpoint = match request {
+                crate::image::ImageRequest::Generate(_) => "generations",
+                crate::image::ImageRequest::Edit { .. } => "edits",
+            };
+            let url = format!("{}/images/{}", base_url, endpoint);
+
+            let access_token = get_token().await?;
+            let mut req = client
+                .post(&url)
+                .header("Authorization", format!("Bearer {}", access_token))
+                .header("Content-Type", "application/json");
+            if let Some(ref id) = account_id {
+                req = req.header("ChatGPT-Account-ID", id.as_str());
+            }
+
+            let response = req
+                .body(body)
+                .send()
+                .await
+                .map_err(|e| format!("image request failed: {e}"))?;
+            let status = response.status();
+            let text = response
+                .text()
+                .await
+                .map_err(|e| format!("failed to read image response: {e}"))?;
+            if !status.is_success() {
+                return Err(format!("image request failed with HTTP {status}: {text}"));
+            }
+            crate::image::ImageResponse::from_json(&text)
+        })
+    }
+
     fn chat(
         &self,
         model: &str,
@@ -662,25 +688,7 @@ impl LLM for OpenAI {
                 });
             }
         };
-        let tools = {
-            let mut tool_items: Vec<ToolItem> = self
-                .cached_tools
-                .clone()
-                .unwrap_or_default()
-                .into_iter()
-                .map(ToolItem::Function)
-                .collect();
-            // Always include image_generation — the API silently ignores it
-            // for models that don't support image output.
-            tool_items.push(ToolItem::ImageGeneration(ImageGenerationToolDef {
-                r#type: "image_generation",
-            }));
-            if tool_items.is_empty() {
-                None
-            } else {
-                Some(tool_items)
-            }
-        };
+        let tools = self.cached_tools.clone();
         let max_output_tokens = options.max_tokens;
         let cache_key = self.cache_key.clone();
 
@@ -825,23 +833,8 @@ impl LLM for OpenAI {
                         }
                     }
 
-                    // Output item added — detect image_generation_call immediately
-                    // so we can emit MediaGenerationStarted before the result is ready.
-                    "response.output_item.added" => {
-                        if let Ok(parsed) = serde_json::from_str::<OutputItemDonePayload>(data) {
-                            let item_type = parsed.item.get("type").and_then(|t| t.as_str());
-                            if item_type == Some("image_generation_call")
-                                && let Some(item_id) = parsed.item.get("id").and_then(|v| v.as_str())
-                            {
-                                yield LLMEvent::MediaGenerationStarted {
-                                    media_id: item_id.to_string(),
-                                };
-                            }
-                        }
-                    }
-
-                    // Output item done — collect for round-tripping and handle
-                    // function calls and image generation output
+                    // Output item done — collect for round-tripping and emit
+                    // streaming events for function calls
                     "response.output_item.done" => {
                         if let Ok(parsed) = serde_json::from_str::<OutputItemDonePayload>(data) {
                             // Move the item into the collection first, then
@@ -888,92 +881,6 @@ impl LLM for OpenAI {
                                     arguments,
                                 });
                             }
-
-                            if item_type == Some("image_generation_call")
-                                && let Some(result) =
-                                    item.get("result").and_then(|v| v.as_str())
-                                    && let Ok(image_bytes) =
-                                        base64::engine::general_purpose::STANDARD.decode(result)
-                                        && let Some(ref media_dir) = media_dir {
-                                            // Use the item's id to correlate with the already-emitted
-                                            // MediaGenerationStarted (from output_item.added).
-                                            let media_id = match item.get("id").and_then(|v| v.as_str()) {
-                                                Some(id) => id.to_string(),
-                                                None => Uuid::new_v4().to_string(),
-                                            };
-
-                                            // Process through the resize/compress pipeline in a
-                                            // blocking task to avoid stalling the async runtime.
-                                            let process_result = tokio::task::spawn_blocking(move || {
-                                                crate::media::process_image(&image_bytes)
-                                            })
-                                            .await;
-                                            match process_result {
-                                                Ok(Ok((processed, media_type, ext))) => {
-                                                    let filename_uuid = Uuid::new_v4();
-                                                    let filename = format!("{}.{}", filename_uuid, ext);
-                                                    let file_path = media_dir.join(&filename);
-                                                    // Ensure media dir exists
-                                                    if let Err(e) = std::fs::create_dir_all(media_dir) {
-                                                        yield LLMEvent::Error(format!(
-                                                            "Failed to create media directory: {}",
-                                                            e
-                                                        ));
-                                                        continue;
-                                                    }
-                                                    // Write with 0o600 permissions
-                                                    match std::fs::File::create(&file_path)
-                                                        .and_then(|f| {
-                                                            f.set_permissions(
-                                                                std::fs::Permissions::from_mode(0o600),
-                                                            )?;
-                                                            Ok(f)
-                                                        })
-                                                        .and_then(|mut f| {
-                                                            f.write_all(&processed)?;
-                                                            Ok(())
-                                                        }) {
-                                                        Ok(()) => {
-                                                            yield LLMEvent::MediaOutput {
-                                                                media_id,
-                                                                relative_path: filename,
-                                                                media_type,
-                                                            };
-                                                        }
-                                                        Err(e) => {
-                                                            yield LLMEvent::Error(format!(
-                                                                "Failed to write generated media: {}",
-                                                                e
-                                                            ));
-                                                            return;
-                                                        }
-                                                    }
-                                                }
-                                                Ok(Err(e)) => {
-                                                    yield LLMEvent::Error(format!(
-                                                        "Failed to process generated media: {:#}",
-                                                        e
-                                                    ));
-                                                    return;
-                                                }
-                                                Err(join_err) => {
-                                                    yield LLMEvent::Error(format!(
-                                                        "Media processing task panicked: {}",
-                                                        join_err
-                                                    ));
-                                                    return;
-                                                }
-                                            }
-                                        } else if item_type == Some("image_generation_call") {
-                                            let media_id = match item
-                                                .get("id")
-                                                .and_then(|v| v.as_str())
-                                            {
-                                                Some(id) => id.to_string(),
-                                                None => Uuid::new_v4().to_string(),
-                                            };
-                                            yield LLMEvent::MediaGenerationFailed { media_id };
-                                        }
                         }
                     }
 

@@ -7,6 +7,7 @@ import { StreamEventBatcher } from './src/stream-event-batcher.ts';
 import { ConversationTimelineBuilder, parseStreamLine } from './src/messages.ts';
 import { specialToolArgsPresentation } from './src/tool-args.ts';
 import { subagentRowTitle } from './src/timeline-render-helpers.ts';
+import { mediaUrl } from './src/api.ts';
 import { shouldSubmitOnEnter } from './src/composer-input.ts';
 
 function assert(condition, message) {
@@ -233,6 +234,37 @@ function validateActiveWorkState() {
     }),
   );
   assert(!subagentBuilder.hasActiveWork(), 'subagent turn end after denial clears activity');
+}
+
+function validateGeneratedMediaState() {
+  const builder = new ConversationTimelineBuilder();
+  builder.appendEvent(rawEvent('AssistantMessageStart', { msg_id: 1 }));
+  builder.appendEvent(rawEvent('AssistantMessageChunk', { msg_id: 1, content: 'generating an image' }));
+  builder.appendEvent(rawEvent('AssistantMessageEnd', { msg_id: 1, end_status: 'success' }));
+  assert(!builder.hasActiveWork(), 'a finished assistant message leaves the conversation idle');
+
+  builder.appendEvent(rawEvent('AssistantMediaGenerating', { media_id: 'img-1' }));
+  assert(builder.timeline.length === 2, 'generated media renders in its own assistant row');
+  assert(
+    !builder.hasActiveWork(),
+    'a generated media row never counts as active work because it has no message lifecycle',
+  );
+
+  builder.appendEvent(
+    rawEvent('AssistantMediaOutput', {
+      media_id: 'img-1',
+      end_status: 'Succeeded',
+      media: { relative_path: 'abc.png', media_type: 'image/png' },
+    }),
+  );
+  assert(!builder.hasActiveWork(), 'a resolved media row leaves the conversation idle');
+  const mediaRow = builder.timeline.at(-1);
+  assert(mediaRow.kind === 'assistant', 'the generated image lands in an assistant row');
+  const image = mediaRow.contentBlocks.find((block) => block.kind === 'image');
+  assert(
+    image && image.pending === false && image.image?.relative_path === 'abc.png',
+    'the media output replaces the placeholder with the generated image',
+  );
 }
 
 function validateSpecialToolArgsPresentation() {
@@ -630,13 +662,36 @@ L\\in\\mathbb R^{T\\times|\\mathcal V|}
   assert(invalidThrew, 'KaTeX throws on invalid LaTeX so the plain-text fallback is reachable');
 }
 
+function validateMediaUrl() {
+  assert(
+    mediaUrl({ sessionId: 'sid-1' }, 'abc.png') === '/api/sessions/sid-1/media/abc.png',
+    'media URL without a subagent points at the session media route',
+  );
+  assert(
+    mediaUrl({ sessionId: 'sid-1', subagentId: 'sub-2' }, 'abc.png') ===
+      '/api/sessions/sid-1/subagents/sub-2/media/abc.png',
+    'media URL with a subagent points at the subagent media route',
+  );
+  assert(
+    mediaUrl({ sessionId: 'sid-1', subagentId: '' }, 'abc.png') === '/api/sessions/sid-1/media/abc.png',
+    'empty subagent id falls back to the session media route',
+  );
+  assert(
+    mediaUrl({ sessionId: 'sid 1', subagentId: 'sub/2' }, 'my image.png') ===
+      '/api/sessions/sid%201/subagents/sub%2F2/media/my%20image.png',
+    'media URL percent-encodes its path components',
+  );
+}
+
 validateTimelineStore();
 validateWireFormatNormalization();
 validateSubagentInputAggregation();
 validateActiveWorkState();
+validateGeneratedMediaState();
 validateSpecialToolArgsPresentation();
 validateSubagentPromptPreview();
 validateComposerEnterDecision();
+validateMediaUrl();
 validateMathRendering();
 await validateStreamEventBatcher();
 console.log('frontend test passed');
