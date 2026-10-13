@@ -5,9 +5,9 @@ cd "$(dirname "$0")"
 
 usage() {
   printf '%s\n' \
-    'Usage: ./build-docker.sh [docker|podman] [build arguments...]' \
+    'Usage: ./build-docker-web-ui.sh [docker|podman] [build arguments...]' \
     'Without an engine, auto-detect Docker first, then Podman.' \
-    'Example: ./build-docker.sh docker --build-arg TCODE_UID=1001 --build-arg TCODE_GID=1001'
+    'Example: ./build-docker-web-ui.sh docker --build-arg TCODE_UID=1001 --build-arg TCODE_GID=1001'
 }
 
 ENGINE=""
@@ -55,5 +55,5 @@ fi
 IMAGE_TAG="${IMAGE}:${TAG}"
 
 printf 'Building %s with %s\n' "$IMAGE_TAG" "$ENGINE"
-"$ENGINE" build "$@" --build-arg "GIT_HASH=${TAG}" -t "${IMAGE_TAG}" -t "${IMAGE}:latest" .
+"$ENGINE" build -f Dockerfile-WebUI "$@" --build-arg "GIT_HASH=${TAG}" -t "${IMAGE_TAG}" -t "${IMAGE}:latest" .
 printf 'Built %s and %s:latest\n' "$IMAGE_TAG" "$IMAGE"

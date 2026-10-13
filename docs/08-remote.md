@@ -262,7 +262,7 @@ and web users with persistent paths, skip setup and go to step 4.
 Run this command from the repository root:
 
 ```sh
-./build-docker.sh podman
+./build-docker-web-ui.sh podman
 ```
 
 ### 2. Copy the browser profile
@@ -317,7 +317,7 @@ For conventional Linux Docker without user-namespace remapping, build as your
 non-root host user:
 
 ```sh
-./build-docker.sh docker \
+./build-docker-web-ui.sh docker \
   --build-arg TCODE_UID="$(id -u)" --build-arg TCODE_GID="$(id -g)"
 ```
 
