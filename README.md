@@ -57,6 +57,7 @@ More user docs:
 - [Browser Setup](docs/06-browser.md) — Chrome setup for web tools
 - [Permissions](docs/07-permissions.md) — permission system, scopes, and config
 - [Remote Web UI](docs/08-remote.md) — run `tcode remote` locally, expose it safely, or deploy the web-only Docker image
+- [Dev Container Setup Prompt](docs/10-dev-container-setup-prompt.md) - reusable prompt for tcode-compatible containers, dependency caching, and build isolation
 
 ## Crate Map
 

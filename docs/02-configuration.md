@@ -230,6 +230,8 @@ When this file exists, running `tcode` (without `-c`) automatically uses the con
 
 **Startup validation:** On launch, tcode checks that the runtime CLI is available, the container is running, bash works inside it, and the project directory is mounted at the correct path. If any check fails, tcode exits with a descriptive error.
 
+For help creating a compatible development container, use the [Dev Container Setup Prompt](10-dev-container-setup-prompt.md). It covers Dockerfile and script generation, persistent dependency caches, and isolation from host build outputs.
+
 **Behavior changes in container mode:**
 
 - Bash commands run as your host UID/GID inside the container when using Docker, or as root (`0:0`) when using Podman. With rootless Podman (the default), container root maps to your host user, so files created on the shared mount are still owned by you. If you run rootful Podman, files created by container commands will be owned by root instead.
