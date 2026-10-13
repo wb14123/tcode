@@ -1,0 +1,47 @@
+# Keep the Rust toolchain version aligned with the production builder.
+FROM rust:1.95.0-slim-bookworm AS rust-toolchain
+
+RUN rustup component add --toolchain 1.95.0 rustfmt clippy \
+    && rustup default 1.95.0
+
+# The pinned tree-sitter CLI requires Trixie's newer glibc.
+FROM node:24-trixie-slim
+
+# Keep image-provided Rust binaries separate from the writable Cargo cache.
+# HOME and the live source working directory are supplied by the run script.
+ENV RUSTUP_HOME=/opt/tcode/rustup \
+    CARGO_HOME=/var/cache/tcode/cargo \
+    PATH=/opt/tcode/rust/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+    NPM_CONFIG_CACHE=/var/cache/tcode/npm \
+    XDG_CACHE_HOME=/var/cache/tcode/xdg \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        build-essential \
+        cmake \
+        pkg-config \
+        ca-certificates \
+        git \
+        neovim \
+        python3 \
+        tmux \
+        bash \
+        coreutils \
+        grep \
+        procps \
+        util-linux \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY --from=rust-toolchain /usr/local/cargo/bin/ /opt/tcode/rust/bin/
+COPY --from=rust-toolchain /usr/local/rustup/ /opt/tcode/rustup/
+
+RUN mkdir -p /home/wangbin "$CARGO_HOME" "$NPM_CONFIG_CACHE" "$XDG_CACHE_HOME" \
+    && npm install --global tree-sitter-cli@0.26.9
+
+# Container root maps to the host user with rootless Podman's --userns=host.
+# No app sources, credentials, or exposed ports are needed. Clear the Node
+# image's inherited entrypoint so there is no startup wrapper.
+ENTRYPOINT []
+CMD ["sleep", "infinity"]

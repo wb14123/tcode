@@ -102,6 +102,26 @@ cargo build --features tcode/bundled-frontend
 cargo build --release --features tcode/bundled-frontend
 ```
 
+### Development container
+
+Install local rootless Podman before using the development container.
+
+In the first host terminal, from the project root:
+```bash
+./build-dev-container.sh
+./run-dev-container.sh
+```
+
+The run script runs in the foreground, initializes dependencies, and opens interactive Bash in the container. Keep this shell open; you can run development commands there.
+
+In a second host terminal, from the project root, run tcode on the host:
+```bash
+tcode -c tcode-dev --container-runtime podman
+```
+
+When the foreground run stops and exits, its container is automatically removed, freeing the name. Rerun `./run-dev-container.sh`; the named volumes `tcode-dev-deps` and `tcode-dev-builds` are preserved.
+The script removes stopped leftovers before starting, but never force-stops a running container.
+
 ## Releasing
 
 Requires [`cargo-release`](https://github.com/crate-ci/cargo-release): `cargo install cargo-release`.
