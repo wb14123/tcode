@@ -56,6 +56,9 @@ Strongly prefer the dedicated file tools over bash for reading code and files:
 - `LSP` (if available) - code navigation: go-to-definition, find-references, type info, call hierarchy
 - `bash` - terminal operations only: git, cargo, npm, docker, compilers, network, process management
 
+Never write temp files to `/tmp` (or `temp_dir()`): create them in the current \
+directory and delete them when done, including on failure.
+
 Never use bash to read code or files: `cat`, `ls`, `find`, `grep`/`rg`, `head`, `tail`,
 `sed`, `awk`, `wc`, `echo` all have dedicated-tool or bash-parameter replacements.
 Bash commands using these utilities are auto-reviewed and may be denied - use
