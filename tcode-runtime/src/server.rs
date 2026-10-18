@@ -1303,7 +1303,7 @@ fn run_event_writer(
         let mut last_fts_index_trigger: Option<Instant> = None;
         let mut activity_guard = EventWriterActivityGuard::new(Arc::clone(&work_activity));
 
-        tracing::info!("event_writer started");
+        tracing::debug!("event_writer started");
 
         while let Some(item) = events.next().await {
             let event = match item {
@@ -1362,7 +1362,7 @@ fn run_event_writer(
                     ..
                 } => {
                     activity_guard.tool_started(tool_activity_key(&session_dir, tool_call_id));
-                    tracing::info!(
+                    tracing::debug!(
                         tool_call_id,
                         tool_call_index,
                         tool_name,
@@ -1425,7 +1425,7 @@ fn run_event_writer(
                     ..
                 } => {
                     activity_guard.tool_started(tool_activity_key(&session_dir, tool_call_id));
-                    tracing::info!(
+                    tracing::debug!(
                         tool_call_id,
                         tool_name,
                         tool_args,
@@ -1523,7 +1523,7 @@ fn run_event_writer(
                         &session_dir,
                         tool_call_id,
                     ));
-                    tracing::info!(tool_call_id, ?end_status, "ToolMessageEnd received");
+                    tracing::debug!(tool_call_id, ?end_status, "ToolMessageEnd received");
                     tool_clients.lock().remove(tool_call_id.as_str());
                     if let Some(state) = tool_calls.remove(tool_call_id) {
                         // Write ToolMessageEnd to both files
@@ -1569,7 +1569,7 @@ fn run_event_writer(
                         tool_call_id,
                     ));
                     activity_guard.subagent_started(conversation_id.clone());
-                    tracing::info!(conversation_id, description, "SubAgentStart received");
+                    tracing::debug!(conversation_id, description, "SubAgentStart received");
                     append_event(&display_file, &event)
                         .await
                         .context("Failed to append subagent start to display")?;
@@ -1647,7 +1647,7 @@ fn run_event_writer(
                     ..
                 } => {
                     activity_guard.subagent_finished_or_idle(conversation_id);
-                    tracing::info!(
+                    tracing::debug!(
                         conversation_id,
                         ?end_status,
                         response_len = response.len(),
@@ -1678,7 +1678,7 @@ fn run_event_writer(
                     ..
                 } => {
                     activity_guard.subagent_finished_or_idle(conversation_id);
-                    tracing::info!(
+                    tracing::debug!(
                         conversation_id,
                         ?end_status,
                         response_len = response.len(),
@@ -1714,7 +1714,7 @@ fn run_event_writer(
                         tool_call_id,
                     ));
                     activity_guard.subagent_started(conversation_id.clone());
-                    tracing::info!(conversation_id, description, "SubAgentContinue received");
+                    tracing::debug!(conversation_id, description, "SubAgentContinue received");
 
                     // Write "Running" status — subagent dir and event writer already exist
                     if let Some(state) = subagents.get(conversation_id) {
@@ -1891,7 +1891,7 @@ fn run_event_writer(
                     })?;
             }
         }
-        tracing::info!("event_writer finished");
+        tracing::debug!("event_writer finished");
         Ok(())
     }) // Box::pin
 }

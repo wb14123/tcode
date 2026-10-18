@@ -40,6 +40,24 @@ tcode --no-container            # force no container, override project config
 
 All other settings live in the config file.
 
+## Debug logging
+
+Tracing output from every tcode process of a session - unified startup (`tcode`, `tcode attach`), `serve`, `display`, `edit`, `tool-call`, and subagent panes - is appended to `~/.tcode/sessions/<session-id>/debug.log` only when `RUST_LOG` enables logging. `debug.log` for a subagent pane lives in its `subagent-<conv_id>/` directory. By default no log file is created and tracing output is discarded.
+
+`RUST_LOG` accepts `EnvFilter` directives, comma-separated with no spaces after the commas:
+
+```sh
+RUST_LOG=debug tcode                # debug level
+RUST_LOG=info tcode                 # info level
+RUST_LOG=tcode_runtime=debug tcode  # module directive
+```
+
+- An invalid value prints a warning and falls back to the built-in filter (`debug`, with `h2`, `reqwest`, `hyper_util`, and `rustls` capped at `info`). The log file is still created. In a terminal/tmux session stderr is already redirected by this point, so the warning lands in `stderr.log`.
+- `RUST_LOG=off` (or `0`) and an empty value disable logging: no file is created.
+- An exported `RUST_LOG` applies to every session, so each session creates and appends to its own `debug.log`. Unset it to disable per-session logging.
+
+`stdout.log` and `stderr.log` in the session directory are raw process output redirects, not structured tracing logs.
+
 ## Session Modes
 
 Normal sessions are the default for the terminal/tmux UI. They load project context, register the local filesystem and shell tools, and honor project instructions such as `CLAUDE.md` or `AGENTS.md`.

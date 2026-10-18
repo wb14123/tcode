@@ -180,6 +180,18 @@ In web-only mode:
 
 This makes the web remote server safe for remotely exposed browser access. Normal sessions with local/container capabilities are available only through the terminal/tmux UI.
 
+## Logging
+
+`tcode remote` writes tracing output to stderr, so it becomes your console or container logs.
+
+The default level is `info`, which covers startup, lifecycle, warning, and error messages. Per-event tool and subagent activity is logged at `debug` and is hidden by default; set `RUST_LOG=debug` to include it:
+
+```sh
+RUST_LOG=debug tcode remote --port 8080
+```
+
+`tcode remote` does not create `debug.log`. Per-session log files belong to terminal/tmux sessions; see [Configuration: Debug logging](02-configuration.md#debug-logging).
+
 ## Configuration and data paths
 
 `tcode remote` uses the same config and data locations as the terminal UI:

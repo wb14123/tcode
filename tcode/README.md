@@ -55,7 +55,7 @@ All session data lives in `~/.tcode/sessions/{session_id}/`. Sessions persist af
 | `tool-call-{id}-status.txt` | Per-tool-call status (`Running`, `Permission`, `Done`, `Failed`, `Cancelled`, `Denied`, `Timeout`) |
 | `subagent-{conv_id}/` | Sub-session directory for a subagent (same file structure as parent) |
 | `permissions.json` | Project-level tool permissions at `~/.tcode/projects/<hash>/permissions.json` (persisted across sessions) |
-| `debug.log` | Debug logging output |
+| `debug.log` | Session tracing output (created only when `RUST_LOG` enables logging) |
 
 The attach-time session picker also maintains a derived full-text search index at `~/.tcode/sessions/fts.db`. The JSON session files remain the source of truth; the index can be rebuilt from `conversation-state.json` files and is not stored inside individual session directories.
 

@@ -50,6 +50,9 @@ mod attach_warning_tests;
 mod module_cache_tests;
 
 #[cfg(test)]
+mod tracing_setup_tests;
+
+#[cfg(test)]
 mod test_support;
 
 use std::fs;
@@ -65,6 +68,7 @@ use clap::{Parser, Subcommand};
 use sha2::{Digest, Sha256};
 use tcode_encoding::{non_utf8_output_message, path_to_str};
 use tokio::process::Child;
+use tracing::level_filters::LevelFilter;
 use tracing_subscriber::EnvFilter;
 
 /// Escape a string for use inside a Lua single-quoted string literal.
@@ -1309,9 +1313,8 @@ async fn main() -> Result<()> {
 }
 
 /// Initialize a stderr-writing tracing subscriber for the `tcode remote`
-/// entry point. The existing `init_tracing(session_id)` writes to a
-/// session-specific log file; the web backend has no session dir, so we
-/// install a fresh subscriber here.
+/// entry point. The web backend has no session directory, so it does not use
+/// the per-session file logging of `init_tracing`.
 ///
 /// Uses `.init()` (not `try_init()`) — `tcode remote` is a fresh process
 /// that never had a subscriber installed before this point, so a double-
@@ -1325,7 +1328,73 @@ fn init_remote_tracing() {
         .init();
 }
 
+const DEFAULT_SESSION_LOG_FILTER: &str = "debug,h2=info,reqwest=info,hyper_util=info,rustls=info";
+
+/// Session tracing setup selected by `RUST_LOG`.
+enum SessionLogFilter {
+    /// No subscriber is installed and no log file is created.
+    Disabled,
+    /// Install a subscriber with this filter. Boxed because `EnvFilter` is
+    /// far larger than the other variants.
+    User(Box<EnvFilter>),
+    /// `RUST_LOG` is unusable: install `DEFAULT_SESSION_LOG_FILTER`.
+    Invalid,
+}
+
+impl SessionLogFilter {
+    fn resolve(rust_log: Option<&str>) -> Self {
+        match rust_log {
+            None => Self::Disabled,
+            Some(raw) => {
+                let trimmed = raw.trim();
+                let disabled = trimmed.is_empty()
+                    || trimmed
+                        .parse::<LevelFilter>()
+                        .is_ok_and(|level| level == LevelFilter::OFF);
+                if disabled {
+                    Self::Disabled
+                } else {
+                    match EnvFilter::try_new(trimmed) {
+                        Ok(filter) => Self::User(Box::new(filter)),
+                        Err(_) => Self::Invalid,
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Filter to install for this process, or `None` when `RUST_LOG` disables
+/// session logging. Unusable values fall back to `DEFAULT_SESSION_LOG_FILTER`.
+fn session_log_filter() -> Option<EnvFilter> {
+    let raw = match std::env::var("RUST_LOG") {
+        Ok(raw) => raw,
+        Err(std::env::VarError::NotPresent) => return None,
+        Err(std::env::VarError::NotUnicode(_)) => {
+            eprintln!(
+                "RUST_LOG is not valid Unicode; using {DEFAULT_SESSION_LOG_FILTER} for session logging"
+            );
+            return Some(EnvFilter::new(DEFAULT_SESSION_LOG_FILTER));
+        }
+    };
+    match SessionLogFilter::resolve(Some(&raw)) {
+        SessionLogFilter::Disabled => None,
+        SessionLogFilter::User(filter) => Some(*filter),
+        SessionLogFilter::Invalid => {
+            eprintln!(
+                "Ignoring RUST_LOG={raw:?}: not a valid filter; using {DEFAULT_SESSION_LOG_FILTER} for session logging"
+            );
+            Some(EnvFilter::new(DEFAULT_SESSION_LOG_FILTER))
+        }
+    }
+}
+
+/// Install the session subscriber that appends to `debug.log`. Nothing is
+/// logged and no file is created unless `RUST_LOG` asks for it.
 fn init_tracing(session_id: &str) {
+    let Some(filter) = session_log_filter() else {
+        return;
+    };
     let log_dir = match session::base_path() {
         Ok(p) => p.join(session_id),
         Err(e) => {
@@ -1335,27 +1404,24 @@ fn init_tracing(session_id: &str) {
     };
     if let Err(e) = fs::create_dir_all(&log_dir) {
         eprintln!("Failed to create log directory {:?}: {}", log_dir, e);
+        return;
     }
     let log_file = match fs::OpenOptions::new()
         .create(true)
         .append(true)
         .open(log_dir.join("debug.log"))
     {
-        Ok(f) => Some(f),
+        Ok(f) => f,
         Err(e) => {
             eprintln!("Failed to open debug.log in {:?}: {}", log_dir, e);
-            None
+            return;
         }
     };
-    if let Some(log_file) = log_file {
-        tracing_subscriber::fmt()
-            .with_writer(std::sync::Mutex::new(log_file))
-            .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
-                EnvFilter::new("debug,h2=info,reqwest=info,hyper_util=info,rustls=info")
-            }))
-            .with_ansi(false)
-            .init();
-    }
+    tracing_subscriber::fmt()
+        .with_writer(std::sync::Mutex::new(log_file))
+        .with_env_filter(filter)
+        .with_ansi(false)
+        .init();
 }
 
 async fn run_browser() -> Result<()> {

@@ -2471,7 +2471,7 @@ async fn execute_regular_tool(
 
     let tool_arc = env.tools.get(&tool_call.name).cloned();
 
-    tracing::info!(
+    tracing::debug!(
         tool_call_id = %tool_call.id,
         tool_name = %tool_call.name,
         args = %tool_call.arguments,
@@ -2549,7 +2549,7 @@ async fn execute_regular_tool(
                 .await?;
             chunk_count += 1;
         }
-        tracing::info!(
+        tracing::debug!(
             tool_call_id = %tool_call.id,
             chunk_count,
             "tool stream finished"
