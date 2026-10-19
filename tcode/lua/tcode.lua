@@ -2703,6 +2703,57 @@ local function setup_skill_completion(skills, descriptions)
   vim.opt_local.completeopt = { 'menu', 'menuone', 'noselect' }
 end
 
+-- Insert-mode '/' handler: insert a literal '/' and, when it starts a word,
+-- open the skill completion popup.
+--
+-- The literal key is fed back with the 'i' flag so it lands at the FRONT of the
+-- typeahead buffer. Without 'i' feedkeys() APPENDS, so a burst that is still
+-- queued (raw-key paste, fast typing, key repeat) gets the '/' inserted after
+-- it: pasting "https://example.com/a/b/c" yields "https:example.comabc/////".
+-- See tcode/lua/tests/slash_mapping_tests.lua.
+local function keymap_slash()
+  local col = vim.fn.col('.') - 1  -- 0-indexed cursor column
+  local line = vim.api.nvim_get_current_line()
+  vim.api.nvim_feedkeys('/', 'ni', false)
+  -- Trigger completion if at start of line or preceded by whitespace
+  if col == 0 or line:sub(col, col):match('%s') then
+    vim.schedule(function()
+      vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n', false)
+    end)
+  end
+end
+
+-- Insert-mode <Tab> handler: advance the completion menu, expand an exact
+-- /skill, open the skill completion popup, or insert a literal tab.
+--
+-- Same 'i' rule as keymap_slash for the literal tab: without it a queued burst
+-- pushes every tab-inserted character behind the rest of the input.
+local function keymap_tab(skills)
+  -- Completion popup visible: select the next item
+  if vim.fn.pumvisible() == 1 then
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-n>', true, false, true), 'n', false)
+    return
+  end
+
+  local line = vim.api.nvim_get_current_line()
+  local col = vim.fn.col('.') - 1  -- 0-indexed cursor column
+  local before_cursor = line:sub(1, col)
+  local cmd = before_cursor:match('/([%w%-_]+)%s*$')
+
+  if cmd and skills[cmd] then
+    -- Exact match: expand the skill (pass col captured in insert mode)
+    vim.cmd('stopinsert')
+    try_expand_skill(skills, col)
+    vim.cmd('startinsert')
+  elseif before_cursor:match('/%s*$') or cmd then
+    -- Has / with partial or no text after it: trigger completion popup
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n', false)
+  else
+    -- No skill context: insert a normal tab
+    vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Tab>', true, false, true), 'ni', false)
+  end
+end
+
 -- @param msg_file: Path to file where messages should be written
 -- @param is_subagent: Whether this is a subagent edit window
 -- @param session_id: Session ID (for approve-next)
@@ -2809,46 +2860,12 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
     setup_skill_completion(skills, descriptions)
 
     -- Auto-trigger completion popup when typing '/'
-    vim.keymap.set('i', '/', function()
-      local col = vim.fn.col('.') - 1  -- 0-indexed cursor column
-      local line = vim.api.nvim_get_current_line()
-      -- Trigger if at start of line or preceded by whitespace
-      if col == 0 or line:sub(col, col):match('%s') then
-        vim.api.nvim_feedkeys('/', 'n', false)
-        vim.schedule(function()
-          vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n', false)
-        end)
-      else
-        vim.api.nvim_feedkeys('/', 'n', false)
-      end
-    end, { buffer = true, silent = true, desc = 'Auto-trigger skill completion' })
+    vim.keymap.set('i', '/', keymap_slash,
+      { buffer = true, silent = true, desc = 'Auto-trigger skill completion' })
 
     -- <Tab> in insert mode: expand skill, show completion, or insert tab
-    vim.keymap.set('i', '<Tab>', function()
-      -- Check if completion popup is already visible — if so, select next item
-      if vim.fn.pumvisible() == 1 then
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-n>', true, false, true), 'n', false)
-        return
-      end
-
-      local line = vim.api.nvim_get_current_line()
-      local col = vim.fn.col('.') - 1  -- 0-indexed cursor column
-      local before_cursor = line:sub(1, col)
-      local cmd = before_cursor:match('/([%w%-_]+)%s*$')
-
-      if cmd and skills[cmd] then
-        -- Exact match — expand the skill (pass col captured in insert mode)
-        vim.cmd('stopinsert')
-        try_expand_skill(skills, col)
-        vim.cmd('startinsert')
-      elseif before_cursor:match('/%s*$') or cmd then
-        -- Has / with partial or no text after it — trigger completion popup
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<C-x><C-u>', true, false, true), 'n', false)
-      else
-        -- No skill context — insert a normal tab
-        vim.api.nvim_feedkeys(vim.api.nvim_replace_termcodes('<Tab>', true, false, true), 'n', false)
-      end
-    end, { buffer = true, silent = true, desc = 'Expand skill or insert tab' })
+    vim.keymap.set('i', '<Tab>', function() keymap_tab(skills) end,
+      { buffer = true, silent = true, desc = 'Expand skill or insert tab' })
 
     -- Auto-expand skill after selecting from completion popup
     vim.api.nvim_create_autocmd('CompleteDone', {

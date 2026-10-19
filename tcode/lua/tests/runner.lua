@@ -49,6 +49,9 @@ M.__test = {
   keymap_o = keymap_o,
   keymap_ck = keymap_ck,
   keymap_gb = keymap_gb,
+  -- Edit-window insert-mode handlers (the `/` and `<Tab>` keymaps).
+  keymap_slash = keymap_slash,
+  keymap_tab = keymap_tab,
   get_renderer_state = get_renderer_state,
   project_element = project_element,
   action_at = action_at,
