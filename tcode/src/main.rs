@@ -6,6 +6,7 @@ mod config_wizard;
 mod container;
 mod display;
 mod edit;
+mod hscroll;
 mod openai_auth;
 mod permission_ui;
 mod session_picker;
@@ -39,6 +40,12 @@ mod oauth_profile_tests;
 
 #[cfg(test)]
 mod tree_tests;
+
+#[cfg(test)]
+mod hscroll_tests;
+
+#[cfg(test)]
+mod permission_ui_tests;
 
 #[cfg(test)]
 mod lua_tests;

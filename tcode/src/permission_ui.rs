@@ -22,6 +22,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, List, ListItem, ListState, Paragraph};
 use tcode_encoding::path_to_str;
 
+use crate::hscroll::PreparedRow;
 use crate::protocol::{ClientMessage, ServerMessage};
 use crate::session::Session;
 use crate::tree_nav::TreeNav;
@@ -119,7 +120,7 @@ struct TreeNode {
     collapsed: bool,
 }
 
-struct PermissionTreeState {
+pub(crate) struct PermissionTreeState {
     arena: Vec<TreeNode>,
     visible: Vec<usize>,
     selected: usize,
@@ -131,10 +132,12 @@ struct PermissionTreeState {
     bell_sent: bool,
     /// When set, annotates tool names in the display to show container context.
     container_name: Option<String>,
+    /// Horizontal scroll offset in columns, shared by all rows.
+    pub(crate) hscroll_offset: usize,
 }
 
 impl PermissionTreeState {
-    fn new(session_id: String, container_name: Option<String>) -> Self {
+    pub(crate) fn new(session_id: String, container_name: Option<String>) -> Self {
         PermissionTreeState {
             arena: Vec::new(),
             visible: Vec::new(),
@@ -144,6 +147,7 @@ impl PermissionTreeState {
             frame_count: 0,
             bell_sent: false,
             container_name,
+            hscroll_offset: 0,
         }
     }
 
@@ -172,7 +176,7 @@ impl PermissionTreeState {
     /// Always creates skeleton Tool/Key nodes for every entry in `ALL_SCOPES`,
     /// then populates Value leaves from the permission state. Entries from the
     /// state that don't appear in `ALL_SCOPES` are still included (defensive).
-    fn rebuild_from_state(&mut self, state: &PermissionState) {
+    pub(crate) fn rebuild_from_state(&mut self, state: &PermissionState) {
         // Preserve collapsed state keyed by (tool_name) and (tool_name, key_name).
         let mut collapsed_tools: std::collections::HashSet<String> =
             std::collections::HashSet::new();
@@ -210,6 +214,7 @@ impl PermissionTreeState {
             });
 
         self.arena.clear();
+        let prev_offset = self.hscroll_offset;
 
         // Group all entries by tool -> key -> Vec<(value, status, prompt, request_id, preview_file_path, once_only)>
         type EntryTuple = (
@@ -397,7 +402,7 @@ impl PermissionTreeState {
 
         // Try to restore selection position by matching node identity.
         if let Some((prev_parent_tool, prev_kind)) = prev_selected {
-            for (vi, &idx) in self.visible.iter().enumerate() {
+            let restored = self.visible.iter().enumerate().find_map(|(vi, &idx)| {
                 let matches = match (&prev_kind, &self.arena[idx].kind) {
                     (NodeKind::Tool { name: a }, NodeKind::Tool { name: b }) => a == b,
                     (NodeKind::Key { key: a }, NodeKind::Key { key: b }) => {
@@ -424,10 +429,17 @@ impl PermissionTreeState {
                     }
                     _ => false,
                 };
-                if matches {
+                matches.then_some(vi)
+            });
+            match restored {
+                // Assigned directly instead of through `set_selected`: a server
+                // refresh may move the same node to a new arena index, which
+                // must not discard the scroll position.
+                Some(vi) => {
                     self.selected = vi;
-                    break;
+                    self.hscroll_offset = prev_offset;
                 }
+                None => self.hscroll_offset = 0,
             }
         }
     }
@@ -641,7 +653,10 @@ impl TreeNav for PermissionTreeState {
         self.selected
     }
     fn set_selected(&mut self, idx: usize) {
-        self.selected = idx;
+        if idx != self.selected {
+            self.selected = idx;
+            self.hscroll_offset = 0;
+        }
     }
 
     fn rebuild_visible(&mut self) {
@@ -664,6 +679,114 @@ impl TreeNav for PermissionTreeState {
 // Rendering
 // ---------------------------------------------------------------------------
 
+/// Tool row: indent + `+`/`-` + `display_name`, plus a yellow ` ?` while the
+/// tool has pending entries.
+pub(crate) fn tool_row(
+    indent: &str,
+    collapsed: bool,
+    display_name: &str,
+    has_pending: bool,
+) -> PreparedRow {
+    let prefix = if collapsed { "+" } else { "-" };
+    let mut left = vec![Span::raw(format!("{indent}{prefix} {display_name}"))];
+    if has_pending {
+        left.push(Span::styled(" ?", Style::default().fg(Color::Yellow)));
+    }
+    PreparedRow::new(Line::from(left))
+}
+
+/// Key row: indent + `+`/`-` + `key`.
+pub(crate) fn key_row(indent: &str, collapsed: bool, key: &str) -> PreparedRow {
+    let prefix = if collapsed { "+" } else { "-" };
+    PreparedRow::new(Line::from(Span::raw(format!("{indent}{prefix} {key}"))))
+}
+
+/// Value row: indent + `[icon]` + value (or ` * (allow all)` for the wildcard)
+/// + ` (status)`. Pending rows flash red bold / dark gray with `flash_on`.
+pub(crate) fn value_row(
+    indent: &str,
+    value: &str,
+    status_icon: &str,
+    status_label: &str,
+    status_color: Color,
+    pending: bool,
+    flash_on: bool,
+) -> PreparedRow {
+    let (icon_style, text_style, label_style) = if pending {
+        let s = if flash_on {
+            Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        (s, s, s)
+    } else {
+        (
+            Style::default().fg(status_color),
+            Style::default(),
+            Style::default().fg(Color::DarkGray),
+        )
+    };
+
+    let mut left = vec![
+        Span::styled(format!("{indent}  "), text_style),
+        Span::styled(format!("[{status_icon}]"), icon_style),
+    ];
+    if value == WILDCARD_VALUE {
+        // A wildcard leaf is never created in Pending state, so the asterisk
+        // keeps its bold-yellow styling instead of taking the flash style.
+        left.push(Span::styled(
+            " *",
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+        left.push(Span::styled(
+            " (allow all)",
+            Style::default().fg(Color::DarkGray),
+        ));
+    } else {
+        left.push(Span::styled(format!(" {value}"), text_style));
+    }
+    left.push(Span::styled(format!(" ({status_label})"), label_style));
+    PreparedRow::new(Line::from(left))
+}
+
+fn prepared_row(state: &PermissionTreeState, node_idx: usize, flash_on: bool) -> PreparedRow {
+    let node = &state.arena[node_idx];
+    let indent = "  ".repeat(node.depth);
+    match &node.kind {
+        NodeKind::Tool { name } => {
+            let has_pending = node.children.iter().any(|&ki| {
+                state.arena[ki].children.iter().any(|&vi| {
+                    matches!(
+                        &state.arena[vi].kind,
+                        NodeKind::Value {
+                            status: PermStatus::Pending,
+                            ..
+                        }
+                    )
+                })
+            });
+            let display_name = match &state.container_name {
+                Some(cn) if name == "bash" => format!("{} (in container {})", name, cn),
+                Some(_) => format!("{} (outside container)", name),
+                None => name.clone(),
+            };
+            tool_row(&indent, node.collapsed, &display_name, has_pending)
+        }
+        NodeKind::Key { key } => key_row(&indent, node.collapsed, key),
+        NodeKind::Value { value, status, .. } => value_row(
+            &indent,
+            value,
+            status.icon(),
+            status.label(),
+            status.color(),
+            matches!(status, PermStatus::Pending),
+            flash_on,
+        ),
+    }
+}
+
 fn render_tree(
     terminal: &mut Terminal<CrosstermBackend<io::Stdout>>,
     state: &mut PermissionTreeState,
@@ -678,94 +801,26 @@ fn render_tree(
 
         let any_pending = state.has_pending();
 
-        // Build list items
-        let items: Vec<ListItem> = state
+        // `chunks[0]` includes the two block border columns.
+        let width = usize::from(chunks[0].width.saturating_sub(2));
+        let rows: Vec<PreparedRow> = state
             .visible
             .iter()
-            .map(|&idx| {
-                let node = &state.arena[idx];
-                let indent = "  ".repeat(node.depth);
-                match &node.kind {
-                    NodeKind::Tool { name } => {
-                        let prefix = if node.collapsed { "+" } else { "-" };
-                        let has_pending = node.children.iter().any(|&ki| {
-                            state.arena[ki].children.iter().any(|&vi| {
-                                matches!(
-                                    &state.arena[vi].kind,
-                                    NodeKind::Value {
-                                        status: PermStatus::Pending,
-                                        ..
-                                    }
-                                )
-                            })
-                        });
-                        let status_icon = if has_pending { " ?" } else { "" };
-                        let display_name = match &state.container_name {
-                            Some(cn) if name == "bash" => {
-                                format!("{} (in container {})", name, cn)
-                            }
-                            Some(_) => format!("{} (outside container)", name),
-                            None => name.clone(),
-                        };
-                        let line = Line::from(vec![
-                            Span::raw(format!("{}{} {}", indent, prefix, display_name)),
-                            Span::styled(status_icon, Style::default().fg(Color::Yellow)),
-                        ]);
-                        ListItem::new(line)
-                    }
-                    NodeKind::Key { key } => {
-                        let prefix = if node.collapsed { "+" } else { "-" };
-                        ListItem::new(Line::from(Span::raw(format!(
-                            "{}{} {}",
-                            indent, prefix, key
-                        ))))
-                    }
-                    NodeKind::Value { value, status, .. } => {
-                        let (icon_style, text_style, label_style) =
-                            if matches!(status, PermStatus::Pending) {
-                                let s = if flash_on {
-                                    Style::default().fg(Color::Red).add_modifier(Modifier::BOLD)
-                                } else {
-                                    Style::default().fg(Color::DarkGray)
-                                };
-                                (s, s, s)
-                            } else {
-                                (
-                                    Style::default().fg(status.color()),
-                                    Style::default(),
-                                    Style::default().fg(Color::DarkGray),
-                                )
-                            };
-                        // Wildcard entries can only be added via the add-permission UI flow
-                        // (ask_permission_inner hard-errors on `value == "*"`), so a wildcard
-                        // leaf in Pending state should never occur. If one somehow does, the
-                        // asterisk keeps its bold-yellow styling rather than flashing red; this
-                        // is a degenerate-case fallthrough, not a panic path.
-                        let line = if value == WILDCARD_VALUE {
-                            Line::from(vec![
-                                Span::styled(format!("{}  ", indent), text_style),
-                                Span::styled(format!("[{}]", status.icon()), icon_style),
-                                Span::styled(
-                                    " *",
-                                    Style::default()
-                                        .fg(Color::Yellow)
-                                        .add_modifier(Modifier::BOLD),
-                                ),
-                                Span::styled(" (allow all)", Style::default().fg(Color::DarkGray)),
-                                Span::styled(format!(" ({})", status.label()), label_style),
-                            ])
-                        } else {
-                            Line::from(vec![
-                                Span::styled(format!("{}  ", indent), text_style),
-                                Span::styled(format!("[{}]", status.icon()), icon_style),
-                                Span::styled(format!(" {}", value), text_style),
-                                Span::styled(format!(" ({})", status.label()), label_style),
-                            ])
-                        };
-                        ListItem::new(line)
-                    }
-                }
-            })
+            .map(|&idx| prepared_row(state, idx, flash_on))
+            .collect();
+        // Clamp before rendering: the offset can exceed the rows' reach after a
+        // collapse, a filter toggle, or a resize. Writing it back keeps `l` from
+        // having to undo growth that was never reachable.
+        let max_offset = rows
+            .iter()
+            .map(|row| row.max_offset(width))
+            .max()
+            .unwrap_or(0);
+        state.hscroll_offset = state.hscroll_offset.min(max_offset);
+        let offset = state.hscroll_offset;
+        let items: Vec<ListItem> = rows
+            .iter()
+            .map(|row| ListItem::new(row.render(width, offset)))
             .collect();
 
         let filter_indicator = if state.filter_pending_only {
@@ -808,7 +863,13 @@ fn render_tree(
                 Span::raw(" action  "),
             ]),
             Line::from(vec![
-                Span::styled(" f", Style::default().fg(Color::Yellow)),
+                Span::styled(" h/←", Style::default().fg(Color::Yellow)),
+                Span::raw(" left  "),
+                Span::styled("l/→", Style::default().fg(Color::Yellow)),
+                Span::raw(" right  "),
+                Span::styled("0", Style::default().fg(Color::Yellow)),
+                Span::raw(" reset  "),
+                Span::styled("f", Style::default().fg(Color::Yellow)),
                 Span::raw(" pending/all  "),
                 Span::styled("q", Style::default().fg(Color::Yellow)),
                 Span::raw(" quit"),
@@ -1248,6 +1309,13 @@ pub fn run_permission_ui(session: Session, container_name: Option<String>) -> Re
                     state.toggle_filter();
                     state.refresh_from_server(&socket_path);
                 }
+                KeyCode::Char('h') | KeyCode::Left => {
+                    state.hscroll_offset = state.hscroll_offset.saturating_sub(1);
+                }
+                KeyCode::Char('l') | KeyCode::Right => {
+                    state.hscroll_offset = state.hscroll_offset.saturating_add(1);
+                }
+                KeyCode::Char('0') | KeyCode::Home => state.hscroll_offset = 0,
                 _ => {}
             }
         }
