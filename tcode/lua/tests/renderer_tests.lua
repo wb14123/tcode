@@ -1033,7 +1033,10 @@ test('label colors: chrome extmarks carry per-part groups on the label row', fun
   apply_render(m, b, { AssistantToolCallStart = { tool_call_id = 't1', tool_name = 'bash',
     tool_call_index = 0, created_at = 1700000000000 } })
   local l = lines_of(b)
-  check(l[1] == '► TOOL: [generating] bash  17:13:20  [Ctrl-k to cancel]', 'label text with timestamp')
+  -- The timestamp is rendered in local time, so build the expected text with
+  -- os.date instead of hardcoding it (keeps the test timezone-independent).
+  local ts = os.date('%H:%M:%S', math.floor(1700000000000 / 1000))
+  check(l[1] == '► TOOL: [generating] bash  ' .. ts .. '  [Ctrl-k to cancel]', 'label text with timestamp')
   local marks = vim.api.nvim_buf_get_extmarks(b, ns, 0, -1, { details = true })
   local function col_mark(group, col)
     for _, mm in ipairs(marks) do
@@ -1044,7 +1047,7 @@ test('label colors: chrome extmarks carry per-part groups on the label row', fun
     return nil
   end
   -- '► TOOL:' [0,9) TCodeTool; ' [generating]' [9,22) TCodeTool; ' bash'
-  -- [22,27) TCodeTool; '  17:13:20' [27,37) TCodeTokens; '  [Ctrl-k to
+  -- [22,27) TCodeTool; '  <ts>' [27,37) TCodeTokens; '  [Ctrl-k to
   -- cancel]' [37,57) TCodeTokens.
   local d = col_mark('TCodeTool', 0)
   check(d ~= nil and d.end_col == 9, 'TCodeTool over ► TOOL:')

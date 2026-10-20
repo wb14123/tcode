@@ -698,8 +698,11 @@ test('element_chrome_spans: subagent status groups', function()
 end)
 
 test('element_layout: user and assistant label spans with ts', function()
+  -- Expected label text is built with os.date (local time), so the check does
+  -- not depend on the machine's timezone.
+  local ts = os.date('%H:%M:%S', math.floor(1700000000000 / 1000))
   local u = T.element_layout({ type = 'user_message', content = 'hi', created_at = 1700000000000 }, {})
-  check(u[1].text == '► USER  17:13:20', 'user label text')
+  check(u[1].text == '► USER  ' .. ts, 'user label text')
   -- Layout row spans are positional { start_col, end_col, group }.
   check(u[1].spans[1][1] == 0 and u[1].spans[1][2] == 8 and u[1].spans[1][3] == 'TCodeUser',
     'user label part')
@@ -707,7 +710,7 @@ test('element_layout: user and assistant label spans with ts', function()
     'user ts part')
   check(u[2].text == 'hi' and u[2].spans == nil, 'content rows carry no chrome spans')
   local a = T.element_layout({ type = 'assistant_message', content = 'hi', created_at = 1700000000000 }, {})
-  check(a[1].text == '► ASSISTANT  17:13:20', 'assistant label text')
+  check(a[1].text == '► ASSISTANT  ' .. ts, 'assistant label text')
   check(a[1].spans[1][1] == 0 and a[1].spans[1][2] == 13 and a[1].spans[1][3] == 'TCodeAssistant',
     'assistant label part')
 end)
