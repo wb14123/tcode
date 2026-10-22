@@ -425,6 +425,12 @@ conversations, tool-call details, and media are copied, so the source session
 can be deleted without affecting the branch. The branch is opened with the
 same config profile as the source display.
 
+Subagent `web_fetch` budget files are copied along with the subagent
+directories, so the branch starts with an independent snapshot of the
+remaining counters as of the branch operation. The counters are not rewound to
+the branch point, and the branch never shares live budget state with the
+source session: fetching in one does not consume the other.
+
 The command must be run from the source session's recorded working directory;
 running it from a different directory fails with an error. The `gb` keybinding
 runs from that directory.

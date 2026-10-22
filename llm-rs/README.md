@@ -25,6 +25,14 @@ Manages multi-round LLM conversations with automatic tool execution loops.
 - **`ConversationClient`**: Public API handle for sending user messages (`send_chat()`) and subscribing to conversation events via broadcast channel.
 - **Message types**: UserMessage, AssistantMessageStart/End/Chunk, ToolMessageStart/Output/End, SubAgentStart/End/TurnEnd/Continue, AssistantRequestEnd, PermissionUpdated (signal for UI refresh), and ToolRequestPermission (tool is awaiting user approval).
 
+### `fetch_budget` - Web Fetch Budget
+
+Character budget shared by the subagents of one tree, consumed by `web_fetch` page content.
+
+- **`DEFAULT_WEB_FETCH_CHAR_BUDGET`**: 400000 chars, the allowance of a tree root.
+- **`WebFetchBudget`**: A node in the tree's budget chain. `new()` creates a runtime node (clamped to its parent's remaining), `restore()` re-creates one from disk without writing, `get()` returns the effective remaining chars (the minimum over the node and its ancestors), and `charge()` atomically takes `min(requested, effective)` from the node and every ancestor and persists every node it changed (a zero grant writes nothing).
+- **`WebFetchBudgetFile`**: On-disk shape of `<owner state dir>/web-fetch-budget.json` (`parent` node id, `remaining` chars). `read()` takes the owner's state directory and returns `None` for a missing or invalid file.
+
 ### `permission` - Tool Permission System
 
 Centralized permission management for controlling tool access to sensitive resources.
@@ -171,10 +179,14 @@ ConversationClient cancel_token
 
 ### Nested Subagents
 
-Subagents can spawn their own subagents up to a configurable depth limit controlled by two parameters on `new_conversation()`:
+Subagents can spawn their own subagents up to a configurable depth limit. Conversation creation and resume take a `ConversationOptions` with six fields:
 
-- **`subagent_depth`** — Current nesting level (0 for root conversations).
-- **`max_subagent_depth`** — Maximum allowed depth. A subagent at depth `d` receives the `subagent`, `continue_subagent`, and `get_subagent_logs` tools only if `d + 1 < max_subagent_depth`.
+- **`subagent_depth`** - Current nesting level (0 for root conversations). Used when creating; resume restores it from the persisted state.
+- **`max_subagent_depth`** - Maximum allowed depth. A subagent at depth `d` receives the `subagent`, `continue_subagent`, and `get_subagent_logs` tools only if `d + 1 < max_subagent_depth`.
+- **`state_dir`** - Session state directory (media, tool logs, `conversation-state.json`). `resume_conversation_tree` requires one.
+- **`supports_media`** - Whether the model accepts visual/media input (images, PDFs).
+- **`web_fetch_budget`** - The `WebFetchBudget` node this conversation draws from (`None` = unbounded). `resume_conversation` does not resolve `ConversationState::web_fetch_budget_id` itself: the caller loads the node and passes it here, as `resume_conversation_tree` does for each resumed subagent.
+- **`single_turn`** - End the conversation after one turn. Used when creating; resume restores it from the persisted state.
 
 ```
 Root conversation (depth=0, max=3)

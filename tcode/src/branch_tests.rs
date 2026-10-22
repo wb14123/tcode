@@ -80,6 +80,7 @@ fn make_state(llm_msgs: Vec<LLMMessage>) -> ConversationState {
         aggregate_cache_read_tokens: 0,
         single_turn: false,
         subagent_depth: 0,
+        web_fetch_budget_id: None,
     }
 }
 

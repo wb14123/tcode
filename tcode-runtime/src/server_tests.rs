@@ -5,8 +5,8 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use llm_rs::conversation::{
-    BroadcastMessage, ConversationClient, ConversationManager, ConversationState, Message,
-    MessageEndStatus,
+    BroadcastMessage, ConversationClient, ConversationManager, ConversationOptions,
+    ConversationState, Message, MessageEndStatus,
 };
 use llm_rs::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo};
 use llm_rs::permission::{
@@ -43,11 +43,14 @@ async fn test_conversation_client(dir: &Path) -> anyhow::Result<Arc<Conversation
         "test-model",
         vec![],
         ChatOptions::default(),
-        true,
-        0,
-        10,
-        Some(dir.to_path_buf()),
-        false,
+        ConversationOptions {
+            max_subagent_depth: 10,
+            state_dir: Some(dir.to_path_buf()),
+            supports_media: false,
+            web_fetch_budget: None,
+            subagent_depth: 0,
+            single_turn: true,
+        },
     )?;
     Ok(client)
 }
@@ -246,6 +249,7 @@ fn write_runtime_resume_state(
         aggregate_cache_read_tokens: 0,
         single_turn: subagent_depth > 0,
         subagent_depth,
+        web_fetch_budget_id: None,
     };
     std::fs::write(state_path, serde_json::to_string_pretty(&state)?)?;
     Ok(())

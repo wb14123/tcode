@@ -16,6 +16,7 @@ mod tests {
             llm: None,
             model: None,
             media_sink: None,
+            web_fetch_budget: None,
         }
     }
 
@@ -356,6 +357,7 @@ mod tests {
             llm: None,
             model: None,
             media_sink: None,
+            web_fetch_budget: None,
         };
 
         let json_args = r#"{"message": "test"}"#.to_string();
@@ -410,6 +412,7 @@ mod tests {
             llm: None,
             model: None,
             media_sink: None,
+            web_fetch_budget: None,
         };
 
         let mut stream = tool.execute(ctx, r#"{"message": "test"}"#.to_string());
@@ -496,6 +499,7 @@ mod tests {
                 llm: None,
                 model: None,
                 media_sink: None,
+                web_fetch_budget: None,
             }
         }
 
@@ -609,6 +613,7 @@ mod tests {
                 llm: None,
                 model: None,
                 media_sink: None,
+                web_fetch_budget: None,
             };
             let mut stream = tool.execute(ctx, r#"{"message": "first"}"#.to_string());
 

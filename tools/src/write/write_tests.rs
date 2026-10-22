@@ -51,6 +51,7 @@ mod tests {
             llm: None,
             model: None,
             media_sink: None,
+            web_fetch_budget: None,
         })
     }
 
@@ -131,6 +132,7 @@ mod tests {
             llm: None,
             model: None,
             media_sink: None,
+            web_fetch_budget: None,
         };
         let stream =
             crate::write::write(ctx, "relative/path.txt".to_string(), "content".to_string());
@@ -162,6 +164,7 @@ mod tests {
             llm: None,
             model: None,
             media_sink: None,
+            web_fetch_budget: None,
         };
         let stream = crate::write::write(
             ctx,

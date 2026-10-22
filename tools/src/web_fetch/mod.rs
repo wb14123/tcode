@@ -1,4 +1,8 @@
+#[cfg(test)]
+mod web_fetch_tests;
+
 use anyhow::{Context, Result, anyhow};
+use llm_rs::fetch_budget::WebFetchBudget;
 use llm_rs::media::ContentPart;
 use llm_rs::permission::SCOPE_WEB_FETCH;
 use llm_rs::tool::ToolContext;
@@ -91,26 +95,179 @@ fn apply_truncation(content: &str, max_length: usize, skip_chars: usize) -> (Str
     (result, total_length, is_truncated)
 }
 
-/// Format the web_fetch result with metadata header.
+/// Why the sent content is shorter than the page.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TruncationReason {
+    /// The whole page (from the requested offset) was sent.
+    None,
+    /// The fetch itself cut the page (`skip_chars` or `max_length`).
+    MaxLength,
+    /// The remaining web_fetch budget cut what was sent.
+    BudgetLimited { shown: usize, skip: usize },
+}
+
+/// Budget figures printed above a result (`None` in the main conversation).
+struct BudgetSummary {
+    /// Effective remaining chars of the tree, after this call's charge.
+    remaining: u32,
+    /// Chars this call was granted.
+    used: u32,
+}
+
+/// What fetched text became after being charged against the tree budget.
+struct ChargeOutcome {
+    /// Chars the fetched text had before the charge.
+    cost: u32,
+    /// Chars actually granted (exactly what may be sent).
+    granted: u32,
+    /// Effective remaining chars of the tree after the charge.
+    remaining: u32,
+    /// The text to send: the fetched text cut to `granted` chars.
+    text: String,
+}
+
+impl ChargeOutcome {
+    /// True when a non-empty page could not be charged at all, so nothing may
+    /// be sent.
+    fn is_blocked(&self) -> bool {
+        self.cost > 0 && self.granted == 0
+    }
+
+    fn summary(&self) -> BudgetSummary {
+        BudgetSummary {
+            remaining: self.remaining,
+            used: self.granted,
+        }
+    }
+}
+
+/// Budget line printed above a content result.
+fn budget_line(remaining: u32, cost: u32) -> String {
+    format!(
+        "[web_fetch] Budget (web_fetch only): {remaining} chars remaining for this subagent tree \
+         (this call used {cost})."
+    )
+}
+
+/// Budget line printed above an image/PDF result, which are never charged.
+fn media_budget_line(remaining: u32) -> String {
+    format!(
+        "[web_fetch] Budget (web_fetch only): {remaining} chars remaining for this subagent tree \
+         (images and PDFs are not charged)."
+    )
+}
+
+/// Notice returned instead of content once the tree budget is exhausted.
+fn blocked_notice() -> String {
+    "[web_fetch] Blocked: the web_fetch character budget for this subagent tree is exhausted \
+     (0 chars remaining). Nothing was sent.\n\
+     Do not retry web_fetch. Report what you already have; this budget only limits web_fetch, \
+     so keep using the other tools as needed."
+        .to_string()
+}
+
+/// Line explaining that the budget, not the page, limited the output.
+fn budget_limited_line(shown: usize, skip: usize) -> String {
+    format!(
+        "[web_fetch] Output limited by the remaining web_fetch budget: showing {shown} chars \
+         starting at {skip}. The next fetch will be blocked; use the other tools normally and \
+         report what you have unless more of this page is essential."
+    )
+}
+
+/// Charges `text` against `budget` and cuts it to what was granted.
+fn charge_text(budget: &WebFetchBudget, text: &str) -> ChargeOutcome {
+    let cost = u32::try_from(text.chars().count()).unwrap_or(u32::MAX);
+    let granted = budget.charge(cost);
+    let text = if granted < cost {
+        apply_truncation(text, granted as usize, 0).0
+    } else {
+        text.to_string()
+    };
+    ChargeOutcome {
+        cost,
+        granted,
+        remaining: budget.get(),
+        text,
+    }
+}
+
+/// The `max_length` this call may ask for, or `None` when the tree budget has
+/// no chars left and nothing may be fetched.
+fn budgeted_max_length(requested: u32, budget: &WebFetchBudget) -> Option<u32> {
+    match budget.get() {
+        0 => None,
+        remaining => Some(requested.min(remaining)),
+    }
+}
+
+/// Picks the wording of a budgeted result; a budget cut wins over the fetch's
+/// own truncation.
+fn result_reason(
+    requested: u32,
+    effective: u32,
+    skip_chars: usize,
+    fetch_truncated: bool,
+    charged: &ChargeOutcome,
+) -> TruncationReason {
+    let budget_cut = charged.granted < charged.cost
+        || (fetch_truncated && effective < requested && effective > 0 && charged.cost == effective);
+    // `fetch_truncated` also covers a non-zero `skip_chars`, so a page that ends
+    // exactly at the clamp with an offset is reported as budget-limited even
+    // though its whole remainder was sent. Harmless here: the pool is at 0, so
+    // the "next fetch will be blocked" advice is true either way.
+    if budget_cut {
+        return TruncationReason::BudgetLimited {
+            shown: charged.granted as usize,
+            skip: skip_chars,
+        };
+    }
+    if fetch_truncated {
+        return TruncationReason::MaxLength;
+    }
+    TruncationReason::None
+}
+
+/// Format the web_fetch result with metadata header. `budget` is `None` in the
+/// main conversation, which prints no budget lines.
 fn format_result(
     content: &str,
     total_length: u32,
-    is_truncated: bool,
+    reason: TruncationReason,
     skip_chars: usize,
+    budget: Option<BudgetSummary>,
 ) -> String {
-    if is_truncated {
-        let start = skip_chars;
-        let end = start + content.chars().count();
-        let remaining = (total_length as usize).saturating_sub(end);
-        format!(
-            "[web_fetch] Content truncated. Showing chars {start}-{end} of {total_length}.\n\
-             There are {remaining} chars remaining. To read the full page, create separate sub agents \
-             each fetching a different portion using skip_chars (e.g. skip_chars={end}). \
-             Each sub agent should summarize its own chunk to maintain a smaller context window.\n\
-             {content}"
-        )
-    } else {
-        format!("[web_fetch] Showing full content ({total_length} chars).\n{content}")
+    let header = match reason {
+        TruncationReason::None => {
+            format!("[web_fetch] Showing full content ({total_length} chars).")
+        }
+        TruncationReason::BudgetLimited { shown, skip } => budget_limited_line(shown, skip),
+        TruncationReason::MaxLength => {
+            let start = skip_chars;
+            let end = start + content.chars().count();
+            let remaining = (total_length as usize).saturating_sub(end);
+            match budget {
+                Some(_) => format!(
+                    "[web_fetch] Content truncated. Showing chars {start}-{end} of {total_length}.\n\
+                     There are {remaining} chars remaining. To read the rest, call web_fetch again with \
+                     skip_chars={end}; further fetches cost the same tree budget."
+                ),
+                None => format!(
+                    "[web_fetch] Content truncated. Showing chars {start}-{end} of {total_length}.\n\
+                     There are {remaining} chars remaining. To read the full page, create separate sub agents \
+                     each fetching a different portion using skip_chars (e.g. skip_chars={end}). \
+                     Each sub agent should summarize its own chunk to maintain a smaller context window."
+                ),
+            }
+        }
+    };
+
+    match budget {
+        Some(summary) => format!(
+            "{}\n{header}\n{content}",
+            budget_line(summary.remaining, summary.used)
+        ),
+        None => format!("{header}\n{content}"),
     }
 }
 
@@ -200,15 +357,18 @@ enum MediaKind {
 
 /// Fetch a web page and return cleaned content extracted by Chrome's accessibility tree.
 /// Default max_length is 20000 chars. Use skip_chars for pagination.
-/// For large pages, spawn parallel sub agents each with a different skip_chars value; have each summarize its chunk.
-/// Prefer using a sub agent to avoid keeping the full page in the main context.
-/// If blocked, do NOT retry via sub agent — it will also fail. Just say so.
+/// For large pages, paginate with skip_chars; chunks fetched by subagents all draw on the same tree budget.
+/// Prefer targeted pages and partial reads.
+/// If the site blocks the request, do NOT retry via a subagent - it will also fail; say so.
+/// In a subagent tree, calls draw on a shared web_fetch budget (400000 chars by
+/// default). Only web_fetch content counts. `max_length` shrinks when the budget
+/// is short, calls return a notice when it is 0, and results show what remains.
 #[tool(timeout_ms = 300000)]
 pub fn web_fetch(
     ctx: ToolContext,
     /// The URL to fetch and extract content from
     url: String,
-    /// Max chars to return (default: 20000). Use with skip_chars to read large pages in chunks via parallel sub agents.
+    /// Max chars to return (default: 20000). Use with skip_chars to read large pages in chunks via parallel sub agents. Lowered automatically if the remaining web_fetch budget is smaller.
     #[serde(default)]
     max_length: Option<u32>,
     /// Chars to skip from content start (default: 0). For pagination: if first call returned 20000 chars of a 50000-char page, set skip_chars=20000 to read the next chunk.
@@ -216,6 +376,14 @@ pub fn web_fetch(
     skip_chars: Option<u32>,
 ) -> impl tokio_stream::Stream<Item = Result<ContentPart>> {
     async_stream::try_stream! {
+        // Fail fast: an exhausted tree budget fetches nothing, prompts for
+        // nothing, and costs nothing.
+        let budget = ctx.web_fetch_budget.clone();
+        if budget.as_ref().is_some_and(|node| node.get() == 0) {
+            yield ContentPart::Text(blocked_notice());
+            return;
+        }
+
         // Extract hostname for permission check
         let hostname = reqwest::Url::parse(&url)
             .ok()
@@ -283,6 +451,9 @@ pub fn web_fetch(
                     media_util::save_image_to_media(data, &url, &media_dir)
                         .await
                         .map_err(|e| anyhow!("Failed to process image from {}: {}", url, e))?;
+                if let Some(node) = &budget {
+                    yield ContentPart::Text(media_budget_line(node.get()));
+                }
                 yield ContentPart::Media(media_data);
                 yield ContentPart::Text(annotation);
                 return;
@@ -307,6 +478,9 @@ pub fn web_fetch(
                     media_util::save_pdf_to_media(data, &url, &media_dir)
                         .await
                         .map_err(|e| anyhow!("Failed to process PDF from {}: {}", url, e))?;
+                if let Some(node) = &budget {
+                    yield ContentPart::Text(media_budget_line(node.get()));
+                }
                 yield ContentPart::Media(media_data);
                 yield ContentPart::Text(annotation);
                 return;
@@ -315,8 +489,22 @@ pub fn web_fetch(
         }
 
         // --- Continue with existing HTML/TEXT path ---
-        let max_len = max_length.unwrap_or(20_000) as usize;
+        let requested = max_length.unwrap_or(20_000);
         let skip = skip_chars.unwrap_or(0) as usize;
+
+        // A budgeted call asks the fetch for no more than the tree can pay for.
+        // The budget is re-read here: another call may have drained it since the
+        // fail-fast check, in which case nothing may be sent.
+        let (effective, browser_max_length) = match budget.as_deref() {
+            Some(node) => match budgeted_max_length(requested, node) {
+                Some(effective) => (effective, Some(effective)),
+                None => {
+                    yield ContentPart::Text(blocked_notice());
+                    return;
+                }
+            },
+            None => (requested, max_length),
+        };
 
         // Reuse the Content-Type already probed above
         let use_browser = match &content_type {
@@ -324,24 +512,55 @@ pub fn web_fetch(
             None => true,
         };
 
-        if use_browser {
+        let (content, total_length, is_truncated) = if use_browser {
             let client = browser_client::get_global_client()
                 .ok_or_else(|| anyhow!("Browser client not initialized. Is the browser-server running?"))?;
 
             let result = tokio::select! {
-                result = client.web_fetch(&url, max_length, skip_chars) => result,
+                result = client.web_fetch(&url, browser_max_length, skip_chars) => result,
                 _ = ctx.cancel_token.cancelled() => Err(anyhow!("Cancelled")),
             };
-            let (content, total_length, is_truncated) = result?;
-            yield ContentPart::Text(format_result(&content, total_length, is_truncated, skip));
+            result?
         } else {
             let result = tokio::select! {
                 result = fetch_plain(&url) => result,
                 _ = ctx.cancel_token.cancelled() => Err(anyhow!("Cancelled")),
             };
             let full_content = result?;
-            let (content, total_length, is_truncated) = apply_truncation(&full_content, max_len, skip);
-            yield ContentPart::Text(format_result(&content, total_length, is_truncated, skip));
+            apply_truncation(&full_content, effective as usize, skip)
+        };
+
+        match budget {
+            None => {
+                let reason = if is_truncated {
+                    TruncationReason::MaxLength
+                } else {
+                    TruncationReason::None
+                };
+                yield ContentPart::Text(format_result(
+                    &content,
+                    total_length,
+                    reason,
+                    skip,
+                    None,
+                ));
+            }
+            Some(node) => {
+                let charged = charge_text(node.as_ref(), &content);
+                if charged.is_blocked() {
+                    yield ContentPart::Text(blocked_notice());
+                } else {
+                    let reason =
+                        result_reason(requested, effective, skip, is_truncated, &charged);
+                    yield ContentPart::Text(format_result(
+                        &charged.text,
+                        total_length,
+                        reason,
+                        skip,
+                        Some(charged.summary()),
+                    ));
+                }
+            }
         }
     }
 }

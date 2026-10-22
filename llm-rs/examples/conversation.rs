@@ -13,7 +13,7 @@ use std::env;
 use std::io::{self, Write};
 use std::sync::Arc;
 
-use llm_rs::conversation::{ConversationManager, Message};
+use llm_rs::conversation::{ConversationManager, ConversationOptions, Message};
 use llm_rs::llm::{ChatOptions, OpenRouter, ReasoningEffort};
 use llm_rs::tool;
 use tokio_stream::StreamExt;
@@ -68,11 +68,14 @@ async fn main() -> anyhow::Result<()> {
             reasoning_effort: Some(ReasoningEffort::Medium),
             ..Default::default()
         },
-        false,
-        0,     // subagent_depth (root)
-        3,     // max_subagent_depth
-        None,  // state_dir (no persistence for this example)
-        false, // supports_media
+        ConversationOptions {
+            max_subagent_depth: 3,
+            state_dir: None, // no persistence for this example
+            supports_media: false,
+            web_fetch_budget: None,
+            subagent_depth: 0, // root
+            single_turn: false,
+        },
     )?;
 
     // Subscribe to messages (this must be done before sending to receive all messages)

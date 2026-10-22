@@ -112,6 +112,7 @@ async fn main() {
                                 llm: None,
                                 model: None,
                                 media_sink: None,
+                                web_fetch_budget: None,
                             };
                             let mut result_stream = tool.execute(ctx, tool_call.arguments.clone());
                             let mut result = String::new();

@@ -1,11 +1,14 @@
 #[cfg(test)]
 mod tests {
     use crate::conversation::{
-        Conversation, ConversationClient, ConversationEnv, ConversationManager, ConversationState,
-        ConversationSummary, MessageEndStatus, SystemPromptContext, UniqueIdGenerator,
-        create_subagent_tool, fill_cancelled_tool_results, format_cancelled_subagent_result,
-        format_subagent_result,
+        Conversation, ConversationClient, ConversationEnv, ConversationManager,
+        ConversationOptions, ConversationState, ConversationSummary, MessageEndStatus,
+        SystemPromptContext, UniqueIdGenerator, child_web_fetch_budget, create_subagent_tool,
+        fill_cancelled_tool_results, first_user_description, format_cancelled_subagent_result,
+        format_subagent_result, load_web_fetch_budget, preview_text, truncate_preview,
+        web_fetch_budget_note,
     };
+    use crate::fetch_budget::{DEFAULT_WEB_FETCH_CHAR_BUDGET, WebFetchBudget, WebFetchBudgetFile};
     use crate::llm::{
         ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, ReasoningEffort, StopReason, ToolCall,
     };
@@ -64,6 +67,23 @@ mod tests {
         }
     }
 
+    /// Options for tests: max depth 10, no media support, no budget.
+    fn options(state_dir: Option<PathBuf>) -> ConversationOptions {
+        options_at(0, state_dir)
+    }
+
+    /// Options for tests with an explicit subagent depth.
+    fn options_at(subagent_depth: usize, state_dir: Option<PathBuf>) -> ConversationOptions {
+        ConversationOptions {
+            max_subagent_depth: 10,
+            state_dir,
+            supports_media: false,
+            web_fetch_budget: None,
+            subagent_depth,
+            single_turn: true,
+        }
+    }
+
     /// Test-only Conversation wired to the given manager, with the given
     /// pending-tool state and no state dir (so `save_state` is a no-op for the
     /// filesystem). Lets tests exercise `fill_remaining_cancelled` directly
@@ -108,6 +128,7 @@ mod tests {
                 state_dir: None,
                 session_dir: None,
                 supports_media: false,
+                web_fetch_budget: None,
                 permission_manager: Arc::clone(manager.permission_manager()),
                 container_config: None,
                 llm: None,
@@ -180,6 +201,7 @@ mod tests {
             aggregate_cache_read_tokens: 0,
             single_turn: false,
             subagent_depth: 0,
+            web_fetch_budget_id: None,
         };
 
         let summary = state.summary();
@@ -278,6 +300,7 @@ mod tests {
             aggregate_output_tokens: 0,
             aggregate_cache_creation_tokens: 0,
             aggregate_cache_read_tokens: 0,
+            web_fetch_budget_id: None,
         };
 
         let json = serde_json::to_string_pretty(&state)?;
@@ -771,11 +794,7 @@ mod tests {
             "test-model",
             vec![],
             chat_options,
-            true, // single_turn
-            0,    // subagent_depth
-            10,   // max_subagent_depth
-            Some(dir.to_path_buf()),
-            false, // supports_media
+            options(Some(dir.to_path_buf())),
         )?;
 
         let mut stream = client.subscribe();
@@ -909,11 +928,7 @@ mod tests {
             "test-model",
             vec![tool],
             ChatOptions::default(),
-            true, // single_turn
-            0,    // subagent_depth
-            10,   // max_subagent_depth
-            Some(dir.to_path_buf()),
-            false, // supports_media
+            options(Some(dir.to_path_buf())),
         )?;
 
         let mut stream = client.subscribe();
@@ -1285,11 +1300,7 @@ mod tests {
             "test-model",
             vec![],
             chat_options,
-            true,
-            0,
-            10,
-            Some(dir.path().to_path_buf()),
-            false,
+            options(Some(dir.path().to_path_buf())),
         )?;
 
         let mut stream = client.subscribe();
@@ -1713,11 +1724,7 @@ mod tests {
             "test-model",
             vec![],
             ChatOptions::default(),
-            true,
-            0,
-            10,
-            Some(dir.path().to_path_buf()),
-            false,
+            options(Some(dir.path().to_path_buf())),
         )?;
         assert_eq!(
             std::fs::read_to_string(dir.path().join("msg-id-epoch"))?,
@@ -1836,11 +1843,7 @@ mod tests {
             "test-model",
             vec![],
             ChatOptions::default(),
-            true,
-            0,
-            10,
-            Some(session_dir.clone()),
-            false,
+            options(Some(session_dir.clone())),
         )?;
 
         assert_session_root_read_only(&manager, &session_dir)?;
@@ -1859,11 +1862,7 @@ mod tests {
                 "test-model",
                 vec![],
                 ChatOptions::default(),
-                true,
-                depth,
-                10,
-                Some(child_dir.clone()),
-                false,
+                options_at(depth, Some(child_dir.clone())),
             )?;
             assert!(child_dir.join("tool-logs").is_dir());
             assert!(!child_dir.join("msg-id-epoch").exists());
@@ -1894,18 +1893,14 @@ mod tests {
             make_resume_state("root", 0, vec![]),
             Box::new(MockLlm::new(vec![])),
             vec![],
-            10,
-            Some(session_dir.clone()),
-            false,
+            options(Some(session_dir.clone())),
         )?;
         assert_session_root_read_only(&manager, &session_dir)?;
         manager.resume_conversation(
             make_resume_state("A", 1, vec![]),
             Box::new(MockLlm::new(vec![])),
             vec![],
-            10,
-            Some(child_dir),
-            false,
+            options(Some(child_dir)),
         )?;
         assert_session_root_read_only(&manager, &session_dir)?;
 
@@ -1918,19 +1913,13 @@ mod tests {
             "test-model",
             vec![],
             ChatOptions::default(),
-            true,
-            2,
-            10,
-            Some(nested_dir.clone()),
-            false,
+            options_at(2, Some(nested_dir.clone())),
         )?;
         manager.resume_conversation(
             make_resume_state("B-resumed", 2, vec![]),
             Box::new(MockLlm::new(vec![])),
             vec![],
-            10,
-            Some(nested_dir),
-            false,
+            options(Some(nested_dir)),
         )?;
         assert!(manager.permission_manager().snapshot().session.is_empty());
         assert!(Arc::ptr_eq(&root_client.ids, &nested_client.ids));
@@ -1944,9 +1933,7 @@ mod tests {
             make_resume_state("root", 0, vec![]),
             Box::new(MockLlm::new(vec![])),
             vec![],
-            10,
-            Some(session_dir.clone()),
-            false,
+            options(Some(session_dir.clone())),
         )?;
         assert_session_root_read_only(&restarted, &session_dir)?;
         assert_eq!(restarted_client.ids.epoch(), 2);
@@ -1964,19 +1951,13 @@ mod tests {
             "test-model",
             vec![],
             ChatOptions::default(),
-            true,
-            0,
-            10,
-            None,
-            false,
+            options(None),
         )?;
         manager.resume_conversation(
             make_resume_state("resumed", 0, vec![]),
             Box::new(MockLlm::new(vec![])),
             vec![],
-            10,
-            None,
-            false,
+            options(None),
         )?;
         assert!(manager.permission_manager().snapshot().session.is_empty());
         assert_eq!(root_client.ids.epoch(), 0);
@@ -1988,9 +1969,7 @@ mod tests {
             make_resume_state("later", 1, vec![]),
             Box::new(MockLlm::new(vec![])),
             vec![],
-            10,
-            Some(later_dir.clone()),
-            false,
+            options(Some(later_dir.clone())),
         )?;
         assert!(manager.permission_manager().snapshot().session.is_empty());
         assert!(Arc::ptr_eq(&root_client.ids, &later_client.ids));
@@ -2022,9 +2001,7 @@ mod tests {
             make_resume_state("root", 0, vec![]),
             Box::new(MockLlm::new(vec![])),
             vec![],
-            10,
-            Some(session_dir.clone()),
-            false,
+            options(Some(session_dir.clone())),
         )?;
         let snapshot = manager.permission_manager().snapshot();
         assert_eq!(
@@ -2063,9 +2040,7 @@ mod tests {
                 make_resume_state(id, depth, vec![]),
                 Box::new(MockLlm::new(vec![])),
                 vec![],
-                10,
-                Some(state_dir.clone()),
-                false,
+                options(Some(state_dir.clone())),
             )?;
             let session = ConversationManager::make_session_dir(&Some(state_dir.clone()))
                 .context("persisted conversation must keep its session directory")?;
@@ -2102,9 +2077,7 @@ mod tests {
                 make_resume_state("root", 0, vec![]),
                 Box::new(MockLlm::new(vec![])),
                 vec![],
-                10,
-                Some(session_dir.clone()),
-                false,
+                options(Some(session_dir.clone())),
             )
             .err()
             .context("invalid UTF-8 root must fail explicitly")?;
@@ -2119,9 +2092,7 @@ mod tests {
             make_resume_state("root-retried", 0, vec![]),
             Box::new(MockLlm::new(vec![])),
             vec![],
-            10,
-            Some(session_dir.clone()),
-            false,
+            options(Some(session_dir.clone())),
         )?;
         let child_dir = session_dir.join("subagent-A");
         std::fs::create_dir_all(&child_dir)?;
@@ -2129,9 +2100,7 @@ mod tests {
             make_resume_state("A", 1, vec![]),
             Box::new(MockLlm::new(vec![])),
             vec![],
-            10,
-            Some(child_dir),
-            false,
+            options(Some(child_dir)),
         )?;
         assert_eq!(client.ids.epoch(), 1);
         assert_eq!(
@@ -2490,6 +2459,7 @@ mod tests {
             aggregate_cache_read_tokens: 0,
             single_turn: true,
             subagent_depth,
+            web_fetch_budget_id: None,
         }
     }
 
@@ -2544,11 +2514,7 @@ mod tests {
                 request_timeout_secs: Some(300),
                 ..Default::default()
             },
-            true, // single_turn
-            0,    // subagent_depth
-            10,   // max_subagent_depth
-            Some(dir.path().to_path_buf()),
-            false, // supports_media
+            options(Some(dir.path().to_path_buf())),
         )?;
 
         let mut stream = client.subscribe();
@@ -2698,9 +2664,7 @@ mod tests {
             root_state,
             Box::new(MockLlm::new(vec![])),
             vec![],
-            10,
-            session_dir.clone(),
-            false,
+            options(Some(session_dir.clone())),
         )?;
 
         assert_eq!(resumed_root_id, root_id);
@@ -2826,9 +2790,7 @@ mod tests {
             root_state,
             Box::new(mock),
             vec![],
-            10,
-            session_dir.clone(),
-            false,
+            options(Some(session_dir.clone())),
         )?;
 
         assert_session_root_read_only(&manager, &session_dir)?;
@@ -2877,6 +2839,553 @@ mod tests {
             Some("B")
         );
 
+        Ok(())
+    }
+
+    // ======== Web fetch budget ========
+
+    const SUBAGENT_TASK: &str = "You are a subagent.\nDo the task.";
+
+    fn write_budget_file(dir: &Path, parent: Option<&str>, remaining: u32) -> anyhow::Result<()> {
+        let file = WebFetchBudgetFile {
+            parent: parent.map(str::to_string),
+            remaining,
+        };
+        std::fs::write(
+            dir.join("web-fetch-budget.json"),
+            serde_json::to_string(&file)?,
+        )?;
+        Ok(())
+    }
+
+    fn read_budget_file(dir: &Path) -> anyhow::Result<WebFetchBudgetFile> {
+        use anyhow::Context;
+        WebFetchBudgetFile::read(dir).context("web fetch budget file missing or invalid")
+    }
+
+    /// A subagent task message with a budget note appended.
+    fn task_with_note(remaining: u32) -> String {
+        let budget = WebFetchBudget::new(remaining, "node".to_string(), None, None);
+        format!("{SUBAGENT_TASK}{}", web_fetch_budget_note(&budget))
+    }
+
+    #[test]
+    fn child_web_fetch_budget_without_parent_owns_node() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let path = dir.path().join("web-fetch-budget.json");
+        let budget = child_web_fetch_budget(None, None, "child-1".to_string(), Some(path));
+
+        assert_eq!(budget.id(), "child-1");
+        assert_eq!(budget.get(), DEFAULT_WEB_FETCH_CHAR_BUDGET);
+        let file = read_budget_file(dir.path())?;
+        assert_eq!(file.remaining, DEFAULT_WEB_FETCH_CHAR_BUDGET);
+        assert_eq!(file.parent, None);
+        Ok(())
+    }
+
+    #[test]
+    fn child_web_fetch_budget_without_parent_uses_requested_value() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let path = dir.path().join("web-fetch-budget.json");
+        let budget = child_web_fetch_budget(None, Some(500), "child-2".to_string(), Some(path));
+
+        assert_eq!(budget.id(), "child-2");
+        assert_eq!(budget.get(), 500);
+        assert_eq!(read_budget_file(dir.path())?.remaining, 500);
+        Ok(())
+    }
+
+    #[test]
+    fn child_web_fetch_budget_shares_parent_without_request() {
+        let dir = TestDir::new("conversation");
+        let parent = WebFetchBudget::new(1000, "parent".to_string(), None, None);
+        let child_path = dir.path().join("web-fetch-budget.json");
+
+        let child = child_web_fetch_budget(
+            Some(&parent),
+            None,
+            "child-3".to_string(),
+            Some(child_path.clone()),
+        );
+
+        assert!(Arc::ptr_eq(&child, &parent));
+        assert_eq!(child.get(), 1000);
+        assert!(
+            !child_path.exists(),
+            "a shared node must not write a child file"
+        );
+    }
+
+    #[test]
+    fn child_web_fetch_budget_request_is_clamped_by_parent() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let parent = WebFetchBudget::new(100, "parent".to_string(), None, None);
+        let path = dir.path().join("web-fetch-budget.json");
+
+        let child =
+            child_web_fetch_budget(Some(&parent), Some(5000), "child-4".to_string(), Some(path));
+
+        assert!(!Arc::ptr_eq(&child, &parent));
+        assert_eq!(child.id(), "child-4");
+        assert_eq!(child.get(), 100);
+        let file = read_budget_file(dir.path())?;
+        assert_eq!(file.remaining, 100);
+        assert_eq!(file.parent.as_deref(), Some("parent"));
+        Ok(())
+    }
+
+    #[test]
+    fn child_web_fetch_budget_explicit_default_creates_node() {
+        let parent = WebFetchBudget::new(
+            DEFAULT_WEB_FETCH_CHAR_BUDGET,
+            "parent".to_string(),
+            None,
+            None,
+        );
+
+        let child = child_web_fetch_budget(
+            Some(&parent),
+            Some(DEFAULT_WEB_FETCH_CHAR_BUDGET),
+            "child-5".to_string(),
+            None,
+        );
+
+        assert!(!Arc::ptr_eq(&child, &parent));
+        assert_eq!(child.id(), "child-5");
+        assert_eq!(child.get(), DEFAULT_WEB_FETCH_CHAR_BUDGET);
+    }
+
+    #[test]
+    fn snapshot_state_records_web_fetch_budget_id() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let manager = make_manager(dir.path())?;
+        let mut conversation = conversation_for_test(
+            manager,
+            "conv-budget",
+            Box::new(MockLlm::new(vec![])),
+            HashSet::new(),
+            HashMap::new(),
+        );
+        assert_eq!(conversation.snapshot_state().web_fetch_budget_id, None);
+
+        conversation.env.web_fetch_budget =
+            Some(WebFetchBudget::new(10, "node-a".to_string(), None, None));
+        assert_eq!(
+            conversation.snapshot_state().web_fetch_budget_id.as_deref(),
+            Some("node-a")
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn web_fetch_budget_note_reports_remaining() {
+        let note =
+            web_fetch_budget_note(&WebFetchBudget::new(1234, "node".to_string(), None, None));
+        let message = format!("{SUBAGENT_TASK}{note}");
+
+        assert!(message.starts_with("You are a subagent."));
+        let lines: Vec<&str> = note.lines().collect();
+        assert_eq!(
+            lines.len(),
+            4,
+            "the note is a marker line plus one paragraph: {note:?}"
+        );
+        assert_eq!(lines[2], "---");
+        assert!(lines[3].starts_with("Web fetch budget: this subagent tree has 1234 chars"));
+        assert!(lines[3].contains("shared with every subagent in the tree."));
+        assert!(lines[3].contains("prefer targeted pages over broad crawling."));
+    }
+
+    #[test]
+    fn web_fetch_budget_note_reports_disabled_at_zero() {
+        let note = web_fetch_budget_note(&WebFetchBudget::new(0, "node".to_string(), None, None));
+
+        let lines: Vec<&str> = note.lines().collect();
+        assert_eq!(lines.len(), 4);
+        assert_eq!(
+            lines[3],
+            "Web fetch budget: `web_fetch` is disabled for this subagent and its descendants \
+             (0 chars)."
+        );
+    }
+
+    #[test]
+    fn web_fetch_budget_note_uses_child_budget() {
+        let parent = WebFetchBudget::new(1000, "parent".to_string(), None, None);
+        let child = child_web_fetch_budget(Some(&parent), Some(10), "child".to_string(), None);
+
+        let note = web_fetch_budget_note(&child);
+
+        assert!(note.contains(" this subagent tree has 10 chars"));
+        assert!(!note.contains("1000"));
+    }
+
+    #[test]
+    fn preview_text_drops_budget_note() {
+        let message = task_with_note(500);
+
+        assert_eq!(preview_text(&message), SUBAGENT_TASK);
+        assert_eq!(preview_text(SUBAGENT_TASK), SUBAGENT_TASK);
+
+        let description =
+            first_user_description(&[LLMMessage::User(vec![ContentPart::Text(message)])]);
+        assert_eq!(description.as_deref(), Some(SUBAGENT_TASK));
+    }
+
+    #[test]
+    fn update_summary_for_message_drops_budget_note() {
+        use crate::conversation::Message;
+        let client = conversation_client_for_test();
+
+        client.update_summary_for_message(&Message::UserMessage {
+            created_at: 1,
+            content: Arc::new(task_with_note(500)),
+            media_filenames: vec![],
+        });
+
+        assert_eq!(
+            client.conversation_summary().description.as_deref(),
+            Some(SUBAGENT_TASK)
+        );
+    }
+
+    #[test]
+    fn preview_text_truncates_long_task() -> anyhow::Result<()> {
+        let long_task = format!("You are a subagent.{}", "x".repeat(120));
+        let message = format!("{long_task}{}", {
+            let budget = WebFetchBudget::new(500, "node".to_string(), None, None);
+            web_fetch_budget_note(&budget)
+        });
+
+        let description =
+            first_user_description(&[LLMMessage::User(vec![ContentPart::Text(message)])]);
+        let Some(description) = description else {
+            anyhow::bail!("a user message must yield a description");
+        };
+
+        assert!(description.ends_with("..."));
+        assert!(!description.contains("Web fetch budget"));
+        assert_eq!(description, truncate_preview(&long_task, 80));
+        Ok(())
+    }
+
+    #[test]
+    fn load_web_fetch_budget_shares_resolved_node() -> anyhow::Result<()> {
+        use anyhow::Context;
+        let dir = TestDir::new("conversation");
+        let owner = dir.path().join("subagent-a");
+        std::fs::create_dir_all(&owner)?;
+        write_budget_file(&owner, None, 100)?;
+
+        let dirs = HashMap::from([("a".to_string(), owner)]);
+        let mut memo = HashMap::new();
+        let mut visiting = HashSet::new();
+        let first = load_web_fetch_budget("a", &dirs, &mut memo, &mut visiting)
+            .context("budget node must be restored")?;
+        let second = load_web_fetch_budget("a", &dirs, &mut memo, &mut visiting)
+            .context("budget node must be restored")?;
+
+        assert!(Arc::ptr_eq(&first, &second));
+        assert_eq!(first.id(), "a");
+        assert_eq!(first.get(), 100);
+        assert!(visiting.is_empty());
+        Ok(())
+    }
+
+    #[test]
+    fn load_web_fetch_budget_links_parent_chain() -> anyhow::Result<()> {
+        use anyhow::Context;
+        let dir = TestDir::new("conversation");
+        let parent_dir = dir.path().join("subagent-parent");
+        let child_dir = dir.path().join("subagent-child");
+        std::fs::create_dir_all(&parent_dir)?;
+        std::fs::create_dir_all(&child_dir)?;
+        write_budget_file(&parent_dir, None, 1000)?;
+        write_budget_file(&child_dir, Some("parent"), 300)?;
+
+        let dirs = HashMap::from([
+            ("parent".to_string(), parent_dir.clone()),
+            ("child".to_string(), child_dir.clone()),
+        ]);
+        let mut memo = HashMap::new();
+        let mut visiting = HashSet::new();
+        let child = load_web_fetch_budget("child", &dirs, &mut memo, &mut visiting)
+            .context("child node must be restored")?;
+
+        assert_eq!(child.get(), 300);
+        assert_eq!(child.charge(400), 300, "the grant is capped by the chain");
+        assert_eq!(child.get(), 0);
+        assert_eq!(read_budget_file(&parent_dir)?.remaining, 700);
+        assert_eq!(read_budget_file(&child_dir)?.remaining, 0);
+        Ok(())
+    }
+
+    #[test]
+    fn load_web_fetch_budget_missing_parent_keeps_link() -> anyhow::Result<()> {
+        use anyhow::Context;
+        let dir = TestDir::new("conversation");
+        let child_dir = dir.path().join("subagent-orphan");
+        std::fs::create_dir_all(&child_dir)?;
+        write_budget_file(&child_dir, Some("gone"), 50)?;
+        let path = child_dir.join("web-fetch-budget.json");
+        let before = std::fs::read(&path)?;
+
+        let dirs = HashMap::from([("orphan".to_string(), child_dir.clone())]);
+        let mut memo = HashMap::new();
+        let mut visiting = HashSet::new();
+        let node = load_web_fetch_budget("orphan", &dirs, &mut memo, &mut visiting)
+            .context("an orphaned node must still load as a tree root")?;
+
+        assert_eq!(node.get(), 50);
+        assert_eq!(
+            std::fs::read(&path)?,
+            before,
+            "loading must not rewrite the file"
+        );
+        assert_eq!(
+            read_budget_file(&child_dir)?.parent.as_deref(),
+            Some("gone")
+        );
+        assert_eq!(node.charge(20), 20);
+        assert_eq!(read_budget_file(&child_dir)?.remaining, 30);
+        Ok(())
+    }
+
+    #[test]
+    fn load_web_fetch_budget_cycle_yields_root() -> anyhow::Result<()> {
+        use anyhow::Context;
+        let dir = TestDir::new("conversation");
+        let self_dir = dir.path().join("subagent-self");
+        let a_dir = dir.path().join("subagent-a");
+        let b_dir = dir.path().join("subagent-b");
+        std::fs::create_dir_all(&self_dir)?;
+        std::fs::create_dir_all(&a_dir)?;
+        std::fs::create_dir_all(&b_dir)?;
+        write_budget_file(&self_dir, Some("self"), 70)?;
+        write_budget_file(&a_dir, Some("b"), 100)?;
+        write_budget_file(&b_dir, Some("a"), 200)?;
+
+        let dirs = HashMap::from([
+            ("self".to_string(), self_dir),
+            ("a".to_string(), a_dir),
+            ("b".to_string(), b_dir),
+        ]);
+        let mut memo = HashMap::new();
+        let mut visiting = HashSet::new();
+
+        let self_node = load_web_fetch_budget("self", &dirs, &mut memo, &mut visiting)
+            .context("a self-referencing node must load")?;
+        assert_eq!(self_node.get(), 70);
+
+        let a_node = load_web_fetch_budget("a", &dirs, &mut memo, &mut visiting)
+            .context("a cyclic node must load")?;
+        assert_eq!(a_node.get(), 100);
+        assert!(visiting.is_empty(), "the cycle guard must release every id");
+        Ok(())
+    }
+
+    #[test]
+    fn load_web_fetch_budget_unknown_id_is_memoized() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let dirs: HashMap<String, PathBuf> = HashMap::new();
+        let mut memo = HashMap::new();
+        let mut visiting = HashSet::new();
+
+        assert!(load_web_fetch_budget("missing", &dirs, &mut memo, &mut visiting).is_none());
+        assert!(memo.contains_key("missing"));
+        assert!(load_web_fetch_budget("missing", &dirs, &mut memo, &mut visiting).is_none());
+        assert!(visiting.is_empty());
+        assert_eq!(
+            std::fs::read_dir(dir.path())?.count(),
+            0,
+            "resolving must not write"
+        );
+        Ok(())
+    }
+
+    /// A tool that yields the id of the budget node its context carries.
+    fn budget_reading_tool() -> Arc<Tool> {
+        #[derive(serde::Deserialize, schemars::JsonSchema)]
+        struct Empty {}
+
+        Arc::new(Tool::new(
+            "read_budget",
+            "Yields the id of the web fetch budget node it was given",
+            None,
+            |ctx: ToolContext, _params: Empty| {
+                let id = match &ctx.web_fetch_budget {
+                    Some(budget) => budget.id().to_string(),
+                    None => "unbounded".to_string(),
+                };
+                tokio_stream::once(Ok::<_, String>(id))
+            },
+        ))
+    }
+
+    /// Broadcast messages of a conversation whose model calls `tool_name` once
+    /// and then ends the turn.
+    async fn drive_with_tool_call(
+        tool: Arc<Tool>,
+        tool_name: &str,
+        options: ConversationOptions,
+        dir: &Path,
+    ) -> anyhow::Result<Vec<Arc<crate::conversation::BroadcastMessage>>> {
+        use crate::conversation::{BroadcastMessage, Message};
+
+        let mock = MockLlm::new(vec![
+            MockResponse::Events(vec![
+                LLMEvent::ToolCall(ToolCall {
+                    id: "tc-budget".to_string(),
+                    name: tool_name.to_string(),
+                    arguments: "{}".to_string(),
+                }),
+                LLMEvent::MessageEnd {
+                    stop_reason: StopReason::ToolUse,
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    reasoning_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    raw: None,
+                },
+            ]),
+            MockResponse::Events(vec![
+                LLMEvent::TextDelta("done".to_string()),
+                LLMEvent::MessageEnd {
+                    stop_reason: StopReason::EndTurn,
+                    input_tokens: 1,
+                    output_tokens: 1,
+                    reasoning_tokens: 0,
+                    cache_creation_input_tokens: 0,
+                    cache_read_input_tokens: 0,
+                    raw: None,
+                },
+            ]),
+        ]);
+
+        let permissions_file = dir.join("permissions.json");
+        std::fs::write(&permissions_file, "[]")?;
+        let manager = ConversationManager::new(permissions_file, None);
+        let (_conv_id, client) = manager.new_conversation_with_id(
+            "test-conv".to_string(),
+            Box::new(mock),
+            "test-model",
+            vec![tool],
+            ChatOptions::default(),
+            options,
+        )?;
+
+        let mut stream = client.subscribe();
+        client.send_chat("Hello").await?;
+
+        let mut messages: Vec<Arc<BroadcastMessage>> = Vec::new();
+        let mut ends = 0usize;
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
+        tokio::pin!(deadline);
+
+        loop {
+            tokio::select! {
+                msg = stream.next() => {
+                    match msg {
+                        Some(Ok(m)) => {
+                            if matches!(&m.msg, Message::AssistantMessageEnd { .. }) {
+                                ends += 1;
+                            }
+                            messages.push(m);
+                            if ends >= 2 {
+                                break;
+                            }
+                        }
+                        Some(Err(BroadcastStreamRecvError::Lagged(_))) => continue,
+                        None => break,
+                    }
+                }
+                _ = &mut deadline => break,
+            }
+        }
+
+        Ok(messages)
+    }
+
+    #[tokio::test]
+    async fn tool_context_carries_the_conversation_budget() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+
+        let dir = TestDir::new("conversation");
+        let budget = WebFetchBudget::new(1000, "node-wired".to_string(), None, None);
+        let msgs = drive_with_tool_call(
+            budget_reading_tool(),
+            "read_budget",
+            ConversationOptions {
+                web_fetch_budget: Some(budget),
+                ..options(Some(dir.path().to_path_buf()))
+            },
+            dir.path(),
+        )
+        .await?;
+
+        let reported = msgs.iter().find_map(|m| match &m.msg {
+            Message::ToolOutputChunk {
+                tool_name, content, ..
+            } if tool_name == "read_budget" => match content.as_ref() {
+                ContentPart::Text(text) => Some(text.as_str()),
+                _ => None,
+            },
+            _ => None,
+        });
+        assert_eq!(reported, Some("node-wired"));
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn conversation_description_drops_budget_note() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+
+        let dir = TestDir::new("conversation");
+        let permissions_file = dir.path().join("permissions.json");
+        std::fs::write(&permissions_file, "[]")?;
+        let manager = ConversationManager::new(permissions_file, None);
+        let mock = MockLlm::new(vec![MockResponse::Events(vec![
+            LLMEvent::TextDelta("done".to_string()),
+            LLMEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                input_tokens: 1,
+                output_tokens: 1,
+                reasoning_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                raw: None,
+            },
+        ])]);
+        let (_conv_id, client) = manager.new_conversation_with_id(
+            "conv-note".to_string(),
+            Box::new(mock),
+            "test-model",
+            vec![],
+            ChatOptions::default(),
+            options(Some(dir.path().to_path_buf())),
+        )?;
+
+        let mut stream = client.subscribe();
+        client.send_chat(&task_with_note(500)).await?;
+
+        let deadline = tokio::time::sleep(std::time::Duration::from_secs(30));
+        tokio::pin!(deadline);
+        loop {
+            tokio::select! {
+                msg = stream.next() => match msg {
+                    Some(Ok(m)) if matches!(&m.msg, Message::AssistantMessageEnd { .. }) => break,
+                    Some(_) => continue,
+                    None => anyhow::bail!("conversation stream ended before the turn finished"),
+                },
+                _ = &mut deadline => anyhow::bail!("conversation did not finish in time"),
+            }
+        }
+
+        assert_eq!(
+            client.conversation_summary().description.as_deref(),
+            Some(SUBAGENT_TASK)
+        );
         Ok(())
     }
 }

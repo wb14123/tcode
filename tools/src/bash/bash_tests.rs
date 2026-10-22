@@ -195,6 +195,7 @@ mod streaming {
             llm: None,
             model: None,
             media_sink: None,
+            web_fetch_budget: None,
         }
     }
 

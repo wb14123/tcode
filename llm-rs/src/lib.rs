@@ -1,4 +1,5 @@
 pub mod conversation;
+pub mod fetch_budget;
 pub mod image;
 pub mod llm;
 pub mod media;
@@ -26,3 +27,6 @@ mod image_tests;
 
 #[cfg(test)]
 mod skill_tests;
+
+#[cfg(test)]
+mod fetch_budget_tests;

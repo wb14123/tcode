@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crate::fetch_budget::{DEFAULT_WEB_FETCH_CHAR_BUDGET, WebFetchBudget, WebFetchBudgetFile};
 use crate::llm::{ChatOptions, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, ToolCall};
 use crate::media::{ContentPart, MediaData, media_type_from_extension};
 use crate::tool::{CancellationToken, ContainerConfig, MediaSink, Tool, ToolContext};
@@ -20,6 +21,9 @@ use uuid::Uuid;
 /// Prefix that subagent prompts are expected to start with.
 /// Used in subagent tool guidance and stripped from display descriptions.
 const SUBAGENT_PROMPT_PREFIX: &str = "You are a subagent.";
+
+/// Marker that separates a subagent's task from its web fetch budget note.
+const WEB_FETCH_BUDGET_NOTE_MARKER: &str = "\n\n---\nWeb fetch budget:";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SystemPromptContext {
@@ -76,6 +80,10 @@ pub struct ConversationState {
     pub aggregate_cache_read_tokens: i32,
     pub single_turn: bool,
     pub subagent_depth: usize,
+    /// Budget node this conversation draws from (`None` = unbounded). The node
+    /// itself persists its remaining value; no numbers live in this state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_fetch_budget_id: Option<String>,
 }
 
 impl ConversationState {
@@ -86,6 +94,28 @@ impl ConversationState {
             last_active_at: None,
         }
     }
+}
+
+/// Options for creating or resuming a conversation.
+pub struct ConversationOptions {
+    /// Max nesting depth allowed for subagents.
+    pub max_subagent_depth: usize,
+    /// Session state directory (media, tool logs, conversation-state.json).
+    pub state_dir: Option<PathBuf>,
+    /// Whether the model accepts media input.
+    pub supports_media: bool,
+    /// Budget node this conversation draws from (`None` = unbounded).
+    ///
+    /// `resume_conversation` does not resolve [`ConversationState::web_fetch_budget_id`];
+    /// the caller must load the node (as `resume_conversation_tree` does) and
+    /// pass it here. Callers that pass `None` get an unbounded conversation.
+    pub web_fetch_budget: Option<Arc<WebFetchBudget>>,
+    /// Depth of this conversation. Used when creating; resume restores it from
+    /// the persisted state.
+    pub subagent_depth: usize,
+    /// End the conversation after one turn. Used when creating; resume restores
+    /// it from the persisted state.
+    pub single_turn: bool,
 }
 
 fn first_user_description(llm_msgs: &[LLMMessage]) -> Option<String> {
@@ -99,7 +129,7 @@ fn first_user_description(llm_msgs: &[LLMMessage]) -> Option<String> {
                 }
             });
             match first_text {
-                Some(text) => Some(truncate_preview(text, 80)),
+                Some(text) => Some(truncate_preview(preview_text(text), 80)),
                 None => Some("[Media]".to_string()),
             }
         } else {
@@ -601,6 +631,13 @@ struct SubAgentParams {
     task: String,
     /// Model ID to use for the subagent (see available models in tool description)
     model: String,
+    /// Cap web_fetch page content for this subagent's tree, in chars. Omit it to
+    /// inherit the spawning conversation's budget; when the spawner has no budget
+    /// (the main conversation), 400000 applies. An explicit value creates a cap for
+    /// this subtree and cannot exceed the inherited remaining; 0 blocks all page
+    /// fetches. Applies to web_fetch only, never to the conversation or other tools.
+    #[serde(default)]
+    web_fetch_char_budget: Option<u32>,
 }
 
 #[derive(Deserialize, JsonSchema)]
@@ -626,6 +663,8 @@ struct ConversationEnv {
     session_dir: Option<crate::tool::SessionDir>,
     /// Whether the current model supports visual/media input (images, PDFs).
     supports_media: bool,
+    /// Web fetch budget node this conversation draws from (`None` = unbounded).
+    web_fetch_budget: Option<Arc<WebFetchBudget>>,
     /// Permission manager shared across all conversations.
     permission_manager: Arc<crate::permission::PermissionManager>,
     /// Optional container configuration for Docker/Podman sandbox mode.
@@ -663,7 +702,18 @@ pub fn create_subagent_tool(model_descriptions: &[ModelInfo]) -> Tool {
          - Spawn in parallel when tasks are independent.
 
 \
-         Available models:\n{}",
+         Available models:\n{}\n\n\
+         Web research budget:\n\
+         - Only `web_fetch` page content counts against a tree budget: {DEFAULT_WEB_FETCH_CHAR_BUDGET} chars by\n  \
+         default, shared by the subagent and all its descendants; parallel children\n  \
+         compete for the same pool. It limits nothing else: not context, messages, or\n  \
+         other tools.\n\
+         - `web_fetch_char_budget` sets it for the spawned subagent's tree at any depth;\n  \
+         omit it to inherit the spawning conversation's budget ({DEFAULT_WEB_FETCH_CHAR_BUDGET} when the spawner\n  \
+         has none). The effective cap is min(request, inherited remaining), so a child\n  \
+         can only tighten it. 0 blocks all page fetches.\n\
+         - Results show the remaining budget; at 0, `web_fetch` returns a notice instead\n  \
+         of content: don't retry, report what you have, and keep using other tools.",
         models_list.join("\n")
     );
 
@@ -848,32 +898,16 @@ impl ConversationManager {
     /// memory until it ends.
     ///
     /// Returns `(conversation_id, client)`.
-    #[allow(clippy::too_many_arguments)]
     pub fn new_conversation(
         self: &Arc<Self>,
         llm: Box<dyn LLM>,
         model: &str,
         tools: Vec<Arc<Tool>>,
         chat_options: ChatOptions,
-        single_turn: bool,
-        subagent_depth: usize,
-        max_subagent_depth: usize,
-        state_dir: Option<PathBuf>,
-        supports_media: bool,
+        options: ConversationOptions,
     ) -> Result<(String, Arc<ConversationClient>)> {
         let conversation_id = Uuid::new_v4().to_string();
-        self.new_conversation_with_id(
-            conversation_id,
-            llm,
-            model,
-            tools,
-            chat_options,
-            single_turn,
-            subagent_depth,
-            max_subagent_depth,
-            state_dir,
-            supports_media,
-        )
+        self.new_conversation_with_id(conversation_id, llm, model, tools, chat_options, options)
     }
 
     fn make_session_dir(state_dir: &Option<PathBuf>) -> Option<crate::tool::SessionDir> {
@@ -885,7 +919,6 @@ impl ConversationManager {
         Some(crate::tool::SessionDir::new(dir.clone()))
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn new_conversation_with_id(
         self: &Arc<Self>,
         conversation_id: String,
@@ -893,12 +926,16 @@ impl ConversationManager {
         model: &str,
         tools: Vec<Arc<Tool>>,
         chat_options: ChatOptions,
-        single_turn: bool,
-        subagent_depth: usize,
-        max_subagent_depth: usize,
-        state_dir: Option<PathBuf>,
-        supports_media: bool,
+        options: ConversationOptions,
     ) -> Result<(String, Arc<ConversationClient>)> {
+        let ConversationOptions {
+            max_subagent_depth,
+            state_dir,
+            supports_media,
+            web_fetch_budget,
+            subagent_depth,
+            single_turn,
+        } = options;
         let now = now_millis();
         let llm_clone = Arc::from(llm.clone_box());
         let ids = self.ensure_session_initialized(state_dir.as_deref())?;
@@ -946,6 +983,7 @@ impl ConversationManager {
                     state_dir: state_dir.clone(),
                     session_dir: Self::make_session_dir(&state_dir),
                     supports_media,
+                    web_fetch_budget,
                     permission_manager: Arc::clone(&self.permission_manager),
                     container_config: self.container_config.clone(),
                     llm: Some(llm_clone),
@@ -1065,15 +1103,25 @@ impl ConversationManager {
     ///
     /// Calls `fill_cancelled_tool_results()` on the loaded llm_msgs,
     /// creates a `Conversation` with pre-populated state, and spawns it.
+    ///
+    /// `options.web_fetch_budget` must already be resolved from
+    /// `state.web_fetch_budget_id` by the caller; this method does not read it.
     pub fn resume_conversation(
         self: &Arc<Self>,
         mut state: ConversationState,
         mut llm: Box<dyn LLM>,
         tools: Vec<Arc<Tool>>,
-        max_subagent_depth: usize,
-        state_dir: Option<PathBuf>,
-        supports_media: bool,
+        options: ConversationOptions,
     ) -> Result<(String, Arc<ConversationClient>)> {
+        let ConversationOptions {
+            max_subagent_depth,
+            state_dir,
+            supports_media,
+            web_fetch_budget,
+            // Restored from the persisted state below.
+            subagent_depth: _,
+            single_turn: _,
+        } = options;
         fill_cancelled_tool_results(&mut state.llm_msgs);
         let summary = state.summary();
         let description = summary.description.clone();
@@ -1115,6 +1163,7 @@ impl ConversationManager {
                     state_dir: state_dir.clone(),
                     session_dir: Self::make_session_dir(&state_dir),
                     supports_media,
+                    web_fetch_budget,
                     permission_manager: Arc::clone(&self.permission_manager),
                     container_config: self.container_config.clone(),
                     llm: Some(llm_clone),
@@ -1129,7 +1178,9 @@ impl ConversationManager {
     ///
     /// Scans `state_dir` for `subagent-*/conversation-state.json`, resumes those
     /// first (so they're registered in the manager for `continue_subagent`), then
-    /// resumes the root conversation.
+    /// resumes the root conversation. Each subagent's `web_fetch_budget_id` is
+    /// resolved to a budget node before it is resumed; the root uses
+    /// `options.web_fetch_budget`.
     ///
     /// Returns the root client and a list of all resumed subagent conversations
     /// (so the caller can attach event writers or other UI).
@@ -1138,10 +1189,20 @@ impl ConversationManager {
         state: ConversationState,
         llm: Box<dyn LLM>,
         tools: Vec<Arc<Tool>>,
-        max_subagent_depth: usize,
-        state_dir: PathBuf,
-        supports_media: bool,
+        options: ConversationOptions,
     ) -> Result<(String, Arc<ConversationClient>, Vec<ResumedSubagent>)> {
+        let ConversationOptions {
+            max_subagent_depth,
+            state_dir,
+            supports_media,
+            web_fetch_budget,
+            // The root's depth and turn policy are restored from its state.
+            subagent_depth: _,
+            single_turn: _,
+        } = options;
+        let state_dir =
+            state_dir.context("resuming a conversation tree requires a state directory")?;
+
         // Initialize from the root before restoring children: the shared epoch
         // must be durable and the root read default attempted before any child
         // can use tools. Child resumes only reuse this shared initialization.
@@ -1174,20 +1235,34 @@ impl ConversationManager {
             }
         }
 
+        // Budget owners are keyed by conversation id, not by directory name, and
+        // resolved lazily so a parent is always built before its children.
+        let budget_dirs: HashMap<String, PathBuf> = subagent_states
+            .iter()
+            .map(|(sa_dir, sa_state)| (sa_state.id.clone(), sa_dir.clone()))
+            .collect();
+        let mut budget_memo: HashMap<String, Option<Arc<WebFetchBudget>>> = HashMap::new();
+        let mut budget_visiting: HashSet<String> = HashSet::new();
+
         let mut resumed_subagents = Vec::new();
 
         for (sa_dir, sa_state) in subagent_states {
             let mut sa_llm = llm.clone_box();
             sa_llm.set_media_dir(Some(sa_dir.join("media")));
             let sa_tools = tools.clone();
-            let (sa_id, sa_client) = self.resume_conversation(
-                sa_state,
-                sa_llm,
-                sa_tools,
+            let sa_budget = sa_state.web_fetch_budget_id.as_deref().and_then(|id| {
+                load_web_fetch_budget(id, &budget_dirs, &mut budget_memo, &mut budget_visiting)
+            });
+            let sa_options = ConversationOptions {
                 max_subagent_depth,
-                Some(sa_dir.clone()),
+                state_dir: Some(sa_dir.clone()),
                 supports_media,
-            )?;
+                web_fetch_budget: sa_budget,
+                subagent_depth: sa_state.subagent_depth,
+                single_turn: sa_state.single_turn,
+            };
+            let (sa_id, sa_client) =
+                self.resume_conversation(sa_state, sa_llm, sa_tools, sa_options)?;
             resumed_subagents.push(ResumedSubagent {
                 conversation_id: sa_id,
                 client: sa_client,
@@ -1196,14 +1271,15 @@ impl ConversationManager {
         }
 
         // Resume root conversation
-        let (root_id, root_client) = self.resume_conversation(
-            state,
-            llm,
-            tools,
+        let root_options = ConversationOptions {
             max_subagent_depth,
-            Some(state_dir),
+            state_dir: Some(state_dir),
             supports_media,
-        )?;
+            web_fetch_budget,
+            subagent_depth: state.subagent_depth,
+            single_turn: state.single_turn,
+        };
+        let (root_id, root_client) = self.resume_conversation(state, llm, tools, root_options)?;
 
         Ok((root_id, root_client, resumed_subagents))
     }
@@ -1279,6 +1355,48 @@ fn find_tool_call_for_subagent(llm_msgs: &[LLMMessage], subagent_conv_id: &str) 
     None
 }
 
+/// Resolve a persisted web fetch budget id to a live node.
+///
+/// Parents are built before children, results (including failures) are memoized,
+/// and a cyclic parent chain degrades to a tree root. Loading never writes: a
+/// node whose ancestor cannot be resolved keeps its recorded parent id so a
+/// later resume can re-link it.
+fn load_web_fetch_budget(
+    id: &str,
+    dirs: &HashMap<String, PathBuf>,
+    memo: &mut HashMap<String, Option<Arc<WebFetchBudget>>>,
+    visiting: &mut HashSet<String>,
+) -> Option<Arc<WebFetchBudget>> {
+    if let Some(hit) = memo.get(id) {
+        return hit.clone();
+    }
+    if !visiting.insert(id.to_string()) {
+        tracing::warn!(
+            id,
+            "cyclic web-fetch budget parent; treating as a tree root"
+        );
+        return None;
+    }
+    let built = (|| {
+        let dir = dirs.get(id)?;
+        let file = WebFetchBudgetFile::read(dir)?;
+        let parent = file
+            .parent
+            .as_deref()
+            .and_then(|parent_id| load_web_fetch_budget(parent_id, dirs, memo, visiting));
+        Some(WebFetchBudget::restore(
+            file.remaining,
+            id.to_string(),
+            parent,
+            file.parent,
+            Some(dir.join("web-fetch-budget.json")),
+        ))
+    })();
+    visiting.remove(id);
+    memo.insert(id.to_string(), built.clone());
+    built
+}
+
 /// Log a message and broadcast it as a SystemMessage to the conversation client.
 fn log_and_broadcast_system_message(
     client: &ConversationClient,
@@ -1306,6 +1424,15 @@ fn truncate_preview(s: &str, max_len: usize) -> String {
         format!("{}...", &s[..end])
     } else {
         s.to_string()
+    }
+}
+
+/// Text to derive a preview from: everything before an appended web fetch
+/// budget note, so the note never becomes a conversation description.
+fn preview_text(text: &str) -> &str {
+    match text.find(WEB_FETCH_BUDGET_NOTE_MARKER) {
+        Some(index) => &text[..index],
+        None => text,
     }
 }
 
@@ -1758,6 +1885,11 @@ impl Conversation {
             aggregate_cache_read_tokens: self.aggregate_cache_read_tokens,
             single_turn: self.single_turn,
             subagent_depth: self.env.subagent_depth,
+            web_fetch_budget_id: self
+                .env
+                .web_fetch_budget
+                .as_ref()
+                .map(|budget| budget.id().to_string()),
         }
     }
 
@@ -1884,7 +2016,8 @@ impl Conversation {
                             }
                             self.cancelled_tools.clear();
                             if self.description.is_none() {
-                                self.description = Some(truncate_preview(&content, 80));
+                                self.description =
+                                    Some(truncate_preview(preview_text(&content), 80));
                             }
                             let mut parts = vec![ContentPart::Text(content.to_string())];
                             for filename in &media_filenames {
@@ -2524,6 +2657,7 @@ async fn execute_regular_tool(
         media_sink: Some(Arc::new(ConversationMediaSink {
             client: Arc::clone(&env.client),
         })),
+        web_fetch_budget: env.web_fetch_budget.as_ref().map(Arc::clone),
     };
     let end_status = if let Some(tool) = tool_arc {
         tracing::debug!(tool_call_id = %tool_call.id, "tool found, starting stream");
@@ -2651,6 +2785,49 @@ fn spawn_subagent_stream_handler(
     });
 }
 
+/// Budget node for a newly spawned subagent.
+///
+/// Without a parent the subagent starts a tree root; with a parent and no
+/// explicit request it shares the parent's node (same pool, no new file), and an
+/// explicit request gives it its own node clamped to the inherited remaining.
+fn child_web_fetch_budget(
+    parent: Option<&Arc<WebFetchBudget>>,
+    requested: Option<u32>,
+    id: String,
+    persist_path: Option<PathBuf>,
+) -> Arc<WebFetchBudget> {
+    match parent {
+        None => WebFetchBudget::new(
+            requested.unwrap_or(DEFAULT_WEB_FETCH_CHAR_BUDGET),
+            id,
+            None,
+            persist_path,
+        ),
+        Some(parent) => match requested {
+            None => Arc::clone(parent),
+            Some(value) => WebFetchBudget::new(value, id, Some(parent), persist_path),
+        },
+    }
+}
+
+/// Note appended to a subagent's initial task message, built from its own node.
+fn web_fetch_budget_note(budget: &WebFetchBudget) -> String {
+    let remaining = budget.get();
+    if remaining > 0 {
+        format!(
+            "{WEB_FETCH_BUDGET_NOTE_MARKER} this subagent tree has {remaining} chars of \
+             `web_fetch` content left, shared with every subagent in the tree. Each \
+             `web_fetch` result reports the remaining budget; prefer targeted pages over \
+             broad crawling."
+        )
+    } else {
+        format!(
+            "{WEB_FETCH_BUDGET_NOTE_MARKER} `web_fetch` is disabled for this subagent and \
+             its descendants (0 chars)."
+        )
+    }
+}
+
 /// Execute a subagent tool call. Sets up the subagent conversation, sends the task,
 /// and spawns a stream handler to monitor results (including post-cancel recovery).
 async fn execute_subagent(
@@ -2732,6 +2909,15 @@ async fn execute_subagent(
     if let Some(ref sa_dir) = subagent_state_dir {
         llm.set_media_dir(Some(sa_dir.join("media")));
     }
+    let budget_path = subagent_state_dir
+        .as_ref()
+        .map(|dir| dir.join("web-fetch-budget.json"));
+    let budget = child_web_fetch_budget(
+        env.web_fetch_budget.as_ref(),
+        params.web_fetch_char_budget,
+        subagent_conv_id_pre.clone(),
+        budget_path,
+    );
     let (subagent_conv_id, subagent_client) =
         match env.conversation_manager.new_conversation_with_id(
             subagent_conv_id_pre,
@@ -2739,11 +2925,14 @@ async fn execute_subagent(
             &params.model,
             subagent_tools,
             env.chat_options.clone(),
-            true, // single_turn
-            child_depth,
-            env.max_subagent_depth,
-            subagent_state_dir,
-            env.supports_media,
+            ConversationOptions {
+                max_subagent_depth: env.max_subagent_depth,
+                state_dir: subagent_state_dir,
+                supports_media: env.supports_media,
+                web_fetch_budget: Some(Arc::clone(&budget)),
+                subagent_depth: child_depth,
+                single_turn: true,
+            },
         ) {
             Ok(result) => result,
             Err(e) => {
@@ -2796,7 +2985,8 @@ async fn execute_subagent(
 
     let sub_stream = subagent_client.subscribe();
 
-    if let Err(e) = subagent_client.send_chat(&params.task).await {
+    let task = format!("{}{}", params.task, web_fetch_budget_note(&budget));
+    if let Err(e) = subagent_client.send_chat(&task).await {
         let error = format!("Error: Failed to send task to subagent: {}", e);
         env.client
             .notify_msg(Message::SubAgentEnd {
@@ -3030,7 +3220,7 @@ impl ConversationClient {
                 ..
             } => {
                 if summary.description.is_none() {
-                    summary.description = Some(truncate_preview(content, 80));
+                    summary.description = Some(truncate_preview(preview_text(content), 80));
                 }
                 if summary.created_at.is_none() {
                     summary.created_at = Some(*created_at);

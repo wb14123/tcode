@@ -12,6 +12,19 @@ Fetches a web page and extracts its main content. Returns clean, readable HTML s
 - 300 second timeout
 - **Requires permission**: Before fetching, prompts the user to approve access to the target hostname (e.g., `example.com`). Once approved for a session or project, subsequent fetches to the same hostname proceed without prompting.
 
+#### Web fetch budget
+
+A subagent tree shares one character budget for `web_fetch` page content:
+
+- By default a tree starts with 400000 chars (`DEFAULT_WEB_FETCH_CHAR_BUDGET`). The subagent and all its descendants draw on the same pool, so parallel children compete for it.
+- The `subagent` tool accepts `web_fetch_char_budget` to cap the spawned subagent's tree. Omitted, the child inherits the spawner's budget; an explicit value can only tighten it (the cap is the smaller of the request and the inherited remaining). `0` blocks all page fetches.
+- A budgeted call caps `max_length` at the chars remaining, so no more than that is sent (a fetch may still download more than it sends).
+- Results start with a budget line, e.g. `[web_fetch] Budget (web_fetch only): 399812 chars remaining for this subagent tree (this call used 188).`
+- Charging counts characters, not bytes. A page longer than what remains is cut to the remaining chars, and the header says the budget, not the page, limited the output.
+- At 0 remaining the call fetches nothing and returns a blocked notice instead of content.
+- Images and PDFs are never charged (their budget line says so), but they are blocked at 0 like any other fetch.
+- The main conversation has no budget and its results carry no budget line. Only `web_fetch` page content counts; no other tool is affected.
+
 ### `web_search`
 
 Performs a web search and returns formatted results with titles, URLs, and snippets. The search engine is configurable via the `--search-engine` CLI flag (default: Google). Supported engines: **Kagi** and **Google**.

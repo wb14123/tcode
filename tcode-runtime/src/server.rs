@@ -10,9 +10,9 @@ use bytes::Bytes;
 use fs2::FileExt;
 use futures::{SinkExt, Stream, StreamExt};
 use llm_rs::conversation::{
-    BroadcastMessage, ConversationClient, ConversationManager, ConversationState, Message,
-    MessageEndStatus, UniqueId, UniqueIdGenerator, create_continue_subagent_tool,
-    create_subagent_tool, format_subagent_result,
+    BroadcastMessage, ConversationClient, ConversationManager, ConversationOptions,
+    ConversationState, Message, MessageEndStatus, UniqueId, UniqueIdGenerator,
+    create_continue_subagent_tool, create_subagent_tool, format_subagent_result,
 };
 use llm_rs::llm::{ChatOptions, LLM};
 use llm_rs::permission::{
@@ -867,9 +867,14 @@ impl Server {
                 root_state,
                 self.llm,
                 tools_list,
-                self.max_subagent_depth,
-                self.session_dir.clone(),
-                self.supports_media,
+                ConversationOptions {
+                    max_subagent_depth: self.max_subagent_depth,
+                    state_dir: Some(self.session_dir.clone()),
+                    supports_media: self.supports_media,
+                    web_fetch_budget: None,
+                    subagent_depth: 0,
+                    single_turn: false,
+                },
             )?;
 
             // Close stale pending permission requests from previous session
@@ -976,11 +981,14 @@ impl Server {
                 &self.model,
                 tools_list,
                 self.chat_options.clone(),
-                false,
-                0, // root conversation depth
-                self.max_subagent_depth,
-                Some(self.session_dir.clone()),
-                self.supports_media,
+                ConversationOptions {
+                    max_subagent_depth: self.max_subagent_depth,
+                    state_dir: Some(self.session_dir.clone()),
+                    supports_media: self.supports_media,
+                    web_fetch_budget: None,
+                    subagent_depth: 0, // root conversation depth
+                    single_turn: false,
+                },
             )?;
 
             let manager_clone = Arc::clone(&manager);

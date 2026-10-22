@@ -280,6 +280,7 @@ mod tests {
             llm: Some(llm),
             model: None,
             media_sink: sink,
+            web_fetch_budget: None,
         };
         (ctx, pm)
     }

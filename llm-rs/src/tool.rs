@@ -25,7 +25,7 @@
 //!
 //! // Execute with JSON string
 //! use tokio_util::sync::CancellationToken;
-//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, session_dir: None, supports_media: false, llm: None, model: None, media_sink: None };
+//! let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, session_dir: None, supports_media: false, llm: None, model: None, media_sink: None, web_fetch_budget: None };
 //! let stream = tool.execute(ctx, r#"{"path": "/tmp/test.txt"}"#.to_string());
 //! ```
 
@@ -128,6 +128,8 @@ pub struct ToolContext {
     pub model: Option<String>,
     /// Optional sink for media events produced during tool execution.
     pub media_sink: Option<Arc<dyn MediaSink>>,
+    /// Budget node this tool draws from (`None` = unbounded).
+    pub web_fetch_budget: Option<Arc<crate::fetch_budget::WebFetchBudget>>,
 }
 
 /// Type alias for the boxed stream returned by tool execution.
@@ -322,7 +324,7 @@ impl<T> ToolParams for T where T: DeserializeOwned + schemars::JsonSchema + Send
 ///
 /// // Execute with JSON string
 /// use tokio_util::sync::CancellationToken;
-/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, session_dir: None, supports_media: false, llm: None, model: None, media_sink: None };
+/// let ctx = ToolContext { cancel_token: CancellationToken::new(), permission: llm_rs::permission::ScopedPermissionManager::always_allow("test"), container_config: None, session_dir: None, supports_media: false, llm: None, model: None, media_sink: None, web_fetch_budget: None };
 /// let stream = tool.execute(ctx, r#"{"query": "foo"}"#.to_string());
 /// ```
 pub struct Tool {
