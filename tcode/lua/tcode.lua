@@ -1052,11 +1052,13 @@ end
 -- extmark id), so the region element kinds place highlights with
 -- nvim_buf_set_extmark instead. The mark shape (end_row = row + 1, end_col = 0)
 -- matches nvim_buf_add_highlight's full-row highlight exactly; this build
--- rejects end_col = -1.
-local function add_tracked_highlight(state, el, buf, ns, group, row)
-  local id = vim.api.nvim_buf_set_extmark(buf, ns, row, 0, {
-    hl_group = group, end_row = row + 1, end_col = 0,
-  })
+-- rejects end_col = -1. priority is the optional override for rows that must
+-- win over the treesitter / markdown layer (see add_tracked_col_highlight);
+-- nil keeps the extmark default.
+local function add_tracked_highlight(state, el, buf, ns, group, row, priority)
+  local opts = { hl_group = group, end_row = row + 1, end_col = 0 }
+  if priority then opts.priority = priority end
+  local id = vim.api.nvim_buf_set_extmark(buf, ns, row, 0, opts)
   local list = state.hl[el.id]
   if not list then list = {}; state.hl[el.id] = list end
   list[#list + 1] = { ns, id }
@@ -1112,14 +1114,21 @@ local function system_message_hl(level)
   return 'TCodeSystemInfo'
 end
 
--- Tail display: the last at most n REAL lines of a content blob. A single
--- trailing empty row left by a trailing '\n' is trimmed so 'a\n' counts as
--- one line; empty content yields {} (callers render the one-empty-line
--- placeholder where a section requires one).
-local function tail_lines(content, n)
-  if content == '' then return {} end
-  local ls = lines(content)
+-- REAL lines of a content blob: lines() minus a single trailing empty row left
+-- by a trailing '\n', so 'a\n' counts as one line. Empty content yields {} so a
+-- caller can tell "no lines" apart from "one blank line".
+local function content_lines(text)
+  if text == nil or text == '' then return {} end
+  local ls = lines(text)
   if #ls > 1 and ls[#ls] == '' then table.remove(ls) end
+  return ls
+end
+
+-- Tail display: the last at most n REAL lines of a content blob. Empty content
+-- yields {} (callers render the one-empty-line placeholder where a section
+-- requires one).
+local function tail_lines(content, n)
+  local ls = content_lines(content)
   if #ls <= n then return ls end
   local tail = {}
   for i = #ls - n + 1, #ls do tail[#tail + 1] = ls[i] end
@@ -1191,14 +1200,316 @@ local function chrome_row(parts)
   return { text = table.concat(text), spans = spans }
 end
 
--- Project one element to its FULL layout: a list of { text, spans } rows in
+-- Pure, buffer-free building blocks for rendering an `edit` tool call as a
+-- diff: args extraction, the hunk rows, and the capped window. Everything here
+-- works on BYTES, because the args text arrives as chunks of JSON the model is
+-- still producing: any helper may be handed a prefix of the final document, so
+-- each one accepts truncation instead of raising.
+
+-- JSON escapes that map to exactly one byte, keyed by the byte after '\'.
+local JSON_ESCAPE_BYTES = {
+  [0x22] = '"', [0x2F] = '/', [0x5C] = '\\',
+  [0x62] = '\b', [0x66] = '\f', [0x6E] = '\n',
+  [0x72] = '\r', [0x74] = '\t',
+}
+
+-- The args keys a diff needs. Every other key is ignored (never an error).
+local EDIT_ARG_FIELDS = {
+  file_path = true, old_string = true, new_string = true, replace_all = true,
+}
+
+-- UTF-8 bytes for one code point. Surrogate pairs are combined by the caller,
+-- so cp is always a scalar here and the 4-byte branch is the widest.
+local function utf8_char(cp)
+  if cp < 0x80 then
+    return string.char(cp)
+  elseif cp < 0x800 then
+    return string.char(0xC0 + math.floor(cp / 0x40), 0x80 + cp % 0x40)
+  elseif cp < 0x10000 then
+    return string.char(
+      0xE0 + math.floor(cp / 0x1000),
+      0x80 + math.floor(cp / 0x40) % 0x40,
+      0x80 + cp % 0x40)
+  end
+  return string.char(
+    0xF0 + math.floor(cp / 0x40000),
+    0x80 + math.floor(cp / 0x1000) % 0x40,
+    0x80 + math.floor(cp / 0x40) % 0x40,
+    0x80 + cp % 0x40)
+end
+
+-- Byte index of the first non-whitespace byte at or after i (n + 1 past the end).
+local function skip_ws(text, i)
+  local n = #text
+  while i <= n do
+    local b = text:byte(i)
+    if b ~= 0x20 and b ~= 0x09 and b ~= 0x0A and b ~= 0x0D then return i end
+    i = i + 1
+  end
+  return i
+end
+
+-- Decode the JSON string literal whose opening quote is at byte i. Returns the
+-- decoded bytes, the index just past the literal, and whether the closing quote
+-- was present. Bytes outside a recognized escape are copied verbatim: no
+-- normalization, so a multi-byte character split across two args chunks is
+-- still byte-exact once its last byte arrives. When the bytes end inside the
+-- literal the decodable prefix comes back with closed = false (that partial
+-- value is what the live display shows); an escape cut off mid-sequence is
+-- dropped rather than half-decoded, since its remaining bytes are still to come.
+local function scan_json_string(text, i)
+  local n = #text
+  local out = {}
+  local j = i + 1
+  while j <= n do
+    local b = text:byte(j)
+    if b == 0x22 then
+      return table.concat(out), j + 1, true
+    elseif b == 0x5C then
+      local e = text:byte(j + 1)
+      local simple = e and JSON_ESCAPE_BYTES[e]
+      if simple then
+        out[#out + 1] = simple
+        j = j + 2
+      elseif e == 0x75 then
+        local hex = text:sub(j + 2, j + 5)
+        -- tonumber accepts a sign, leading space and 0x prefix, so the digits
+        -- are validated first: anything else is not a \u escape.
+        local cp = (#hex == 4 and hex:match('^%x+$')) and tonumber(hex, 16) or nil
+        if not cp then
+          if #hex < 4 then
+            -- Cut inside \uXXXX: the remaining digits may still stream in.
+            return table.concat(out), n + 1, false
+          end
+          -- Not a hex escape: keep the six bytes as they were written.
+          out[#out + 1] = text:sub(j, j + 5)
+          j = j + 6
+        elseif cp >= 0xD800 and cp <= 0xDBFF then
+          local low = tonumber(text:sub(j + 8, j + 11), 16)
+          if text:sub(j + 6, j + 7) == '\\u' and low and low >= 0xDC00 and low <= 0xDFFF then
+            out[#out + 1] = utf8_char(0x10000 + (cp - 0xD800) * 0x400 + (low - 0xDC00))
+            j = j + 12
+          else
+            -- A lone surrogate has no UTF-8 encoding; keep the escape text so
+            -- the bytes are preserved instead of being replaced.
+            out[#out + 1] = text:sub(j, j + 5)
+            j = j + 6
+          end
+        elseif cp >= 0xDC00 and cp <= 0xDFFF then
+          out[#out + 1] = text:sub(j, j + 5)
+          j = j + 6
+        else
+          out[#out + 1] = utf8_char(cp)
+          j = j + 6
+        end
+      elseif e == nil then
+        return table.concat(out), n + 1, false
+      else
+        -- Unknown escape: keep both bytes verbatim (byte-preserving).
+        out[#out + 1] = text:sub(j, j + 1)
+        j = j + 2
+      end
+    else
+      local k = j
+      while k <= n do
+        local c = text:byte(k)
+        if c == 0x22 or c == 0x5C then break end
+        k = k + 1
+      end
+      out[#out + 1] = text:sub(j, k - 1)
+      j = k
+    end
+  end
+  return table.concat(out), n + 1, false
+end
+
+-- Extract the fields a diff needs from the raw args text of an `edit` call:
+-- { file_path, old_string, new_string, replace_all }. A real tokenizer rather
+-- than a pattern search for the key names, because `old_string` can itself
+-- contain the text `"new_string":` and that must not be read as a key: only a
+-- decoded string followed by ':' counts as a key, and its value is then decoded
+-- with the same rules. Truncated input is normal (the model is still writing),
+-- so a field is nil until its key is reached, and no input makes this raise. A
+-- field only takes a value of its own type (a string for the text fields, a
+-- boolean for replace_all) and anything else reads as absent, the same state as
+-- a key that has not arrived yet. The scan is flat because edit args are a flat
+-- object; containers under unknown keys are skipped by depth so their inner
+-- strings cannot masquerade as top-level fields.
+local function scan_edit_args(text)
+  text = text or ''
+  local n = #text
+  local out = {}
+  local depth = 0
+  local i = 1
+  while i <= n do
+    local b = text:byte(i)
+    if b == 0x22 then
+      local name, after, name_closed = scan_json_string(text, i)
+      i = after
+      local colon = skip_ws(text, i)
+      if name_closed and text:byte(colon) == 0x3A then
+        local v = skip_ws(text, colon + 1)
+        if EDIT_ARG_FIELDS[name] and depth <= 1 then
+          if text:byte(v) == 0x22 then
+            local value, after_value = scan_json_string(text, v)
+            out[name] = value
+            i = after_value
+          elseif name == 'replace_all' then
+            if text:sub(v, v + 3) == 'true' then
+              out.replace_all = true
+              i = v + 4
+            elseif text:sub(v, v + 4) == 'false' then
+              out.replace_all = false
+              i = v + 5
+            end
+          end
+        end
+      end
+    else
+      if b == 0x7B or b == 0x5B then
+        depth = depth + 1
+      elseif (b == 0x7D or b == 0x5D) and depth > 0 then
+        depth = depth - 1
+      end
+      i = i + 1
+    end
+  end
+  return out
+end
+
+-- Rows of the single hunk old -> new: up to 2 leading context lines, every
+-- removed line, every added line, up to 2 trailing context lines. Common
+-- leading/trailing lines are trimmed exactly, and there is deliberately no
+-- LCS or recursion: an `edit` replaces one contiguous region, so two separated
+-- changes degrade to one remove block followed by one add block. Context is
+-- capped on both sides so a large unchanged surrounding region cannot eat the
+-- display budget. Row text is the raw line (NUL already escaped by lines(), so
+-- each row stays one buffer row) and carries no prefix — the layout prepends
+-- '  ' / '- ' / '+ ' so the text and its row highlight come from one place.
+-- Returns {} for identical inputs (an empty hunk, not an error).
+local function hunk_rows(old, new)
+  local old_lines = content_lines(old)
+  local new_lines = content_lines(new)
+  local last_common = math.min(#old_lines, #new_lines)
+  local prefix = 0
+  while prefix < last_common and old_lines[prefix + 1] == new_lines[prefix + 1] do
+    prefix = prefix + 1
+  end
+  local suffix = 0
+  while suffix < last_common - prefix
+    and old_lines[#old_lines - suffix] == new_lines[#new_lines - suffix] do
+    suffix = suffix + 1
+  end
+  -- Nothing changed at all: an empty hunk, not a block of context rows (the
+  -- prefix and suffix would otherwise cover the same lines twice).
+  if prefix == #old_lines and prefix == #new_lines then return {} end
+  local rows = {}
+  -- Tail of the common prefix: where the change starts.
+  for i = math.max(1, prefix - 1), prefix do
+    rows[#rows + 1] = { kind = 'context', text = old_lines[i] }
+  end
+  for i = prefix + 1, #old_lines - suffix do
+    rows[#rows + 1] = { kind = 'del', text = old_lines[i] }
+  end
+  for i = prefix + 1, #new_lines - suffix do
+    rows[#rows + 1] = { kind = 'add', text = new_lines[i] }
+  end
+  -- Head of the common suffix: where the change lands.
+  local tail_start = #old_lines - suffix + 1
+  for i = tail_start, math.min(#old_lines, tail_start + 1) do
+    rows[#rows + 1] = { kind = 'context', text = old_lines[i] }
+  end
+  return rows
+end
+
+-- Capped view of the hunk rows. `cap` nil means unlimited (the detail window).
+-- The window direction is what differs between the two live states: while the
+-- args stream, the newest rows matter, so the tail is kept and the marker is
+-- prepended; once the args are complete, where the change starts matters, so
+-- the head is kept and the marker is appended. The marker is one extra row on
+-- top of cap and never starts with '► ', so it reads as content inside the
+-- fence rather than as a section header.
+local function diff_window(rows, cap, streaming)
+  local n = #rows
+  local out = {}
+  if not cap or n <= cap then
+    for i = 1, n do out[i] = rows[i] end
+    return out
+  end
+  local omitted = n - cap
+  local noun = omitted == 1 and 'line' or 'lines'
+  if streaming then
+    out[1] = { kind = 'marker',
+      text = string.format('... %d earlier diff %s (press o for full diff)', omitted, noun) }
+    for i = n - cap + 1, n do out[#out + 1] = rows[i] end
+  else
+    for i = 1, cap do out[#out + 1] = rows[i] end
+    out[#out + 1] = { kind = 'marker',
+      text = string.format('... %d more diff %s (press o for full diff)', omitted, noun) }
+  end
+  return out
+end
+
+-- Width-independent diff work memoized per element. element_layout runs
+-- several times per render (directly, via element_chrome_spans, and via the
+-- row-highlight lookup) and each run would otherwise re-scan the args. The key
+-- is the element table (weak keys, like renderer_state, so a discarded model
+-- releases its entries) plus #args, the only input to the scan; the per-call
+-- inputs (cap, args_open, full_input, width) are applied by slicing these rows
+-- and are never cached. Nothing is stored on the element itself: the model is
+-- serialized and traversed by other code paths.
+local edit_diff_cache = setmetatable({}, { __mode = 'k' })
+
+-- The cached { args_len, rows, meta } for one tool-call element, recomputed
+-- only when the args text grew. meta is the scanner result (file_path,
+-- replace_all, the decoded values).
+local function edit_diff_for(el)
+  local args = content_of(el, 'args')
+  local entry = edit_diff_cache[el]
+  if entry and entry.args_len == #args then return entry end
+  local meta = scan_edit_args(args)
+  entry = { args_len = #args, rows = hunk_rows(meta.old_string, meta.new_string), meta = meta }
+  edit_diff_cache[el] = entry
+  return entry
+end
+
+-- The last '/'-, '.'- or '\'-separated segment of a tool name: tools can be
+-- namespaced ('mcp.server.edit'), and only the final segment names the tool.
+-- A missing/empty name matches nothing, so it is never the edit tool.
+local function tool_basename(name)
+  return (tostring(name or ''):match('([^%./\\]+)$')) or ''
+end
+
+-- Whether the scanned args have anything to show: a decoded old_string (a
+-- removal) or a decoded new_string (an addition; empty is a pure deletion).
+-- Neither decoded means the args so far only carry the file_path, which is the
+-- state that still shows the raw args tail.
+local function edit_diff_usable(meta)
+  local old, new = meta.old_string, meta.new_string
+  return (old ~= nil and #old > 0) or (new ~= nil and #new > 0)
+end
+
+-- Prefix and row group per hunk row kind: one table feeds both the row text
+-- and its highlight, so a row can never be tinted as something it does not
+-- read as. The marker carries no prefix — it must read as content inside the
+-- fence, not as a chrome row.
+local DIFF_ROW_STYLE = {
+  context = { prefix = '  ', hl = 'TCodeToolArgs' },
+  del = { prefix = '- ', hl = 'TCodeDiffDelete' },
+  add = { prefix = '+ ', hl = 'TCodeDiffAdd' },
+  marker = { prefix = '', hl = 'TCodeTokens' },
+}
+
+-- Project one element to its FULL layout: a list of { text, spans, hl } rows in
 -- buffer order. spans (nil for content rows) carries the col-range chrome
--- highlight parts. This is the single source of truth for project_element
--- (which concatenates the texts) and element_chrome_spans (which maps the
--- ranges to element-relative rows), so the chrome text and its colors can
--- never drift. Every chrome line starts with '► '; content lines (fences,
--- message/tool/subagent data) carry no prefix. Fences stay content and the
--- new section headers sit outside the fence pairs. ctx = { width,
+-- highlight parts; hl (nil for every row that is not a diff row) is the
+-- full-row group for content rows whose color is per-row rather than per-type.
+-- This is the single source of truth for project_element (which concatenates
+-- the texts), element_chrome_spans (which maps the ranges to element-relative
+-- rows) and element_row_highlights (which maps the hl fields), so text and
+-- colors can never drift. Every chrome line starts with '► '; content lines
+-- (fences, diff rows, message/tool/subagent data) carry no prefix. Fences stay
+-- content and the section headers sit outside the fence pairs. ctx = { width,
 -- media_root } carries only read-only rendering inputs: the media URI
 -- root. No buffer / extmark / navigation state.
 local function element_layout(el, ctx)
@@ -1251,7 +1562,34 @@ local function element_layout(el, ctx)
       return tail_capped(text, width, 5)
     end
     local args = content_of(el, 'args')
-    if args ~= '' then
+    -- An edit call reads better as a diff than as raw JSON. Every other tool,
+    -- and an edit whose args do not decode to a value yet, keeps the Param
+    -- section below.
+    local diff
+    if args ~= '' and tool_basename(el.tool_name) == 'edit' then
+      diff = edit_diff_for(el)
+    end
+    if diff and edit_diff_usable(diff.meta) then
+      local meta = diff.meta
+      local header = { { '► Diff', 'TCodeTokens' } }
+      local path = single_line(meta.file_path)
+      if path ~= '' then header[#header + 1] = { ' ' .. path, 'TCodeToolArgs' } end
+      if meta.replace_all == true then
+        header[#header + 1] = { ' (all occurrences)', 'TCodeTokens' }
+      end
+      out[#out + 1] = chrome_row(header)
+      out[#out + 1] = c_row(TC_FENCE)
+      -- The detail window (full_input) shows the whole hunk; the pane caps it.
+      -- An open args stream keeps the newest rows visible, a closed one the
+      -- start of the change.
+      local cap = 10
+      if el.full_input then cap = nil end
+      for _, row in ipairs(diff_window(diff.rows, cap, el.args_open)) do
+        local style = DIFF_ROW_STYLE[row.kind]
+        out[#out + 1] = { text = style.prefix .. row.text, hl = style.hl }
+      end
+      out[#out + 1] = c_row(TC_FENCE)
+    elseif args ~= '' then
       out[#out + 1] = chrome_row({ { '► Param', 'TCodeTokens' } })
       out[#out + 1] = c_row(TC_FENCE)
       for _, l in ipairs(section_lines(args)) do out[#out + 1] = c_row(l) end
@@ -1406,6 +1744,20 @@ local function element_chrome_spans(el, ctx)
   return spans
 end
 
+-- Pure row-group lookup: element-relative { row, group } for the layout rows
+-- that carry an hl (the diff rows). Derived from the SAME layout builder as
+-- project_element, so a row's group always describes the row's own text and
+-- the highlight pass never has to classify buffer text. Fences never carry an
+-- hl, so they never get a full-row group.
+local function element_row_highlights(el, ctx)
+  local layout = element_layout(el, ctx)
+  local rows = {}
+  for r, row in ipairs(layout) do
+    if row.hl then rows[#rows + 1] = { row = r - 1, group = row.hl } end
+  end
+  return rows
+end
+
 -- Pure navigation intent: what `o` does on a row of the layout.
 -- 'thinking' toggles a thinking block from ANY row, in either state;
 -- 'detail' opens the tool-call / subagent detail view from EVERY row of a
@@ -1450,11 +1802,12 @@ end
 
 -- Per-row highlight decoration for an element's projected lines. Chrome rows
 -- get col-range marks from element_chrome_spans (priority 150, beating the
--- treesitter @comment default of 100); content rows keep the full-row logic:
--- the element's group (subagent error rows get TCodeError; the whole retry
--- block is TCodeTokens). Every mark is tracked in state.hl so a rebuild can
--- delete and re-apply them. Extmarks are decoration only — they never carry
--- position, text, or navigation data.
+-- treesitter @comment default of 100); rows the layout assigned an hl (the
+-- diff rows) get their full-row group at the same priority; every other
+-- content row keeps the per-type logic (subagent error rows get TCodeError;
+-- the whole retry block is TCodeTokens). Every mark is tracked in state.hl so
+-- a rebuild can delete and re-apply them. Extmarks are decoration only — they
+-- never carry position, text, or navigation data.
 local function apply_element_highlights(state, buf, ns, el, ctx, start_row, el_lines)
   -- Structural chrome-row set: element-relative indices of the layout's
   -- chrome rows (from the SAME layout builder that produced el_lines), so
@@ -1464,6 +1817,19 @@ local function apply_element_highlights(state, buf, ns, el, ctx, start_row, el_l
   for _, sp in ipairs(element_chrome_spans(el, ctx)) do
     chrome[sp.row] = true
     add_tracked_col_highlight(state, el, buf, ctx.ns, sp.group, start_row + sp.row, sp.start_col, sp.end_col)
+  end
+  -- Rows the layout already grouped. Priority 150 for the same reason as the
+  -- chrome spans: the markdown injection over content regions would otherwise
+  -- win. Claimed rows are skipped by the per-type fallback below, so a diff
+  -- row whose payload happens to be a fence can never be re-classified. Only a
+  -- tool_call's diff rows carry a layout hl, so other types skip the extra
+  -- layout build.
+  local claimed = {}
+  if el.type == 'tool_call' then
+    for _, rh in ipairs(element_row_highlights(el, ctx)) do
+      claimed[rh.row] = true
+      add_tracked_highlight(state, el, buf, ns, rh.group, start_row + rh.row, 150)
+    end
   end
   local function is_content(i)
     -- Every non-chrome row except fence rows is content (i is 1-based; the
@@ -1481,21 +1847,23 @@ local function apply_element_highlights(state, buf, ns, el, ctx, start_row, el_l
     group = 'TCodeError'
   end
   for i = 1, #el_lines do
-    local line = el_lines[i]
-    local g
-    if el.type == 'subagent' then
-      if line:match('^Error: ') then
-        g = 'TCodeError'
-      elseif is_content(i) then
-        g = 'TCodeToolArgs'
+    if not claimed[i - 1] then
+      local line = el_lines[i]
+      local g
+      if el.type == 'subagent' then
+        if line:match('^Error: ') then
+          g = 'TCodeError'
+        elseif is_content(i) then
+          g = 'TCodeToolArgs'
+        end
+      elseif el.type == 'retry' then
+        g = 'TCodeTokens'
+      elseif group and is_content(i) then
+        g = group
       end
-    elseif el.type == 'retry' then
-      g = 'TCodeTokens'
-    elseif group and is_content(i) then
-      g = group
-    end
-    if g then
-      add_tracked_highlight(state, el, buf, ns, g, start_row + i - 1)
+      if g then
+        add_tracked_highlight(state, el, buf, ns, g, start_row + i - 1)
+      end
     end
   end
 end
@@ -2016,6 +2384,8 @@ local function setup_highlights(statusline_fg, statusline_ctermfg)
   vim.api.nvim_set_hl(0, 'TCodeTokens', { fg = '#5c6370', italic = true, ctermfg = 242 })
   vim.api.nvim_set_hl(0, 'TCodeSuccess', { fg = '#98c379', bold = true, ctermfg = 114 })
   vim.api.nvim_set_hl(0, 'TCodeError', { fg = '#e06c75', bold = true, ctermfg = 168 })
+  vim.api.nvim_set_hl(0, 'TCodeDiffAdd', { fg = '#98c379', bg = '#24361f', ctermfg = 114, ctermbg = 22 })
+  vim.api.nvim_set_hl(0, 'TCodeDiffDelete', { fg = '#e06c75', bg = '#3a2224', ctermfg = 168, ctermbg = 52 })
   vim.api.nvim_set_hl(0, 'TCodePermission', { fg = '#e5c07b', bold = true, ctermfg = 11 })
   vim.api.nvim_set_hl(0, 'TCodeSystemInfo', { fg = '#61afef', italic = true, ctermfg = 75 })
   vim.api.nvim_set_hl(0, 'TCodeSystemWarning', { fg = '#e5c07b', bold = true, ctermfg = 180 })

@@ -187,7 +187,7 @@ tcode opens a four-pane layout inside your tmux window:
 +------------------+------------------+
 ```
 
-- **display** (top-left) -- shows the conversation history. This is a neovim buffer, so all your normal neovim navigation works (scrolling, searching with `/`, etc.).
+- **display** (top-left) -- shows the conversation history. This is a neovim buffer, so all your normal neovim navigation works (scrolling, searching with `/`, etc.). Each `edit` tool call shows a colored diff of the removed and added lines instead of the raw arguments JSON; a large diff is clipped in the pane (press **o** on the block for the full diff).
 - **edit** (bottom-left) -- where you compose messages. Also a neovim buffer, so you have full neovim editing (motions, registers, visual mode, etc.).
 - **tree** (top-right) -- shows the subagent and tool call hierarchy.
 - **permission** (bottom-right) -- where tool permission prompts appear.
