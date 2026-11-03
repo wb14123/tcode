@@ -1,10 +1,16 @@
+import { readFileSync } from 'node:fs';
 import { marked } from 'marked';
 import katex from 'katex';
 // markdown.ts registers its math tokenizers with marked as a side effect of import.
 import './src/markdown.ts';
 import { TimelineStore } from './src/timeline-store.ts';
 import { StreamEventBatcher } from './src/stream-event-batcher.ts';
-import { ConversationTimelineBuilder, parseStreamLine } from './src/messages.ts';
+import {
+  ConversationTimelineBuilder,
+  parseStreamLine,
+  renderRateLimitAlert,
+  renderTimelineItem,
+} from './src/messages.ts';
 import { specialToolArgsPresentation } from './src/tool-args.ts';
 import { subagentRowTitle } from './src/timeline-render-helpers.ts';
 import { mediaUrl } from './src/api.ts';
@@ -683,6 +689,150 @@ function validateMediaUrl() {
   );
 }
 
+// Flattens a lit template result (and any nested results or directives) into its
+// text, so items can be asserted without a DOM.
+function templateText(result) {
+  if (Array.isArray(result)) {
+    return result.map(templateText).join('');
+  }
+  if (result && typeof result === 'object' && Array.isArray(result.strings) && Array.isArray(result.values)) {
+    return result.strings.reduce(
+      (text, chunk, index) =>
+        text + chunk + (index < result.values.length ? templateText(result.values[index]) : ''),
+      '',
+    );
+  }
+  if (result && typeof result === 'object' && Array.isArray(result.values)) {
+    return result.values.map(templateText).join('');
+  }
+  return typeof result === 'string' || typeof result === 'number' ? String(result) : '';
+}
+
+function validateRateLimitWait() {
+  // Built from local wall-clock parts so the expected text holds in any timezone.
+  const resetAtEpochSecs = new Date(2026, 10, 3, 14, 35).getTime() / 1000;
+  const builder = new ConversationTimelineBuilder();
+  builder.appendEvent(rawEvent('AssistantMessageStart', { msg_id: 1 }));
+  builder.appendEvent(
+    rawEvent('LLMRateLimited', {
+      attempt: 2,
+      max_retries: 5,
+      reason: 'usage limit reached\nresets with the 5h window',
+      reset_at_epoch_secs: resetAtEpochSecs,
+      wait_secs: 7997,
+    }),
+  );
+
+  assert(builder.timeline.length === 1, 'a rate-limit wait renders before the assistant has any content');
+  let item = builder.timeline[0];
+  assert(item.kind === 'assistant', 'LLMRateLimited attaches to the assistant item');
+  assert(
+    item.rateLimit?.reason === 'usage limit reached\nresets with the 5h window',
+    'LLMRateLimited stores the multi-line reason',
+  );
+  assert(item.rateLimit?.resetAtEpochSecs === resetAtEpochSecs, 'LLMRateLimited stores the reset epoch');
+  assert(item.rateLimit?.waitSecs === 7997, 'LLMRateLimited stores the wait duration');
+  assert(
+    item.rateLimit && !('attempt' in item.rateLimit) && !('maxRetries' in item.rateLimit),
+    'the stored wait carries only the fields it renders',
+  );
+
+  const rendered = templateText(renderTimelineItem(item, { sessionId: 'sid-1' }));
+  assert(
+    rendered.includes(
+      '<div class="inline-alert warning multiline">Rate limited; retrying at 2026-11-03 14:35 (~2h 13m) -- usage limit reached\nresets with the 5h window</div>',
+    ),
+    `rate-limit banner renders the reset time and wait: ${rendered}`,
+  );
+
+  const revision = builder.store.getItem(item.id)?.revision;
+  builder.appendEvent(rawEvent('LLMRateLimitResumed', {}));
+  assert(builder.timeline.length === 1, 'LLMRateLimitResumed adds no timeline item');
+  item = builder.timeline[0];
+  assert(item.kind === 'assistant', 'LLMRateLimitResumed leaves the assistant item in place');
+  assert(item.rateLimit?.waitSecs === 7997, 'LLMRateLimitResumed leaves the wait untouched');
+  assert(builder.store.getItem(item.id)?.revision === revision, 'LLMRateLimitResumed does not touch the assistant');
+
+  builder.appendEvents([
+    rawEvent('AssistantMediaGenerating', { media_id: 'img-1' }),
+    rawEvent('AssistantMediaOutput', {
+      media_id: 'img-1',
+      end_status: 'Succeeded',
+      media: { relative_path: 'abc.png', media_type: 'image/png' },
+    }),
+  ]);
+  item = builder.timeline[0];
+  assert(item.kind === 'assistant' && item.contentBlocks.length === 1, 'the rate-limit row keeps later content');
+  const renderedWithContent = templateText(renderTimelineItem(item, { sessionId: 'sid-1' }));
+  assert(
+    renderedWithContent.indexOf('Rate limited; retrying') <
+      renderedWithContent.indexOf('generated-image'),
+    `the rate-limit banner stays above the content: ${renderedWithContent}`,
+  );
+
+  builder.appendEvent(
+    rawEvent('LLMRateLimited', {
+      attempt: 3,
+      max_retries: 5,
+      reason: 'still limited',
+      reset_at_epoch_secs: resetAtEpochSecs,
+      wait_secs: 780,
+    }),
+  );
+  item = builder.timeline[0];
+  assert(item.kind === 'assistant' && item.rateLimit?.waitSecs === 780, 'a later wait replaces the earlier one');
+  assert(builder.timeline.length === 1, 'a later wait reuses the same assistant item');
+  const replaced = templateText(renderRateLimitAlert(item.rateLimit));
+  assert(
+    replaced.includes('(~13m) -- still limited</div>'),
+    `the replaced wait renders the new duration and reason: ${replaced}`,
+  );
+  assert(!replaced.includes('2h 13m'), 'the replaced wait is no longer rendered');
+
+  builder.appendEvent(
+    rawEvent('LLMRateLimited', {
+      attempt: 4,
+      max_retries: 5,
+      reason: 'still limited',
+      reset_at_epoch_secs: resetAtEpochSecs,
+      wait_secs: 45,
+    }),
+  );
+  item = builder.timeline[0];
+  const shortWait = templateText(renderRateLimitAlert(item.rateLimit));
+  assert(shortWait.includes('(~45s) -- still limited</div>'), `waits under a minute render in seconds: ${shortWait}`);
+
+  const waitAlert = (waitSecs) =>
+    templateText(
+      renderRateLimitAlert({ reason: 'weekly limit', resetAtEpochSecs, waitSecs }),
+    );
+  const weeklyWait = waitAlert(604800);
+  assert(weeklyWait.includes('(~7d 0h)'), `a full week renders in days: ${weeklyWait}`);
+  const subDayWait = waitAlert(86399);
+  assert(subDayWait.includes('(~23h 59m)'), `a sub-day wait keeps hours: ${subDayWait}`);
+  const flooredWait = waitAlert(167940);
+  assert(flooredWait.includes('(~1d 22h)'), `days and hours both floor: ${flooredWait}`);
+
+  const styles = readFileSync(new URL('./src/styles.css', import.meta.url), 'utf8');
+  const alertRule = /\.inline-alert\.multiline\s*\{([^}]*)\}/.exec(styles)?.[1] ?? '';
+  assert(
+    /white-space:\s*pre-wrap/.test(alertRule),
+    `.inline-alert.multiline preserves the reason's line breaks: ${alertRule}`,
+  );
+}
+
+function validateLiveAssistantRowRateLimitAlert() {
+  // The live row uses extension-less imports and a DOM, so it cannot be loaded
+  // here; assert the wiring and its position in the component source instead.
+  const source = readFileSync(new URL('./src/components/timeline.ts', import.meta.url), 'utf8');
+  const alert = source.indexOf('renderRateLimitAlert(');
+  assert(alert !== -1, 'the live assistant row renders the rate-limit alert');
+  assert(
+    alert < source.indexOf('contentBlocks.map('),
+    'the live assistant row renders the rate-limit alert above the content',
+  );
+}
+
 validateTimelineStore();
 validateWireFormatNormalization();
 validateSubagentInputAggregation();
@@ -692,6 +842,8 @@ validateSpecialToolArgsPresentation();
 validateSubagentPromptPreview();
 validateComposerEnterDecision();
 validateMediaUrl();
+validateRateLimitWait();
+validateLiveAssistantRowRateLimitAlert();
 validateMathRendering();
 await validateStreamEventBatcher();
 console.log('frontend test passed');

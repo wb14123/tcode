@@ -4,8 +4,11 @@
 //! to retrieve rate-limit window utilisation and reset times.
 
 use anyhow::{Context, Result};
+use chrono::{DateTime, Utc};
 use llm_rs::llm::CLAUDE_CLI_USER_AGENT;
 use serde::{Deserialize, Serialize};
+
+use crate::{RateLimitSnapshot, RateLimitWindow};
 
 /// Top-level response from `GET /api/oauth/usage`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -62,19 +65,57 @@ pub async fn fetch_usage(
     Ok(usage)
 }
 
-/// Format a [`SubscriptionUsage`] into a human-readable one-line summary.
+/// Convert the wire payload into the provider-neutral rate-limit snapshot.
+///
+/// `resets_at` timestamps are parsed here, so the rest of the crate works with
+/// [`DateTime`] values only.
+pub fn to_rate_limit_snapshot(usage: &SubscriptionUsage) -> RateLimitSnapshot {
+    let windows: Vec<RateLimitWindow> = [
+        ("5h", usage.five_hour.as_ref()),
+        ("7d", usage.seven_day.as_ref()),
+        ("7d sonnet", usage.seven_day_sonnet.as_ref()),
+        ("7d opus", usage.seven_day_opus.as_ref()),
+    ]
+    .into_iter()
+    .filter_map(|(name, window)| {
+        window.map(|window| RateLimitWindow {
+            name: name.to_string(),
+            utilization: window.utilization,
+            reset_at: window.resets_at.as_deref().and_then(parse_resets_at),
+        })
+    })
+    .collect();
+
+    RateLimitSnapshot {
+        limit_reached: windows
+            .iter()
+            .any(|window| window.utilization >= crate::EXHAUSTED_UTILIZATION),
+        windows,
+    }
+}
+
+/// Parse an RFC 3339 reset timestamp as reported by the usage endpoint.
+fn parse_resets_at(resets_at: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(resets_at)
+        .ok()
+        .map(|reset_at| reset_at.with_timezone(&Utc))
+}
+
+/// Format a [`RateLimitSnapshot`] into a human-readable one-line summary.
 ///
 /// Shows the 5-hour window utilisation percentage and time until reset.
-pub fn format_usage(usage: &SubscriptionUsage) -> String {
-    if let Some(ref window) = usage.five_hour {
-        let pct = window.utilization.round() as i64;
-        let reset_str = window
-            .resets_at
-            .as_deref()
-            .and_then(crate::format_resets_in)
-            .unwrap_or_else(|| "unknown".to_string());
-        format!("{}% used, resets in {}", pct, reset_str)
-    } else {
-        "no usage data".to_string()
-    }
+pub fn format_usage(snapshot: &RateLimitSnapshot) -> String {
+    let Some(window) = snapshot.window("5h") else {
+        return "no usage data".to_string();
+    };
+
+    let reset_str = window
+        .reset_at
+        .map(crate::format_duration_until)
+        .unwrap_or_else(|| "unknown".to_string());
+    format!(
+        "{}% used, resets in {}",
+        window.utilization.round() as i64,
+        reset_str
+    )
 }

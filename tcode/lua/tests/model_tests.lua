@@ -344,6 +344,7 @@ test('invariant: expanded thinking collapses before every new element variant', 
     { 'SystemMessage', { level = 'Info', message = 'sys' } },
     { 'AssistantMessageStart', {} },
     { 'LLMRetry', { attempt = 1, max_retries = 2, reason = 'r' } },
+    { 'LLMRateLimited', { attempt = 1, max_retries = 2, reason = 'r', reset_at_epoch_secs = 1, wait_secs = 2 } },
     { 'AssistantMediaOutput', { media = { relative_path = 'x.png' } } },
     { 'UserMessage', { content = 'u' } },
     { 'AssistantRequestEnd', { total_input_tokens = 1, total_output_tokens = 2 } },
@@ -873,6 +874,44 @@ test('elements: field sweep across user_message/retry/media/end_marker/system_me
   local d6 = T.apply(m, { SystemMessage = { level = 'Error', message = 'fatal' } })
   local sm = d6.added[1]
   check(sm.level == 'Error' and sm.message == 'fatal', 'system_message level/message')
+end)
+
+test('LLMRateLimited: rate_limited element carries the wait fields, resumed is a no-op', function()
+  local m = T.reset_model()
+  T.apply(m, { AssistantMessageStart = {} })
+  local d = T.apply(m, { LLMRateLimited = {
+    attempt = 2, max_retries = 3, reason = 'usage limit reached',
+    reset_at_epoch_secs = 1700000000, wait_secs = 7980,
+  } })
+  check(#d.added == 1 and d.added[1].type == 'rate_limited', 'rate_limited element added')
+  local el = d.added[1]
+  check(el.reason == 'usage limit reached', 'rate_limited reason')
+  check(el.reset_at_epoch_secs == 1700000000 and el.wait_secs == 7980, 'rate_limited reset/wait fields')
+  check(m.tail == el, 'tail is the rate_limited element')
+  local d2 = T.apply(m, { LLMRateLimitResumed = {} })
+  check(#d2.added == 0 and #d2.updated_all == 0 and #d2.updated_content == 0, 'resumed: empty diff')
+  check(#m.elements == 2 and m.tail == el, 'resumed leaves the model unchanged')
+
+  local m2 = T.reset_model()
+  local d3 = T.apply(m2, { LLMRateLimited = {} })
+  local defaults = d3.added[1]
+  check(defaults.reason == '', 'rate_limited default reason')
+  check(defaults.reset_at_epoch_secs == 0 and defaults.wait_secs == 0, 'rate_limited numeric defaults')
+end)
+
+test('LLMRateLimited: attaches to the assistant message the retry streams into', function()
+  local m = T.reset_model()
+  local am = T.apply(m, { AssistantMessageStart = {} }).added[1]
+  local el = T.apply(m, { LLMRateLimited = {
+    reason = 'usage limit reached', reset_at_epoch_secs = 1700000000, wait_secs = 7980,
+  } }).added[1]
+  check(el.attach_to == am.id, 'rate_limited tagged attach_to = the streaming am')
+
+  local m2 = T.reset_model()
+  T.apply(m2, { AssistantMessageStart = {} })
+  T.apply(m2, { AssistantMessageEnd = { end_status = 'Failed' } })
+  local el2 = T.apply(m2, { LLMRateLimited = { reason = 'limit' } }).added[1]
+  check(el2.attach_to == nil, 'untagged when the tail is not an assistant message')
 end)
 
 -- ------------------------------------------------------------ no-op variants

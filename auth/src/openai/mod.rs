@@ -180,12 +180,17 @@ impl crate::OAuthTokenManager for TokenManager {
         crate::BaseTokenManager::client(self)
     }
 
-    async fn fetch_formatted_usage(&self) -> anyhow::Result<Option<String>> {
+    async fn fetch_rate_limit_snapshot(&self) -> anyhow::Result<Option<crate::RateLimitSnapshot>> {
         let token = self.get_access_token().await?;
         let account_id = self.account_id().await;
         let client = crate::BaseTokenManager::client(self);
-        let payload = usage::fetch_usage(client, &token, account_id.as_deref()).await?;
-        Ok(Some(usage::format_usage(&payload)))
+        let usage = usage::fetch_usage(client, &token, account_id.as_deref()).await?;
+        Ok(Some(usage::to_rate_limit_snapshot(&usage)))
+    }
+
+    async fn fetch_formatted_usage(&self) -> anyhow::Result<Option<String>> {
+        let snapshot = self.fetch_rate_limit_snapshot().await?;
+        Ok(snapshot.as_ref().map(usage::format_usage))
     }
 }
 

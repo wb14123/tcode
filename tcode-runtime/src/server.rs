@@ -1880,6 +1880,40 @@ fn run_event_writer(
                         .context("Failed to append display event")?;
                 }
 
+                Message::LLMRateLimited {
+                    reset_at_epoch_secs,
+                    ..
+                } => {
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append display event")?;
+                    match chrono::DateTime::from_timestamp(*reset_at_epoch_secs, 0) {
+                        Some(reset_at) => {
+                            let reset_at = reset_at.with_timezone(&chrono::Local);
+                            let text = format!(
+                                "Rate limited; retrying at {}",
+                                reset_at.format("%Y-%m-%d %H:%M")
+                            );
+                            tokio::fs::write(&status_file, text)
+                                .await
+                                .context("Failed to write status file")?;
+                        }
+                        None => tracing::warn!(
+                            reset_at_epoch_secs,
+                            "rate limit reset timestamp out of range; status unchanged"
+                        ),
+                    }
+                }
+
+                Message::LLMRateLimitResumed {} => {
+                    append_event(&display_file, &event)
+                        .await
+                        .context("Failed to append display event")?;
+                    tokio::fs::write(&status_file, "Streaming...")
+                        .await
+                        .context("Failed to write status file")?;
+                }
+
                 _ => {
                     // All other events: write to main display only
                     append_event(&display_file, &event)

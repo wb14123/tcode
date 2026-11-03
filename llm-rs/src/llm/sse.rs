@@ -1,5 +1,6 @@
 //! Shared SSE (Server-Sent Events) stream parser for HTTP streaming responses.
 
+use std::fmt;
 use std::pin::Pin;
 
 use async_stream::stream;
@@ -13,15 +14,59 @@ pub(crate) struct SseEvent {
     pub data: String,
 }
 
-/// Validate an HTTP response, returning an error string on request failure or non-success status.
+/// A non-success HTTP response.
+///
+/// The status, headers and body are kept so providers can inspect rate-limit
+/// metadata instead of losing it to a formatted string.
+pub(crate) struct HttpError {
+    pub status: reqwest::StatusCode,
+    pub headers: reqwest::header::HeaderMap,
+    pub body: String,
+}
+
+impl fmt::Display for HttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "API error {}: {}", self.status, self.body)
+    }
+}
+
+/// Why a request produced no streaming response.
+pub(crate) enum CheckError {
+    /// The request could not be sent or the connection failed.
+    Request(String),
+    /// The server answered with a non-success status.
+    Http(HttpError),
+}
+
+impl fmt::Display for CheckError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            CheckError::Request(message) => f.write_str(message),
+            CheckError::Http(error) => error.fmt(f),
+        }
+    }
+}
+
+/// Validate an HTTP response, returning an error on request failure or non-success status.
 pub(crate) async fn check_response(
     result: Result<reqwest::Response, reqwest::Error>,
-) -> Result<reqwest::Response, String> {
-    let response = result.map_err(|e| format!("Request failed: {:?}", e))?;
+) -> Result<reqwest::Response, CheckError> {
+    let response = result.map_err(|e| CheckError::Request(format!("Request failed: {:?}", e)))?;
     if !response.status().is_success() {
         let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(format!("API error {}: {}", status, body));
+        let headers = response.headers().clone();
+        let body = match response.text().await {
+            Ok(body) => body,
+            Err(error) => {
+                tracing::warn!(%status, %error, "Failed to read error response body");
+                String::new()
+            }
+        };
+        return Err(CheckError::Http(HttpError {
+            status,
+            headers,
+            body,
+        }));
     }
     Ok(response)
 }

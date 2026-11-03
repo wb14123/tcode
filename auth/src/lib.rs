@@ -8,15 +8,22 @@
 pub mod claude;
 pub mod openai;
 
+mod rate_limit_source;
+
+#[cfg(test)]
+mod rate_limit_tests;
+
 #[cfg(test)]
 mod token_storage_tests;
+
+pub use rate_limit_source::rate_limit_reset_source;
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result};
-use chrono::{DateTime, TimeZone, Utc};
+use chrono::{DateTime, Utc};
 use tokio::sync::RwLock;
 
 /// OAuth providers with file-backed token storage.
@@ -235,58 +242,122 @@ impl<R: TokenRefresher> llm_rs::llm::TokenProvider for BaseTokenManager<R> {
 }
 
 // ---------------------------------------------------------------------------
+// Subscription rate-limit snapshots
+// ---------------------------------------------------------------------------
+
+/// Utilisation percentage at or above which a window is fully consumed.
+pub(crate) const EXHAUSTED_UTILIZATION: f64 = 100.0;
+
+/// A single rate-limit window of a subscription.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateLimitWindow {
+    /// Window label as reported by the provider: `"5h"`, `"7d"`,
+    /// `"7d sonnet"`, `"7d opus"`, `"primary"`, `"secondary"`.
+    pub name: String,
+    /// Percentage of the window capacity consumed (0–100).
+    pub utilization: f64,
+    /// Moment at which the window resets, if the provider reports one.
+    pub reset_at: Option<DateTime<Utc>>,
+}
+
+/// Provider-neutral view of a subscription's rate-limit state.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RateLimitSnapshot {
+    /// Windows reported by the provider, in the provider's order.
+    pub windows: Vec<RateLimitWindow>,
+    /// Whether the provider reports that the subscription is out of quota.
+    pub limit_reached: bool,
+}
+
+impl RateLimitSnapshot {
+    /// Look up one window by its label.
+    pub fn window(&self, name: &str) -> Option<&RateLimitWindow> {
+        self.windows.iter().find(|window| window.name == name)
+    }
+
+    /// Latest reset among windows that are at or over the limit, ignoring
+    /// resets that have already passed `now`.
+    ///
+    /// A request only succeeds again once every exhausted window has reset, so
+    /// the latest of them wins. When the provider reports `limit_reached` but no
+    /// window reports full utilisation, every window's reset is considered. A
+    /// usage snapshot can be minutes old, so a reset in the past says nothing
+    /// about the next one and yields `None`.
+    pub fn blocking_reset_at(&self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+        let mut exhausted = self
+            .windows
+            .iter()
+            .filter(|window| window.utilization >= EXHAUSTED_UTILIZATION)
+            .peekable();
+        let blocking: &mut dyn Iterator<Item = &RateLimitWindow> = if exhausted.peek().is_some() {
+            &mut exhausted
+        } else if self.limit_reached {
+            &mut self.windows.iter()
+        } else {
+            return None;
+        };
+
+        blocking
+            .filter_map(|window| window.reset_at)
+            .filter(|reset_at| *reset_at > now)
+            .max()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // OAuthTokenManager trait
 // ---------------------------------------------------------------------------
 
 /// Common trait for OAuth token managers across providers.
 ///
 /// Extends [`llm_rs::llm::TokenProvider`] with provider-specific
-/// HTTP client access and formatted usage fetching.
+/// HTTP client access and subscription usage fetching.
 #[async_trait::async_trait]
 pub trait OAuthTokenManager: llm_rs::llm::TokenProvider + Send + Sync {
     /// Return a reference to the shared HTTP client.
     fn client(&self) -> &reqwest::Client;
 
-    /// Fetch usage data from the provider and format it as a human-readable string.
+    /// Fetch the subscription's rate-limit windows.
+    ///
+    /// Returns `Ok(None)` if the provider exposes no usage data.
+    async fn fetch_rate_limit_snapshot(&self) -> Result<Option<RateLimitSnapshot>>;
+
+    /// Fetch usage data and format it as a human-readable one-line summary.
     ///
     /// Returns `Ok(None)` if usage data is unavailable.
     async fn fetch_formatted_usage(&self) -> Result<Option<String>>;
 }
 
+/// [`llm_rs::llm::TokenProvider`] over a token manager shared with the caller.
+///
+/// Lets the LLM client and the server state work on one token set, so a refresh
+/// triggered by either side is visible to both.
+#[derive(Clone)]
+pub struct SharedTokenProvider(Arc<dyn OAuthTokenManager>);
+
+impl SharedTokenProvider {
+    pub fn new(token_manager: Arc<dyn OAuthTokenManager>) -> Self {
+        Self(token_manager)
+    }
+}
+
+impl llm_rs::llm::TokenProvider for SharedTokenProvider {
+    fn get_access_token(
+        &self,
+    ) -> std::pin::Pin<Box<dyn Future<Output = std::result::Result<String, String>> + Send>> {
+        self.0.get_access_token()
+    }
+}
+
 /// Format the time remaining until a usage window resets as a human-readable string.
 ///
-/// Accepts ISO 8601 / RFC 3339 timestamps (with or without fractional seconds).
-///
 /// Returns strings like `"2h 13m"`, `"45m"`, `"3h 0m"`, or `"now"` when the
-/// reset time is already in the past.  Returns `None` if the timestamp cannot
-/// be parsed.
-pub fn format_resets_in(resets_at: &str) -> Option<String> {
-    let reset_time: DateTime<Utc> = DateTime::parse_from_rfc3339(resets_at)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))?;
-
-    format_duration_until(reset_time)
-}
-
-/// Format the time remaining until a usage window resets, given a Unix epoch
-/// timestamp (seconds since 1970-01-01 00:00:00 UTC).
-///
-/// Returns the same human-readable format as [`format_resets_in`]:
-/// `"2h 13m"`, `"45m"`, `"3h 0m"`, or `"now"`.
-///
-/// Returns `None` if the timestamp is out of range.
-pub fn format_resets_in_epoch(reset_at: i64) -> Option<String> {
-    let reset_time = Utc.timestamp_opt(reset_at, 0).single()?;
-    format_duration_until(reset_time)
-}
-
-/// Shared implementation: format the duration from now until `reset_time`.
-fn format_duration_until(reset_time: DateTime<Utc>) -> Option<String> {
-    let now = Utc::now();
-    let duration = reset_time.signed_duration_since(now);
+/// reset time is already in the past.
+pub(crate) fn format_duration_until(reset_time: DateTime<Utc>) -> String {
+    let duration = reset_time.signed_duration_since(Utc::now());
 
     if duration.num_seconds() <= 0 {
-        return Some("now".to_string());
+        return "now".to_string();
     }
 
     let total_minutes = duration.num_minutes();
@@ -294,8 +365,8 @@ fn format_duration_until(reset_time: DateTime<Utc>) -> Option<String> {
     let minutes = total_minutes % 60;
 
     if hours > 0 {
-        Some(format!("{}h {}m", hours, minutes))
+        format!("{}h {}m", hours, minutes)
     } else {
-        Some(format!("{}m", minutes))
+        format!("{}m", minutes)
     }
 }

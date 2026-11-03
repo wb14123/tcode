@@ -147,6 +147,11 @@ export interface AssistantTimelineItem extends TimelineItemBase {
   cacheCreationTokens: number | null;
   cacheReadTokens: number | null;
   retry?: { attempt: number; maxRetries: number; reason: string };
+  rateLimit?: {
+    reason: string;
+    resetAtEpochSecs: number;
+    waitSecs: number;
+  };
 }
 
 export interface UserTimelineItem extends TimelineItemBase {

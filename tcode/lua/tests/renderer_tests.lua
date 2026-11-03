@@ -40,6 +40,16 @@ local function count_hl(b, group)
   return n
 end
 
+-- Buffer rows (0-based) carrying at least one mark of a group.
+local function hl_rows(b, group)
+  local rows = {}
+  local marks = vim.api.nvim_buf_get_extmarks(b, ns, 0, -1, { details = true })
+  for _, mm in ipairs(marks) do
+    if mm[4] and mm[4].hl_group == group then rows[mm[2]] = true end
+  end
+  return rows
+end
+
 -- ------------------------------------------------------------------ basics
 
 test('first_event: the first added replaces the initial empty row', function()
@@ -113,6 +123,59 @@ test('added: retry renders the retry line with TCodeTokens highlight', function(
     if mm[4] and mm[4].hl_group == 'TCodeTokens' and mm[2] == 0 then hl = true end
   end
   check(hl, 'retry row highlighted TCodeTokens')
+end)
+
+test('added: rate_limited renders one chrome row + reason rows, all TCodeTokens', function()
+  local m = T.reset_model()
+  local b = new_buf()
+  seed(b, { '' })
+  local ts = os.date('%Y-%m-%d %H:%M', 1700000000)
+  local reason = 'usage limit reached\n  "message": "try later"'
+  apply_render(m, b, { LLMRateLimited = {
+    attempt = 1, max_retries = 3, reason = reason,
+    reset_at_epoch_secs = 1700000000, wait_secs = 7980,
+  } })
+  local el = m.elements[1]
+  local l = lines_of(b)
+  check(l[1] == '► [Rate limited; retrying at ' .. ts .. ' (in 2h 13m) -- usage limit reached]',
+    'chrome row with the first reason line')
+  check(l[2] == '  "message": "try later"' and #l == 2, 'remaining reason line is a content row')
+  local hl = hl_rows(b, 'TCodeTokens')
+  check(hl[0] and hl[1], 'chrome row and reason continuation row highlighted TCodeTokens')
+  local r = row_of(m, el)
+  check(r.start_row == 0 and r.height == 2, 'row map: rate_limited at [0, 2)')
+  check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
+end)
+
+test('rate_limited: attached wait rows render above content streamed afterwards', function()
+  -- The wait rows are attached to the assistant message: they land INSIDE its
+  -- region at their arrival position, so the text the retried request streams
+  -- afterwards appears BELOW them.
+  local m = T.reset_model()
+  local b = new_buf()
+  seed(b, { '' })
+  local ts = os.date('%Y-%m-%d %H:%M', 1700000000)
+  apply_render(m, b, { UserMessage = { content = 'turn one' } }) -- rows 0-1
+  apply_render(m, b, { AssistantMessageStart = {} })             -- row 2
+  local am = m.elements[2]
+  apply_render(m, b, { LLMRateLimited = {
+    reason = 'usage limit reached\n  "message": "try later"',
+    reset_at_epoch_secs = 1700000000, wait_secs = 7980,
+  } })
+  local el = m.elements[3]
+  apply_render(m, b, { LLMRateLimitResumed = {} })
+  apply_render(m, b, { AssistantMessageChunk = { content = 'reply' } })
+  local l = lines_of(b)
+  check(l[4] == '► [Rate limited; retrying at ' .. ts .. ' (in 2h 13m) -- usage limit reached]'
+    and l[5] == '  "message": "try later"', 'wait rows sit inside the am region')
+  check(l[6] == 'reply' and #l == 6, 'retried content streams below the wait rows')
+  check(row_of(m, el).start_row == 3 and row_of(m, el).height == 2,
+    'wait rows attached inside the am region')
+  check(row_of(m, am).start_row == 2 and row_of(m, am).height == 4,
+    'am region grew to label + wait rows + reply')
+  local hl = hl_rows(b, 'TCodeTokens')
+  check(hl[3] and hl[4], 'attached chrome and reason rows highlighted TCodeTokens')
+  check(vim.bo[b].modifiable == false, 'buffer non-modifiable')
 end)
 
 test('added: media renders blank + markdown image link from the media root', function()

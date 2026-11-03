@@ -501,6 +501,46 @@ test('retry: chrome label + extra reason lines', function()
   expect_rows(proj(el), { '► [Retrying... (attempt 1/3) -- rate limited]', 'more detail' }, 'retry rows')
 end)
 
+test('rate_limited: chrome label + extra reason lines, hour-scale wait', function()
+  local ts = os.date('%Y-%m-%d %H:%M', 1700000000)
+  local el = {
+    type = 'rate_limited',
+    reason = 'usage limit reached\nmore detail\nthird line',
+    reset_at_epoch_secs = 1700000000, wait_secs = 7980,
+  }
+  expect_rows(proj(el), {
+    '► [Rate limited; retrying at ' .. ts .. ' (in 2h 13m) -- usage limit reached]',
+    'more detail', 'third line',
+  }, 'rate limited rows')
+end)
+
+test('rate_limited: minute and second waits', function()
+  local ts = os.date('%Y-%m-%d %H:%M', 1700000000)
+  local function rows(wait_secs)
+    local el = {
+      type = 'rate_limited', reason = 'limit',
+      reset_at_epoch_secs = 1700000000, wait_secs = wait_secs,
+    }
+    return proj(el)
+  end
+  expect_rows(rows(2700), { '► [Rate limited; retrying at ' .. ts .. ' (in 45m) -- limit]' }, 'minutes')
+  expect_rows(rows(12), { '► [Rate limited; retrying at ' .. ts .. ' (in 12s) -- limit]' }, 'seconds')
+  expect_rows(rows(3600), { '► [Rate limited; retrying at ' .. ts .. ' (in 1h 0m) -- limit]' }, 'exactly one hour')
+end)
+
+test('rate_limited: day-scale waits render days and hours', function()
+  local ts = os.date('%Y-%m-%d %H:%M', 1700000000)
+  local function rows(wait_secs)
+    local el = {
+      type = 'rate_limited', reason = 'limit',
+      reset_at_epoch_secs = 1700000000, wait_secs = wait_secs,
+    }
+    return proj(el)
+  end
+  expect_rows(rows(190800), { '► [Rate limited; retrying at ' .. ts .. ' (in 2d 5h) -- limit]' }, 'two days five hours')
+  expect_rows(rows(604800), { '► [Rate limited; retrying at ' .. ts .. ' (in 7d 0h) -- limit]' }, 'exactly seven days')
+end)
+
 -- ------------------------------------------------------------------ end_info / end_marker
 
 test('end_info: token line without cache read', function()
@@ -623,6 +663,7 @@ test('action_at: nil for non-interactive element types', function()
   check(T.action_at({ type = 'system_message', level = 'Info', message = 'm' }) == nil, 'system nil')
   check(T.action_at({ type = 'media', relative_path = 'p' }) == nil, 'media nil')
   check(T.action_at({ type = 'retry', attempt = 1, max_retries = 2, reason = 'r' }) == nil, 'retry nil')
+  check(T.action_at({ type = 'rate_limited', reason = 'r', reset_at_epoch_secs = 1, wait_secs = 2 }) == nil, 'rate_limited nil')
   check(T.action_at({ type = 'end_info', tokens = { input_tokens = 1, output_tokens = 1 } }) == nil, 'end_info nil')
   check(T.action_at({ type = 'end_marker', tokens = {} }) == nil, 'end_marker nil')
   check(T.action_at(nil) == nil, 'nil element nil')

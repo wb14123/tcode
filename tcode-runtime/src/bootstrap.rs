@@ -469,14 +469,18 @@ pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<C
                         auth_command
                     )
                 })?;
-                let mut llm = Claude::with_token_provider(manager.clone(), &base_url);
+                let token_manager: Arc<dyn auth::OAuthTokenManager> = Arc::new(manager);
+                let mut llm = Claude::with_token_provider(
+                    auth::SharedTokenProvider::new(Arc::clone(&token_manager)),
+                    &base_url,
+                )
+                .with_rate_limit_reset_source(auth::rate_limit_reset_source(Arc::clone(
+                    &token_manager,
+                )));
                 if let Some(timeout) = config.connect_timeout_secs {
                     llm = llm.with_connect_timeout(timeout);
                 }
-                (
-                    Box::new(llm),
-                    Some(Arc::new(manager) as Arc<dyn auth::OAuthTokenManager>),
-                )
+                (Box::new(llm), Some(token_manager))
             }
             Provider::OpenAi => {
                 let base_url = config
@@ -510,16 +514,20 @@ pub async fn create_llm(config: &TcodeConfig, profile: Option<&str>) -> Result<C
                     .try_read()
                     .ok()
                     .and_then(|t| t.account_id.clone());
-                let mut llm = OpenAI::with_token_provider(manager.clone(), &base_url)
-                    .with_account_id(account_id)
-                    .with_image_model(image_model.clone());
+                let token_manager: Arc<dyn auth::OAuthTokenManager> = Arc::new(manager);
+                let mut llm = OpenAI::with_token_provider(
+                    auth::SharedTokenProvider::new(Arc::clone(&token_manager)),
+                    &base_url,
+                )
+                .with_account_id(account_id)
+                .with_image_model(image_model.clone())
+                .with_rate_limit_reset_source(auth::rate_limit_reset_source(Arc::clone(
+                    &token_manager,
+                )));
                 if let Some(timeout) = config.connect_timeout_secs {
                     llm = llm.with_connect_timeout(timeout);
                 }
-                (
-                    Box::new(llm),
-                    Some(Arc::new(manager) as Arc<dyn auth::OAuthTokenManager>),
-                )
+                (Box::new(llm), Some(token_manager))
             }
             Provider::OpenRouter => {
                 let base_url = config

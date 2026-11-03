@@ -29,7 +29,7 @@ import {
   toolDetailRoute,
   toolRowTitle,
 } from '../timeline-render-helpers';
-import { renderAssistantImageBlock, renderMediaAttachment } from '../messages';
+import { renderAssistantImageBlock, renderMediaAttachment, renderRateLimitAlert } from '../messages';
 import { formatTimestamp, prettyJson } from '../formatting';
 
 type TimelineRowTag = 'tcode-user-message' | 'tcode-assistant-message' | 'tcode-tool-row' | 'tcode-subagent-row' | 'tcode-raw-event-row';
@@ -456,6 +456,7 @@ class TcodeAssistantMessage extends TimelineRowElement {
               </details>
             `
           : nothing}
+        ${item.rateLimit ? renderRateLimitAlert(item.rateLimit) : nothing}
         ${item.contentBlocks.map((block) => {
           if (block.kind === 'text') {
             return block.text

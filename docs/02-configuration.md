@@ -161,6 +161,17 @@ There is no fallback from a profile-specific OAuth token file to the unsuffixed 
 
 **Migration note.** Earlier versions of tcode treated `provider = "claude"` with no `api_key` and no `$ANTHROPIC_API_KEY` as an implicit fallback to OAuth. That fallback is gone: `provider = "claude"` is now strictly API-key mode. If you were relying on the implicit fallback, edit your config and change the line to `provider = "claude-oauth"`.
 
+## Rate-limit waiting
+
+`claude-oauth` and `open-ai-oauth` sessions do not fail immediately when the subscription hits its rate limit. Instead of retrying with the short backoff, tcode waits until the limit resets and then retries:
+
+- The reset moment comes from the failing response when that response carries one (Claude `anthropic-ratelimit-unified-*` headers, OpenAI Codex `x-codex-*` headers or a `usage_limit_reached` body, `retry-after` for both).
+- Otherwise tcode falls back to the subscription usage endpoint that also feeds the status-bar usage display, and waits for the latest reset among the windows that are exhausted.
+- There is no upper bound on the wait — a 7-day window can mean waiting for days. One transcript line states the local date and time the limit resets (the retry follows a few seconds later), and the status bar shows the same while the wait runs. The wait is cancelable with the normal cancel key, which ends the turn as cancelled.
+- One wait consumes one `max_retries` attempt; a successful request starts the next one with a fresh retry budget.
+
+If neither the response nor the usage endpoint reports a reset, tcode falls back to the normal short-backoff retry and then fails. To stop a wait, cancel the turn with the normal cancel key — there is no separate setting to disable waiting. `max_retries = 0` disables retrying and rate-limit waiting entirely. Only clients that report a reset schedule can wait — the subscription providers `claude-oauth` and `open-ai-oauth`; the API-key providers (`claude`, `open-ai`), `open-router` and `bedrock` never wait and keep the short backoff.
+
 ## Layout Configuration
 
 The layout defines how tmux panes are arranged using a binary split tree. Each node is either a **split** (with children `a` and `b`) or a **command** (a leaf pane).

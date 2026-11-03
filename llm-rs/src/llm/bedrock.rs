@@ -597,13 +597,11 @@ impl BedrockStreamState {
     pub(super) fn handle_event(&mut self, event: ConverseStreamOutput) -> Vec<LLMEvent> {
         let mut events = Vec::new();
         match event {
-            ConverseStreamOutput::MessageStart(_) => {
-                if !self.emitted_start {
-                    events.push(LLMEvent::MessageStart {
-                        input_tokens: self.input_tokens,
-                    });
-                    self.emitted_start = true;
-                }
+            ConverseStreamOutput::MessageStart(_) if !self.emitted_start => {
+                events.push(LLMEvent::MessageStart {
+                    input_tokens: self.input_tokens,
+                });
+                self.emitted_start = true;
             }
             ConverseStreamOutput::ContentBlockStart(event) => {
                 let index = event.content_block_index.max(0) as usize;
@@ -629,11 +627,9 @@ impl BedrockStreamState {
                 let index = event.content_block_index.max(0) as usize;
                 if let Some(delta) = event.delta {
                     match delta {
-                        ContentBlockDelta::Text(text) => {
-                            if !text.is_empty() {
-                                self.text_blocks.entry(index).or_default().push_str(&text);
-                                events.push(LLMEvent::TextDelta(text));
-                            }
+                        ContentBlockDelta::Text(text) if !text.is_empty() => {
+                            self.text_blocks.entry(index).or_default().push_str(&text);
+                            events.push(LLMEvent::TextDelta(text));
                         }
                         ContentBlockDelta::ToolUse(delta) => {
                             let partial = delta.input;
@@ -646,19 +642,17 @@ impl BedrockStreamState {
                             });
                         }
                         ContentBlockDelta::ReasoningContent(delta) => match delta {
-                            ReasoningContentBlockDelta::Text(text) => {
-                                if !text.is_empty() {
-                                    self.thinking_blocks
-                                        .entry(index)
-                                        .or_insert_with(|| ThinkingBlockAccumulator {
-                                            text: String::new(),
-                                            signature: String::new(),
-                                            redacted_content: Vec::new(),
-                                        })
-                                        .text
-                                        .push_str(&text);
-                                    events.push(LLMEvent::ThinkingDelta(text));
-                                }
+                            ReasoningContentBlockDelta::Text(text) if !text.is_empty() => {
+                                self.thinking_blocks
+                                    .entry(index)
+                                    .or_insert_with(|| ThinkingBlockAccumulator {
+                                        text: String::new(),
+                                        signature: String::new(),
+                                        redacted_content: Vec::new(),
+                                    })
+                                    .text
+                                    .push_str(&text);
+                                events.push(LLMEvent::ThinkingDelta(text));
                             }
                             ReasoningContentBlockDelta::Signature(signature) => {
                                 self.thinking_blocks

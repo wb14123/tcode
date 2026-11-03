@@ -8,6 +8,7 @@ mod claude;
 mod openai;
 mod openai_common;
 mod openrouter;
+mod rate_limit;
 mod sse;
 
 #[cfg(test)]
@@ -23,6 +24,9 @@ mod openai_tests;
 mod openrouter_tests;
 
 #[cfg(test)]
+mod rate_limit_tests;
+
+#[cfg(test)]
 mod sse_tests;
 
 pub use bedrock::Bedrock;
@@ -34,6 +38,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::time::SystemTime;
 use tokio_stream::Stream;
 
 use serde::{Deserialize, Serialize};
@@ -62,6 +67,17 @@ pub type GetTokenFn =
 /// Implement this to use [`Claude::with_token_provider`] or [`OpenAI::with_token_provider`].
 pub trait TokenProvider: Send + Sync {
     fn get_access_token(&self) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>>;
+}
+
+/// Source of the reset moment of a provider rate limit.
+///
+/// Used as a fallback when the failing response itself carries no usable reset
+/// hint, e.g. by querying the subscription usage endpoint. Implementations are
+/// shared between a provider and the subagent clones it spawns, so a slow
+/// lookup should be cached inside the implementation.
+pub trait RateLimitResetSource: Send + Sync {
+    /// Moment the rate limit is expected to lift, or `None` when unknown.
+    fn reset_at(&self) -> Pin<Box<dyn Future<Output = Option<SystemTime>> + Send>>;
 }
 
 // ============================================================================
@@ -419,6 +435,15 @@ pub enum LLMEvent {
     /// Error occurred during generation.
     /// Maps to Claude's error event or OpenAI error responses.
     Error(String),
+
+    /// The provider rejected the request because a rate limit was reached.
+    ///
+    /// `reset_at` is `None` when the reset moment could not be determined from
+    /// the response or the configured [`RateLimitResetSource`].
+    RateLimited {
+        message: String,
+        reset_at: Option<SystemTime>,
+    },
 }
 
 pub trait LLM: Send + Sync {
@@ -464,6 +489,15 @@ pub trait LLM: Send + Sync {
 
     /// Whether this provider can generate images via [`LLM::generate_image`].
     fn supports_image_generation(&self) -> bool {
+        false
+    }
+
+    /// Whether this client may block until a provider rate limit resets.
+    ///
+    /// Only subscription credentials report a reset schedule the conversation
+    /// can rely on, so an API-key client keeps the short backoff retry and the
+    /// user cancels the turn if a wait is not wanted.
+    fn supports_rate_limit_wait(&self) -> bool {
         false
     }
 

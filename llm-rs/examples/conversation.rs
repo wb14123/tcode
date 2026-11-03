@@ -310,5 +310,18 @@ fn print_message(msg: &Message) {
         } => {
             println!("    [LLM retry {}/{}: {}]", attempt, max_retries, reason);
         }
+        Message::LLMRateLimited {
+            reason,
+            reset_at_epoch_secs,
+            wait_secs,
+        } => {
+            println!(
+                "    [Rate limited: retrying at {} (in {}s): {}]",
+                reset_at_epoch_secs, wait_secs, reason
+            );
+        }
+        Message::LLMRateLimitResumed {} => {
+            println!("    [Rate limit wait finished]");
+        }
     }
 }

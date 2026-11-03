@@ -15,11 +15,12 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
+use super::rate_limit;
 use super::sse;
 use super::{
     CLAUDE_CLI_USER_AGENT, ChatOptions, GetTokenFn, LLM, LLMEvent, LLMMessage, ModelInfo,
-    ReasoningEffort, StopReason, TokenProvider, ToolCall, is_manual_only_model,
-    model_max_output_tokens,
+    RateLimitResetSource, ReasoningEffort, StopReason, TokenProvider, ToolCall,
+    is_manual_only_model, model_max_output_tokens,
 };
 use crate::tool::Tool;
 
@@ -38,6 +39,8 @@ pub struct Claude {
     /// When false, use x-api-key header.
     use_oauth: bool,
     cached_tool_defs: Option<Vec<ClaudeToolDefinition>>,
+    /// Fallback source for the reset moment of a rate limit.
+    rate_limit_reset_source: Option<Arc<dyn RateLimitResetSource>>,
     /// Directory for loading media files (images, PDFs) referenced by ContentPart::Media.
     pub media_dir: Option<PathBuf>,
 }
@@ -64,6 +67,7 @@ impl Claude {
             connect_timeout: Some(Duration::from_secs(30)),
             use_oauth: false,
             cached_tool_defs: None,
+            rate_limit_reset_source: None,
             media_dir: None,
         }
     }
@@ -91,6 +95,7 @@ impl Claude {
             connect_timeout: Some(Duration::from_secs(30)),
             use_oauth: true,
             cached_tool_defs: None,
+            rate_limit_reset_source: None,
             media_dir: None,
         }
     }
@@ -123,6 +128,12 @@ impl Claude {
             .connect_timeout(self.connect_timeout.unwrap_or(Duration::from_secs(30)))
             .build()
             .expect("reqwest Client should always build with standard TLS");
+        self
+    }
+
+    /// Install the fallback source used to find the reset moment of a rate limit.
+    pub fn with_rate_limit_reset_source(mut self, source: Arc<dyn RateLimitResetSource>) -> Self {
+        self.rate_limit_reset_source = Some(source);
         self
     }
 }
@@ -342,6 +353,8 @@ struct ErrorData {
 #[derive(Deserialize, Debug)]
 struct ErrorInfo {
     message: String,
+    #[serde(rename = "type", default)]
+    error_type: Option<String>,
 }
 
 // ============================================================================
@@ -625,12 +638,17 @@ impl LLM for Claude {
             connect_timeout: self.connect_timeout,
             use_oauth: self.use_oauth,
             cached_tool_defs: None,
+            rate_limit_reset_source: self.rate_limit_reset_source.clone(),
             media_dir: self.media_dir.clone(),
         })
     }
 
     fn set_media_dir(&mut self, dir: Option<PathBuf>) {
         self.media_dir = dir;
+    }
+
+    fn supports_rate_limit_wait(&self) -> bool {
+        self.use_oauth
     }
 
     fn available_models(&self) -> Vec<ModelInfo> {
@@ -678,6 +696,7 @@ impl LLM for Claude {
         let use_oauth = self.use_oauth;
         let model = model.to_string();
         let tool_defs = self.cached_tool_defs.clone();
+        let rate_limit_reset_source = self.rate_limit_reset_source.clone();
 
         let media_dir = self.media_dir.clone();
 
@@ -787,11 +806,38 @@ impl LLM for Claude {
                 req.json(&request_body).send().await
             ).await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield LLMEvent::Error(e);
+                Err(error) => {
+                    let http = match &error {
+                        sse::CheckError::Http(http)
+                            if http.status == reqwest::StatusCode::TOO_MANY_REQUESTS =>
+                        {
+                            http
+                        }
+                        _ => {
+                            yield LLMEvent::Error(error.to_string());
+                            return;
+                        }
+                    };
+                    let mut reset_at = rate_limit::claude_reset_at(&http.headers);
+                    if reset_at.is_none()
+                        && let Some(source) = rate_limit_reset_source.as_ref()
+                    {
+                        reset_at = source.reset_at().await;
+                    }
+                    if reset_at.is_none() {
+                        rate_limit::log_missing_reset("Claude", http);
+                    }
+                    yield LLMEvent::RateLimited {
+                        message: rate_limit::error_message(http),
+                        reset_at,
+                    };
                     return;
                 }
             };
+
+            // A rate limit can also surface as an error event after the response
+            // was accepted; its headers already describe the reset moment.
+            let header_reset = rate_limit::claude_reset_at(response.headers());
 
             // State for accumulating the response
             let mut input_tokens = 0i32;
@@ -1024,6 +1070,27 @@ impl LLM for Claude {
                             }
                             "error" => {
                                 if let Ok(parsed) = serde_json::from_str::<ErrorData>(data) {
+                                    let error_type =
+                                        parsed.error.error_type.as_deref().unwrap_or_default();
+                                    if rate_limit::claude_is_rate_limited_error(error_type) {
+                                        let mut reset_at = header_reset.or_else(|| {
+                                            rate_limit::claude_legacy_reset_at(
+                                                &parsed.error.message,
+                                            )
+                                        });
+                                        if reset_at.is_none()
+                                            && let Some(source) = rate_limit_reset_source.as_ref()
+                                        {
+                                            reset_at = source.reset_at().await;
+                                        }
+                                        yield LLMEvent::RateLimited {
+                                            message: rate_limit::truncate_message(
+                                                &parsed.error.message,
+                                            ),
+                                            reset_at,
+                                        };
+                                        return;
+                                    }
                                     yield LLMEvent::Error(parsed.error.message);
                                     return;
                                 }

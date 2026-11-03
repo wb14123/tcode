@@ -140,6 +140,9 @@ async fn main() {
                 eprintln!("\nError: {}", err);
             }
             LLMEvent::ToolCallStart { .. } | LLMEvent::ToolCallDelta { .. } => {}
+            LLMEvent::RateLimited { message, .. } => {
+                eprintln!("\nRate limited: {}", message);
+            }
         }
     }
 }

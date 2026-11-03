@@ -37,6 +37,19 @@ local function format_time(ts_millis)
   return os.date('%H:%M:%S', math.floor(ts_millis / 1000))
 end
 
+-- Format a wait in seconds with the granularity of the usage status line:
+-- '2d 5h' from a day up, '2h 13m' from an hour up, '45m' below that, '12s'
+-- below a minute.
+local function format_wait_duration(wait_secs)
+  local secs = math.max(math.floor(wait_secs or 0), 0)
+  if secs < 60 then return secs .. 's' end
+  local minutes = math.floor(secs / 60)
+  if minutes < 60 then return minutes .. 'm' end
+  local hours = math.floor(minutes / 60)
+  if hours < 24 then return string.format('%dh %dm', hours, minutes % 60) end
+  return string.format('%dd %dh', math.floor(hours / 24), hours % 24)
+end
+
 -- Single-quote a value for safe shell interpolation: wraps it in single
 -- quotes and escapes embedded quotes (' -> '\''), so wire-derived strings
 -- (the exe path, session ids, tool call ids, conversation ids) can never be
@@ -968,6 +981,23 @@ local function apply(model, event, envelope_id)
     diff.added[#diff.added + 1] = el
     model.tail = el
 
+  elseif variant == 'LLMRateLimited' then
+    merge_diff(diff, flush_pending_whitespace(model))
+    merge_diff(diff, collapse_open_thinking(model))
+    -- The retried request streams into the same am, so attach the wait rows
+    -- to it: they render INSIDE the am's region at the arrival position —
+    -- above the content that arrives later (same rule as a thinking block).
+    local tail = model.tail
+    local el = add_element(model, {
+      type = 'rate_limited',
+      reason = data.reason or '',
+      reset_at_epoch_secs = data.reset_at_epoch_secs or 0,
+      wait_secs = data.wait_secs or 0,
+      attach_to = tail and tail.type == 'assistant_message' and tail.id or nil,
+    })
+    diff.added[#diff.added + 1] = el
+    model.tail = el
+
   elseif variant == 'AssistantRequestEnd' then
     merge_diff(diff, flush_pending_whitespace(model))
     merge_diff(diff, collapse_open_thinking(model))
@@ -983,7 +1013,8 @@ local function apply(model, event, envelope_id)
     diff.added[#diff.added + 1] = el
     model.tail = el
 
-  elseif variant == 'UserRequestEnd' or variant == 'PermissionUpdated' then
+  elseif variant == 'UserRequestEnd' or variant == 'PermissionUpdated'
+    or variant == 'LLMRateLimitResumed' then
     -- no-op
   end
 
@@ -1667,6 +1698,18 @@ local function element_layout(el, ctx)
     }
     for i = 2, #reason_lines do out[#out + 1] = c_row(reason_lines[i]) end
     return out
+  elseif el.type == 'rate_limited' then
+    -- Same split as the retry block: the provider reason may be a multi-line
+    -- error body, so only the first line joins the chrome row and the rest
+    -- follow as content rows.
+    local reason_lines = lines(el.reason or '')
+    local label = string.format('► [Rate limited; retrying at %s (in %s) -- %s]',
+      os.date('%Y-%m-%d %H:%M', el.reset_at_epoch_secs or 0),
+      format_wait_duration(el.wait_secs),
+      reason_lines[1])
+    local out = { chrome_row({ { label, 'TCodeTokens' } }) }
+    for i = 2, #reason_lines do out[#out + 1] = c_row(reason_lines[i]) end
+    return out
   elseif el.type == 'end_info' then
     local tokens = el.tokens or {}
     local token_prefix = el.token_prefix
@@ -1805,9 +1848,9 @@ end
 -- treesitter @comment default of 100); rows the layout assigned an hl (the
 -- diff rows) get their full-row group at the same priority; every other
 -- content row keeps the per-type logic (subagent error rows get TCodeError;
--- the whole retry block is TCodeTokens). Every mark is tracked in state.hl so
--- a rebuild can delete and re-apply them. Extmarks are decoration only — they
--- never carry position, text, or navigation data.
+-- the whole retry / rate-limited block is TCodeTokens). Every mark is tracked
+-- in state.hl so a rebuild can delete and re-apply them. Extmarks are
+-- decoration only — they never carry position, text, or navigation data.
 local function apply_element_highlights(state, buf, ns, el, ctx, start_row, el_lines)
   -- Structural chrome-row set: element-relative indices of the layout's
   -- chrome rows (from the SAME layout builder that produced el_lines), so
@@ -1856,7 +1899,7 @@ local function apply_element_highlights(state, buf, ns, el, ctx, start_row, el_l
         elseif is_content(i) then
           g = 'TCodeToolArgs'
         end
-      elseif el.type == 'retry' then
+      elseif el.type == 'retry' or el.type == 'rate_limited' then
         g = 'TCodeTokens'
       elseif group and is_content(i) then
         g = group
@@ -1896,11 +1939,12 @@ end
 -- replaces the buffer's initial single empty line (start_row = 0); later
 -- elements append at the buffer tail. Zero-height projections (media without
 -- a root, an empty end_info) are recorded with height 0 and no start_row.
--- A thinking block tagged attach_to (created while the model tail was an
--- assistant_message) is inserted INSIDE its host am's region at the am's
--- current region end — the block's arrival position — so the display order
--- matches the wire order (thinking before response). The am's region then
--- spans [label] + attached blocks + content, contiguous.
+-- An element tagged attach_to (created while the model tail was an
+-- assistant_message — a thinking block or a rate-limited wait row) is
+-- inserted INSIDE its host am's region at the am's current region end — the
+-- element's arrival position — so the display order matches the wire order
+-- (thinking / wait rows before the response text). The am's region then
+-- spans [label] + attached elements + content, contiguous.
 local function render_added(model, el, state, ctx)
   local buf = ctx.buf
   local el_lines = project_element(el, ctx)

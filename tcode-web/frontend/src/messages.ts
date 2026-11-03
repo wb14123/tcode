@@ -233,6 +233,7 @@ function shouldRenderTimelineItem(item: TimelineItem): boolean {
   return Boolean(
     (item.contentBlocks.some((b) => (b.kind === 'text' && b.text.trim()) || b.kind === 'image')) ||
     item.thinking.trim() ||
+    item.rateLimit ||
     item.error,
   );
 }
@@ -818,6 +819,20 @@ export class ConversationTimelineBuilder {
           }
           break;
         }
+        case 'LLMRateLimited': {
+          const id = this.ensureActiveAssistantId();
+          this.updateAssistant(id, (item) => {
+            item.rateLimit = {
+              reason: asString(payload.reason) ?? 'unknown error',
+              resetAtEpochSecs: asNumber(payload.reset_at_epoch_secs) ?? 0,
+              waitSecs: asNumber(payload.wait_secs) ?? 0,
+            };
+          });
+          break;
+        }
+        // The wait ended; the transcript line it produced stays as written.
+        case 'LLMRateLimitResumed':
+          break;
         default:
           this.addItem(createRawItem(this.store, event, variant));
           break;
@@ -1249,6 +1264,30 @@ function renderUser(item: UserTimelineItem, context: TimelineRenderContext): Tem
   `;
 }
 
+function formatLocalDateTime(epochSeconds: number): string {
+  const date = new Date(epochSeconds * 1000);
+  const pad = (value: number): string => String(value).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatWaitDuration(seconds: number): string {
+  const total = Math.max(0, Math.floor(seconds));
+  if (total >= 86400) {
+    return `${Math.floor(total / 86400)}d ${Math.floor((total % 86400) / 3600)}h`;
+  }
+  if (total >= 3600) {
+    return `${Math.floor(total / 3600)}h ${Math.floor((total % 3600) / 60)}m`;
+  }
+  if (total >= 60) {
+    return `${Math.floor(total / 60)}m`;
+  }
+  return `${total}s`;
+}
+
+export function renderRateLimitAlert(rateLimit: NonNullable<AssistantTimelineItem['rateLimit']>): TemplateResult {
+  return html`<div class="inline-alert warning multiline">Rate limited; retrying at ${formatLocalDateTime(rateLimit.resetAtEpochSecs)} (~${formatWaitDuration(rateLimit.waitSecs)}) -- ${rateLimit.reason}</div>`;
+}
+
 function renderAssistant(item: AssistantTimelineItem, context: TimelineRenderContext): TemplateResult {
   return html`
     <article class="chat-bubble chat-bubble-assistant timeline-assistant">
@@ -1264,8 +1303,9 @@ function renderAssistant(item: AssistantTimelineItem, context: TimelineRenderCon
             </details>
           `
         : nothing}
+      ${item.rateLimit ? renderRateLimitAlert(item.rateLimit) : nothing}
       ${item.retry && item.contentBlocks.length === 0
-        ? html`<div class="inline-alert warning">Retrying... (attempt ${item.retry.attempt}/${item.retry.maxRetries}) -- ${item.retry.reason}</div>`
+        ? html`<div class="inline-alert warning multiline">Retrying... (attempt ${item.retry.attempt}/${item.retry.maxRetries}) -- ${item.retry.reason}</div>`
         : nothing}
       ${item.contentBlocks.map((block) => {
         if (block.kind === 'text') {

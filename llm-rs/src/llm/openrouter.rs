@@ -556,8 +556,8 @@ impl LLM for OpenRouter {
                     .await
             ).await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield LLMEvent::Error(e);
+                Err(error) => {
+                    yield LLMEvent::Error(error.to_string());
                     return;
                 }
             };

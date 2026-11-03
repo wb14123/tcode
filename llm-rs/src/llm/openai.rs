@@ -22,10 +22,11 @@ use serde::{Deserialize, Serialize};
 use tokio_stream::{Stream, StreamExt};
 
 use super::openai_common::effort_to_str;
+use super::rate_limit;
 use super::sse;
 use super::{
-    ChatOptions, GetTokenFn, LLM, LLMEvent, LLMMessage, ModelInfo, StopReason, TokenProvider,
-    ToolCall,
+    ChatOptions, GetTokenFn, LLM, LLMEvent, LLMMessage, ModelInfo, RateLimitResetSource,
+    StopReason, TokenProvider, ToolCall,
 };
 use crate::tool::Tool;
 use crate::tool::normalize_schema;
@@ -144,6 +145,17 @@ struct OutputTokensDetails {
 struct ResponseError {
     #[serde(default)]
     message: String,
+    #[serde(rename = "type", default)]
+    error_type: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
+impl ResponseError {
+    /// Whether this error reports an exhausted usage limit.
+    fn is_usage_limit(&self) -> bool {
+        is_usage_limit(self.error_type.as_deref(), self.code.as_deref())
+    }
 }
 
 /// Payload for `response.output_text.delta` events.
@@ -171,6 +183,25 @@ struct OutputItemDonePayload {
 struct ErrorEventPayload {
     #[serde(default)]
     message: String,
+    #[serde(rename = "type", default)]
+    error_type: Option<String>,
+    #[serde(default)]
+    code: Option<String>,
+}
+
+impl ErrorEventPayload {
+    /// Whether this error reports an exhausted usage limit.
+    fn is_usage_limit(&self) -> bool {
+        is_usage_limit(self.error_type.as_deref(), self.code.as_deref())
+    }
+}
+
+/// Whether an error's type or code reports an exhausted usage limit.
+fn is_usage_limit(error_type: Option<&str>, code: Option<&str>) -> bool {
+    [error_type, code]
+        .into_iter()
+        .flatten()
+        .any(|kind| kind == rate_limit::USAGE_LIMIT_REACHED)
 }
 
 // ============================================================================
@@ -195,10 +226,15 @@ pub struct OpenAI {
     connect_timeout: Option<Duration>,
     /// ChatGPT account ID for OAuth requests via the ChatGPT backend proxy.
     account_id: Option<String>,
+    /// When true, the client authenticates with a subscription (ChatGPT plan)
+    /// rather than an API key.
+    use_oauth: bool,
     /// Opaque key for server-side prompt caching. Each clone (= each conversation)
     /// gets a fresh UUID so the server can cache prompt prefixes per conversation.
     cache_key: String,
     cached_tools: Option<Vec<FunctionToolDef>>,
+    /// Fallback source for the reset moment of a rate limit.
+    rate_limit_reset_source: Option<Arc<dyn RateLimitResetSource>>,
     /// Directory for session media files (images, PDFs) referenced by ContentPart::Media.
     pub media_dir: Option<PathBuf>,
     /// Model used for Images API requests (`images/generations`, `images/edits`).
@@ -226,8 +262,10 @@ impl OpenAI {
             base_url: base_url.into(),
             connect_timeout: Some(Duration::from_secs(30)),
             account_id: None,
+            use_oauth: false,
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
+            rate_limit_reset_source: None,
             media_dir: None,
             image_model: DEFAULT_IMAGE_MODEL.to_string(),
         }
@@ -245,8 +283,10 @@ impl OpenAI {
             base_url: base_url.into(),
             connect_timeout: Some(Duration::from_secs(30)),
             account_id: None,
+            use_oauth: true,
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
+            rate_limit_reset_source: None,
             media_dir: None,
             image_model: DEFAULT_IMAGE_MODEL.to_string(),
         }
@@ -286,6 +326,12 @@ impl OpenAI {
     /// Set the model used for Images API requests.
     pub fn with_image_model(mut self, model: impl Into<String>) -> Self {
         self.image_model = model.into();
+        self
+    }
+
+    /// Install the fallback source used to find the reset moment of a rate limit.
+    pub fn with_rate_limit_reset_source(mut self, source: Arc<dyn RateLimitResetSource>) -> Self {
+        self.rate_limit_reset_source = Some(source);
         self
     }
 }
@@ -568,8 +614,10 @@ impl LLM for OpenAI {
             base_url: self.base_url.clone(),
             connect_timeout: self.connect_timeout,
             account_id: self.account_id.clone(),
+            use_oauth: self.use_oauth,
             cache_key: uuid::Uuid::new_v4().to_string(),
             cached_tools: None,
+            rate_limit_reset_source: self.rate_limit_reset_source.clone(),
             media_dir: self.media_dir.clone(),
             image_model: self.image_model.clone(),
         })
@@ -577,6 +625,10 @@ impl LLM for OpenAI {
 
     fn set_media_dir(&mut self, dir: Option<PathBuf>) {
         self.media_dir = dir;
+    }
+
+    fn supports_rate_limit_wait(&self) -> bool {
+        self.use_oauth
     }
 
     fn available_models(&self) -> Vec<ModelInfo> {
@@ -680,6 +732,7 @@ impl LLM for OpenAI {
         let account_id = self.account_id.clone();
         let model = model.to_string();
         let media_dir = self.media_dir.clone();
+        let rate_limit_reset_source = self.rate_limit_reset_source.clone();
         let (instructions, input_items) = match convert_messages(msgs, &media_dir) {
             Ok(v) => v,
             Err(e) => {
@@ -757,11 +810,38 @@ impl LLM for OpenAI {
                     .await
             ).await {
                 Ok(r) => r,
-                Err(e) => {
-                    yield LLMEvent::Error(e);
+                Err(error) => {
+                    let http = match &error {
+                        sse::CheckError::Http(http)
+                            if http.status == reqwest::StatusCode::TOO_MANY_REQUESTS =>
+                        {
+                            http
+                        }
+                        _ => {
+                            yield LLMEvent::Error(error.to_string());
+                            return;
+                        }
+                    };
+                    let mut reset_at = rate_limit::openai_reset_at(&http.headers, &http.body);
+                    if reset_at.is_none()
+                        && let Some(source) = rate_limit_reset_source.as_ref()
+                    {
+                        reset_at = source.reset_at().await;
+                    }
+                    if reset_at.is_none() {
+                        rate_limit::log_missing_reset("OpenAI", http);
+                    }
+                    yield LLMEvent::RateLimited {
+                        message: rate_limit::error_message(http),
+                        reset_at,
+                    };
                     return;
                 }
             };
+
+            // A usage limit can also surface as an in-stream failure; the headers
+            // of the accepted response describe the reset moment.
+            let response_headers = response.headers().clone();
 
             let mut emitted_start = false;
             let mut tool_call_counter: usize = 0;
@@ -787,11 +867,9 @@ impl LLM for OpenAI {
 
                 match event_type {
                     // Response created — emit MessageStart
-                    "response.created" => {
-                        if !emitted_start {
-                            yield LLMEvent::MessageStart { input_tokens: 0 };
-                            emitted_start = true;
-                        }
+                    "response.created" if !emitted_start => {
+                        yield LLMEvent::MessageStart { input_tokens: 0 };
+                        emitted_start = true;
                     }
 
                     // Text delta
@@ -941,9 +1019,27 @@ impl LLM for OpenAI {
                             yield LLMEvent::MessageStart { input_tokens: 0 };
                         }
                         if let Ok(parsed) = serde_json::from_str::<ResponsePayload>(data) {
-                            let msg = parsed.response.error
+                            let error = parsed.response.error;
+                            let usage_limited = error
+                                .as_ref()
+                                .is_some_and(ResponseError::is_usage_limit);
+                            let msg = error
                                 .map(|err| err.message)
                                 .unwrap_or_else(|| "Unknown error".to_string());
+                            if usage_limited {
+                                let mut reset_at =
+                                    rate_limit::openai_reset_at(&response_headers, data);
+                                if reset_at.is_none()
+                                    && let Some(source) = rate_limit_reset_source.as_ref()
+                                {
+                                    reset_at = source.reset_at().await;
+                                }
+                                yield LLMEvent::RateLimited {
+                                    message: rate_limit::truncate_message(&msg),
+                                    reset_at,
+                                };
+                                return;
+                            }
                             yield LLMEvent::Error(format!("Response failed: {}", msg));
                         } else {
                             yield LLMEvent::Error(format!("Response failed: {}", data));
@@ -1002,6 +1098,20 @@ impl LLM for OpenAI {
                     // Error event
                     "error" => {
                         if let Ok(parsed) = serde_json::from_str::<ErrorEventPayload>(data) {
+                            if parsed.is_usage_limit() {
+                                let mut reset_at =
+                                    rate_limit::openai_reset_at(&response_headers, data);
+                                if reset_at.is_none()
+                                    && let Some(source) = rate_limit_reset_source.as_ref()
+                                {
+                                    reset_at = source.reset_at().await;
+                                }
+                                yield LLMEvent::RateLimited {
+                                    message: rate_limit::truncate_message(&parsed.message),
+                                    reset_at,
+                                };
+                                return;
+                            }
                             yield LLMEvent::Error(format!("API error: {}", parsed.message));
                         } else {
                             yield LLMEvent::Error(format!("API error: {}", data));

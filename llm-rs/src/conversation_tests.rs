@@ -22,6 +22,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::pin::Pin;
     use std::sync::Arc;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
     use tokio::sync::{broadcast, mpsc};
     use tokio_stream::wrappers::errors::BroadcastStreamRecvError;
     use tokio_stream::{Stream, StreamExt};
@@ -718,6 +719,7 @@ mod tests {
     struct MockLlmInner {
         responses: Vec<MockResponse>,
         required_session_read: Option<(Arc<PermissionManager>, PermissionKey)>,
+        supports_rate_limit_wait: bool,
     }
 
     impl MockLlm {
@@ -726,6 +728,7 @@ mod tests {
                 inner: Arc::new(Mutex::new(MockLlmInner {
                     responses,
                     required_session_read: None,
+                    supports_rate_limit_wait: true,
                 })),
             }
         }
@@ -736,6 +739,12 @@ mod tests {
             key: PermissionKey,
         ) -> Self {
             self.inner.lock().required_session_read = Some((permissions, key));
+            self
+        }
+
+        /// A client without a subscription: it reports no reset schedule.
+        fn without_rate_limit_wait(self) -> Self {
+            self.inner.lock().supports_rate_limit_wait = false;
             self
         }
     }
@@ -771,9 +780,45 @@ mod tests {
 
         fn set_media_dir(&mut self, _dir: Option<PathBuf>) {}
 
+        fn supports_rate_limit_wait(&self) -> bool {
+            self.inner.lock().supports_rate_limit_wait
+        }
+
         fn available_models(&self) -> Vec<ModelInfo> {
             vec![]
         }
+    }
+
+    /// A response that streams one text chunk and ends the turn.
+    fn successful_response(text: &str) -> MockResponse {
+        MockResponse::Events(vec![
+            LLMEvent::TextDelta(text.to_string()),
+            LLMEvent::MessageEnd {
+                stop_reason: StopReason::EndTurn,
+                input_tokens: 5,
+                output_tokens: 3,
+                reasoning_tokens: 0,
+                cache_creation_input_tokens: 0,
+                cache_read_input_tokens: 0,
+                raw: None,
+            },
+        ])
+    }
+
+    /// A response that reports a rate limit and then ends.
+    fn rate_limited_response(message: &str, reset_at: Option<SystemTime>) -> MockResponse {
+        MockResponse::Events(vec![LLMEvent::RateLimited {
+            message: message.to_string(),
+            reset_at,
+        }])
+    }
+
+    /// Seconds since the epoch for a `SystemTime` the test created or the
+    /// conversation reported.
+    fn epoch_secs(time: SystemTime) -> i64 {
+        time.duration_since(UNIX_EPOCH)
+            .expect("test times are after the epoch")
+            .as_secs() as i64
     }
 
     /// Drive a conversation with a MockLlm: send "Hello" and collect broadcast
@@ -821,6 +866,61 @@ mod tests {
                 }
                 _ = &mut deadline => {
                     break;
+                }
+            }
+        }
+
+        Ok(messages)
+    }
+
+    /// Drive `turns` chat turns on one conversation started with the given
+    /// options, collecting every message until each assistant turn ends. The
+    /// deadline is long in virtual time so hours-long rate-limit waits elapse
+    /// before it fires while a stalled conversation still terminates.
+    async fn drive_conversation_paused(
+        mock: MockLlm,
+        chat_options: ChatOptions,
+        dir: &Path,
+        turns: usize,
+    ) -> anyhow::Result<Vec<Arc<crate::conversation::BroadcastMessage>>> {
+        use crate::conversation::{BroadcastMessage, Message};
+        let permissions_file = dir.join("permissions.json");
+        std::fs::write(&permissions_file, "[]")?;
+        let manager = ConversationManager::new(permissions_file, None);
+
+        let (_conv_id, client) = manager.new_conversation_with_id(
+            "test-conv".to_string(),
+            Box::new(mock),
+            "test-model",
+            vec![],
+            chat_options,
+            options(Some(dir.to_path_buf())),
+        )?;
+
+        let mut stream = client.subscribe();
+        let mut messages: Vec<Arc<BroadcastMessage>> = Vec::new();
+
+        for _ in 0..turns {
+            client.send_chat("Hello").await?;
+            let deadline = tokio::time::sleep(std::time::Duration::from_secs(30 * 24 * 3600));
+            tokio::pin!(deadline);
+
+            loop {
+                tokio::select! {
+                    msg = stream.next() => {
+                        match msg {
+                            Some(Ok(m)) => {
+                                let is_end = matches!(&m.msg, Message::AssistantMessageEnd { .. });
+                                messages.push(m);
+                                if is_end {
+                                    break;
+                                }
+                            }
+                            Some(Err(BroadcastStreamRecvError::Lagged(_))) => continue,
+                            None => return Ok(messages),
+                        }
+                    }
+                    _ = &mut deadline => break,
                 }
             }
         }
@@ -1400,6 +1500,495 @@ mod tests {
                 _ => unreachable!(),
             }
         }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Rate-limit waits
+    // ----------------------------------------------------------------
+
+    use crate::conversation::rate_limit_wait;
+
+    /// Options with the given retry budget.
+    fn rate_limit_options(max_retries: u32) -> ChatOptions {
+        ChatOptions {
+            max_retries: Some(max_retries),
+            ..Default::default()
+        }
+    }
+
+    /// Exact wait arithmetic. Integration tests can only bracket the result
+    /// because the conversation samples `SystemTime::now()` again after the
+    /// stream ends, and that clock keeps running under `start_paused`.
+    #[test]
+    fn rate_limit_wait_future_reset_adds_margin_and_jitter() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let reset_at = now + Duration::from_secs(3600);
+        let jitter = Duration::from_millis(1500);
+        assert_eq!(
+            rate_limit_wait(reset_at, now, jitter),
+            Duration::from_secs(3600) + Duration::from_secs(2) + jitter
+        );
+    }
+
+    #[test]
+    fn rate_limit_wait_past_or_zero_reset_uses_floor() {
+        let now = UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let jitter = Duration::from_millis(1999);
+        for reset_at in [now - Duration::from_secs(60), now] {
+            assert_eq!(
+                rate_limit_wait(reset_at, now, jitter),
+                Duration::from_secs(1) + Duration::from_secs(2) + jitter
+            );
+        }
+    }
+
+    /// `(reason, reset_at_epoch_secs, wait_secs)` of the first `LLMRateLimited`
+    /// message.
+    fn first_rate_limited(
+        msgs: &[Arc<crate::conversation::BroadcastMessage>],
+    ) -> Option<(String, i64, u64)> {
+        use crate::conversation::Message;
+        msgs.iter().find_map(|m| match &m.msg {
+            Message::LLMRateLimited {
+                reason,
+                reset_at_epoch_secs,
+                wait_secs,
+            } => Some((reason.clone(), *reset_at_epoch_secs, *wait_secs)),
+            _ => None,
+        })
+    }
+
+    fn count_rate_limited(msgs: &[Arc<crate::conversation::BroadcastMessage>]) -> usize {
+        use crate::conversation::Message;
+        count_msg(msgs, |m| matches!(m, Message::LLMRateLimited { .. }))
+    }
+
+    fn count_rate_limit_resumed(msgs: &[Arc<crate::conversation::BroadcastMessage>]) -> usize {
+        use crate::conversation::Message;
+        count_msg(msgs, |m| matches!(m, Message::LLMRateLimitResumed {}))
+    }
+
+    fn count_retry(msgs: &[Arc<crate::conversation::BroadcastMessage>]) -> usize {
+        use crate::conversation::Message;
+        count_msg(msgs, |m| matches!(m, Message::LLMRetry { .. }))
+    }
+
+    /// Index of the single text chunk carrying `text`.
+    fn chunk_index(
+        msgs: &[Arc<crate::conversation::BroadcastMessage>],
+        text: &str,
+    ) -> Option<usize> {
+        use crate::conversation::Message;
+        msgs.iter().position(|m| {
+            matches!(&m.msg, Message::AssistantMessageChunk { content } if content.as_ref() == text)
+        })
+    }
+
+    // ----------------------------------------------------------------
+    // Test: rate limit with a future reset waits, then succeeds
+    // ----------------------------------------------------------------
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_future_reset_waits_then_succeeds() -> anyhow::Result<()> {
+        use crate::conversation::{Message, MessageEndStatus};
+        let dir = TestDir::new("conversation");
+        let reset_at = SystemTime::now() + Duration::from_secs(3600);
+        let mock = MockLlm::new(vec![
+            rate_limited_response("rate limited by provider", Some(reset_at)),
+            successful_response("Recovered"),
+        ]);
+
+        let msgs = drive_conversation_paused(mock, rate_limit_options(2), dir.path(), 1).await?;
+
+        let (reason, reset_secs, wait_secs) =
+            first_rate_limited(&msgs).expect("expected LLMRateLimited");
+        assert_eq!(reason, "rate limited by provider");
+        assert_eq!(reset_secs, epoch_secs(reset_at));
+        // A whole second may elapse between building `reset_at` and the wait
+        // computation, which shaves up to one second off the observed value.
+        assert!(
+            (3601..=3603).contains(&wait_secs),
+            "unexpected wait_secs {wait_secs}"
+        );
+
+        assert_eq!(count_rate_limited(&msgs), 1);
+        assert_eq!(count_rate_limit_resumed(&msgs), 1);
+        assert_eq!(count_retry(&msgs), 0, "a wait is not a backoff retry");
+
+        let limited_idx = msgs
+            .iter()
+            .position(|m| matches!(&m.msg, Message::LLMRateLimited { .. }))
+            .expect("expected LLMRateLimited");
+        let resumed_idx = msgs
+            .iter()
+            .position(|m| matches!(&m.msg, Message::LLMRateLimitResumed {}))
+            .expect("expected LLMRateLimitResumed");
+        let recovered_idx = chunk_index(&msgs, "Recovered").expect("expected 'Recovered' chunk");
+        assert!(
+            limited_idx < resumed_idx && resumed_idx < recovered_idx,
+            "expected rate-limited -> resumed -> recovered, got {limited_idx}, {resumed_idx}, {recovered_idx}"
+        );
+
+        let end = msgs
+            .iter()
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }))
+            .expect("expected AssistantMessageEnd");
+        match &end.msg {
+            Message::AssistantMessageEnd { end_status, .. } => {
+                assert_eq!(*end_status, MessageEndStatus::Succeeded);
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: rate limit whose reset already passed waits the floor only
+    // ----------------------------------------------------------------
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_past_reset_waits_minimum_then_succeeds() -> anyhow::Result<()> {
+        let dir = TestDir::new("conversation");
+        let reset_at = SystemTime::now() - Duration::from_secs(60);
+        let mock = MockLlm::new(vec![
+            rate_limited_response("limit already reset", Some(reset_at)),
+            successful_response("Recovered"),
+        ]);
+
+        let msgs = drive_conversation_paused(mock, rate_limit_options(2), dir.path(), 1).await?;
+
+        let (reason, reset_secs, wait_secs) =
+            first_rate_limited(&msgs).expect("expected LLMRateLimited");
+        assert_eq!(reason, "limit already reset");
+        assert_eq!(reset_secs, epoch_secs(reset_at));
+        // Floor 1s + margin 2s + jitter < 2s, truncated to whole seconds.
+        assert!(
+            (3..=4).contains(&wait_secs),
+            "unexpected wait_secs {wait_secs}"
+        );
+
+        assert_eq!(count_rate_limit_resumed(&msgs), 1);
+        assert_eq!(count_retry(&msgs), 0);
+        assert!(
+            chunk_index(&msgs, "Recovered").is_some(),
+            "the retry after the wait must succeed"
+        );
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: a wait spends exactly one retry attempt
+    // ----------------------------------------------------------------
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_wait_spends_one_attempt() -> anyhow::Result<()> {
+        use crate::conversation::{Message, MessageEndStatus};
+        let dir = TestDir::new("conversation");
+        let reset_at = SystemTime::now() + Duration::from_secs(3600);
+        let mock = MockLlm::new(vec![
+            rate_limited_response("first limit", Some(reset_at)),
+            rate_limited_response("second limit", Some(reset_at)),
+        ]);
+
+        let msgs = drive_conversation_paused(mock, rate_limit_options(1), dir.path(), 1).await?;
+
+        assert_eq!(
+            count_rate_limited(&msgs),
+            1,
+            "the second limit must not wait again: the budget is spent"
+        );
+        assert_eq!(count_rate_limit_resumed(&msgs), 1);
+        assert_eq!(count_retry(&msgs), 0);
+
+        let end = msgs
+            .iter()
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }))
+            .expect("expected AssistantMessageEnd");
+        match &end.msg {
+            Message::AssistantMessageEnd {
+                end_status, error, ..
+            } => {
+                assert_eq!(*end_status, MessageEndStatus::Failed);
+                assert_eq!(error.as_deref(), Some("second limit"));
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: client without a reset schedule -> normal backoff retry
+    // ----------------------------------------------------------------
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_client_without_a_reset_schedule_uses_backoff_retry() -> anyhow::Result<()>
+    {
+        use crate::conversation::Message;
+        let dir = TestDir::new("conversation");
+        let reset_at = SystemTime::now() + Duration::from_secs(3600);
+        let mock = MockLlm::new(vec![
+            rate_limited_response("rate limited by provider", Some(reset_at)),
+            successful_response("Recovered"),
+        ])
+        .without_rate_limit_wait();
+
+        let msgs = drive_conversation_paused(mock, rate_limit_options(1), dir.path(), 1).await?;
+
+        assert_eq!(
+            count_rate_limited(&msgs),
+            0,
+            "an API-key client must not block for hours"
+        );
+        assert_eq!(count_rate_limit_resumed(&msgs), 0);
+        assert_eq!(count_retry(&msgs), 1);
+        assert!(chunk_index(&msgs, "Recovered").is_some());
+
+        let has_reason = msgs.iter().any(|m| {
+            matches!(&m.msg, Message::LLMRetry { reason, .. } if reason == "rate limited by provider")
+        });
+        assert!(has_reason, "LLMRetry must carry the provider reason");
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: max_retries = 0 -> no wait, immediate failure
+    // ----------------------------------------------------------------
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_max_retries_zero_fails_immediately() -> anyhow::Result<()> {
+        use crate::conversation::{Message, MessageEndStatus};
+        let dir = TestDir::new("conversation");
+        let reset_at = SystemTime::now() + Duration::from_secs(3600);
+        let mock = MockLlm::new(vec![rate_limited_response(
+            "too many requests",
+            Some(reset_at),
+        )]);
+
+        let msgs = drive_conversation_paused(mock, rate_limit_options(0), dir.path(), 1).await?;
+
+        assert_eq!(count_rate_limited(&msgs), 0);
+        assert_eq!(count_rate_limit_resumed(&msgs), 0);
+        assert_eq!(count_retry(&msgs), 0);
+
+        let end = msgs
+            .iter()
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }))
+            .expect("expected AssistantMessageEnd");
+        match &end.msg {
+            Message::AssistantMessageEnd {
+                end_status, error, ..
+            } => {
+                assert_eq!(*end_status, MessageEndStatus::Failed);
+                assert_eq!(error.as_deref(), Some("too many requests"));
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: partial content then rate limit -> failure, no wait
+    // ----------------------------------------------------------------
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_after_partial_content_fails_without_wait() -> anyhow::Result<()> {
+        use crate::conversation::{Message, MessageEndStatus};
+        let dir = TestDir::new("conversation");
+        let reset_at = SystemTime::now() + Duration::from_secs(3600);
+        let mock = MockLlm::new(vec![MockResponse::Events(vec![
+            LLMEvent::TextDelta("Partial".to_string()),
+            LLMEvent::RateLimited {
+                message: "rate limited".to_string(),
+                reset_at: Some(reset_at),
+            },
+        ])]);
+
+        let msgs = drive_conversation_paused(mock, rate_limit_options(2), dir.path(), 1).await?;
+
+        assert!(
+            chunk_index(&msgs, "Partial").is_some(),
+            "expected the 'Partial' chunk"
+        );
+        assert_eq!(
+            count_rate_limited(&msgs),
+            0,
+            "retrying would duplicate output"
+        );
+        assert_eq!(count_rate_limit_resumed(&msgs), 0);
+        assert_eq!(count_retry(&msgs), 0);
+
+        let end = msgs
+            .iter()
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }))
+            .expect("expected AssistantMessageEnd");
+        match &end.msg {
+            Message::AssistantMessageEnd {
+                end_status, error, ..
+            } => {
+                assert_eq!(*end_status, MessageEndStatus::Failed);
+                assert_eq!(error.as_deref(), Some("rate limited"));
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: unknown reset -> normal backoff retry
+    // ----------------------------------------------------------------
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_unknown_reset_uses_backoff_retry() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+        let dir = TestDir::new("conversation");
+        let mock = MockLlm::new(vec![
+            rate_limited_response("rate limited, reset unknown", None),
+            successful_response("Recovered"),
+        ]);
+
+        let msgs = drive_conversation_paused(mock, rate_limit_options(2), dir.path(), 1).await?;
+
+        assert_eq!(count_rate_limited(&msgs), 0, "no reset, so no wait");
+        assert_eq!(count_rate_limit_resumed(&msgs), 0);
+        assert_eq!(count_retry(&msgs), 1);
+
+        let has_reason = msgs.iter().any(|m| {
+            matches!(&m.msg, Message::LLMRetry { attempt, reason, .. }
+                if *attempt == 1 && reason == "rate limited, reset unknown")
+        });
+        assert!(has_reason, "LLMRetry must carry the provider reason");
+        assert!(chunk_index(&msgs, "Recovered").is_some());
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: cancellation during the wait
+    // ----------------------------------------------------------------
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_cancel_during_wait_ends_cancelled() -> anyhow::Result<()> {
+        use crate::conversation::{BroadcastMessage, Message, MessageEndStatus};
+        let dir = TestDir::new("conversation");
+        let reset_at = SystemTime::now() + Duration::from_secs(3600);
+        let mock = MockLlm::new(vec![
+            rate_limited_response("rate limited by provider", Some(reset_at)),
+            successful_response("Recovered"),
+        ]);
+
+        let permissions_file = dir.path().join("permissions.json");
+        std::fs::write(&permissions_file, "[]")?;
+        let manager = ConversationManager::new(permissions_file, None);
+        let (_conv_id, client) = manager.new_conversation_with_id(
+            "test-conv".to_string(),
+            Box::new(mock),
+            "test-model",
+            vec![],
+            rate_limit_options(2),
+            options(Some(dir.path().to_path_buf())),
+        )?;
+
+        let mut stream = client.subscribe();
+        client.send_chat("Hello").await?;
+
+        let mut messages: Vec<Arc<BroadcastMessage>> = Vec::new();
+        let deadline = tokio::time::sleep(Duration::from_secs(30 * 24 * 3600));
+        tokio::pin!(deadline);
+
+        loop {
+            tokio::select! {
+                msg = stream.next() => {
+                    match msg {
+                        Some(Ok(m)) => {
+                            let is_limited =
+                                matches!(&m.msg, Message::LLMRateLimited { .. });
+                            let is_end =
+                                matches!(&m.msg, Message::AssistantMessageEnd { .. });
+                            messages.push(m);
+                            if is_limited {
+                                client.cancel();
+                            }
+                            if is_end {
+                                break;
+                            }
+                        }
+                        Some(Err(BroadcastStreamRecvError::Lagged(_))) => continue,
+                        None => break,
+                    }
+                }
+                _ = &mut deadline => break,
+            }
+        }
+
+        assert_eq!(count_rate_limited(&messages), 1);
+        assert_eq!(
+            count_rate_limit_resumed(&messages),
+            0,
+            "a cancelled wait must not broadcast LLMRateLimitResumed"
+        );
+        assert_eq!(count_retry(&messages), 0);
+        assert_eq!(
+            chunk_index(&messages, "Recovered"),
+            None,
+            "no request may be issued after the cancel"
+        );
+
+        let end = messages
+            .iter()
+            .find(|m| matches!(&m.msg, Message::AssistantMessageEnd { .. }))
+            .expect("expected AssistantMessageEnd");
+        match &end.msg {
+            Message::AssistantMessageEnd { end_status, .. } => {
+                assert_eq!(*end_status, MessageEndStatus::Cancelled);
+            }
+            _ => unreachable!(),
+        }
+
+        Ok(())
+    }
+
+    // ----------------------------------------------------------------
+    // Test: a successful turn restores the retry budget for the next turn
+    // ----------------------------------------------------------------
+    #[tokio::test(start_paused = true)]
+    async fn rate_limited_wait_does_not_consume_next_turn_budget() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+        let dir = TestDir::new("conversation");
+        let reset_soon = || SystemTime::now() + Duration::from_secs(600);
+        let mock = MockLlm::new(vec![
+            rate_limited_response("first", Some(reset_soon())),
+            successful_response("first answer"),
+            rate_limited_response("second", Some(reset_soon())),
+            successful_response("second answer"),
+        ]);
+
+        let msgs = drive_conversation_paused(mock, rate_limit_options(1), dir.path(), 2).await?;
+
+        // `(waits, resumed)` per assistant turn: both turns get to wait, so the
+        // retry budget of the second turn cannot have been spent by the first.
+        let mut per_turn: Vec<(usize, usize)> = Vec::new();
+        let (mut waits, mut resumed) = (0usize, 0usize);
+        for m in &msgs {
+            match &m.msg {
+                Message::LLMRateLimited { .. } => waits += 1,
+                Message::LLMRateLimitResumed {} => resumed += 1,
+                Message::AssistantMessageEnd { .. } => {
+                    per_turn.push((waits, resumed));
+                    (waits, resumed) = (0, 0);
+                }
+                _ => {}
+            }
+        }
+        assert_eq!(per_turn, vec![(1, 1), (1, 1)]);
+
+        let texts: Vec<&str> = msgs
+            .iter()
+            .filter_map(|m| match &m.msg {
+                Message::AssistantMessageChunk { content } => Some(content.as_ref().as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(texts, vec!["first answer", "second answer"]);
 
         Ok(())
     }

@@ -168,6 +168,48 @@ mod tests {
         Ok(())
     }
 
+    // ======== Rate-limit Message serde ========
+
+    #[test]
+    fn message_llm_rate_limited_serde() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+        let msg = Message::LLMRateLimited {
+            reason: "usage limit reached".to_string(),
+            reset_at_epoch_secs: 1_780_000_000,
+            wait_secs: 3602,
+        };
+        let json = serde_json::to_string(&msg)?;
+        assert_eq!(
+            json,
+            r#"{"LLMRateLimited":{"reason":"usage limit reached","reset_at_epoch_secs":1780000000,"wait_secs":3602}}"#
+        );
+        let deserialized: Message = serde_json::from_str(&json)?;
+        match deserialized {
+            Message::LLMRateLimited {
+                reason,
+                reset_at_epoch_secs,
+                wait_secs,
+            } => {
+                assert_eq!(reason, "usage limit reached");
+                assert_eq!(reset_at_epoch_secs, 1_780_000_000);
+                assert_eq!(wait_secs, 3602);
+            }
+            _ => panic!("Expected LLMRateLimited variant"),
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn message_llm_rate_limit_resumed_serde() -> anyhow::Result<()> {
+        use crate::conversation::Message;
+        let msg = Message::LLMRateLimitResumed {};
+        let json = serde_json::to_string(&msg)?;
+        assert_eq!(json, r#"{"LLMRateLimitResumed":{}}"#);
+        let deserialized: Message = serde_json::from_str(&json)?;
+        assert!(matches!(deserialized, Message::LLMRateLimitResumed {}));
+        Ok(())
+    }
+
     // ======== ReasoningEffort serde ========
 
     #[test]

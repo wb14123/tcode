@@ -552,6 +552,11 @@ code {
   border: 1px solid transparent;
 }
 
+/* Alerts whose text is provider output and may contain line breaks. */
+.inline-alert.multiline {
+  white-space: pre-wrap;
+}
+
 .inline-alert.error {
   color: var(--danger-text);
   background: var(--danger-soft);

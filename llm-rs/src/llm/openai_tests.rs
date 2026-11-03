@@ -65,6 +65,7 @@ mod tests {
                 LLMEvent::ToolCallDelta { .. } => "ToolCallDelta",
                 LLMEvent::MessageEnd { .. } => "MessageEnd",
                 LLMEvent::Error(_) => "Error",
+                LLMEvent::RateLimited { .. } => "RateLimited",
             })
             .collect::<Vec<_>>()
             .join(", ")

@@ -340,6 +340,36 @@ fn now_millis() -> u64 {
         .as_millis() as u64
 }
 
+/// Shortest pause before retrying a rate-limited request, so a reset that is
+/// already due still yields a pause instead of an immediate retry.
+const RATE_LIMIT_MIN_WAIT: Duration = Duration::from_secs(1);
+
+/// Extra wait past the reset instant, absorbing clock skew between this host and
+/// the provider.
+const RATE_LIMIT_WAIT_MARGIN: Duration = Duration::from_secs(2);
+
+/// Exclusive upper bound of the random extra wait, in milliseconds.
+const RATE_LIMIT_JITTER_MS: u16 = 2000;
+
+/// Random extra wait of 0..2000 ms, derived from a v4 UUID so that concurrent
+/// conversations limited at the same moment do not all retry in the same tick.
+fn rate_limit_wait_jitter() -> Duration {
+    let bytes = Uuid::new_v4().into_bytes();
+    let millis = u16::from_be_bytes([bytes[0], bytes[1]]) % RATE_LIMIT_JITTER_MS;
+    Duration::from_millis(u64::from(millis))
+}
+
+/// Pause before retrying a rate-limited request: the time left until the reset,
+/// never less than [`RATE_LIMIT_MIN_WAIT`], plus the skew margin and `jitter`.
+fn rate_limit_wait(reset_at: SystemTime, now: SystemTime, jitter: Duration) -> Duration {
+    reset_at
+        .duration_since(now)
+        .unwrap_or_default()
+        .max(RATE_LIMIT_MIN_WAIT)
+        + RATE_LIMIT_WAIT_MARGIN
+        + jitter
+}
+
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum MessageEndStatus {
     Succeeded,
@@ -603,6 +633,20 @@ pub enum Message {
         /// or the error message from the provider)
         reason: String,
     },
+
+    /// Broadcast when the provider reported a rate limit and the conversation
+    /// waits for the limit to reset before retrying.
+    LLMRateLimited {
+        /// Human-readable reason from the provider
+        reason: String,
+        /// Unix epoch seconds at which the limit is expected to reset
+        reset_at_epoch_secs: i64,
+        /// How long the conversation waits before retrying, in seconds
+        wait_secs: u64,
+    },
+
+    /// Broadcast when a rate-limit wait is over and the request is retried.
+    LLMRateLimitResumed {},
 }
 
 /// A broadcast message: a `Message` plus the id assigned to it when it was
@@ -1844,6 +1888,12 @@ enum StreamResult {
     Cancelled,
     Timeout,
     Error(String),
+    /// The provider rate-limited the request and waiting for `reset_at` is
+    /// allowed, so the attempt ends with a wait instead of a backoff retry.
+    RateLimited {
+        message: String,
+        reset_at: SystemTime,
+    },
 }
 
 /// Multi round LLM conversation. Thread and async safe.
@@ -2299,6 +2349,22 @@ impl Conversation {
                     LLMEvent::Error(error) => {
                         break StreamResult::Error(error);
                     }
+                    LLMEvent::RateLimited { message, reset_at } => {
+                        // A rate limit only turns into a wait when the client
+                        // can report a reset schedule, the reset is known,
+                        // nothing was streamed yet (retrying would duplicate
+                        // output) and the retry budget still has an attempt to
+                        // spend. Every other case is handled like a transient
+                        // error: backoff retry, or failure.
+                        if let Some(reset_at) = reset_at
+                            && self.llm.supports_rate_limit_wait()
+                            && !got_content
+                            && attempt < max_retries
+                        {
+                            break StreamResult::RateLimited { message, reset_at };
+                        }
+                        break StreamResult::Error(message);
+                    }
                 }
                 idle_timeout
                     .as_mut()
@@ -2308,6 +2374,36 @@ impl Conversation {
             match inner_result {
                 StreamResult::Success | StreamResult::Cancelled => {
                     return Ok(());
+                }
+                StreamResult::RateLimited { message, reset_at } => {
+                    let wait =
+                        rate_limit_wait(reset_at, SystemTime::now(), rate_limit_wait_jitter());
+                    let reset_at_epoch_secs = reset_at
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs() as i64)
+                        .unwrap_or_default();
+                    let wait_secs = wait.as_secs();
+                    tracing::info!(
+                        reset_at_epoch_secs,
+                        wait_secs,
+                        "rate limited; waiting for the limit to reset"
+                    );
+                    self.broadcast_msg(Message::LLMRateLimited {
+                        reason: message,
+                        reset_at_epoch_secs,
+                        wait_secs,
+                    })?;
+                    tokio::select! {
+                        biased;
+                        _ = cancel_token.cancelled() => {
+                            self.broadcast_cancelled_end()?;
+                            return Ok(());
+                        }
+                        _ = tokio::time::sleep(wait) => {}
+                    }
+                    self.broadcast_msg(Message::LLMRateLimitResumed {})?;
+                    // The wait spends this attempt, so the loop advances without
+                    // a separate retry message.
                 }
                 StreamResult::Timeout | StreamResult::Error(_)
                     if !got_content && attempt < max_retries =>

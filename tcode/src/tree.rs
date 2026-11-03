@@ -706,33 +706,31 @@ impl TreeState {
                 tool_call_id,
                 tool_name,
                 ..
-            } => {
-                if tool_name == "subagent" {
-                    // Create a SubAgent node with Generating status as a placeholder.
-                    // conversation_id is not yet known; it will be filled in by SubAgentStart.
-                    let depth = self.arena[owner_node].depth + 1;
-                    let node_idx = self.arena.len();
-                    self.arena.push(TreeNode {
-                        kind: NodeType::SubAgent {
-                            conversation_id: String::new(),
-                            description: String::new(),
-                            status: NodeStatus::Generating,
-                            input_tokens: 0,
-                            output_tokens: 0,
-                        },
-                        depth,
-                        children: Vec::new(),
-                        collapsed: false,
-                    });
-                    self.arena[owner_node].children.push(node_idx);
-                    self.subagent_tc_idx.insert(tool_call_id.clone(), node_idx);
-                }
-                // For continue_subagent: do nothing — the existing node stays at [idle]
+            } if tool_name == "subagent" => {
+                // Create a SubAgent node with Generating status as a placeholder.
+                // conversation_id is not yet known; it will be filled in by SubAgentStart.
+                let depth = self.arena[owner_node].depth + 1;
+                let node_idx = self.arena.len();
+                self.arena.push(TreeNode {
+                    kind: NodeType::SubAgent {
+                        conversation_id: String::new(),
+                        description: String::new(),
+                        status: NodeStatus::Generating,
+                        input_tokens: 0,
+                        output_tokens: 0,
+                    },
+                    depth,
+                    children: Vec::new(),
+                    collapsed: false,
+                });
+                self.arena[owner_node].children.push(node_idx);
+                self.subagent_tc_idx.insert(tool_call_id.clone(), node_idx);
             }
             Message::SubAgentInputChunk { .. } => {
                 // Subagent input chunks don't affect the tree
             }
-            // All other message types are ignored
+            // continue_subagent keeps its existing node at [idle]; every other
+            // message type is ignored.
             _ => {}
         }
     }
