@@ -16,7 +16,7 @@ COPY tree-sitter-tcode/grammar.js ./
 RUN tree-sitter generate -o src/generated grammar.js
 
 # Locked AWS SDK crates require Rust >= 1.94.1.
-FROM rust:1.95.0-slim-bookworm AS builder
+FROM rust:1.100.0-slim-bookworm AS builder
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \

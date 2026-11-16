@@ -6,20 +6,31 @@ fn main() {
     let manifest_dir = PathBuf::from(env::var("CARGO_MANIFEST_DIR").unwrap());
     let ts_dir = manifest_dir.join("../tree-sitter-tcode");
 
-    // Determine the target directory (target/debug or target/release).
-    // OUT_DIR is something like target/{profile}/build/tcode-{hash}/out,
-    // so the profile directory is 3 levels up.
+    // Determine the target profile directory (target/debug, target/release or
+    // target/{triple}/release). OUT_DIR lives in the build-script output tree:
+    //
+    //   Cargo < 1.100:  {profile}/build/tcode-{hash}/out
+    //   Cargo >= 1.100: {profile}/build/tcode/{hash}/out  (build-dir layout v2)
+    //
+    // Cargo's build-dir layout is internal and gains/loses levels between
+    // releases, so anchor on the nearest `build` ancestor instead of counting a
+    // fixed number of parents.
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
-    let target_profile_dir = out_dir
-        .parent()
-        .and_then(|p| p.parent())
-        .and_then(|p| p.parent())
+    let build_dir = out_dir
+        .ancestors()
+        .find(|dir| dir.file_name().is_some_and(|name| name == "build"))
         .unwrap_or_else(|| {
             panic!(
-                "Could not determine target profile directory from OUT_DIR: {}",
+                "Could not find the cargo build directory above OUT_DIR: {}",
                 out_dir.display()
             )
         });
+    let target_profile_dir = build_dir.parent().unwrap_or_else(|| {
+        panic!(
+            "Could not determine target profile directory from build directory: {}",
+            build_dir.display()
+        )
+    });
 
     // Generate parser.c from grammar.js if missing or outdated.
     let grammar_js = ts_dir.join("grammar.js");

@@ -49,19 +49,31 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }} --features tcode/bundled-frontend
 
       - name: Package
+        shell: bash
         run: |
+          set -euo pipefail
           TAG="${{ github.ref_name }}"
           TARGET="${{ matrix.target }}"
+          BIN_DIR="target/${TARGET}/release"
           if [ "${{ runner.os }}" = "macOS" ]; then
             LIB_EXT="dylib"
           else
             LIB_EXT="so"
           fi
+          LIB_NAME="libtree-sitter-tcode.${LIB_EXT}"
+          for file in tcode browser-server "${LIB_NAME}"; do
+            if [ ! -f "${BIN_DIR}/${file}" ]; then
+              printf 'error: %s is missing from %s\n' "${file}" "${BIN_DIR}" >&2
+              ls -la "${BIN_DIR}" >&2 || true
+              find target -name "${LIB_NAME}" >&2 || true
+              exit 1
+            fi
+          done
           tar -czf "tcode-${TAG}-${TARGET}.tar.gz" \
-            -C "target/${TARGET}/release" \
+            -C "${BIN_DIR}" \
             tcode \
             browser-server \
-            "libtree-sitter-tcode.${LIB_EXT}"
+            "${LIB_NAME}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
