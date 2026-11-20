@@ -530,8 +530,7 @@ impl TreeState {
                             }
                         }
                         // Transfer children from duplicate to this node
-                        let dup_children: Vec<usize> =
-                            self.arena[dup_idx].children.drain(..).collect();
+                        let dup_children = std::mem::take(&mut self.arena[dup_idx].children);
                         self.arena[idx].children.extend(dup_children);
                     }
 
@@ -748,10 +747,12 @@ impl TreeState {
         }
     }
 
-    /// Sort children: running first, then by arena index (creation time).
+    /// Sort children: running first, then by arena index descending (newest
+    /// creation first).
     fn sorted_children(&self, children: &[usize]) -> Vec<usize> {
         let mut sorted = children.to_vec();
-        sorted.sort_by_key(|&child_idx| (!self.is_running(child_idx), child_idx));
+        sorted
+            .sort_by_key(|&child_idx| (!self.is_running(child_idx), std::cmp::Reverse(child_idx)));
         sorted
     }
 
