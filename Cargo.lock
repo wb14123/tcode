@@ -2952,7 +2952,6 @@ dependencies = [
  "lopdf",
  "parking_lot",
  "pin-project-lite",
- "regex",
  "reqwest",
  "schemars",
  "serde",
