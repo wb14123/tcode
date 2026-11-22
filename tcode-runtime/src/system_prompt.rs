@@ -123,6 +123,8 @@ const WEB_ONLY_SUBAGENT_RULES: &str = "
 const OUTPUT_STYLE_RULES: &str = "
 ## Output Style
 
+- Try to use ASD-STE100 for technical related writings. Best effort, \
+do not do compute heavy things like counting words, actually check dictionary etc.
 - Never use emoji in responses unless the user explicitly asks for them.
 - Avoid bold (**...**) markdown. Use it sparingly and only when it genuinely \
 improves readability — it should be the exception, not the norm.
@@ -132,14 +134,7 @@ several dimensions).
 - Use plain ASCII for structural punctuation (hyphens `-`, pipes `|`, arrows \
 `->`, quotes `\"`). Avoid Unicode substitutes like en-dash, em-dash, smart \
 quotes, or special arrow characters — these break search and pattern matching.
-- Write ordinary sentences: a subject, a verb, one idea per sentence.
-- Never \"X, not Y\" or \"X rather than Y\". State what is true, and give a contrast its own sentence.
-- No appositive colons (\"A page: a target, a window, a session\"), no inverted emphasis (\"What counts \
-is\"), no clipped fragments that drop words.
-- Use plain everyday words, and use the established term for anything that has one. Do not invent \
-terms or metaphors, and do not reach for an uncommon word or a complex construction where a \
-simple one says the same.
-- Cut filler: no preamble, no restating the question, no summary of what was just said.";
+- Never \"X, not Y\" or \"X rather than Y\". State what is true, and give a contrast its own sentence.";
 
 pub(crate) fn tcode_system_prompt_builder(
     session_mode: SessionMode,
