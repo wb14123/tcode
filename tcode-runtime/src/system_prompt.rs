@@ -121,7 +121,10 @@ const WEB_ONLY_SUBAGENT_RULES: &str = "
 - State the desired deliverable: summary, answer, or both";
 
 const OUTPUT_STYLE_RULES: &str = "
-## Output Style
+## Writing Style
+
+This applies to everything the user can see, including the code comments, documents,
+plan, comunication with user and so on.
 
 - Try to use ASD-STE100 for technical related writings. Best effort, \
 do not do compute heavy things like counting words, actually check dictionary etc.
