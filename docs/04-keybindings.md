@@ -18,9 +18,10 @@ The display view shows the conversation output (assistant messages, tool calls, 
 | `Ctrl-c` | Anywhere | Cancel the entire conversation (with confirmation popup) |
 | `Ctrl-p` | Anywhere | Open pending tool approvals one by one |
 | `gb` | User message | Branch the conversation at that user message (clone history up to it into a new session in a new tmux tab, in the source session's working directory) |
+| `gn` | Anywhere | Name the session (opens a one-line input with the current name; an empty input removes the name) |
 | `q` | Anywhere | Quit |
 
-Context is determined by cursor position using extmarks. `Ctrl-k` checks for a subagent under the cursor first, then falls back to a tool call. A `[Ctrl-k to cancel]` hint is shown on tool and subagent labels while they are running and removed when they finish. `Ctrl-c` reads the root conversation ID and cancels it, cascading to all running tools and child subagents. `Ctrl-p` loops through pending tool approvals via tmux popups. `gb` is available only in the main display (not subagent displays) and only on user-message rows; elsewhere it reports "not on a user message". Branches are fully independent sessions opened with the same config profile as the source display, in the source session's working directory; branching from another directory is rejected.
+Context is determined by cursor position using extmarks. `Ctrl-k` checks for a subagent under the cursor first, then falls back to a tool call. A `[Ctrl-k to cancel]` hint is shown on tool and subagent labels while they are running and removed when they finish. `Ctrl-c` reads the root conversation ID and cancels it, cascading to all running tools and child subagents. `Ctrl-p` loops through pending tool approvals via tmux popups. `gb` is available only in the main display (not subagent displays) and only on user-message rows; elsewhere it reports "not on a user message". Branches are fully independent sessions opened with the same config profile as the source display, in the source session's working directory; branching from another directory is rejected. `gn` runs in the main display and the edit view only (not in subagent views); it saves the name in the session, and the current tmux tab takes the same name.
 
 ## Edit View
 
@@ -32,6 +33,7 @@ The edit view is the input area where the user composes messages to send.
 | `Ctrl-s` | Normal | Send message |
 | `Ctrl-j` | Insert | Insert newline at cursor |
 | `Ctrl-p` | Normal/Insert | Open pending tool approvals one by one |
+| `gn` | Normal | Name the session (opens a one-line input with the current name; an empty input removes the name) |
 | `Tab` | Insert | Expand `/skill`, show completion popup, or insert tab |
 
 ## Tree View
@@ -50,7 +52,7 @@ The tree view shows a hierarchical tree of subagents and tool calls.
 
 ## Session Picker
 
-The session picker appears when a command such as `tcode attach` needs a session and `--session <id>` was not provided. The default view is sorted by last activity time. Press `/` to search conversation history; search results show session metadata plus a highlighted snippet from the best matching message.
+The session picker appears when a command such as `tcode attach` needs a session and `--session <id>` was not provided. The default view is sorted by last activity time. Press `/` to search conversation history. A session whose name matches the query is listed first. The other results show session metadata plus a highlighted snippet from the best matching message.
 
 | Key | Context | Action |
 |-----|---------|--------|

@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -40,6 +40,7 @@ struct SessionEntry {
     id: String,
     status: String,
     mode: SessionMode,
+    name: Option<String>,
     description: Option<String>,
     last_active_at: u64,
 }
@@ -597,19 +598,7 @@ fn build_display_items<'a>(
     search_state: &'a SearchState,
 ) -> Vec<DisplayItem<'a>> {
     if has_current_search_results(search_state) {
-        return search_state
-            .results
-            .iter()
-            .filter_map(|result| {
-                entry_by_id
-                    .get(&result.session_id)
-                    .and_then(|index| entries.get(*index))
-                    .map(|entry| DisplayItem {
-                        entry,
-                        snippet: Some(result.snippet.as_str()),
-                    })
-            })
-            .collect();
+        return search_display_items(entries, entry_by_id, search_state);
     }
 
     entries
@@ -619,6 +608,65 @@ fn build_display_items<'a>(
             snippet: None,
         })
         .collect()
+}
+
+/// Rows for the current search: sessions whose name matches the query, then the
+/// content matches. A session that matches both appears once, in the name
+/// group.
+fn search_display_items<'a>(
+    entries: &'a [SessionEntry],
+    entry_by_id: &HashMap<String, usize>,
+    search_state: &'a SearchState,
+) -> Vec<DisplayItem<'a>> {
+    let terms: Vec<String> = search_state
+        .query
+        .split_whitespace()
+        .map(str::to_lowercase)
+        .collect();
+    let snippet_by_id: HashMap<&str, &str> = search_state
+        .results
+        .iter()
+        .map(|result| (result.session_id.as_str(), result.snippet.as_str()))
+        .collect();
+
+    let mut items = Vec::new();
+    let mut shown = HashSet::new();
+    for entry in entries {
+        let Some(name) = entry.name.as_deref() else {
+            continue;
+        };
+        if !name_matches_terms(name, &terms) {
+            continue;
+        }
+        items.push(DisplayItem {
+            entry,
+            snippet: snippet_by_id.get(entry.id.as_str()).copied(),
+        });
+        shown.insert(entry.id.as_str());
+    }
+
+    for result in &search_state.results {
+        if shown.contains(result.session_id.as_str()) {
+            continue;
+        }
+        if let Some(entry) = entry_by_id
+            .get(&result.session_id)
+            .and_then(|index| entries.get(*index))
+        {
+            items.push(DisplayItem {
+                entry,
+                snippet: Some(result.snippet.as_str()),
+            });
+        }
+    }
+
+    items
+}
+
+/// True when every query term is a case-insensitive substring of `name`.
+fn name_matches_terms(name: &str, terms: &[String]) -> bool {
+    let name = name.to_lowercase();
+    terms.iter().all(|term| name.contains(term.as_str()))
 }
 
 /// Exact equality between two already-canonical paths. No canonicalization
@@ -745,12 +793,14 @@ fn session_entry_from_id(
     }
     let last_active = meta.as_ref().and_then(|m| m.last_active_at).unwrap_or(0);
     let mode = meta.as_ref().map(|m| m.mode).unwrap_or_default();
+    let name = meta.as_ref().and_then(|m| m.name.clone());
     let description = meta.and_then(|m| m.description);
     Some((
         SessionEntry {
             id: id.to_string(),
             status: status.to_string(),
             mode,
+            name,
             description,
             last_active_at: last_active,
         },
@@ -830,6 +880,15 @@ fn session_summary_line(entry: &SessionEntry, include_description: bool) -> Line
         format_last_active(entry.last_active_at),
         Style::default().fg(Color::DarkGray),
     ));
+    if let Some(ref name) = entry.name {
+        spans.push(Span::raw(" "));
+        spans.push(Span::styled(
+            name.clone(),
+            Style::default()
+                .fg(Color::Yellow)
+                .add_modifier(Modifier::BOLD),
+        ));
+    }
     if include_description && let Some(ref desc) = entry.description {
         spans.push(Span::raw(" "));
         spans.push(Span::styled(desc.clone(), Style::default().fg(Color::Cyan)));
@@ -1022,16 +1081,14 @@ fn status_text(
         parts.push("Searching...".to_string());
     } else if let Some(error) = &search_state.error {
         parts.push(format!("Search failed: {error}"));
-    } else if has_current_search_results(search_state) && search_state.results.is_empty() {
-        parts.push("No matches".to_string());
-    } else if has_current_search_results(search_state)
-        && !search_state.results.is_empty()
-        && filter_mode == FilterMode::CurrentFolder
-        && visible_len == 0
-    {
-        // The search found matches, but all of them were filtered out by the
-        // current-folder index, so the list area shows nothing.
-        parts.push("No matches in this folder - press Tab to show all sessions".to_string());
+    } else if has_current_search_results(search_state) && visible_len == 0 {
+        if filter_mode == FilterMode::CurrentFolder && !search_state.results.is_empty() {
+            // The search found matches, but all of them were filtered out by
+            // the current-folder index, so the list area shows nothing.
+            parts.push("No matches in this folder - press Tab to show all sessions".to_string());
+        } else {
+            parts.push("No matches".to_string());
+        }
     }
 
     if let Some(error) = &index_state.error {

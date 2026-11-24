@@ -99,6 +99,11 @@ pub enum ClientMessage {
     DetachClientLease { client_id: String },
     /// Query active runtime metadata.
     GetSessionRuntimeInfo,
+    /// Set or clear the user-visible session name.
+    SetSessionName {
+        /// `None` clears the name.
+        name: Option<String>,
+    },
     /// Request server shutdown from the runtime owner/supervisor.
     AuthorizedShutdown { owner_token: String },
 }

@@ -103,6 +103,28 @@ end
 -- accidentally close the fence.
 local TC_FENCE = '``````````'
 
+-- Close a popup window and its scratch buffer, then restore the parent view.
+-- Autocmds are off during the close so a plugin cannot take the window.
+local function close_floating_popup(win, buf, parent_win, parent_buf)
+  local saved_ei = vim.o.eventignore
+  vim.o.eventignore = 'all'
+  local ok, err = pcall(function()
+    if vim.api.nvim_win_is_valid(win) then
+      vim.api.nvim_win_close(win, true)
+    end
+    if vim.api.nvim_buf_is_valid(buf) then
+      vim.api.nvim_buf_delete(buf, { force = true })
+    end
+    -- Restore the parent window and buffer in case a plugin switched them.
+    if vim.api.nvim_win_is_valid(parent_win) and vim.api.nvim_buf_is_valid(parent_buf) then
+      vim.api.nvim_win_set_buf(parent_win, parent_buf)
+      vim.api.nvim_set_current_win(parent_win)
+    end
+  end)
+  vim.o.eventignore = saved_ei
+  if not ok then vim.api.nvim_err_writeln('close_floating_popup: ' .. tostring(err)) end
+end
+
 --- Show a y/n confirmation popup at the cursor and execute callback on confirm.
 local function confirm_popup(prompt, on_confirm)
   -- Remember the window and buffer we came from so we can restore after the popup
@@ -124,25 +146,7 @@ local function confirm_popup(prompt, on_confirm)
   })
 
   local function close_popup()
-    -- Suppress all autocmds during close to prevent LazyVim plugins
-    -- (file explorers, completion, etc.) from hijacking the display window
-    local saved_ei = vim.o.eventignore
-    vim.o.eventignore = 'all'
-    local ok, err = pcall(function()
-      if vim.api.nvim_win_is_valid(popup_win) then
-        vim.api.nvim_win_close(popup_win, true)
-      end
-      if vim.api.nvim_buf_is_valid(popup_buf) then
-        vim.api.nvim_buf_delete(popup_buf, { force = true })
-      end
-      -- Restore the parent window/buffer in case plugins already switched it
-      if vim.api.nvim_win_is_valid(parent_win) and vim.api.nvim_buf_is_valid(parent_buf) then
-        vim.api.nvim_win_set_buf(parent_win, parent_buf)
-        vim.api.nvim_set_current_win(parent_win)
-      end
-    end)
-    vim.o.eventignore = saved_ei
-    if not ok then vim.api.nvim_err_writeln('close_popup: ' .. tostring(err)) end
+    close_floating_popup(popup_win, popup_buf, parent_win, parent_buf)
   end
 
   vim.keymap.set('n', 'y', function()
@@ -1075,6 +1079,71 @@ end
 -- internal buffer line break.
 local function single_line(s)
   return escape_nul(tostring(s or ''):gsub('\n', ' '))
+end
+
+--- Show a one-line floating input at the cursor and submit the text on Enter.
+-- Enter trims the text and passes it to on_submit. Esc discards it. The handle
+-- that comes back exposes the window, the buffer, and the two callbacks the
+-- keymaps run, so a test can drive the same bodies.
+-- @param prefill: initial text (nil for an empty line)
+-- @param on_submit: callback with the trimmed text
+-- @param opts: (optional) { return_insert = true } starts insert mode after the close
+local function input_popup(prefill, on_submit, opts)
+  opts = opts or {}
+  -- Remember the window and buffer we came from so we can restore after the popup
+  local parent_win = vim.api.nvim_get_current_win()
+  local parent_buf = vim.api.nvim_get_current_buf()
+
+  local text = single_line(prefill or '')
+  local popup_buf = vim.api.nvim_create_buf(false, true)
+  vim.bo[popup_buf].modifiable = true
+  vim.api.nvim_buf_set_lines(popup_buf, 0, -1, false, { text })
+  local width = math.min(70, math.max(44, vim.fn.strdisplaywidth(text) + 4))
+  local popup_win = vim.api.nvim_open_win(popup_buf, true, {
+    relative = 'cursor',
+    row = 1,
+    col = 0,
+    width = width,
+    height = 1,
+    style = 'minimal',
+    border = 'rounded',
+    title = {
+      { ' Session name ', 'TCodePopupTitle' },
+      { ' Enter save  Esc cancel ', 'TCodePopupHint' },
+    },
+    title_pos = 'center',
+    noautocmd = true,
+  })
+
+  local function close_popup()
+    -- The close runs from an insert-mode mapping. Leave insert mode first so
+    -- the parent view does not stay in insert mode.
+    if vim.fn.mode():sub(1, 1) == 'i' then vim.cmd('stopinsert') end
+    close_floating_popup(popup_win, popup_buf, parent_win, parent_buf)
+    if opts.return_insert then vim.cmd('startinsert') end
+  end
+
+  local function accept()
+    local lines = vim.api.nvim_buf_is_valid(popup_buf)
+      and vim.api.nvim_buf_get_lines(popup_buf, 0, -1, false) or {}
+    local value = vim.trim(single_line(lines[1] or ''))
+    close_popup()
+    on_submit(value)
+  end
+
+  local function cancel()
+    close_popup()
+  end
+
+  vim.keymap.set({ 'i', 'n' }, '<CR>', accept, { buffer = popup_buf, nowait = true })
+  vim.keymap.set({ 'i', 'n' }, '<Esc>', cancel, { buffer = popup_buf, nowait = true })
+
+  -- Start at column 0 of the popup line. `startinsert!` then puts insert mode
+  -- at the end of the text, so typing extends the prefilled name.
+  vim.api.nvim_win_set_cursor(popup_win, { 1, 0 })
+  vim.cmd('startinsert!')
+
+  return { win = popup_win, buf = popup_buf, accept = accept, cancel = cancel }
 end
 
 -- Place a full-row highlight extmark for a rebuilt element kind and track its
@@ -2434,6 +2503,8 @@ local function setup_highlights(statusline_fg, statusline_ctermfg)
   vim.api.nvim_set_hl(0, 'TCodeSystemInfo', { fg = '#61afef', italic = true, ctermfg = 75 })
   vim.api.nvim_set_hl(0, 'TCodeSystemWarning', { fg = '#e5c07b', bold = true, ctermfg = 180 })
   vim.api.nvim_set_hl(0, 'TCodeSystemError', { fg = '#e06c75', bold = true, ctermfg = 168 })
+  vim.api.nvim_set_hl(0, 'TCodePopupTitle', { fg = '#61afef', bold = true, ctermfg = 75 })
+  vim.api.nvim_set_hl(0, 'TCodePopupHint', { fg = '#7c8495', italic = true, ctermfg = 245 })
   vim.api.nvim_set_hl(0, 'TCodeStatusLine', {
     bg = '#282c34', fg = statusline_fg,
     ctermfg = statusline_ctermfg, ctermbg = 236,
@@ -2722,6 +2793,56 @@ local function keymap_gb(model, buf)
   end
 end
 
+-- Read the stored session name from <session_dir>/session-meta.json.
+-- A missing file, a read error, and a parse error all return nil, silently: the
+-- name is a prefill, so it must never fail the keybinding.
+local function session_meta_name(session_dir)
+  if not session_dir or session_dir == '' then return nil end
+  local file = io.open(session_dir .. '/session-meta.json', 'r')
+  if not file then return nil end
+  local content = file:read('*a')
+  file:close()
+  if not content then return nil end
+  local ok, data = pcall(vim.json.decode, content)
+  if not ok or type(data) ~= 'table' then return nil end
+  if type(data.name) ~= 'string' then return nil end
+  return data.name
+end
+
+-- Save the session name through the `tcode set-name` CLI command.
+-- An empty text clears the name. The submit path trims, so spaces only also
+-- clears. The `--` separator stops the parser from reading a name that starts
+-- with `-` as a flag. `2>&1` is needed because the CLI writes errors to stderr
+-- and vim.fn.system captures stdout only.
+local function submit_session_name(text)
+  local name = vim.trim(single_line(text or ''))
+  local cmd
+  if name == '' then
+    cmd = string.format('%s --session=%s set-name --clear 2>&1',
+      shquote(M.exe_path), shquote(M.session_id))
+  else
+    cmd = string.format('%s --session=%s set-name -- %s 2>&1',
+      shquote(M.exe_path), shquote(M.session_id), shquote(name))
+  end
+  local out = vim.trim(vim.fn.system(cmd))
+  if out ~= '' then
+    local level = vim.v.shell_error ~= 0 and vim.log.levels.ERROR or vim.log.levels.INFO
+    vim.notify(out, level, { title = 'TCode' })
+  end
+end
+
+-- `gn`: name the current session. The input opens with the stored name.
+-- @param session_dir: directory that holds session-meta.json (nil for no prefill)
+-- @param return_insert: true in the edit view, which returns to insert mode
+local function keymap_gn(session_dir, return_insert)
+  if not M.exe_path or not M.session_id then
+    vim.notify('Session info not available', vim.log.levels.ERROR)
+    return nil
+  end
+  return input_popup(session_meta_name(session_dir), submit_session_name,
+    { return_insert = return_insert })
+end
+
 -- Setup display window for viewing conversation
 -- @param display_file: Path to file where display content is written (JSONL)
 -- @param status_file: Path to file where status messages are written
@@ -2947,6 +3068,11 @@ function M.setup_display(display_file, status_file, usage_file, token_usage_file
     vim.keymap.set('n', 'gb', function()
       keymap_gb(model, buf)
     end, { buffer = true, silent = true, desc = 'Branch conversation at user message' })
+
+    -- Name the session (gn) - see keymap_gn.
+    vim.keymap.set('n', 'gn', function()
+      keymap_gn(vim.fn.fnamemodify(M.display_file, ':h'), false)
+    end, { buffer = true, silent = true, desc = 'Name session' })
   end
 end
 
@@ -3265,6 +3391,14 @@ function M.setup_edit(msg_file, is_subagent, session_id, exe_path)
       end
     end)
   end, { buffer = true, silent = true, desc = 'Open pending tool approvals' })
+
+  -- Name the session (gn) - see keymap_gn. The edit view returns to insert
+  -- mode after the popup closes.
+  if not is_subagent then
+    vim.keymap.set('n', 'gn', function()
+      keymap_gn(vim.fn.fnamemodify(M.msg_file, ':h'), true)
+    end, { buffer = true, silent = true, desc = 'Name session' })
+  end
 
   -- Load user-invocable skills
   local skills, descriptions = load_user_skills()

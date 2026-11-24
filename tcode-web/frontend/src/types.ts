@@ -8,6 +8,7 @@ export type SessionMode = 'normal' | 'web_only';
 
 export interface SessionSummary {
   id: string;
+  name?: string | null;
   description?: string | null;
   created_at: number | null;
   last_active_at: number | null;

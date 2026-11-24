@@ -146,7 +146,7 @@ add TLS. Keep this override local and use HTTPS for exposed deployments.
 
 After login, the browser UI can:
 
-- list existing sessions and show each session's status and mode (`normal` or `web-only`)
+- list existing sessions and show each session's status, mode (`normal` or `web-only`), name, and description when available
 - create a new conversation, optionally with an initial prompt
 - stream the live conversation timeline and token/usage/status updates
 - send follow-up messages to root conversations and subagents

@@ -985,3 +985,63 @@ fn branch_meta_records_cwd_at_creation() -> Result<()> {
     assert_eq!(meta.cwd.as_deref(), Some(expected));
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// branch name
+// ---------------------------------------------------------------------------
+
+#[test]
+fn branch_meta_clones_source_name() -> Result<()> {
+    let dir = TestDir::new("branch");
+    let (source, staging) = empty_source_and_staging(dir.path());
+    tcode_runtime::session::set_session_name(&source, Some("my session"))?;
+    let state = make_state(vec![LLMMessage::System("system".to_string())]);
+    let cut = cut_with_envelopes(vec![]);
+
+    build_branch_content(&source, &staging, &state, &cut)?;
+
+    let meta = tcode_runtime::session::read_session_meta(&staging)?.expect("branch meta written");
+    assert_eq!(meta.name.as_deref(), Some("my session-clone"));
+    Ok(())
+}
+
+#[test]
+fn branch_meta_has_no_name_when_source_has_none() -> Result<()> {
+    let dir = TestDir::new("branch");
+    let (source, staging) = empty_source_and_staging(dir.path());
+    let state = make_state(vec![LLMMessage::System("system".to_string())]);
+    let cut = cut_with_envelopes(vec![]);
+
+    build_branch_content(&source, &staging, &state, &cut)?;
+
+    let meta = tcode_runtime::session::read_session_meta(&staging)?.expect("branch meta written");
+    assert_eq!(meta.name, None);
+    Ok(())
+}
+
+#[test]
+fn branch_meta_skips_a_source_name_that_fails_validation() -> Result<()> {
+    let dir = TestDir::new("branch");
+    let (source, staging) = empty_source_and_staging(dir.path());
+    // A hand-edited meta can hold a name that the name rules reject.
+    let source_meta = tcode_runtime::session::SessionMeta {
+        description: None,
+        created_at: None,
+        last_active_at: None,
+        mode: tcode_runtime::session::SessionMode::Normal,
+        cwd: None,
+        name: Some("bad\nname".to_string()),
+    };
+    std::fs::write(
+        source.join("session-meta.json"),
+        serde_json::to_string_pretty(&source_meta)?,
+    )?;
+    let state = make_state(vec![LLMMessage::System("system".to_string())]);
+    let cut = cut_with_envelopes(vec![]);
+
+    build_branch_content(&source, &staging, &state, &cut)?;
+
+    let meta = tcode_runtime::session::read_session_meta(&staging)?.expect("branch meta written");
+    assert_eq!(meta.name, None);
+    Ok(())
+}

@@ -27,7 +27,7 @@ use crate::server::{
     WebIdleShutdownPolicy, WorkActivityTracker, assistant_activity_key, close_stale_running_items,
     next_tool_display_preview_chunk, tool_activity_key, validate_owner_shutdown_token,
 };
-use crate::session::{SessionMeta, SessionMode};
+use crate::session::{SessionMeta, SessionMode, read_session_meta};
 use crate::test_support::{HomeGuard, TestDir};
 
 /// Create a conversation client whose generator owns `dir`'s id space. A new
@@ -187,6 +187,41 @@ async fn runtime_snapshots(
     }
     handle.await??;
     snapshots
+}
+
+/// Start a runtime server and wait until it accepts messages.
+async fn start_test_runtime(
+    socket_path: &Path,
+    session_dir: &Path,
+    owner_token: &str,
+) -> anyhow::Result<tokio::task::JoinHandle<anyhow::Result<()>>> {
+    let server = test_server(
+        socket_path.to_path_buf(),
+        session_dir.to_path_buf(),
+        owner_token,
+    );
+    let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+    let handle = tokio::spawn(server.run(Some(ready_tx)));
+    ready_rx.await??;
+    Ok(handle)
+}
+
+/// Shut the runtime server down through its owner token.
+async fn shutdown_test_runtime(
+    socket_path: PathBuf,
+    owner_token: &str,
+    handle: tokio::task::JoinHandle<anyhow::Result<()>>,
+) -> anyhow::Result<()> {
+    let response = send_socket_message(
+        socket_path,
+        &ClientMessage::AuthorizedShutdown {
+            owner_token: owner_token.to_string(),
+        },
+    )
+    .await?;
+    assert!(matches!(response, Some(ServerMessage::Ack)));
+    handle.await??;
+    Ok(())
 }
 
 fn file_permission_key(scope: &str, path: &Path) -> anyhow::Result<PermissionKey> {
@@ -873,6 +908,7 @@ async fn server_start_keeps_entry_under_recorded_cwd_for_cross_folder() -> anyho
         last_active_at: Some(2),
         mode: SessionMode::Normal,
         cwd: Some(folder_a.to_str().unwrap().to_string()),
+        name: None,
     };
     std::fs::write(
         session_dir.join("session-meta.json"),
@@ -1187,4 +1223,97 @@ async fn dev_null_default_permissions_granted() -> anyhow::Result<()> {
         "default grants should not create pending requests"
     );
     Ok(())
+}
+
+/// A `SetSessionName` message stores the name in the session meta and replies `Ack`.
+#[tokio::test]
+async fn set_session_name_over_socket_writes_meta_and_acks() -> anyhow::Result<()> {
+    let dir = TestDir::new("r");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    let _home_guard = HomeGuard::set(&home);
+
+    let session_dir = dir.path().join("abc123xy");
+    std::fs::create_dir_all(&session_dir)?;
+    let socket_path = dir.path().join("s");
+    let owner_token = "owner-token";
+
+    let handle = start_test_runtime(&socket_path, &session_dir, owner_token).await?;
+    let response = send_socket_message(
+        socket_path.clone(),
+        &ClientMessage::SetSessionName {
+            name: Some("my session".to_string()),
+        },
+    )
+    .await?;
+    assert!(matches!(response, Some(ServerMessage::Ack)));
+
+    let meta = read_session_meta(&session_dir)?.expect("session meta after the write");
+    assert_eq!(meta.name.as_deref(), Some("my session"));
+
+    shutdown_test_runtime(socket_path, owner_token, handle).await
+}
+
+/// An invalid name gets an `Error` reply and leaves the meta file byte-identical.
+#[tokio::test]
+async fn set_session_name_over_socket_rejects_invalid_name() -> anyhow::Result<()> {
+    let dir = TestDir::new("r");
+    let home = dir.path().join("home");
+    std::fs::create_dir_all(&home)?;
+    let _home_guard = HomeGuard::set(&home);
+
+    let session_dir = dir.path().join("abc123xy");
+    std::fs::create_dir_all(&session_dir)?;
+    let meta = SessionMeta {
+        description: Some("kept description".to_string()),
+        created_at: Some(1),
+        last_active_at: Some(2),
+        mode: SessionMode::Normal,
+        cwd: None,
+        name: Some("kept name".to_string()),
+    };
+    let meta_path = session_dir.join("session-meta.json");
+    std::fs::write(&meta_path, serde_json::to_string_pretty(&meta)?)?;
+
+    let socket_path = dir.path().join("s");
+    let owner_token = "owner-token";
+    let handle = start_test_runtime(&socket_path, &session_dir, owner_token).await?;
+
+    // The server records the cwd at startup, so snapshot the file after it is ready.
+    let before = std::fs::read(&meta_path)?;
+
+    let too_long = "a".repeat(crate::session::MAX_SESSION_NAME_CHARS + 1);
+    let response = send_socket_message(
+        socket_path.clone(),
+        &ClientMessage::SetSessionName {
+            name: Some(too_long),
+        },
+    )
+    .await?;
+    let Some(ServerMessage::Error { message }) = response else {
+        anyhow::bail!("expected an error reply for an over-long name, got {response:?}");
+    };
+    assert!(
+        message.contains("too long"),
+        "unexpected error message: {message}"
+    );
+
+    let response = send_socket_message(
+        socket_path.clone(),
+        &ClientMessage::SetSessionName {
+            name: Some("bad\nname".to_string()),
+        },
+    )
+    .await?;
+    let Some(ServerMessage::Error { message }) = response else {
+        anyhow::bail!("expected an error reply for a control character, got {response:?}");
+    };
+    assert!(
+        message.contains("control character"),
+        "unexpected error message: {message}"
+    );
+
+    assert_eq!(std::fs::read(&meta_path)?, before, "the meta file changed");
+
+    shutdown_test_runtime(socket_path, owner_token, handle).await
 }

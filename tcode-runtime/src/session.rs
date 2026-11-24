@@ -45,7 +45,17 @@ pub struct SessionMeta {
     /// sessions created before this feature and for web-only sessions.
     #[serde(default)]
     pub cwd: Option<String>,
+    /// User-set name. `None` when the session has no name. Independent of
+    /// `description`, which stays auto-generated.
+    #[serde(default)]
+    pub name: Option<String>,
 }
+
+/// Maximum number of characters in a user-set session name.
+pub const MAX_SESSION_NAME_CHARS: usize = 64;
+
+/// Suffix that marks a branch session name.
+const CLONE_NAME_SUFFIX: &str = "-clone";
 
 fn now_millis() -> u64 {
     std::time::SystemTime::now()
@@ -93,6 +103,7 @@ fn write_initial_session_meta(session_dir: &Path, mode: SessionMode) -> Result<(
         last_active_at: Some(now),
         mode,
         cwd: None,
+        name: None,
     };
     let meta_json = serde_json::to_string_pretty(&meta)?;
     let meta_path = session_dir.join("session-meta.json");
@@ -140,19 +151,14 @@ pub fn session_meta_from_summary(
         last_active_at: summary.last_active_at.or(Some(now)),
         mode,
         cwd: existing.as_ref().and_then(|meta| meta.cwd.clone()),
+        name: existing.as_ref().and_then(|meta| meta.name.clone()),
     })
 }
 
-pub fn update_session_meta_from_summary(
-    session_dir: &Path,
-    summary: &ConversationSummary,
-    default_mode: SessionMode,
-) -> Result<SessionMeta> {
-    let _guard = META_RMW_LOCK.lock();
-    std::fs::create_dir_all(session_dir)
-        .with_context(|| format!("failed to create {}", session_dir.display()))?;
-    let meta = session_meta_from_summary(session_dir, summary, default_mode)?;
-    let meta_json = serde_json::to_string_pretty(&meta)?;
+/// Write the session meta through a temp file plus rename, so a reader never
+/// sees a partial file. Callers hold [`META_RMW_LOCK`].
+fn write_session_meta_atomic(session_dir: &Path, meta: &SessionMeta) -> Result<()> {
+    let meta_json = serde_json::to_string_pretty(meta)?;
     let temp_nonce: u64 = rand::rng().random();
     let meta_tmp = session_dir.join(format!(
         "session-meta.json.{}.{}.tmp",
@@ -172,6 +178,19 @@ pub fn update_session_meta_from_summary(
         }
         return Err(e).with_context(|| format!("failed to rename {}", meta_target.display()));
     }
+    Ok(())
+}
+
+pub fn update_session_meta_from_summary(
+    session_dir: &Path,
+    summary: &ConversationSummary,
+    default_mode: SessionMode,
+) -> Result<SessionMeta> {
+    let _guard = META_RMW_LOCK.lock();
+    std::fs::create_dir_all(session_dir)
+        .with_context(|| format!("failed to create {}", session_dir.display()))?;
+    let meta = session_meta_from_summary(session_dir, summary, default_mode)?;
+    write_session_meta_atomic(session_dir, &meta)?;
     Ok(meta)
 }
 
@@ -222,6 +241,7 @@ pub fn record_session_cwd_if_missing(session_dir: &Path, cwd: &Path) -> Result<O
             last_active_at: None,
             mode: SessionMode::Normal,
             cwd: Some(cwd_str.clone()),
+            name: None,
         };
         let meta_json = serde_json::to_string_pretty(&meta)?;
         match std::fs::OpenOptions::new()
@@ -255,27 +275,59 @@ pub fn record_session_cwd_if_missing(session_dir: &Path, cwd: &Path) -> Result<O
     }
     meta.cwd = Some(cwd_str.clone());
 
-    let meta_json = serde_json::to_string_pretty(&meta)?;
-    let temp_nonce: u64 = rand::rng().random();
-    let meta_tmp = session_dir.join(format!(
-        "session-meta.json.{}.{}.tmp",
-        std::process::id(),
-        temp_nonce
-    ));
-    let meta_target = session_dir.join("session-meta.json");
-    std::fs::write(&meta_tmp, meta_json)
-        .with_context(|| format!("failed to write {}", meta_tmp.display()))?;
-    if let Err(e) = std::fs::rename(&meta_tmp, &meta_target) {
-        if let Err(cleanup_err) = std::fs::remove_file(&meta_tmp) {
-            tracing::warn!(
-                temp_file = %meta_tmp.display(),
-                error = %cleanup_err,
-                "failed to remove session metadata temp file after rename failure"
-            );
-        }
-        return Err(e).with_context(|| format!("failed to rename {}", meta_target.display()));
-    }
+    write_session_meta_atomic(session_dir, &meta)?;
     Ok(Some(cwd_str))
+}
+
+/// Check a trimmed, non-empty session name.
+fn validate_session_name(name: &str) -> Result<()> {
+    if name.chars().count() > MAX_SESSION_NAME_CHARS {
+        bail!("session name is too long (maximum {MAX_SESSION_NAME_CHARS} characters)");
+    }
+    if name.chars().any(char::is_control) {
+        bail!("session name must not contain control characters");
+    }
+    Ok(())
+}
+
+/// Set or clear the user-visible session name.
+///
+/// The input is trimmed. An empty or whitespace-only input clears the name.
+/// The meta file is created when it is missing. A validation error is returned
+/// unchanged, so the caller can show its text to the user.
+pub fn set_session_name(session_dir: &Path, name: Option<&str>) -> Result<()> {
+    let name = name.map(str::trim).filter(|name| !name.is_empty());
+    if let Some(name) = name {
+        validate_session_name(name)?;
+    }
+
+    let _guard = META_RMW_LOCK.lock();
+    std::fs::create_dir_all(session_dir)
+        .with_context(|| format!("failed to create {}", session_dir.display()))?;
+    let mut meta = match read_session_meta_retrying(session_dir)? {
+        Some(meta) => meta,
+        None => SessionMeta {
+            description: None,
+            created_at: None,
+            last_active_at: None,
+            mode: SessionMode::Normal,
+            cwd: None,
+            name: None,
+        },
+    };
+    meta.name = name.map(str::to_string);
+    write_session_meta_atomic(session_dir, &meta)
+}
+
+/// Name for a session branched off a named session.
+///
+/// The base text is truncated on a character boundary, so the result fits
+/// [`MAX_SESSION_NAME_CHARS`].
+pub fn clone_session_name(source: &str) -> String {
+    let keep = MAX_SESSION_NAME_CHARS - CLONE_NAME_SUFFIX.chars().count();
+    let mut name: String = source.chars().take(keep).collect();
+    name.push_str(CLONE_NAME_SUFFIX);
+    name
 }
 
 /// Re-read the session meta, tolerating a brief window in which a concurrent

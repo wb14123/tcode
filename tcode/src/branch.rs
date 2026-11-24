@@ -592,12 +592,28 @@ pub(crate) fn build_branch_content(
         .with_context(|| format!("failed to rename {}", state_target.display()))?;
 
     // session-meta.json: source mode, description from the truncated summary.
-    let mode = tcode_runtime::session::read_session_mode(source_dir)?;
+    let source_meta = tcode_runtime::session::read_session_meta(source_dir)?;
+    let mode = source_meta
+        .as_ref()
+        .map(|meta| meta.mode)
+        .unwrap_or_default();
     tcode_runtime::session::update_session_meta_from_summary(
         staging,
         &truncated_state.summary(),
         mode,
     )?;
+
+    // The branch takes a clone of the source name. An unnamed source leaves
+    // the branch unnamed. An invalid source name must not block the branch.
+    if let Some(name) = source_meta.and_then(|meta| meta.name) {
+        let clone_name = tcode_runtime::session::clone_session_name(&name);
+        if let Err(e) = tcode_runtime::session::set_session_name(staging, Some(&clone_name)) {
+            tracing::warn!(
+                error = %e,
+                "failed to copy the source session name; the branch has no name"
+            );
+        }
+    }
 
     // display.jsonl: the retained prefix. Always created, even when empty.
     let mut display_content = String::new();

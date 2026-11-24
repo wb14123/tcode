@@ -45,10 +45,13 @@ M.__test = {
     return select(1, element_at_row(model, buf, row))
   end,
   element_at_row_full = element_at_row,
-  -- Keymap handler bodies (what the `o` / `<C-k>` / `gb` keymaps invoke).
+  -- Keymap handler bodies (what the `o` / `<C-k>` / `gb` / `gn` keymaps invoke).
   keymap_o = keymap_o,
   keymap_ck = keymap_ck,
   keymap_gb = keymap_gb,
+  keymap_gn = keymap_gn,
+  -- Session name helper: the stored name read for the `gn` popup prefill.
+  session_meta_name = session_meta_name,
   -- Edit-window insert-mode handlers (the `/` and `<Tab>` keymaps).
   keymap_slash = keymap_slash,
   keymap_tab = keymap_tab,

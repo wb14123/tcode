@@ -24,7 +24,7 @@ mod tests {
         assert!(prompt.contains("Subagent Rules"));
         assert!(prompt.contains("Tool Usage"));
         assert!(prompt.contains("Strongly prefer the dedicated file tools"));
-        assert!(prompt.contains("Output Style"));
+        assert!(prompt.contains("Writing Style"));
         assert!(prompt.contains("Do not search for them"));
     }
 
@@ -105,7 +105,7 @@ mod tests {
             !prompt.contains("Available Tools"),
             "the web-only prompt must not enumerate a closed tool list"
         );
-        assert!(prompt.contains("Output Style"));
+        assert!(prompt.contains("Writing Style"));
     }
 
     #[test]

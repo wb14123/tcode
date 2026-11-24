@@ -402,13 +402,24 @@ code {
   -webkit-line-clamp: 2;
 }
 
+.session-link-desc,
 .session-link-meta,
+.manage-session-desc,
 .muted,
 .timeline-meta,
 .meta-list dt,
 .meta-list dd,
 .empty-copy {
   color: var(--text-muted);
+}
+
+.session-link-desc,
+.manage-session-desc {
+  line-height: 1.35;
+  display: -webkit-box;
+  overflow: hidden;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 .main-column {
@@ -2584,7 +2595,7 @@ tcode-manage-conversations {
   gap: 0.15rem;
 }
 
-.manage-session-desc {
+.manage-session-title {
   font-weight: 500;
   color: var(--text);
   line-height: 1.35;

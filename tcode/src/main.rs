@@ -60,6 +60,9 @@ mod module_cache_tests;
 mod tracing_setup_tests;
 
 #[cfg(test)]
+mod session_label_tests;
+
+#[cfg(test)]
 mod test_support;
 
 use std::fs;
@@ -166,6 +169,16 @@ struct Cli {
     no_container: bool,
 }
 
+/// Accept a non-empty session name. An empty name is a removal, which is sent
+/// as `--clear` instead.
+fn non_empty_session_name(value: &str) -> std::result::Result<String, String> {
+    if value.is_empty() {
+        Err("a name must not be empty; use --clear to remove the name".to_string())
+    } else {
+        Ok(value.to_string())
+    }
+}
+
 #[derive(Subcommand)]
 enum Commands {
     /// Start the server only (for standalone mode)
@@ -229,6 +242,19 @@ enum Commands {
     CancelConversation {
         /// The conversation ID to cancel
         conversation_id: String,
+    },
+    /// Set or clear the session name (used by the `gn` keybinding)
+    SetName {
+        /// New name. Required unless --clear is given.
+        #[arg(
+            value_parser = non_empty_session_name,
+            conflicts_with = "clear",
+            required_unless_present = "clear"
+        )]
+        name: Option<String>,
+        /// Remove the name
+        #[arg(long)]
+        clear: bool,
     },
     /// List active sessions
     Sessions,
@@ -779,27 +805,102 @@ async fn send_server_message(
     Ok(())
 }
 
-/// Run a tmux command via argv (no shell involved) and bail on failure with
-/// its stderr.
-fn run_tmux_command(args: &[&str], context_msg: &str) -> Result<()> {
+/// Send a message to the server and fail when the server does not acknowledge
+/// it. An `Error` reply becomes an error that carries the server message, so
+/// the process exits with a non-zero code.
+async fn send_server_message_strict(session: &Session, msg: protocol::ClientMessage) -> Result<()> {
+    let response = tcode_runtime::bootstrap::send_socket_message(session.socket_path(), &msg)
+        .await
+        .context("Failed to connect to server socket. Is the server running?")?;
+    match response {
+        Some(protocol::ServerMessage::Ack) => Ok(()),
+        Some(protocol::ServerMessage::Error { message }) => bail!("{message}"),
+        Some(other) => bail!("unexpected server reply: {:?}", other),
+        None => bail!("the server closed the connection without a reply"),
+    }
+}
+
+/// Run a tmux command via argv (no shell involved). Returns the stderr text
+/// when tmux exits with a non-zero status, `Ok(None)` on success.
+fn tmux_command_stderr(args: &[&str]) -> Result<Option<String>> {
     let output = Command::new("tmux")
         .args(args)
         .output()
-        .map_err(|e| anyhow!("{}: {}", context_msg, e))?;
-    if !output.status.success() {
-        let stderr = match std::str::from_utf8(&output.stderr) {
-            Ok(s) => s.to_string(),
-            Err(err) => {
-                tracing::warn!(
-                    "tmux stderr is not valid UTF-8 (first invalid byte at offset {}); using error message instead",
-                    err.valid_up_to()
-                );
-                non_utf8_output_message("tmux output", &err)
-            }
-        };
-        anyhow::bail!("{}: {}", context_msg, stderr);
+        .context("failed to run tmux")?;
+    if output.status.success() {
+        return Ok(None);
     }
-    Ok(())
+    let stderr = match std::str::from_utf8(&output.stderr) {
+        Ok(s) => s.to_string(),
+        Err(err) => {
+            tracing::warn!(
+                "tmux stderr is not valid UTF-8 (first invalid byte at offset {}); using error message instead",
+                err.valid_up_to()
+            );
+            non_utf8_output_message("tmux output", &err)
+        }
+    };
+    Ok(Some(stderr))
+}
+
+/// Run a tmux command via argv (no shell involved) and bail on failure with
+/// its stderr.
+fn run_tmux_command(args: &[&str], context_msg: &str) -> Result<()> {
+    match tmux_command_stderr(args) {
+        Ok(None) => Ok(()),
+        Ok(Some(stderr)) => bail!("{}: {}", context_msg, stderr),
+        Err(e) => Err(e.context(context_msg.to_string())),
+    }
+}
+
+/// Window name that a session window returns to when its name is cleared.
+const DEFAULT_TMUX_WINDOW_NAME: &str = "tcode";
+
+/// The tmux pane that runs this process, when tcode runs inside tmux.
+fn current_tmux_pane() -> Option<String> {
+    std::env::var("TMUX_PANE")
+        .ok()
+        .filter(|pane| !pane.is_empty())
+}
+
+/// Rename the tmux window that holds `pane`. A failure carries the tmux stderr
+/// text only, without added context. The `--` separator stops tmux from reading
+/// a name that starts with `-` as a flag.
+fn rename_tmux_window(pane: &str, name: &str) -> Result<()> {
+    let name = escape_tmux_format(name);
+    match tmux_command_stderr(&["rename-window", "-t", pane, "--", &name])? {
+        Some(stderr) => bail!("{}", stderr.trim_end()),
+        None => Ok(()),
+    }
+}
+
+/// Escape the two sequences that tmux expands in a window name, so the name
+/// appears as typed. Other `#` characters need no escape.
+fn escape_tmux_format(name: &str) -> String {
+    name.replace("#{", "##{").replace("#(", "##(")
+}
+
+/// One row of the `tcode sessions` output.
+struct SessionListEntry {
+    id: String,
+    status: String,
+    mode: SessionMode,
+    name: Option<String>,
+    description: Option<String>,
+    last_active_at: u64,
+}
+
+/// Format one `tcode sessions` row. A missing name or description drops its
+/// own part and its separator.
+fn session_list_line(entry: &SessionListEntry) -> String {
+    let mut line = format!("  {} ({}, {})", entry.id, entry.status, entry.mode.label());
+    match (&entry.name, &entry.description) {
+        (Some(name), Some(description)) => line.push_str(&format!(" {} - {}", name, description)),
+        (Some(name), None) => line.push_str(&format!(" {}", name)),
+        (None, Some(description)) => line.push_str(&format!(" {}", description)),
+        (None, None) => {}
+    }
+    line
 }
 
 fn initialize_new_session_mode(
@@ -1052,6 +1153,34 @@ async fn main() -> Result<()> {
             let msg = protocol::ClientMessage::CancelConversation { conversation_id };
             send_server_message(&session, msg, "Conversation cancelled").await
         }
+        Some(Commands::SetName { name, .. }) => {
+            let session_id = require_session(session)?;
+            if root_session_id(&session_id) != session_id {
+                bail!("only root sessions can be named");
+            }
+            let session = Session::new(session_id)?;
+            // tmux keeps the last manual window name, so a clear must set the
+            // default text itself.
+            let window_name = name
+                .as_deref()
+                .map(str::trim)
+                .filter(|name| !name.is_empty())
+                .unwrap_or(DEFAULT_TMUX_WINDOW_NAME)
+                .to_string();
+            send_server_message_strict(&session, protocol::ClientMessage::SetSessionName { name })
+                .await?;
+            match current_tmux_pane() {
+                Some(pane) => {
+                    if let Err(e) = rename_tmux_window(&pane, &window_name) {
+                        println!("The name was saved, but the tab rename failed: {e}");
+                    }
+                }
+                None => {
+                    tracing::warn!("TMUX_PANE is not set; the tmux window was not renamed");
+                }
+            }
+            Ok(())
+        }
         Some(Commands::Attach) => {
             let config = load_cfg()?;
             let session_id = match session_id_or_pick(session)? {
@@ -1145,7 +1274,7 @@ async fn main() -> Result<()> {
             if sessions.is_empty() {
                 println!("No sessions in ~/.tcode/sessions/");
             } else {
-                let mut entries: Vec<(String, String, SessionMode, Option<String>, u64)> = sessions
+                let mut entries: Vec<SessionListEntry> = sessions
                     .into_iter()
                     .map(|id| {
                         let session = Session::new(id.clone())?;
@@ -1157,22 +1286,27 @@ async fn main() -> Result<()> {
                         let meta = fs::read_to_string(session.session_meta_file())
                             .ok()
                             .and_then(|json| serde_json::from_str::<SessionMeta>(&json).ok());
-                        let last_active = meta.as_ref().and_then(|m| m.last_active_at).unwrap_or(0);
+                        let last_active_at =
+                            meta.as_ref().and_then(|m| m.last_active_at).unwrap_or(0);
                         let mode = meta.as_ref().map(|m| m.mode).unwrap_or_default();
+                        let name = meta.as_ref().and_then(|m| m.name.clone());
                         let description = meta.and_then(|m| m.description);
-                        Ok((id, status.to_string(), mode, description, last_active))
+                        Ok(SessionListEntry {
+                            id,
+                            status: status.to_string(),
+                            mode,
+                            name,
+                            description,
+                            last_active_at,
+                        })
                     })
                     .collect::<Result<Vec<_>>>()?;
 
-                entries.sort_by_key(|b| std::cmp::Reverse(b.4));
+                entries.sort_by_key(|entry| std::cmp::Reverse(entry.last_active_at));
 
                 println!("Sessions:");
-                for (id, status, mode, description, _) in entries {
-                    if let Some(desc) = description {
-                        println!("  {} ({}, {}) {}", id, status, mode.label(), desc);
-                    } else {
-                        println!("  {} ({}, {})", id, status, mode.label());
-                    }
+                for entry in &entries {
+                    println!("{}", session_list_line(entry));
                 }
             }
             Ok(())
@@ -1851,7 +1985,13 @@ async fn run_unified_with_session(
     tools::set_search_engine(search_engine);
 
     let socket_path = session.socket_path();
-    let session_mode = read_session_mode(session.session_dir())?;
+    // One meta read for the whole start path: the mode gates the server and the
+    // stored name renames the tmux window.
+    let session_meta = read_session_meta(session.session_dir())?;
+    let session_mode = session_meta
+        .as_ref()
+        .map(|meta| meta.mode)
+        .unwrap_or_default();
 
     let exe_path =
         std::env::current_exe().context("Failed to determine current executable path")?;
@@ -1862,9 +2002,7 @@ async fn run_unified_with_session(
     };
 
     // Capture current pane ID before starting/attaching runtime so failures do not leak leases.
-    let current_pane_id = std::env::var("TMUX_PANE")
-        .ok()
-        .filter(|s| !s.is_empty())
+    let current_pane_id = current_tmux_pane()
         .ok_or_else(|| anyhow!("TMUX_PANE not set — cannot determine current tmux pane"))?;
 
     let runtime_mode = match probe_runtime_status(&socket_path).await? {
@@ -2001,6 +2139,14 @@ async fn run_unified_with_session(
             return Err(e.context("Failed to set up layout"));
         }
     };
+
+    // Rename after the layout step, which respawns panes, and before the
+    // display child starts. A failed rename never blocks the session.
+    if let Some(name) = session_meta.as_ref().and_then(|meta| meta.name.as_deref())
+        && let Err(e) = rename_tmux_window(&current_pane_id, name)
+    {
+        tracing::warn!(session_id, error = %e, "failed to rename the tmux window");
+    }
 
     // Display runs as child process with saved original stdio FDs. The exe and
     // args are passed via argv (no shell), so no quoting is needed.

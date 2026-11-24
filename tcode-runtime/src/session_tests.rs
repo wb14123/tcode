@@ -6,8 +6,9 @@ use std::sync::{Arc, Barrier};
 use llm_rs::conversation::ConversationSummary;
 
 use crate::session::{
-    SessionMeta, SessionMode, ensure_session_mode_initialized, is_valid_session_id,
-    read_session_meta, read_session_mode, record_session_cwd_if_missing, session_meta_from_summary,
+    MAX_SESSION_NAME_CHARS, SessionMeta, SessionMode, clone_session_name,
+    ensure_session_mode_initialized, is_valid_session_id, read_session_meta, read_session_mode,
+    record_session_cwd_if_missing, session_meta_from_summary, set_session_name,
     update_session_meta_from_summary, validate_session_id, validate_session_path,
 };
 use crate::test_support::{TestDir, WarnCapture};
@@ -91,6 +92,7 @@ fn ensure_session_mode_initialized_preserves_existing_valid_metadata() -> anyhow
         last_active_at: Some(40),
         mode: SessionMode::Normal,
         cwd: None,
+        name: None,
     };
     let meta_path = dir.path().join("session-meta.json");
     std::fs::write(&meta_path, serde_json::to_string_pretty(&existing)?)?;
@@ -129,6 +131,7 @@ fn session_meta_from_summary_preserves_existing_mode() -> anyhow::Result<()> {
         last_active_at: Some(2),
         mode: SessionMode::WebOnly,
         cwd: None,
+        name: None,
     };
     std::fs::write(
         dir.path().join("session-meta.json"),
@@ -218,6 +221,7 @@ fn session_meta_cwd_round_trips() -> anyhow::Result<()> {
         last_active_at: Some(2),
         mode: SessionMode::Normal,
         cwd: Some("/work/project".to_string()),
+        name: None,
     };
 
     let json = serde_json::to_string_pretty(&meta)?;
@@ -242,6 +246,7 @@ fn record_session_cwd_sets_cwd_when_absent() -> anyhow::Result<()> {
         last_active_at: Some(40),
         mode: SessionMode::Normal,
         cwd: None,
+        name: None,
     };
     std::fs::write(
         session_dir.join("session-meta.json"),
@@ -273,6 +278,7 @@ fn record_session_cwd_does_not_overwrite_existing_value() -> anyhow::Result<()> 
         last_active_at: Some(2),
         mode: SessionMode::Normal,
         cwd: Some("/original/project".to_string()),
+        name: None,
     };
     std::fs::write(
         session_dir.join("session-meta.json"),
@@ -337,6 +343,7 @@ fn record_session_cwd_retries_until_partial_meta_is_completed() -> anyhow::Resul
                 last_active_at: Some(2),
                 mode: SessionMode::Normal,
                 cwd: None,
+                name: None,
             };
             std::fs::write(
                 session_dir.join("session-meta.json"),
@@ -479,6 +486,7 @@ fn record_session_cwd_non_utf8_path_leaves_existing_meta_untouched() -> anyhow::
         last_active_at: Some(2),
         mode: SessionMode::Normal,
         cwd: None,
+        name: None,
     };
     let original_json = serde_json::to_string_pretty(&existing)?;
     std::fs::write(session_dir.join("session-meta.json"), &original_json)?;
@@ -593,4 +601,247 @@ fn summary_update_racing_cwd_record_serialized_cannot_clobber_cwd() -> anyhow::R
         "summary update must not clobber the recorded cwd"
     );
     Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// session name
+// ---------------------------------------------------------------------------
+
+fn write_meta(session_dir: &Path, meta: &SessionMeta) -> anyhow::Result<()> {
+    std::fs::write(
+        session_dir.join("session-meta.json"),
+        serde_json::to_string_pretty(meta)?,
+    )?;
+    Ok(())
+}
+
+fn meta_with_name(name: Option<&str>) -> SessionMeta {
+    SessionMeta {
+        description: Some("auto description".to_string()),
+        created_at: Some(1),
+        last_active_at: Some(2),
+        mode: SessionMode::Normal,
+        cwd: Some("/work/project".to_string()),
+        name: name.map(str::to_string),
+    }
+}
+
+#[test]
+fn session_meta_without_name_parses_to_none() -> anyhow::Result<()> {
+    let meta: SessionMeta = serde_json::from_str(
+        r#"{
+            "description": "old session",
+            "created_at": 123,
+            "last_active_at": 456,
+            "mode": "normal"
+        }"#,
+    )?;
+
+    assert_eq!(meta.name, None);
+    Ok(())
+}
+
+#[test]
+fn session_meta_name_round_trips() -> anyhow::Result<()> {
+    let dir = TestDir::new("session");
+    write_meta(dir.path(), &meta_with_name(Some("my session")))?;
+
+    let meta = read_session_meta(dir.path())?.expect("meta file should exist");
+
+    assert_eq!(meta.name.as_deref(), Some("my session"));
+    assert_eq!(meta.description.as_deref(), Some("auto description"));
+    Ok(())
+}
+
+#[test]
+fn session_meta_from_summary_keeps_existing_name() -> anyhow::Result<()> {
+    let dir = TestDir::new("session");
+    write_meta(dir.path(), &meta_with_name(Some("kept name")))?;
+
+    let summary = ConversationSummary {
+        description: Some("updated description".to_string()),
+        created_at: Some(3),
+        last_active_at: Some(4),
+    };
+    let saved = session_meta_from_summary(dir.path(), &summary, SessionMode::Normal)?;
+
+    assert_eq!(saved.name.as_deref(), Some("kept name"));
+    assert_eq!(saved.description.as_deref(), Some("updated description"));
+    Ok(())
+}
+
+#[test]
+fn update_session_meta_from_summary_keeps_name_on_disk() -> anyhow::Result<()> {
+    // The event writer rewrites the meta on each event; a stored name must
+    // survive it.
+    let dir = TestDir::new("session");
+    write_meta(dir.path(), &meta_with_name(Some("kept name")))?;
+
+    let summary = ConversationSummary {
+        description: Some("updated description".to_string()),
+        created_at: Some(3),
+        last_active_at: Some(4),
+    };
+    update_session_meta_from_summary(dir.path(), &summary, SessionMode::Normal)?;
+
+    let meta = read_session_meta(dir.path())?.expect("meta file should exist");
+    assert_eq!(meta.name.as_deref(), Some("kept name"));
+    assert_eq!(meta.description.as_deref(), Some("updated description"));
+    Ok(())
+}
+
+#[test]
+fn set_session_name_sets_replaces_and_clears() -> anyhow::Result<()> {
+    let dir = TestDir::new("session");
+    let session_dir = dir.path().join("abc123xy");
+
+    set_session_name(&session_dir, Some("first"))?;
+    let meta = read_session_meta(&session_dir)?.expect("meta file should exist");
+    assert_eq!(meta.name.as_deref(), Some("first"));
+
+    set_session_name(&session_dir, Some("second"))?;
+    let meta = read_session_meta(&session_dir)?.expect("meta file should exist");
+    assert_eq!(meta.name.as_deref(), Some("second"));
+
+    set_session_name(&session_dir, None)?;
+    let meta = read_session_meta(&session_dir)?.expect("meta file should exist");
+    assert_eq!(meta.name, None);
+
+    // Clearing an unnamed session changes nothing.
+    set_session_name(&session_dir, None)?;
+    let meta = read_session_meta(&session_dir)?.expect("meta file should exist");
+    assert_eq!(meta.name, None);
+    Ok(())
+}
+
+#[test]
+fn set_session_name_creates_meta_file_when_missing() -> anyhow::Result<()> {
+    let dir = TestDir::new("session");
+    let session_dir = dir.path().join("abc123xy");
+
+    set_session_name(&session_dir, Some("written"))?;
+
+    let meta = read_session_meta(&session_dir)?.expect("meta file should exist");
+    assert_eq!(meta.name.as_deref(), Some("written"));
+    assert_eq!(meta.mode, SessionMode::Normal);
+    assert_eq!(meta.description, None);
+    Ok(())
+}
+
+#[test]
+fn set_session_name_keeps_description_and_cwd() -> anyhow::Result<()> {
+    let dir = TestDir::new("session");
+    write_meta(dir.path(), &meta_with_name(None))?;
+
+    set_session_name(dir.path(), Some("new name"))?;
+
+    let meta = read_session_meta(dir.path())?.expect("meta file should exist");
+    assert_eq!(meta.name.as_deref(), Some("new name"));
+    assert_eq!(meta.description.as_deref(), Some("auto description"));
+    assert_eq!(meta.cwd.as_deref(), Some("/work/project"));
+    assert_eq!(meta.created_at, Some(1));
+    assert_eq!(meta.last_active_at, Some(2));
+    Ok(())
+}
+
+#[test]
+fn set_session_name_trims_surrounding_spaces() -> anyhow::Result<()> {
+    let dir = TestDir::new("session");
+
+    set_session_name(dir.path(), Some("  spaced name \n "))?;
+
+    let meta = read_session_meta(dir.path())?.expect("meta file should exist");
+    assert_eq!(meta.name.as_deref(), Some("spaced name"));
+    Ok(())
+}
+
+#[test]
+fn set_session_name_accepts_max_length_name() -> anyhow::Result<()> {
+    let dir = TestDir::new("session");
+    let name = "a".repeat(MAX_SESSION_NAME_CHARS);
+
+    set_session_name(dir.path(), Some(&name))?;
+
+    let meta = read_session_meta(dir.path())?.expect("meta file should exist");
+    assert_eq!(meta.name.as_deref(), Some(name.as_str()));
+    Ok(())
+}
+
+#[test]
+fn set_session_name_rejects_too_long_name() -> anyhow::Result<()> {
+    let dir = TestDir::new("session");
+    let name = "a".repeat(MAX_SESSION_NAME_CHARS + 1);
+
+    let err = set_session_name(dir.path(), Some(&name)).expect_err("65 characters must fail");
+
+    assert_eq!(
+        err.to_string(),
+        "session name is too long (maximum 64 characters)"
+    );
+    assert!(
+        !dir.path().join("session-meta.json").exists(),
+        "a rejected name must not write a meta file"
+    );
+    Ok(())
+}
+
+#[test]
+fn set_session_name_rejects_control_characters() -> anyhow::Result<()> {
+    let dir = TestDir::new("session");
+
+    for name in ["bad\nname", "bad\tname", "bad\u{1b}name", "bad\u{7f}name"] {
+        let err = set_session_name(dir.path(), Some(name))
+            .expect_err("control characters must be rejected");
+        assert_eq!(
+            err.to_string(),
+            "session name must not contain control characters",
+            "for {name:?}"
+        );
+    }
+    Ok(())
+}
+
+#[test]
+fn set_session_name_whitespace_only_clears() -> anyhow::Result<()> {
+    let dir = TestDir::new("session");
+    set_session_name(dir.path(), Some("named"))?;
+
+    set_session_name(dir.path(), Some("   "))?;
+
+    let meta = read_session_meta(dir.path())?.expect("meta file should exist");
+    assert_eq!(meta.name, None);
+    Ok(())
+}
+
+#[test]
+fn clone_session_name_appends_suffix() {
+    assert_eq!(clone_session_name("my session"), "my session-clone");
+}
+
+#[test]
+fn clone_session_name_fits_the_max_length() {
+    let source = "a".repeat(MAX_SESSION_NAME_CHARS);
+
+    let clone = clone_session_name(&source);
+
+    assert_eq!(clone.chars().count(), MAX_SESSION_NAME_CHARS);
+    assert_eq!(
+        clone,
+        format!("{}-clone", "a".repeat(MAX_SESSION_NAME_CHARS - 6))
+    );
+}
+
+#[test]
+fn clone_session_name_keeps_multibyte_characters_whole() {
+    // 64 four-byte characters: the base must drop whole characters, never
+    // bytes.
+    let source = "漢".repeat(MAX_SESSION_NAME_CHARS);
+
+    let clone = clone_session_name(&source);
+
+    assert_eq!(clone.chars().count(), MAX_SESSION_NAME_CHARS);
+    assert_eq!(
+        clone,
+        format!("{}-clone", "漢".repeat(MAX_SESSION_NAME_CHARS - 6))
+    );
 }

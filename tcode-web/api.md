@@ -166,6 +166,7 @@ List existing sessions for the sidebar.
 This returns lightweight summary data derived from session files such as:
 
 - session id
+- name set by the user when available
 - description/title when available
 - creation time
 - last active time
@@ -179,6 +180,7 @@ Example response:
   "sessions": [
     {
       "id": "53hthyc8",
+      "name": "Code review",
       "description": "Review this project",
       "created_at": "2026-04-15T23:00:00Z",
       "last_active_at": "2026-04-16T00:00:00Z",

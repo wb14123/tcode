@@ -691,7 +691,10 @@ class TcodeApp extends LitElement {
                     href="${hrefForRoute({ kind: 'session', sessionId: session.id })}"
                     @click=${this.closeSidebar}
                   >
-                    <div class="session-link-title">${session.description || 'Untitled conversation'}</div>
+                    <div class="session-link-title">${session.name || session.description || 'Untitled conversation'}</div>
+                    ${session.name && session.description
+                      ? html`<div class="session-link-desc">${session.description}</div>`
+                      : nothing}
                     <div class="session-link-meta">${formatTimestamp(session.last_active_at || session.created_at)}</div>
                   </a>
                 `,

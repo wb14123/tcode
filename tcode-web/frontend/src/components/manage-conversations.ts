@@ -185,7 +185,10 @@ class TcodeManageConversations extends LitElement {
                       @change=${() => this.toggleSession(session.id)}
                     />
                     <div class="manage-session-info">
-                      <div class="manage-session-desc">${session.description || 'Untitled conversation'}</div>
+                      <div class="manage-session-title">${session.name || session.description || 'Untitled conversation'}</div>
+                      ${session.name && session.description
+                        ? html`<div class="manage-session-desc">${session.description}</div>`
+                        : nothing}
                       <div class="manage-session-meta">${formatTimestamp(session.last_active_at || session.created_at)}</div>
                     </div>
                   </label>

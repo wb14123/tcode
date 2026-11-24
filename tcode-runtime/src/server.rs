@@ -35,7 +35,7 @@ use crate::protocol::{
     SessionRuntimeInfo, lease_timeout_duration,
 };
 use crate::session::{
-    SessionMode, is_root_session_name, record_session_cwd_if_missing,
+    SessionMode, is_root_session_name, record_session_cwd_if_missing, set_session_name,
     update_session_meta_from_summary,
 };
 use crate::system_prompt::tcode_system_prompt_builder;
@@ -2040,7 +2040,6 @@ async fn handle_client_inner(
         runtime_id,
         session_dir,
     } = context;
-    let _ = &session_dir; // no longer passed to handle_send_message; image parsing moved to client
     let framed = Framed::new(stream, LengthDelimitedCodec::new());
     let (mut sink, mut stream) = framed.split();
 
@@ -2221,6 +2220,25 @@ async fn handle_client_inner(
                             )),
                         )
                         .await?;
+                    }
+                    ClientMessage::SetSessionName { name } => {
+                        // The name text stays out of the log. Only its length is logged.
+                        let name_chars = name.as_deref().map_or(0, |name| name.trim().chars().count());
+                        match set_session_name(&session_dir, name.as_deref()) {
+                            Ok(()) => {
+                                tracing::info!(
+                                    session_dir = %session_dir.display(),
+                                    name_chars,
+                                    "session name updated"
+                                );
+                                send_msg(&mut sink, &ServerMessage::Ack).await?;
+                            }
+                            Err(e) => {
+                                send_msg(&mut sink, &ServerMessage::Error {
+                                    message: e.to_string(),
+                                }).await?;
+                            }
+                        }
                     }
                     ClientMessage::AuthorizedShutdown { owner_token } => {
                         if !validate_owner_shutdown_token(&owner_token, &owner_shutdown_token) {

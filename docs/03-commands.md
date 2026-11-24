@@ -64,7 +64,7 @@ Attaches to an existing session and resumes the conversation in the current tmux
 
 Each session records its working directory once, at its first server start. When the session's recorded working directory differs from the folder you attach from, a warning is printed and attaching requires explicit confirmation (`Force attach anyway? [y/N]`). If the recorded working directory cannot be verified — no recorded cwd, the folder no longer exists, or the current directory cannot be resolved — a similar confirmation is required with the reason shown. Web-only sessions never prompt.
 
-The interactive picker opens showing sessions whose recorded working directory matches the current folder; press Tab to toggle between that view and all sessions. When the current folder has no sessions but sessions exist elsewhere, the list shows a hint to press Tab. Sessions are listed by last activity time. Press `/` to search conversation history across sessions. Search runs in the background and shows ranked snippet results with highlighted matches; the search index is checked in the background when the picker opens, so early results may be partial until that check finishes.
+The interactive picker opens showing sessions whose recorded working directory matches the current folder; press Tab to toggle between that view and all sessions. When the current folder has no sessions but sessions exist elsewhere, the list shows a hint to press Tab. Sessions are listed by last activity time. Press `/` to search conversation history across sessions. A session whose name matches the query is listed first. Search runs in the background and shows ranked snippet results with highlighted matches; the search index is checked in the background when the picker opens, so early results may be partial until that check finishes.
 
 ```
 tcode attach
@@ -81,14 +81,15 @@ tcode --session <id> attach
 
 ### `tcode sessions`
 
-Lists all sessions with their status (`active` or `inactive`), mode (`normal` or `web-only`), and description when available. Active sessions have a running server process.
+Lists all sessions with their status (`active` or `inactive`), mode (`normal` or `web-only`), name, and description when available. Active sessions have a running server process.
 
 Example output:
 
 ```text
 Sessions:
   abc123xy (active, web-only) Research notes
-  def456uv (inactive, normal) Project refactor
+  def456uv (inactive, normal) Refactor branch - Project refactor
+  ghi789jk (inactive, normal) Refactor branch
 ```
 
 ```
@@ -370,6 +371,34 @@ tcode --session <id> cancel-conversation <conversation-id>
 
 ---
 
+### `tcode set-name`
+
+Sets or clears the user-visible session name. The `gn` keybinding runs this command from the display and edit views. Only root sessions can be named, and the server for the session must run.
+
+A set renames the current tmux window to the new name. A clear renames it to `tcode`. Outside tmux the window rename is skipped, and the name is still saved. A failed tmux rename prints a warning, and the command still exits with code 0.
+
+Names hold at most 64 characters. Control characters such as newline, tab, and `Esc` are rejected. An empty or spaces-only input in the TUI is sent as `--clear`. The parser rejects an empty `<name>` value.
+
+```
+tcode --session <id> set-name <name>
+tcode --session <id> set-name --clear
+```
+
+**Flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--session <id>` | **(required)** Root session ID |
+| `--clear` | Remove the name. Conflicts with `<name>`. |
+
+**Arguments:**
+
+| Argument | Description |
+|----------|-------------|
+| `<name>` | New name. Required unless `--clear` is given. Surrounding spaces are trimmed. |
+
+---
+
 ### `tcode open-tool-call`
 
 Opens a tool-call detail view in a new tmux window.
@@ -423,7 +452,9 @@ before that user message — the message itself is rewritten by typing a
 replacement in the new session — and is self-contained: subagent
 conversations, tool-call details, and media are copied, so the source session
 can be deleted without affecting the branch. The branch is opened with the
-same config profile as the source display.
+same config profile as the source display. A branch of a named session takes
+the name `<source name>-clone`. The command truncates the source name so that
+the result fits 64 characters. A branch of an unnamed session has no name.
 
 Subagent `web_fetch` budget files are copied along with the subagent
 directories, so the branch starts with an independent snapshot of the

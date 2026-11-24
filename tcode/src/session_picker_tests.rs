@@ -3,12 +3,15 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 
 use anyhow::Result;
+use ratatui::style::{Color, Modifier};
 use ratatui::text::Line;
 use tcode_runtime::fts::SearchResult;
+use tcode_runtime::session::SessionMode;
 
 use super::{
-    FilterMode, IndexState, SearchState, entries_from_index_markers, load_all_entries,
-    pick_session_at, show_empty_folder_hint, status_text,
+    FilterMode, IndexState, SearchState, SessionEntry, build_display_items,
+    entries_from_index_markers, entry_index_by_id, load_all_entries, pick_session_at,
+    session_summary_line, show_empty_folder_hint, status_text,
 };
 use crate::test_support::TestDir;
 
@@ -388,6 +391,17 @@ fn status_text_shows_no_matches_when_results_are_empty() {
 }
 
 #[test]
+fn status_text_shows_no_status_when_a_name_match_is_visible() {
+    // A query can match a session name while the content search finds nothing.
+    let search = search_state_with_results(Vec::new());
+    let text = status_text_of(FilterMode::CurrentFolder, 1, &search);
+    assert!(
+        !text.contains("No matches"),
+        "a visible name match must not report no matches: {text}"
+    );
+}
+
+#[test]
 fn status_text_shows_folder_no_matches_when_results_are_filtered_out() {
     let search = search_state_with_results(vec![SearchResult {
         session_id: "aaaa1111".to_string(),
@@ -441,4 +455,223 @@ fn status_text_shows_search_failure() {
         text.contains("Search failed: boom"),
         "unexpected status: {text}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// session_summary_line (name and description labels)
+// ---------------------------------------------------------------------------
+
+/// Build an entry with a fixed status and timestamp, so only the id, the name,
+/// and the description vary between cases. The timestamp renders as
+/// `unknown time`.
+fn session_entry(id: &str, name: Option<&str>, description: Option<&str>) -> SessionEntry {
+    SessionEntry {
+        id: id.to_string(),
+        status: "active".to_string(),
+        mode: SessionMode::Normal,
+        name: name.map(str::to_string),
+        description: description.map(str::to_string),
+        last_active_at: 0,
+    }
+}
+
+fn summary_text(name: Option<&str>, description: Option<&str>) -> String {
+    line_text(&session_summary_line(
+        &session_entry("aaaa1111", name, description),
+        true,
+    ))
+}
+
+#[test]
+fn summary_line_shows_name_only() {
+    let text = summary_text(Some("my session"), None);
+    assert_eq!(text, "aaaa1111 (active, normal) unknown time my session");
+}
+
+#[test]
+fn summary_line_shows_description_only() {
+    let text = summary_text(None, Some("the description"));
+    assert_eq!(
+        text,
+        "aaaa1111 (active, normal) unknown time the description"
+    );
+}
+
+#[test]
+fn summary_line_shows_name_then_description() {
+    let text = summary_text(Some("my session"), Some("the description"));
+    assert_eq!(
+        text,
+        "aaaa1111 (active, normal) unknown time my session the description"
+    );
+    let name_at = text.find("my session").expect("name is rendered");
+    let description_at = text
+        .find("the description")
+        .expect("description is rendered");
+    assert!(
+        name_at < description_at,
+        "the name must come before the description: {text}"
+    );
+}
+
+#[test]
+fn summary_line_shows_no_label_when_both_are_missing() {
+    let text = summary_text(None, None);
+    assert_eq!(text, "aaaa1111 (active, normal) unknown time");
+}
+
+#[test]
+fn summary_line_styles_name_bold_and_description_cyan() {
+    let line = session_summary_line(
+        &session_entry("aaaa1111", Some("my session"), Some("the description")),
+        true,
+    );
+
+    let name_span = line
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "my session")
+        .expect("the name has its own span");
+    assert!(
+        name_span.style.add_modifier.contains(Modifier::BOLD),
+        "the name must be bold"
+    );
+    assert_eq!(
+        name_span.style.fg,
+        Some(Color::Yellow),
+        "the name is yellow"
+    );
+
+    let description_span = line
+        .spans
+        .iter()
+        .find(|span| span.content.as_ref() == "the description")
+        .expect("the description has its own span");
+    assert_eq!(
+        description_span.style.fg,
+        Some(Color::Cyan),
+        "the description stays cyan"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// build_display_items (name matches rank above content matches)
+// ---------------------------------------------------------------------------
+
+fn search_state_for(query: &str, results: Vec<SearchResult>) -> SearchState {
+    search_state(
+        true,
+        query.to_string(),
+        false,
+        Some(query.to_string()),
+        results,
+        None,
+    )
+}
+
+fn result_for(session_id: &str, snippet: &str) -> SearchResult {
+    SearchResult {
+        session_id: session_id.to_string(),
+        snippet: snippet.to_string(),
+    }
+}
+
+fn display_ids(entries: &[SessionEntry], search: &SearchState) -> Vec<String> {
+    let entry_by_id = entry_index_by_id(entries);
+    build_display_items(entries, &entry_by_id, search)
+        .iter()
+        .map(|item| item.entry.id.clone())
+        .collect()
+}
+
+fn display_snippets(entries: &[SessionEntry], search: &SearchState) -> Vec<Option<String>> {
+    let entry_by_id = entry_index_by_id(entries);
+    build_display_items(entries, &entry_by_id, search)
+        .iter()
+        .map(|item| item.snippet.map(str::to_string))
+        .collect()
+}
+
+#[test]
+fn search_puts_a_name_match_before_content_matches() {
+    let entries = vec![
+        session_entry("aaaaaaaa", Some("Release notes"), None),
+        session_entry("bbbbbbbb", None, None),
+    ];
+    let search = search_state_for("release", vec![result_for("bbbbbbbb", "...release...")]);
+
+    assert_eq!(display_ids(&entries, &search), vec!["aaaaaaaa", "bbbbbbbb"]);
+    assert_eq!(
+        display_snippets(&entries, &search),
+        vec![None, Some("...release...".to_string())],
+        "a name-only match shows no snippet"
+    );
+}
+
+#[test]
+fn search_matches_a_name_by_case_insensitive_terms_in_any_order() {
+    let entries = vec![session_entry(
+        "aaaaaaaa",
+        Some("Weekly Release Notes"),
+        None,
+    )];
+    let search = search_state_for("notes weekly", Vec::new());
+
+    assert_eq!(display_ids(&entries, &search), vec!["aaaaaaaa"]);
+}
+
+#[test]
+fn search_matches_a_name_only_when_all_terms_are_present() {
+    let entries = vec![session_entry("aaaaaaaa", Some("Release notes"), None)];
+    let search = search_state_for("release budget", Vec::new());
+
+    assert!(display_ids(&entries, &search).is_empty());
+}
+
+#[test]
+fn search_shows_a_session_once_when_its_name_and_content_match() {
+    let entries = vec![session_entry("aaaaaaaa", Some("Release notes"), None)];
+    let search = search_state_for("release", vec![result_for("aaaaaaaa", "...release...")]);
+
+    assert_eq!(display_ids(&entries, &search), vec!["aaaaaaaa"]);
+    assert_eq!(
+        display_snippets(&entries, &search),
+        vec![Some("...release...".to_string())],
+        "a name match keeps the content snippet when the content matched too"
+    );
+}
+
+#[test]
+fn search_does_not_match_a_session_without_a_name() {
+    let entries = vec![session_entry("aaaaaaaa", None, None)];
+    let search = search_state_for("release", Vec::new());
+
+    assert!(display_ids(&entries, &search).is_empty());
+}
+
+#[test]
+fn search_matches_a_non_ascii_name_through_extra_spaces() {
+    let entries = vec![session_entry("aaaaaaaa", Some("发布 记录"), None)];
+    let search = search_state_for("  记录   发布  ", Vec::new());
+
+    assert_eq!(display_ids(&entries, &search), vec!["aaaaaaaa"]);
+}
+
+#[test]
+fn search_keeps_the_entry_order_within_the_name_group() {
+    let entries = vec![
+        session_entry("cccccccc", Some("Release two"), None),
+        session_entry("aaaaaaaa", Some("Release one"), None),
+    ];
+    let search = search_state_for("release", Vec::new());
+
+    assert_eq!(display_ids(&entries, &search), vec!["cccccccc", "aaaaaaaa"]);
+}
+
+#[test]
+fn search_drops_results_outside_the_filtered_entries() {
+    let entries = vec![session_entry("aaaaaaaa", None, None)];
+    let search = search_state_for("release", vec![result_for("bbbbbbbb", "...release...")]);
+
+    assert!(display_ids(&entries, &search).is_empty());
 }
